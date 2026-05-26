@@ -1,0 +1,22 @@
+[package]
+name = "qianxun-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "千寻 CLI — Agent 交互式终端 + ACP 协议模式"
+
+[[bin]]
+name = "qx"
+path = "src/main.rs"
+
+[dependencies]
+qianxun-core = { path = "../qianxun-core" }
+tokio = { workspace = true, features = ["full"] }
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
