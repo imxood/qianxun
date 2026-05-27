@@ -14,7 +14,10 @@ docs/
 
 ## 当前重点
 
-Phase 1 代码框架已落地。核心类型、Agent 引擎骨架、CLI REPL 入口已完成。
+Phase 2 (ACP 协议 + 工作空间支持) 已完成。CLI REPL 和 ACP 模式均可工作。
+- CLI 模式: `qx` — 交互式 REPL，支持工作区自动检测
+- ACP 模式: `qx --acp-mode` — 通过 stdio JSON-RPC 2.0 与 Zed 编辑器通信
+- 默认配置: `~/.qianxun/config.json5`，可通过 `qx --generate-config` 生成模板
 
 ## 导航
 

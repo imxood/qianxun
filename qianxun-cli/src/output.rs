@@ -16,10 +16,11 @@ impl OutputSink for CliOutputSink {
         eprintln!("\x1b[90m[思考]\x1b[0m {}", text);
     }
 
-    async fn on_tool_call(&self, tool_name: &str, arguments: &serde_json::Value) {
+    async fn on_tool_call(&self, tool_call_id: &str, tool_name: &str, arguments: &serde_json::Value) {
         eprintln!(
-            "\x1b[36m[工具调用] {}\x1b[0m {}",
+            "\x1b[36m[工具调用] {} ({})\x1b[0m {}",
             tool_name,
+            tool_call_id,
             serde_json::to_string_pretty(arguments).unwrap_or_default()
         );
     }

@@ -5,6 +5,7 @@ pub mod output;
 pub async fn run_repl(
     _verbose: bool,
     resolved: &qianxun_core::config::ResolvedConfig,
+    workspace: Option<qianxun_core::workspace::Workspace>,
 ) -> anyhow::Result<()> {
     use qianxun_core::agent::conversation::Conversation;
     use qianxun_core::agent::engine::AgentLoop;
@@ -14,8 +15,12 @@ pub async fn run_repl(
     use qianxun_core::tools::ToolRegistry;
     use crate::cli::Repl;
 
-    // 系统提示词
-    let system_prompt = system_prompt::build_system_prompt("", "", None);
+    // 系统提示词（包含工作区上下文）
+    let ws_context = workspace
+        .as_ref()
+        .map(qianxun_core::workspace::build_workspace_context)
+        .unwrap_or_default();
+    let system_prompt = system_prompt::build_system_prompt(&ws_context, "", None);
 
     // 对话
     let mut conversation = Conversation::new(Some(system_prompt));
@@ -36,6 +41,6 @@ pub async fn run_repl(
     qianxun_core::tools::builtin::register_all(&mut tools);
 
     // 启动 REPL
-    let mut repl = Repl::new(agent_loop, conversation, provider, tools);
+    let mut repl = Repl::new(agent_loop, conversation, provider, tools, ws_context);
     repl.run().await
 }

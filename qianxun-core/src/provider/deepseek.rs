@@ -20,6 +20,11 @@ struct SseParser {
     tool_id: String,
     tool_name: String,
     tool_input_json: String,
+
+    // Accumulator for thinking blocks
+    thinking_index: Option<usize>,
+    thinking_text: String,
+    thinking_signature: String,
 }
 
 impl SseParser {
@@ -89,12 +94,20 @@ impl SseParser {
             "content_block_start" => {
                 let index = data["index"].as_i64().unwrap_or(0) as usize;
                 if let Some(block) = data.get("content_block") {
-                    if let Some("tool_use") = block["type"].as_str() {
-                        self.tool_index = Some(index);
-                        self.tool_id = block["id"].as_str().unwrap_or("").to_string();
-                        self.tool_name = block["name"].as_str().unwrap_or("").to_string();
-                        self.tool_input_json = serde_json::to_string(&block["input"])
-                            .unwrap_or_default();
+                    match block["type"].as_str() {
+                        Some("tool_use") => {
+                            self.tool_index = Some(index);
+                            self.tool_id = block["id"].as_str().unwrap_or("").to_string();
+                            self.tool_name = block["name"].as_str().unwrap_or("").to_string();
+                            self.tool_input_json = serde_json::to_string(&block["input"])
+                                .unwrap_or_default();
+                        }
+                        Some("thinking") => {
+                            self.thinking_index = Some(index);
+                            self.thinking_text.clear();
+                            self.thinking_signature = block["signature"].as_str().unwrap_or("").to_string();
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -110,6 +123,20 @@ impl SseParser {
                         Some("input_json_delta") => {
                             if let Some(json) = delta["partial_json"].as_str() {
                                 self.tool_input_json.push_str(json);
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let Some(text) = delta["thinking"].as_str() {
+                                self.thinking_text.push_str(text);
+                                self.pending_events.push(LlmStreamEvent::Thinking {
+                                    text: text.to_string(),
+                                    signature: None,
+                                });
+                            }
+                        }
+                        Some("signature_delta") => {
+                            if let Some(sig) = delta["signature"].as_str() {
+                                self.thinking_signature = sig.to_string();
                             }
                         }
                         _ => {}
@@ -129,6 +156,14 @@ impl SseParser {
                     });
                     self.tool_input_json.clear();
                     self.tool_index = None;
+                } else if self.thinking_index == Some(index) {
+                    // Finalize thinking block: emit event with signature signal
+                    self.pending_events.push(LlmStreamEvent::Thinking {
+                        text: String::new(),
+                        signature: Some(std::mem::take(&mut self.thinking_signature)),
+                    });
+                    self.thinking_text.clear();
+                    self.thinking_index = None;
                 }
             }
             "message_delta" => {
@@ -280,6 +315,11 @@ impl DeepSeekProvider {
                 "tool_use_id": block.tool_use_id.as_deref().unwrap_or(""),
                 "content": block.text.as_deref().unwrap_or("")
             })),
+            "thinking" => Some(serde_json::json!({
+                "type": "thinking",
+                "thinking": block.text.as_deref().unwrap_or(""),
+                "signature": block.signature.as_deref().unwrap_or(""),
+            })),
             _ => None,
         }
     }
@@ -304,6 +344,16 @@ impl DeepSeekProvider {
             })?;
 
         let status = response.status();
+
+        // Log full first chunk for easier debugging, but let streaming proceed
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        tracing::debug!("send_request response: status={status}, content-type={content_type:?}");
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
             return match status.as_u16() {
@@ -354,10 +404,20 @@ impl super::LlmProvider for DeepSeekProvider {
         tokio::spawn(async move {
             let mut byte_stream = response.bytes_stream();
             let mut parser = SseParser::default();
+            let mut first_chunk = true;
 
             while let Some(chunk) = byte_stream.next().await {
                 match chunk {
                     Ok(bytes) => {
+                        if first_chunk {
+                            first_chunk = false;
+                            let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(400)]);
+                            tracing::debug!(
+                                "SSE first chunk ({} bytes, preview): {}",
+                                bytes.len(),
+                                preview.replace('\n', "\\n")
+                            );
+                        }
                         parser.feed_bytes(&bytes);
                         for event in parser.pending_events.drain(..) {
                             if tx.send(Ok(event)).await.is_err() {
@@ -376,6 +436,18 @@ impl super::LlmProvider for DeepSeekProvider {
                         return;
                     }
                 }
+            }
+
+            // Stream exhausted — if no events were sent, log a warning
+            let remaining = parser.pending_events.len();
+            let unparsed = parser.buffer.len();
+            tracing::debug!(
+                "SSE stream ended: {} pending events, {} bytes unparsed in buffer",
+                remaining,
+                unparsed,
+            );
+            for event in parser.pending_events.drain(..) {
+                let _ = tx.send(Ok(event)).await;
             }
         });
 

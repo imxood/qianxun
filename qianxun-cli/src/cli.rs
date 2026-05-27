@@ -15,6 +15,7 @@ pub struct Repl {
     tools: ToolRegistry,
     sink: CliOutputSink,
     budget: (Option<u64>, Option<u64>), // (max_input, max_output) for /reset
+    workspace_context: String,
 }
 
 impl Repl {
@@ -23,6 +24,7 @@ impl Repl {
         conversation: Conversation,
         provider: Box<dyn LlmProvider>,
         tools: ToolRegistry,
+        workspace_context: String,
     ) -> Self {
         let budget = (
             conversation.budget().max_input_tokens,
@@ -36,6 +38,7 @@ impl Repl {
             tools,
             sink: CliOutputSink,
             budget,
+            workspace_context,
         }
     }
 
@@ -75,17 +78,25 @@ impl Repl {
             }
             "/help" => {
                 eprintln!("可用命令：");
-                eprintln!("  /quit    退出千寻");
-                eprintln!("  /help    显示此帮助");
-                eprintln!("  /reset   重置对话");
-                eprintln!("  /usage   显示 token 用量");
+                eprintln!("  /quit      退出千寻");
+                eprintln!("  /help      显示此帮助");
+                eprintln!("  /reset     重置对话");
+                eprintln!("  /usage     显示 token 用量");
+                eprintln!("  /workspace 显示工作区信息");
             }
             "/reset" => {
-                let sys = system_prompt::build_system_prompt("", "", None);
+                let sys = system_prompt::build_system_prompt(&self.workspace_context, "", None);
                 self.conversation = Conversation::new(Some(sys));
                 self.conversation.set_budget(self.budget.0, self.budget.1);
                 self.agent_loop.reset();
                 eprintln!("对话已重置");
+            }
+            "/workspace" => {
+                if self.workspace_context.is_empty() {
+                    eprintln!("未检测到工作区。使用 -w / --workspace 指定项目路径。");
+                } else {
+                    eprintln!("当前工作区：\n{}", self.workspace_context);
+                }
             }
             "/usage" => {
                 let usage = &self.agent_loop.accumulated_usage;

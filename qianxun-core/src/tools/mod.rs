@@ -96,6 +96,16 @@ impl ToolRegistry {
         defs
     }
 
+    /// 异步执行工具（真正的 async，避免 block_on 在 runtime 内 panic）
+    pub async fn execute_async(&self, name: &str, arguments: Value) -> Result<ToolOutput, ToolError> {
+        if let Some(tool) = self.builtin.get(name) {
+            tool.execute(arguments).await
+        } else {
+            Err(ToolError::NotFound(name.to_string()))
+        }
+    }
+
+    /// 同步执行工具（通过 block_on，仅用于非 tokio 上下文）
     pub fn execute(&self, name: &str, arguments: Value) -> Result<ToolOutput, ToolError> {
         if let Some(tool) = self.builtin.get(name) {
             let rt = tokio::runtime::Handle::try_current()

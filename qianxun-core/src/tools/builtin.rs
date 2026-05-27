@@ -264,10 +264,263 @@ fn glob_match_rec(p: &[char], s: &[char], pi: usize, si: usize) -> bool {
     }
 }
 
+pub struct GrepTool;
+
+#[async_trait]
+impl AgentTool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn description(&self) -> &str {
+        "在文件中搜索文本内容，返回匹配行及行号"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "搜索模式（区分大小写子串匹配）"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "搜索起始目录，默认当前目录"
+                },
+                "include": {
+                    "type": "string",
+                    "description": "文件 glob 模式，例如 *.rs"
+                },
+                "max_results": {
+                    "type": "number",
+                    "description": "最大结果数，默认 200"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let pattern = arguments
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing pattern".into()))?;
+        let root = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+        let include = arguments.get("include").and_then(|v| v.as_str());
+        let max_results = arguments
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200) as usize;
+
+        let mut results = Vec::new();
+        let mut dirs = vec![std::path::PathBuf::from(root)];
+
+        while let Some(dir) = dirs.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            loop {
+                let entry = match entries.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if let Some(glob) = include {
+                        if !glob_match(glob, name) {
+                            continue;
+                        }
+                    }
+                    if results.len() >= max_results {
+                        break;
+                    }
+                    // 读取文件并搜索
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        for (i, line) in content.lines().enumerate() {
+                            if line.contains(pattern) {
+                                results.push(format!(
+                                    "{}:{}: {}",
+                                    path.display(),
+                                    i + 1,
+                                    line
+                                ));
+                                if results.len() >= max_results {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if results.len() >= max_results {
+                break;
+            }
+        }
+
+        if results.is_empty() {
+            Ok(ToolOutput {
+                content: format!("No matches for '{pattern}'"),
+                is_error: false,
+            })
+        } else {
+            Ok(ToolOutput {
+                content: results.join("\n"),
+                is_error: false,
+            })
+        }
+    }
+}
+
+pub struct ListDirectoryTool;
+
+#[async_trait]
+impl AgentTool for ListDirectoryTool {
+    fn name(&self) -> &str {
+        "list_directory"
+    }
+
+    fn description(&self) -> &str {
+        "列出目录内容（树状结构，可控制深度）"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "目录路径"
+                },
+                "depth": {
+                    "type": "number",
+                    "description": "递归深度，默认 1，最大 3"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing path".into()))?;
+        let depth = arguments
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .min(3) as usize;
+
+        let path = std::path::PathBuf::from(path);
+        if !path.exists() {
+            return Ok(ToolOutput {
+                content: format!("Path does not exist: {}", path.display()),
+                is_error: true,
+            });
+        }
+        if !path.is_dir() {
+            return Ok(ToolOutput {
+                content: format!("Not a directory: {}", path.display()),
+                is_error: true,
+            });
+        }
+
+        let lines = collect_tree(&path, "", depth);
+        Ok(ToolOutput {
+            content: lines.join("\n"),
+            is_error: false,
+        })
+    }
+}
+
+/// 递归收集目录树（同步 I/O，避免 async 递归限制）
+fn collect_tree(dir: &std::path::Path, prefix: &str, depth: usize) -> Vec<String> {
+    if depth == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(r) => r
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => return lines,
+    };
+    entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    for (i, path) in entries.iter().enumerate() {
+        let is_last = i == entries.len() - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let child_prefix = if is_last { "    " } else { "│   " };
+
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_dir() {
+            let size = dir_size_sync(path);
+            let size_str = if size > 1024 * 1024 {
+                format!(" ({:.1} MB)", size as f64 / (1024.0 * 1024.0))
+            } else if size > 1024 {
+                format!(" ({:.1} KB)", size as f64 / 1024.0)
+            } else {
+                format!(" ({size} B)")
+            };
+            lines.push(format!("{prefix}{connector}{name}/{size_str}"));
+            lines.extend(collect_tree(path, &format!("{prefix}{child_prefix}"), depth - 1));
+        } else {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let size_str = if size > 1024 * 1024 {
+                format!(" ({:.1} MB)", size as f64 / (1024.0 * 1024.0))
+            } else if size > 1024 {
+                format!(" ({:.1} KB)", size as f64 / 1024.0)
+            } else {
+                format!(" ({size} B)")
+            };
+            lines.push(format!("{prefix}{connector}{name}{size_str}"));
+        }
+    }
+    lines
+}
+
+fn dir_size_sync(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    total
+}
+
 /// 注册所有内置工具到 ToolRegistry
 pub fn register_all(registry: &mut super::ToolRegistry) {
     use std::sync::Arc;
     registry.register_builtin(Arc::new(ReadTextFileTool));
     registry.register_builtin(Arc::new(WriteTextFileTool));
     registry.register_builtin(Arc::new(SearchTool));
+    registry.register_builtin(Arc::new(GrepTool));
+    registry.register_builtin(Arc::new(ListDirectoryTool));
 }

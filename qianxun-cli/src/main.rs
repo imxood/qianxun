@@ -26,21 +26,53 @@ struct Cli {
     /// 生成默认配置文件模板并退出
     #[arg(long)]
     generate_config: bool,
+
+    /// 工作区路径（默认从当前目录自动检测）
+    #[arg(short, long)]
+    workspace: Option<String>,
+
+    /// 日志文件路径（指定后将日志写入文件而非 stderr）
+    #[arg(long)]
+    log_file: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
     let filter = if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::EnvFilter::from_default_env()
+    } else if cli.verbose {
+        tracing_subscriber::EnvFilter::new("debug")
     } else {
         tracing_subscriber::EnvFilter::new("info")
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
-
-    let cli = Cli::parse();
+    if let Some(ref log_path) = cli.log_file {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            Ok(log_file) => {
+                tracing_subscriber::fmt()
+                    .with_writer(std::sync::Mutex::new(log_file))
+                    .with_env_filter(filter)
+                    .with_ansi(false)
+                    .init();
+            }
+            Err(e) => {
+                eprintln!("警告: 无法打开日志文件 {log_path}: {e}，回退到 stderr");
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .init();
+            }
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .init();
+    }
 
     if cli.generate_config {
         match qianxun_cli::config::write_default_config() {
@@ -55,50 +87,76 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // 加载配置（双模式共享）
+    let config_path = cli
+        .config
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(qianxun_cli::config::default_config_path);
+
+    let resolved = if let Some(ref path) = config_path {
+        match qianxun_core::config::Config::from_file(path) {
+            Ok(raw) => {
+                let env_key = std::env::var("DEEPSEEK_API_KEY").ok();
+                raw.resolve(env_key, cli.model.clone())
+            }
+            Err(e) => {
+                eprintln!("警告: 无法读取配置文件 {}: {e}", path.display());
+                let env_key = std::env::var("DEEPSEEK_API_KEY")
+                    .expect("DEEPSEEK_API_KEY environment variable or config file is required");
+                let mut cfg = qianxun_core::config::ResolvedConfig::default();
+                cfg.deepseek.api_key = env_key;
+                if let Some(ref m) = cli.model {
+                    cfg.deepseek.model = m.clone();
+                }
+                cfg
+            }
+        }
+    } else {
+        let env_key = std::env::var("DEEPSEEK_API_KEY")
+            .expect("DEEPSEEK_API_KEY environment variable or config file is required");
+        let mut cfg = qianxun_core::config::ResolvedConfig::default();
+        cfg.deepseek.api_key = env_key;
+        if let Some(ref m) = cli.model {
+            cfg.deepseek.model = m.clone();
+        }
+        cfg
+    };
+
     if cli.acp_mode {
         tracing::info!("以 ACP 协议模式启动");
-        // Phase 2: ACP server start
-        eprintln!("ACP 模式将在 Phase 2 中实现");
+        let provider: Box<dyn qianxun_core::provider::LlmProvider> = Box::new(
+            qianxun_core::provider::deepseek::DeepSeekProvider::new(
+                resolved.deepseek.api_key.clone(),
+                resolved.deepseek.base_url.clone(),
+                resolved.deepseek.model.clone(),
+            ),
+        );
+        qianxun_acp::run_acp_server(
+            provider,
+            resolved.agent.clone(),
+            resolved.budget.max_input_tokens,
+            resolved.budget.max_output_tokens,
+        )
+        .await?;
     } else {
         tracing::info!("以独立 CLI 模式启动");
 
-        // 加载配置
-        let config_path = cli
-            .config
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .or_else(qianxun_cli::config::default_config_path);
-
-        let resolved = if let Some(ref path) = config_path {
-            match qianxun_core::config::Config::from_file(path) {
-                Ok(raw) => {
-                    let env_key = std::env::var("DEEPSEEK_API_KEY").ok();
-                    raw.resolve(env_key, cli.model.clone())
-                }
-                Err(e) => {
-                    eprintln!("警告: 无法读取配置文件 {}: {e}", path.display());
-                    let env_key = std::env::var("DEEPSEEK_API_KEY")
-                        .expect("DEEPSEEK_API_KEY environment variable or config file is required");
-                    let mut cfg = qianxun_core::config::ResolvedConfig::default();
-                    cfg.deepseek.api_key = env_key;
-                    if let Some(ref m) = cli.model {
-                        cfg.deepseek.model = m.clone();
-                    }
-                    cfg
-                }
-            }
+        // 检测工作区
+        let workspace = if let Some(ref w) = cli.workspace {
+            qianxun_core::workspace::detect_workspace(std::path::Path::new(w))
         } else {
-            let env_key = std::env::var("DEEPSEEK_API_KEY")
-                .expect("DEEPSEEK_API_KEY environment variable or config file is required");
-            let mut cfg = qianxun_core::config::ResolvedConfig::default();
-            cfg.deepseek.api_key = env_key;
-            if let Some(ref m) = cli.model {
-                cfg.deepseek.model = m.clone();
-            }
-            cfg
+            std::env::current_dir()
+                .ok()
+                .as_ref()
+                .and_then(|d| qianxun_core::workspace::detect_workspace(d))
         };
 
-        qianxun_cli::run_repl(cli.verbose, &resolved).await?;
+        if let Some(ref ws) = workspace {
+            tracing::info!("工作区已检测: {}", ws.root.display());
+        }
+
+        qianxun_cli::run_repl(cli.verbose, &resolved, workspace).await?;
     }
 
     Ok(())

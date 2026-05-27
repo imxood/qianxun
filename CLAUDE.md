@@ -39,18 +39,30 @@ qianxun/                 # workspace 根
 ├── qianxun-core/        # 核心库
 │   ├── src/
 │   │   ├── types.rs     # LlmError, TokenUsage, AgentConfig 等核心类型
+│   │   ├── config.rs    # 全局配置 (json5) + 解析
 │   │   ├── output.rs    # OutputSink trait (输出抽象)
 │   │   ├── event.rs     # AgentEvent, EventBus
+│   │   ├── workspace.rs # 工作区检测 (detect_workspace, build_workspace_context)
 │   │   ├── agent/       # Conversation, Message, AgentLoop, system_prompt
-│   │   ├── provider/    # LlmProvider trait, CompletionRequest, LlmStreamEvent
-│   │   ├── tools/       # AgentTool trait, ToolRegistry, builtin tools
+│   │   ├── provider/    # LlmProvider trait, DeepSeek 实现
+│   │   ├── tools/       # AgentTool trait, ToolRegistry, 5 个内置工具
 │   │   ├── context/     # ContextProvider trait, MemoryManager
 │   │   ├── skills/      # SkillManager (骨架)
 │   │   └── mcp/         # MCP Client (骨架)
+├── qianxun-acp/         # ACP 协议实现
+│   └── src/
+│       ├── types.rs     # JSON-RPC 2.0 信封 + ACP 协议类型
+│       ├── transport.rs # stdio 行帧读写 + 双向请求路由
+│       ├── session.rs   # SessionManager (会话创建/关闭/查询)
+│       ├── acp_output.rs# AcpOutputSink (OutputSink → ACP session/update)
+│       ├── prompt.rs    # session/prompt → processing_loop 桥接
+│       ├── handler.rs   # 请求路由 + ForwardingToolRegistry
+│       └── server.rs    # ACP 主循环
 └── qianxun-cli/         # CLI 二进制
     └── src/
         ├── main.rs      # 入口 (clap), 双模式路由
         ├── cli.rs       # REPL 循环
+        ├── config.rs    # 配置路径 + 默认配置生成
         └── output.rs    # CliOutputSink (ANSI 终端输出)
 ```
 
@@ -59,7 +71,7 @@ qianxun/                 # workspace 根
 | Phase | 交付 |
 |---|---|
 | 1 | 代码骨架 + 核心类型 + REPL CLI + LLM Provider (DeepSeek) + AgentLoop + 内置工具 |
-| 2 | ACP 协议 |
+| 2 | ACP 协议 + 工作空间支持 ✅ |
 | 3 | Memory/Skills/MCP 集成 |
 | 4 | Daemon 模式 + 完整 RAG |
 

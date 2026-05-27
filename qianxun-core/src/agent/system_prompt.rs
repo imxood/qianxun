@@ -9,7 +9,7 @@ pub const BASE_PROMPT: &str = r#"你是千寻（Qianxun），一个高效的 AI 
 "#;
 
 pub fn build_system_prompt(
-    memory_context: &str,
+    workspace_context: &str,
     skills_catalog: &str,
     custom_instructions: Option<&str>,
 ) -> String {
@@ -19,8 +19,8 @@ pub fn build_system_prompt(
         parts.push(format!("\n## 用户指令\n{instructions}\n"));
     }
 
-    if !memory_context.is_empty() {
-        parts.push(format!("\n## 上下文记忆\n{memory_context}\n"));
+    if !workspace_context.is_empty() {
+        parts.push(format!("\n{workspace_context}\n"));
     }
 
     if !skills_catalog.is_empty() {
@@ -36,9 +36,9 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_with_all_parts() {
-        let prompt = build_system_prompt("记忆内容", "技能目录", Some("自定义指令"));
+        let prompt = build_system_prompt("工作区上下文", "技能目录", Some("自定义指令"));
         assert!(prompt.contains("千寻"));
-        assert!(prompt.contains("记忆内容"));
+        assert!(prompt.contains("工作区上下文"));
         assert!(prompt.contains("技能目录"));
         assert!(prompt.contains("自定义指令"));
     }
