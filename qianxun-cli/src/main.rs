@@ -1,4 +1,13 @@
 use clap::Parser;
+use tracing_subscriber::fmt::time::FormatTime;
+
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))
+    }
+}
 
 /// 千寻 (Qianxun) — AI 编程助手 CLI
 ///
@@ -56,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         {
             Ok(log_file) => {
                 tracing_subscriber::fmt()
+                    .with_timer(LocalTimer)
                     .with_writer(std::sync::Mutex::new(log_file))
                     .with_env_filter(filter)
                     .with_ansi(false)
@@ -64,12 +74,14 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => {
                 eprintln!("警告: 无法打开日志文件 {log_path}: {e}，回退到 stderr");
                 tracing_subscriber::fmt()
+                    .with_timer(LocalTimer)
                     .with_env_filter(filter)
                     .init();
             }
         }
     } else {
         tracing_subscriber::fmt()
+            .with_timer(LocalTimer)
             .with_env_filter(filter)
             .init();
     }

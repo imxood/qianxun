@@ -21,3 +21,4 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
