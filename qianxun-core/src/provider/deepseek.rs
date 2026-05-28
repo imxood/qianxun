@@ -397,6 +397,13 @@ impl DeepSeekProvider {
         tracing::debug!("send_request response: status={status}, content-type={content_type:?}");
 
         if !status.is_success() {
+            // 读取 Retry-After 头（在消费 body 前，429 重试用）
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
             let error_text = response.text().await.unwrap_or_default();
             return match status.as_u16() {
                 401 => Err(LlmError::AuthenticationError {
@@ -405,7 +412,7 @@ impl DeepSeekProvider {
                 }),
                 429 => Err(LlmError::RateLimitExceeded {
                     provider: "deepseek".into(),
-                    retry_after: None,
+                    retry_after,
                 }),
                 _ => Err(LlmError::ApiError {
                     provider: "deepseek".into(),

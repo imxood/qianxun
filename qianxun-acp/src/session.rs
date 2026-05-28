@@ -178,6 +178,19 @@ impl SessionManager {
         self.sessions.remove(id).is_some()
     }
 
+    /// 删除会话（从内存和磁盘同时删除）。
+    /// 先保存再删除磁盘文件，然后从内存移除。
+    pub async fn delete(&mut self, id: &str) -> bool {
+        self.save_session(id).await;
+        if let Some(ref dir) = self.sessions_dir {
+            let jsonl = dir.join(format!("{id}.jsonl"));
+            let meta = dir.join(format!("{id}.meta"));
+            let _ = std::fs::remove_file(&jsonl);
+            let _ = std::fs::remove_file(&meta);
+        }
+        self.sessions.remove(id).is_some()
+    }
+
     /// 会话数量
     pub fn count(&self) -> usize {
         self.sessions.len()

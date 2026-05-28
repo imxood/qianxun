@@ -199,13 +199,25 @@ pub mod processing_loop {
                 tracing::debug!("=== System Prompt ===\n{}", trunc(sys, 2000));
             }
 
-            let mut stream = match provider.stream_completion(request).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("LLM stream start failed: {e}");
-                    sink.on_error(&e).await;
-                    agent.state = AgentState::Error(e.to_string());
-                    return;
+            // ── stream_completion with rate-limit retry ──
+            let mut stream = loop {
+                match provider.stream_completion(request.clone()).await {
+                    Ok(s) => break s,
+                    Err(e) => {
+                        if let crate::types::LlmError::RateLimitExceeded { retry_after, .. } = &e {
+                            if agent.retry_count < agent.config.max_retries {
+                                agent.retry_count += 1;
+                                let wait = retry_after.unwrap_or(std::time::Duration::from_secs(5));
+                                sink.on_status(&format!("速率受限，{}s 后重试 ({}/{})", wait.as_secs(), agent.retry_count, agent.config.max_retries)).await;
+                                tokio::time::sleep(wait).await;
+                                continue;
+                            }
+                        }
+                        tracing::error!("LLM stream start failed: {e}");
+                        sink.on_error(&e).await;
+                        agent.state = AgentState::Error(e.to_string());
+                        return;
+                    }
                 }
             };
 

@@ -78,12 +78,7 @@ impl SkillManager {
 
     /// 全局技能目录 `~/.qianxun/skills/`。
     pub fn global_skills_dir() -> Option<PathBuf> {
-        let home = if cfg!(target_os = "windows") {
-            std::env::var("USERPROFILE").ok()
-        } else {
-            std::env::var("HOME").ok()
-        }?;
-        Some(PathBuf::from(home).join(".qianxun").join("skills"))
+        crate::workspace::qianxun_dir().map(|d| d.join("skills"))
     }
 
     /// 从目录加载所有 `.md` 技能文件，返回加载数量。
@@ -233,6 +228,24 @@ impl SkillManager {
         catalog
     }
 
+    /// 移除外层代码块内容，避免在代码块内的关键词误触发技能匹配。
+    fn strip_code_blocks(msg: &str) -> String {
+        let mut out = String::with_capacity(msg.len());
+        let mut in_block = false;
+        for line in msg.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                in_block = !in_block;
+                continue;
+            }
+            if !in_block {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     /// 自动匹配：根据用户消息中的关键词选择匹配的技能。
     /// - `user_message`: 用户当前输入
     /// - `exclude_names`: 排除列表（最近已注入的 + 手动已选的）
@@ -242,7 +255,8 @@ impl SkillManager {
             return Vec::new();
         }
 
-        let msg_lower = user_message.to_lowercase();
+        let stripped = Self::strip_code_blocks(user_message);
+        let msg_lower = stripped.to_lowercase();
         let mut matched = Vec::new();
 
         for (_, meta) in &self.skills {

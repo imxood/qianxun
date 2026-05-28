@@ -16,7 +16,6 @@ pub async fn run_repl(
     use qianxun_core::provider::LlmProvider;
     use qianxun_core::skills::SkillWatcher;
     use qianxun_core::tools::ToolRegistry;
-    use std::path::PathBuf;
     use crate::cli::Repl;
 
     // 系统提示词（包含工作区上下文 + 技能目录 Layer 1）
@@ -98,12 +97,7 @@ pub async fn run_repl(
 
     // Memory（基于工作区）
     let memory_manager = workspace.as_ref().and_then(|ws| {
-        let home = if cfg!(target_os = "windows") {
-            std::env::var("USERPROFILE").ok()
-        } else {
-            std::env::var("HOME").ok()
-        }?;
-        let base_dir = PathBuf::from(home).join(".qianxun").join("memory");
+        let base_dir = qianxun_core::workspace::qianxun_dir()?.join("memory");
         Some(MemoryManager::new(base_dir, &ws.root, 5))
     });
 

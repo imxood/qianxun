@@ -19,7 +19,6 @@ use serde_json::Value;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::path::PathBuf;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
 
@@ -264,9 +263,8 @@ impl AcpRequestHandler {
             "session/new" => self.handle_session_new(req.params).await,
             "session/load" => self.handle_session_load(req.params).await,
             "session/resume" => self.handle_session_resume(req.params).await,
-            "session/delete" | "session/fork" => {
-                Err("not implemented".to_string())
-            }
+            "session/delete" => self.handle_session_delete(req.params).await,
+            "session/fork" => Err("not implemented".to_string()),
             "session/close" => self.handle_session_close(req.params).await,
             "session/list" => self.handle_session_list().await,
             _ => {
@@ -326,11 +324,10 @@ impl AcpRequestHandler {
         session.is_running = true;
 
         // 提取记忆上下文
-        let memory_context = session
-            .memory_manager
-            .as_ref()
-            .map(|mm| mm.build_context())
-            .unwrap_or_default();
+        let memory_context = match &session.memory_manager {
+            Some(mm) => mm.build_context().await,
+            None => String::new(),
+        };
         let memory_manager = std::mem::take(&mut session.memory_manager);
 
         // 提取会话级工具注册表（如有），否则使用基础注册表
@@ -459,7 +456,7 @@ impl AcpRequestHandler {
                         &prompt_text
                     };
                     if let Some(mm) = &memory_manager {
-                        mm.write_memory(summary, &["conversation"], &prompt_text);
+                        mm.write_memory(summary, &["conversation"], &prompt_text).await;
                     }
 
                     let mut sessions = sessions_arc2.lock().await;
@@ -651,6 +648,20 @@ impl AcpRequestHandler {
         }
     }
 
+    async fn handle_session_delete(&self, params: Option<Value>) -> Result<Value, String> {
+        let p: SessionDeleteParams = params
+            .and_then(|v| serde_json::from_value(v).ok())
+            .ok_or_else(|| "missing session_id".to_string())?;
+
+        let mut sessions = self.sessions.lock().await;
+        if sessions.delete(&p.session_id).await {
+            tracing::info!("Session deleted: {}", p.session_id);
+            Ok(serde_json::json!({}))
+        } else {
+            Err(format!("session not found: {}", p.session_id))
+        }
+    }
+
     async fn handle_session_list(&self) -> Result<Value, String> {
         let sessions = self.sessions.lock().await;
         let info = SessionListResult {
@@ -679,12 +690,7 @@ impl AcpRequestHandler {
 
 /// 从工作区根路径构建 MemoryManager。
 fn build_memory_manager(ws: &qianxun_core::workspace::Workspace) -> Option<MemoryManager> {
-    let home = if cfg!(target_os = "windows") {
-        std::env::var("USERPROFILE").ok()
-    } else {
-        std::env::var("HOME").ok()
-    }?;
-    let base_dir = PathBuf::from(home).join(".qianxun").join("memory");
+    let base_dir = qianxun_core::workspace::qianxun_dir()?.join("memory");
     Some(MemoryManager::new(base_dir, &ws.root, 5))
 }
 

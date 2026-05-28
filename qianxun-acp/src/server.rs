@@ -6,7 +6,6 @@ use crate::types::{rpc_success, IncomingMessage};
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::types::AgentConfig;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
@@ -28,7 +27,7 @@ pub async fn run_acp_server(
 
     // 会话持久化目录: ~/.qianxun/sessions/
     let sessions = {
-        let dir = home_dir().map(|h| h.join(".qianxun").join("sessions"));
+        let dir = qianxun_core::workspace::home_dir().map(|h| h.join(".qianxun").join("sessions"));
         Arc::new(Mutex::new(match dir {
             Some(d) => SessionManager::new_with_dir(10, d),
             None => SessionManager::new(10),
@@ -112,11 +111,3 @@ pub async fn run_acp_server(
     Ok(())
 }
 
-/// 用户 home 目录
-fn home_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "windows") {
-        std::env::var("USERPROFILE").ok().map(PathBuf::from)
-    } else {
-        std::env::var("HOME").ok().map(PathBuf::from)
-    }
-}

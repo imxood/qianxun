@@ -101,16 +101,5 @@ pub fn write_default_config() -> Result<PathBuf, String> {
 ///
 /// 所有平台统一使用 `~/.qianxun/config.json`
 pub fn default_config_path() -> Option<PathBuf> {
-    let home = if cfg!(target_os = "windows") {
-        std::env::var("USERPROFILE").ok()
-    } else {
-        std::env::var("HOME").ok()
-    };
-
-    home.map(|base| {
-        let mut path = PathBuf::from(base);
-        path.push(".qianxun");
-        path.push("config.json");
-        path
-    })
+    qianxun_core::workspace::qianxun_dir().map(|d| d.join("config.json"))
 }

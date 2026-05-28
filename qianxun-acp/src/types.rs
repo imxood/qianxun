@@ -168,6 +168,12 @@ pub struct SessionCloseParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionDeleteParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionListResult {
     pub sessions: Vec<SessionInfo>,
 }

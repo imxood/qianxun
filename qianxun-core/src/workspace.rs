@@ -268,15 +268,24 @@ pub fn build_workspace_context(ws: &Workspace) -> String {
     parts.join("\n")
 }
 
+/// 获取用户 home 目录路径。
+pub fn home_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    } else {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
+}
+
+/// 获取 `~/.qianxun` 配置目录路径。
+pub fn qianxun_dir() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".qianxun"))
+}
+
 /// 读取全局用户指令 `~/.qianxun/AGENTS.md`。
 /// 截断到 4000 字符，文件不存在或为空时返回 None。
 pub fn read_global_agents_md() -> Option<String> {
-    let home = if cfg!(target_os = "windows") {
-        std::env::var("USERPROFILE").ok()
-    } else {
-        std::env::var("HOME").ok()
-    }?;
-    let path = PathBuf::from(home).join(".qianxun").join("AGENTS.md");
+    let path = qianxun_dir()?.join("AGENTS.md");
     if !path.exists() {
         return None;
     }

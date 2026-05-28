@@ -206,24 +206,14 @@ impl Repl {
 
     /// 历史文件路径: ~/.qianxun/history.txt
     fn history_path() -> Option<PathBuf> {
-        let home = if cfg!(target_os = "windows") {
-            std::env::var("USERPROFILE").ok()
-        } else {
-            std::env::var("HOME").ok()
-        }?;
-        let dir = PathBuf::from(home).join(".qianxun");
+        let dir = qianxun_core::workspace::qianxun_dir()?;
         let _ = std::fs::create_dir_all(&dir);
         Some(dir.join("history.txt"))
     }
 
     /// 会话目录: ~/.qianxun/sessions/
     fn sessions_dir() -> Option<PathBuf> {
-        let home = if cfg!(target_os = "windows") {
-            std::env::var("USERPROFILE").ok()
-        } else {
-            std::env::var("HOME").ok()
-        }?;
-        let dir = PathBuf::from(home).join(".qianxun").join("sessions");
+        let dir = qianxun_core::workspace::qianxun_dir()?.join("sessions");
         let _ = std::fs::create_dir_all(&dir);
         Some(dir)
     }
@@ -678,7 +668,7 @@ impl Repl {
             "/memory" => {
                 match &self.memory_manager {
                     Some(mm) => {
-                        let ctx = mm.build_context();
+                        let ctx = mm.build_context().await;
                         if ctx.is_empty() {
                             eprintln!("尚无记忆。");
                         } else {
@@ -836,11 +826,10 @@ impl Repl {
         }
 
         // 8. 构建记忆上下文
-        let memory_context = self
-            .memory_manager
-            .as_ref()
-            .map(|mm| mm.build_context())
-            .unwrap_or_default();
+        let memory_context = match &self.memory_manager {
+            Some(mm) => mm.build_context().await,
+            None => String::new(),
+        };
 
         self.conversation
             .push_user_message(vec![ContentBlock::text(&full_msg)]);
@@ -866,7 +855,7 @@ impl Repl {
             } else {
                 &msg
             };
-            mm.write_memory(summary, &["conversation"], &msg);
+            mm.write_memory(summary, &["conversation"], &msg).await;
         }
 
         // 自动保存会话（每次轮次后）
