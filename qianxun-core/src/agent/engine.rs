@@ -149,6 +149,7 @@ pub mod processing_loop {
                             agent.state = AgentState::ToolExecuting;
                             let mut results = Vec::new();
                             for (id, name, args) in &tool_calls {
+                                sink.on_status(&format!("执行工具: {name}")).await;
                                 tracing::info!(
                                     "[tool] execute: {name} ({id}) args={}",
                                     serde_json::to_string(args).unwrap_or_default(),
@@ -168,12 +169,7 @@ pub mod processing_loop {
                                     }
                                     Err(e) => {
                                         tracing::error!("[tool] error: {name} ({id}): {e}");
-                                        sink.on_error(&crate::types::LlmError::ApiError {
-                                            provider: "tool".into(),
-                                            status: 0,
-                                            message: e.to_string(),
-                                        })
-                                        .await;
+                                        sink.on_status(&format!("工具执行失败: {name} — {e}")).await;
                                         results.push((id.clone(), format!("Error: {e}"), true));
                                     }
                                 }
@@ -181,6 +177,7 @@ pub mod processing_loop {
 
                             flush_text(sink, &mut text_buffer).await;
                             flush_thinking(sink, &mut thinking_buffer).await;
+                            sink.on_status("工具执行完成，继续请求 LLM...").await;
 
                             // Push tool results and loop back to LLM
                             let result_blocks: Vec<ContentBlock> = results

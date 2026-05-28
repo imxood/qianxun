@@ -270,8 +270,8 @@ impl AcpRequestHandler {
     /// session/prompt 的延迟处理入口：先校验参数，然后异步执行
     async fn handle_session_prompt_deferred(&self, id: RequestId, params: Option<Value>) {
         match self.prepare_prompt(params).await {
-            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools)) => {
-                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools)
+            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog)) => {
+                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog)
                     .await;
             }
             Err(e) => {
@@ -286,7 +286,7 @@ impl AcpRequestHandler {
     async fn prepare_prompt(
         &self,
         params: Option<Value>,
-    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>), String> {
+    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>, String), String> {
         let p: PromptParams = params
             .and_then(|v| serde_json::from_value(v).ok())
             .ok_or_else(|| "invalid prompt params".to_string())?;
@@ -316,6 +316,8 @@ impl AcpRequestHandler {
             .take()
             .unwrap_or_else(|| self.tools.clone());
 
+        let skills_catalog = session.skills_catalog.clone();
+
         let empty_loop = AgentLoop::new(self.agent_config.clone());
         let empty_conv = Conversation::new(None);
         let agent_loop = std::mem::replace(&mut session.agent_loop, empty_loop);
@@ -331,7 +333,7 @@ impl AcpRequestHandler {
             .join("\n");
         let user_text = if user_text.is_empty() { "..." } else { &user_text };
 
-        Ok((session_id, agent_loop, conversation, user_text.to_string(), memory_context, memory_manager, session_tools))
+        Ok((session_id, agent_loop, conversation, user_text.to_string(), memory_context, memory_manager, session_tools, skills_catalog))
     }
 
     /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
@@ -346,6 +348,7 @@ impl AcpRequestHandler {
         memory_context: String,
         memory_manager: Option<MemoryManager>,
         tools: Arc<ToolRegistry>,
+        skills_catalog: String,
     ) {
         conversation
             .push_user_message(vec![ContentBlock::text(&prompt_text)]);
@@ -353,6 +356,7 @@ impl AcpRequestHandler {
         let sink = AcpOutputSink::new(session_id.clone(), self.output_tx.clone());
         let provider: Arc<dyn LlmProvider> = self.provider.clone();
         let tools_for_spawn = tools.clone();
+        let skills_catalog_for_spawn = skills_catalog;
         let sid = session_id.clone();
 
         // 第一层：处理循环（可能 panic）
@@ -364,7 +368,7 @@ impl AcpRequestHandler {
                 tools_for_spawn.as_ref(),
                 &sink,
                 &memory_context,
-                "", // skills_catalog
+                &skills_catalog_for_spawn,
             )
             .await;
             (agent_loop, conversation) // 正常完成后返还所有权
@@ -454,12 +458,12 @@ impl AcpRequestHandler {
         let ws = p.cwd.as_ref().and_then(|cwd| {
             qianxun_core::workspace::detect_workspace(std::path::Path::new(cwd))
         });
-        let system_prompt = ws.as_ref().map(|w| {
+        let (system_prompt, skills_catalog): (Option<String>, String) = ws.as_ref().map(|w| {
             let ctx = qianxun_core::workspace::build_workspace_context(w);
-            let skills_catalog = qianxun_core::skills::SkillManager::load_all(Some(&w.root))
+            let sc = qianxun_core::skills::SkillManager::load_all(Some(&w.root))
                 .build_catalog_prompt();
-            qianxun_core::agent::system_prompt::build_system_prompt(&ctx, &skills_catalog, None)
-        });
+            (Some(qianxun_core::agent::system_prompt::build_system_prompt(&ctx, &sc, None)), sc)
+        }).unwrap_or((None, String::new()));
         let memory_manager = ws.as_ref().and_then(build_memory_manager);
 
         // 构建会话级 ToolRegistry：从基础注册表克隆，添加 MCP 工具
@@ -505,6 +509,7 @@ impl AcpRequestHandler {
                 agent_loop,
                 memory_manager,
                 Some(session_tools),
+                skills_catalog,
             )
             .map_err(|e| e.to_string())?;
 
@@ -530,18 +535,18 @@ impl AcpRequestHandler {
         let ws = cwd.and_then(|cwd| {
             qianxun_core::workspace::detect_workspace(std::path::Path::new(cwd))
         });
-        let system_prompt = ws.as_ref().map(|w| {
+        let (system_prompt, skills_catalog): (Option<String>, String) = ws.as_ref().map(|w| {
             let ctx = qianxun_core::workspace::build_workspace_context(w);
-            let skills_catalog = qianxun_core::skills::SkillManager::load_all(Some(&w.root))
+            let sc = qianxun_core::skills::SkillManager::load_all(Some(&w.root))
                 .build_catalog_prompt();
-            qianxun_core::agent::system_prompt::build_system_prompt(&ctx, &skills_catalog, None)
-        });
+            (Some(qianxun_core::agent::system_prompt::build_system_prompt(&ctx, &sc, None)), sc)
+        }).unwrap_or((None, String::new()));
         let memory_manager = ws.as_ref().and_then(build_memory_manager);
 
         let agent_loop = AgentLoop::new(self.agent_config.clone());
         let session_tools = build_session_tools_from_ws(cwd, &self.tools).await;
         sessions
-            .create(session_id, system_prompt, agent_loop, memory_manager, session_tools)
+            .create(session_id, system_prompt, agent_loop, memory_manager, session_tools, skills_catalog)
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({}))

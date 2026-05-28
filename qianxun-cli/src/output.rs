@@ -39,4 +39,8 @@ impl OutputSink for CliOutputSink {
     async fn on_turn_finished(&self, reason: &StopReason, _usage: &TokenUsage) {
         eprintln!("\x1b[2m[回合结束] 原因: {:?}\x1b[0m", reason);
     }
+
+    async fn on_status(&self, status: &str) {
+        eprintln!("\x1b[2m[状态] {status}\x1b[0m");
+    }
 }

@@ -211,4 +211,47 @@ impl ToolRegistry {
     pub fn mcp_client_count(&self) -> usize {
         self.mcp_clients.lock().unwrap().len()
     }
+
+    /// 关闭所有连接的 MCP 客户端。
+    pub async fn shutdown_all(&self) {
+        let names: Vec<String> = self.mcp_client_names();
+        for name in &names {
+            if let Some(client) = self.remove_mcp_client(name) {
+                tracing::info!("[mcp] shutting down '{name}'");
+                client.shutdown().await;
+            }
+        }
+    }
+
+    /// 格式化工具列表（用于 CLI `/tools` 展示）。
+    pub fn format_tools_list(&self) -> String {
+        let mut list = String::new();
+
+        list.push_str(&format!("内置工具 ({}):\n", self.builtin.len()));
+        if self.builtin.is_empty() {
+            list.push_str("  （无）\n");
+        } else {
+            let mut names: Vec<&str> = self.builtin.keys().map(|s| s.as_str()).collect();
+            names.sort();
+            for name in names {
+                if let Some(tool) = self.builtin.get(name) {
+                    list.push_str(&format!("  🔧 **{}** — {}\n", name, tool.description()));
+                }
+            }
+        }
+
+        list.push('\n');
+        list.push_str(&format!("MCP 工具 ({}):\n", self.mcp_tools.len()));
+        if self.mcp_tools.is_empty() {
+            list.push_str("  （无）\n");
+        } else {
+            let mut entries: Vec<&McpToolEntry> = self.mcp_tools.values().collect();
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            for entry in entries {
+                list.push_str(&format!("  🔌 **{}** [{}] — {}\n", entry.name, entry.client_id, entry.description));
+            }
+        }
+
+        list
+    }
 }

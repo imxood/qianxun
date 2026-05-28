@@ -15,6 +15,8 @@ pub struct AcpSession {
     pub memory_manager: Option<MemoryManager>,
     /// 会话级工具注册表（含 MCP 工具），None 表示使用基础注册表
     pub tools: Option<Arc<ToolRegistry>>,
+    /// 会话级技能目录，在 prompt 时注入
+    pub skills_catalog: String,
 }
 
 /// 会话管理器
@@ -40,6 +42,7 @@ impl SessionManager {
         agent_loop: AgentLoop,
         memory_manager: Option<MemoryManager>,
         tools: Option<Arc<ToolRegistry>>,
+        skills_catalog: String,
     ) -> Result<&mut AcpSession, String> {
         if self.sessions.len() as u32 >= self.max_sessions {
             return Err("max sessions reached".into());
@@ -58,6 +61,7 @@ impl SessionManager {
                 is_running: false,
                 memory_manager,
                 tools,
+                skills_catalog,
             },
         );
 

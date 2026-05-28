@@ -171,18 +171,28 @@ impl SkillManager {
     /// 构建仅含名称和描述的技能列表（用于 `/skills` 展示）。
     pub fn build_skills_list(&self) -> String {
         if self.skills.is_empty() {
-            return "（无）".to_string();
+            return String::new();
         }
 
         let mut list = String::new();
-        for (_source, meta) in &self.skills {
-            list.push_str(&format!("  - **{}**", meta.name.as_str()));
+        for (source, meta) in &self.skills {
+            let src_label = match source {
+                SkillSource::Global => "全局",
+                SkillSource::ProjectLocal => "项目",
+                SkillSource::BuiltIn => "内置",
+            };
+            list.push_str(&format!("  📦 **{}** ({})", meta.name.as_str(), src_label));
             if !meta.description.is_empty() {
                 list.push_str(&format!(": {}", meta.description));
             }
             list.push('\n');
         }
         list
+    }
+
+    /// 返回技能数量。
+    pub fn skill_count(&self) -> usize {
+        self.skills.len()
     }
 
     /// 构建注入到 system prompt 的技能目录（含 body 内容）。

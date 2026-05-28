@@ -20,6 +20,8 @@ pub struct Repl {
     memory_manager: Option<MemoryManager>,
     skills_catalog: String,
     skills_list: String,
+    skills_count: usize,
+    tools_list: String,
 }
 
 impl Repl {
@@ -33,6 +35,8 @@ impl Repl {
         memory_manager: Option<MemoryManager>,
         skills_catalog: String,
         skills_list: String,
+        skills_count: usize,
+        tools_list: String,
     ) -> Self {
         let budget = (
             conversation.budget().max_input_tokens,
@@ -50,6 +54,8 @@ impl Repl {
             memory_manager,
             skills_catalog,
             skills_list,
+            skills_count,
+            tools_list,
         }
     }
 
@@ -78,6 +84,9 @@ impl Repl {
             }
         }
 
+        // 退出时关闭 MCP 子进程
+        self.tools.shutdown_all().await;
+
         Ok(())
     }
 
@@ -88,16 +97,30 @@ impl Repl {
                 self.running = false;
             }
             "/help" => {
-                eprintln!("可用命令：");
-                eprintln!("  /quit      退出千寻");
-                eprintln!("  /help      显示此帮助");
-                eprintln!("  /reset     重置对话");
-                eprintln!("  /usage     显示 token 用量");
-                eprintln!("  /workspace 显示工作区信息");
-                eprintln!("  /skills    显示已加载的技能");
-                eprintln!("  /memory    显示最近记忆");
+                eprintln!("\x1b[1m\x1b[4m对话控制:\x1b[0m");
+                eprintln!("  \x1b[36m/quit\x1b[0m      退出千寻");
+                eprintln!("  \x1b[36m/reset\x1b[0m     重置对话");
+                eprintln!();
+                eprintln!("\x1b[1m\x1b[4m信息查询:\x1b[0m");
+                eprintln!("  \x1b[36m/help\x1b[0m      显示此帮助");
+                eprintln!("  \x1b[36m/usage\x1b[0m     token 用量");
+                eprintln!("  \x1b[36m/workspace\x1b[0m 工作区信息");
+                eprintln!("  \x1b[36m/skills\x1b[0m    已加载技能");
+                eprintln!("  \x1b[36m/tools\x1b[0m     可用工具");
+                eprintln!("  \x1b[36m/memory\x1b[0m    最近记忆");
             }
             "/reset" => {
+                eprint!("确定要重置对话吗？(y/N): ");
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+                let mut confirm = String::new();
+                if std::io::stdin().read_line(&mut confirm).is_ok() {
+                    let trimmed = confirm.trim().to_lowercase();
+                    if trimmed != "y" && trimmed != "yes" {
+                        eprintln!("已取消。");
+                        return;
+                    }
+                }
                 let sys = system_prompt::build_system_prompt(
                     &self.workspace_context, &self.skills_catalog, None,
                 );
@@ -126,10 +149,22 @@ impl Repl {
                 }
             }
             "/skills" => {
-                if self.skills_list.contains("（无）") {
+                if self.skills_list.is_empty() {
                     eprintln!("未加载任何技能。");
                 } else {
-                    eprintln!("已加载的技能：\n{}", self.skills_list);
+                    eprintln!("已加载的技能: ({})", self.skills_count);
+                    eprintln!();
+                    eprintln!("{}", self.skills_list);
+                    eprintln!("技能以纯文本形式注入 system prompt，由 LLM 自行决定如何使用。");
+                    eprintln!("当前无触发/钩子机制，无法跟踪 LLM 是否使用了某个技能。");
+                }
+            }
+            "/tools" => {
+                if self.tools_list.is_empty() {
+                    eprintln!("无可用工具。");
+                } else {
+                    eprintln!("可用工具：");
+                    eprintln!("{}", self.tools_list);
                 }
             }
             "/memory" => {

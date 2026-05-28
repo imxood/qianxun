@@ -27,6 +27,7 @@ pub async fn run_repl(
     );
     let skills_catalog = skills_mgr.build_catalog_prompt();
     let skills_list = skills_mgr.build_skills_list();
+    let skills_count = skills_mgr.skill_count();
     let system_prompt = system_prompt::build_system_prompt(&ws_context, &skills_catalog, None);
 
     // 对话
@@ -97,7 +98,10 @@ pub async fn run_repl(
         Some(MemoryManager::new(base_dir, &ws.root, 5))
     });
 
+    // 工具列表（用于 /tools 命令）
+    let tools_list = tools.format_tools_list();
+
     // 启动 REPL
-    let mut repl = Repl::new(agent_loop, conversation, provider, tools, ws_context, memory_manager, skills_catalog, skills_list);
+    let mut repl = Repl::new(agent_loop, conversation, provider, tools, ws_context, memory_manager, skills_catalog, skills_list, skills_count, tools_list);
     repl.run().await
 }
