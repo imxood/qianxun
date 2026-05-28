@@ -36,6 +36,7 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
         let mut detected = Vec::new();
         let mut has_cargo_toml = false;
         let mut has_package_json = false;
+        let mut has_python = false;
         let mut claude_content = None;
 
         let entries = match std::fs::read_dir(dir) {
@@ -62,6 +63,7 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
                     detected.push(name);
                 }
                 "pyproject.toml" | "setup.py" | "requirements.txt" => {
+                    has_python = true;
                     detected.push(name);
                 }
                 _ => {}
@@ -80,6 +82,8 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
                 ProjectType::Rust { is_workspace: is_ws }
             } else if has_package_json {
                 ProjectType::Node
+            } else if has_python {
+                ProjectType::Python
             } else {
                 ProjectType::Generic
             };
@@ -151,6 +155,17 @@ mod tests {
         let result = detect_workspace(&dir).unwrap();
         assert_eq!(result.project_type, ProjectType::Rust { is_workspace: false });
         assert!(result.detected_files.contains(&"Cargo.toml".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_python_project() {
+        let dir = std::env::temp_dir().join("qianxun_test_python");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("pyproject.toml"), "[project]\nname = \"test\"\n").ok();
+        let result = detect_workspace(&dir).unwrap();
+        assert_eq!(result.project_type, ProjectType::Python);
+        assert!(result.detected_files.contains(&"pyproject.toml".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

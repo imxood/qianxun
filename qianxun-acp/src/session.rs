@@ -1,6 +1,9 @@
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::AgentLoop;
+use qianxun_core::context::memory::MemoryManager;
+use qianxun_core::tools::ToolRegistry;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 单个 ACP 会话
 pub struct AcpSession {
@@ -9,6 +12,9 @@ pub struct AcpSession {
     pub agent_loop: AgentLoop,
     pub created_at: String,
     pub is_running: bool,
+    pub memory_manager: Option<MemoryManager>,
+    /// 会话级工具注册表（含 MCP 工具），None 表示使用基础注册表
+    pub tools: Option<Arc<ToolRegistry>>,
 }
 
 /// 会话管理器
@@ -26,11 +32,14 @@ impl SessionManager {
     }
 
     /// 创建新会话
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &mut self,
         id: String,
         system_prompt: Option<String>,
         agent_loop: AgentLoop,
+        memory_manager: Option<MemoryManager>,
+        tools: Option<Arc<ToolRegistry>>,
     ) -> Result<&mut AcpSession, String> {
         if self.sessions.len() as u32 >= self.max_sessions {
             return Err("max sessions reached".into());
@@ -47,6 +56,8 @@ impl SessionManager {
                 agent_loop,
                 created_at: now,
                 is_running: false,
+                memory_manager,
+                tools,
             },
         );
 

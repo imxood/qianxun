@@ -99,8 +99,29 @@ impl SseParser {
                             self.tool_index = Some(index);
                             self.tool_id = block["id"].as_str().unwrap_or("").to_string();
                             self.tool_name = block["name"].as_str().unwrap_or("").to_string();
-                            self.tool_input_json = serde_json::to_string(&block["input"])
-                                .unwrap_or_default();
+                            // DeepSeek 在 content_block_start 中发送 input={} 或 null，
+                            // 实际参数通过 input_json_delta 流式传入。仅当 input
+                            // 有实际键值时才预填，避免 {}→"{}" 与 delta 拼接为非法 JSON。
+                            let has_meaningful_input = block.get("input")
+                                .map(|v| {
+                                    if v.is_null() { return false; }
+                                    if let Some(obj) = v.as_object() {
+                                        !obj.is_empty()
+                                    } else {
+                                        true // 非 object 类型（不应出现）
+                                    }
+                                })
+                                .unwrap_or(false);
+                            self.tool_input_json = if has_meaningful_input {
+                                serde_json::to_string(&block["input"]).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            tracing::debug!(
+                                "[sse] tool_use start idx={index} name={} id={} input_prefix={:?}",
+                                self.tool_name, self.tool_id,
+                                self.tool_input_json.chars().take(80).collect::<String>(),
+                            );
                         }
                         Some("thinking") => {
                             self.thinking_index = Some(index);
@@ -122,6 +143,11 @@ impl SseParser {
                         }
                         Some("input_json_delta") => {
                             if let Some(json) = delta["partial_json"].as_str() {
+                                tracing::trace!(
+                                    "[sse] input_json_delta idx={} json_len={}",
+                                    data["index"].as_i64().unwrap_or(0),
+                                    json.len(),
+                                );
                                 self.tool_input_json.push_str(json);
                             }
                         }
@@ -147,8 +173,23 @@ impl SseParser {
                 let index = data["index"].as_i64().unwrap_or(0) as usize;
                 if self.tool_index == Some(index) {
                     // Finalize tool_use: parse accumulated JSON
-                    let input: Value =
-                        serde_json::from_str(&self.tool_input_json).unwrap_or(Value::Null);
+                    let input: Value = if self.tool_input_json.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_str(&self.tool_input_json).unwrap_or_else(|e| {
+                            tracing::warn!(
+                                "[sse] tool_use parse error: {e}, raw(len={}): {:?}",
+                                self.tool_input_json.len(),
+                                self.tool_input_json.chars().take(120).collect::<String>(),
+                            );
+                            Value::Null
+                        })
+                    };
+                    tracing::debug!(
+                        "[sse] tool_use stop name={} id={} has_args={}",
+                        self.tool_name, self.tool_id,
+                        !input.is_null(),
+                    );
                     self.pending_events.push(LlmStreamEvent::ToolCall {
                         id: std::mem::take(&mut self.tool_id),
                         tool_name: std::mem::take(&mut self.tool_name),
@@ -313,7 +354,8 @@ impl DeepSeekProvider {
             "tool_result" => Some(serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": block.tool_use_id.as_deref().unwrap_or(""),
-                "content": block.text.as_deref().unwrap_or("")
+                "content": block.text.as_deref().unwrap_or(""),
+                "is_error": block.is_error.unwrap_or(false)
             })),
             "thinking" => Some(serde_json::json!({
                 "type": "thinking",

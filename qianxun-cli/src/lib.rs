@@ -10,17 +10,24 @@ pub async fn run_repl(
     use qianxun_core::agent::conversation::Conversation;
     use qianxun_core::agent::engine::AgentLoop;
     use qianxun_core::agent::system_prompt;
+    use qianxun_core::context::memory::MemoryManager;
     use qianxun_core::provider::deepseek::DeepSeekProvider;
     use qianxun_core::provider::LlmProvider;
     use qianxun_core::tools::ToolRegistry;
+    use std::path::PathBuf;
     use crate::cli::Repl;
 
-    // 系统提示词（包含工作区上下文）
+    // 系统提示词（包含工作区上下文 + 技能）
     let ws_context = workspace
         .as_ref()
         .map(qianxun_core::workspace::build_workspace_context)
         .unwrap_or_default();
-    let system_prompt = system_prompt::build_system_prompt(&ws_context, "", None);
+    let skills_mgr = qianxun_core::skills::SkillManager::load_all(
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+    );
+    let skills_catalog = skills_mgr.build_catalog_prompt();
+    let skills_list = skills_mgr.build_skills_list();
+    let system_prompt = system_prompt::build_system_prompt(&ws_context, &skills_catalog, None);
 
     // 对话
     let mut conversation = Conversation::new(Some(system_prompt));
@@ -40,7 +47,57 @@ pub async fn run_repl(
     let mut tools = ToolRegistry::new();
     qianxun_core::tools::builtin::register_all(&mut tools);
 
+    // MCP 服务器引导（从工作区 .claude/mcp.json 加载）
+    if let Some(ref ws) = workspace {
+        match qianxun_core::mcp::config::McpConfigFile::find_in_workspace(&ws.root) {
+            Ok(Some(config_file)) => {
+                let server_configs = config_file.to_server_configs();
+                for sc in &server_configs {
+                    match qianxun_core::mcp::client::McpClient::connect(sc.clone()).await {
+                        Ok(client) => {
+                            match client.list_tools().await {
+                                Ok(tool_list) => {
+                                    for t in tool_list {
+                                        tools.register_mcp_tool(qianxun_core::tools::McpToolEntry {
+                                            client_id: client.server_name().to_string(),
+                                            name: t.name,
+                                            description: t.description,
+                                            input_schema: t.input_schema,
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("[mcp:{}] list_tools failed: {e}", sc.name);
+                                }
+                            }
+                            tools.register_mcp_client(std::sync::Arc::new(client));
+                            tracing::info!("[mcp] '{}' connected ({} tools)", sc.name, tools.mcp_count());
+                        }
+                        Err(e) => {
+                            tracing::warn!("[mcp] '{}' connect failed: {e}", sc.name);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("[mcp] config error: {e}");
+            }
+        }
+    }
+
+    // Memory（基于工作区）
+    let memory_manager = workspace.as_ref().and_then(|ws| {
+        let home = if cfg!(target_os = "windows") {
+            std::env::var("USERPROFILE").ok()
+        } else {
+            std::env::var("HOME").ok()
+        }?;
+        let base_dir = PathBuf::from(home).join(".qianxun").join("memory");
+        Some(MemoryManager::new(base_dir, &ws.root, 5))
+    });
+
     // 启动 REPL
-    let mut repl = Repl::new(agent_loop, conversation, provider, tools, ws_context);
+    let mut repl = Repl::new(agent_loop, conversation, provider, tools, ws_context, memory_manager, skills_catalog, skills_list);
     repl.run().await
 }

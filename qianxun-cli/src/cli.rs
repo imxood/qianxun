@@ -3,6 +3,7 @@ use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::{processing_loop, AgentLoop};
 use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::agent::system_prompt;
+use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::tools::ToolRegistry;
 use crate::output::CliOutputSink;
@@ -16,15 +17,22 @@ pub struct Repl {
     sink: CliOutputSink,
     budget: (Option<u64>, Option<u64>), // (max_input, max_output) for /reset
     workspace_context: String,
+    memory_manager: Option<MemoryManager>,
+    skills_catalog: String,
+    skills_list: String,
 }
 
 impl Repl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_loop: AgentLoop,
         conversation: Conversation,
         provider: Box<dyn LlmProvider>,
         tools: ToolRegistry,
         workspace_context: String,
+        memory_manager: Option<MemoryManager>,
+        skills_catalog: String,
+        skills_list: String,
     ) -> Self {
         let budget = (
             conversation.budget().max_input_tokens,
@@ -39,6 +47,9 @@ impl Repl {
             sink: CliOutputSink,
             budget,
             workspace_context,
+            memory_manager,
+            skills_catalog,
+            skills_list,
         }
     }
 
@@ -83,9 +94,13 @@ impl Repl {
                 eprintln!("  /reset     重置对话");
                 eprintln!("  /usage     显示 token 用量");
                 eprintln!("  /workspace 显示工作区信息");
+                eprintln!("  /skills    显示已加载的技能");
+                eprintln!("  /memory    显示最近记忆");
             }
             "/reset" => {
-                let sys = system_prompt::build_system_prompt(&self.workspace_context, "", None);
+                let sys = system_prompt::build_system_prompt(
+                    &self.workspace_context, &self.skills_catalog, None,
+                );
                 self.conversation = Conversation::new(Some(sys));
                 self.conversation.set_budget(self.budget.0, self.budget.1);
                 self.agent_loop.reset();
@@ -110,6 +125,28 @@ impl Repl {
                     eprintln!("  缓存读取: {cr}");
                 }
             }
+            "/skills" => {
+                if self.skills_list.contains("（无）") {
+                    eprintln!("未加载任何技能。");
+                } else {
+                    eprintln!("已加载的技能：\n{}", self.skills_list);
+                }
+            }
+            "/memory" => {
+                match &self.memory_manager {
+                    Some(mm) => {
+                        let ctx = mm.build_context();
+                        if ctx.is_empty() {
+                            eprintln!("尚无记忆。");
+                        } else {
+                            eprintln!("最近记忆：\n{ctx}");
+                        }
+                    }
+                    None => {
+                        eprintln!("未启用记忆（需要工作区）。");
+                    }
+                }
+            }
             _ => {
                 eprintln!("未知命令: {cmd}");
             }
@@ -117,6 +154,13 @@ impl Repl {
     }
 
     async fn handle_message(&mut self, msg: &str) {
+        // 构建记忆上下文
+        let memory_context = self
+            .memory_manager
+            .as_ref()
+            .map(|mm| mm.build_context())
+            .unwrap_or_default();
+
         self.conversation
             .push_user_message(vec![ContentBlock::text(msg)]);
 
@@ -126,9 +170,15 @@ impl Repl {
             &*self.provider,
             &self.tools,
             &self.sink,
-            "", // memory_context
-            "", // skills_catalog
+            &memory_context,
+            &self.skills_catalog,
         )
         .await;
+
+        // 轮次后写入记忆
+        if let Some(mm) = &self.memory_manager {
+            let summary = if msg.len() > 200 { &msg[..200] } else { msg };
+            mm.write_memory(summary, &["conversation"], msg);
+        }
     }
 }

@@ -6,12 +6,16 @@ use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::processing_loop;
 use qianxun_core::agent::engine::AgentLoop;
 use qianxun_core::agent::message::ContentBlock;
+use qianxun_core::context::memory::MemoryManager;
+use qianxun_core::mcp::client::McpClient;
+use qianxun_core::mcp::McpServerConfig;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::tools::{AgentTool, ToolError, ToolOutput, ToolRegistry};
 use qianxun_core::types::AgentConfig;
 use serde_json::Value;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::path::PathBuf;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
 
@@ -266,8 +270,8 @@ impl AcpRequestHandler {
     /// session/prompt 的延迟处理入口：先校验参数，然后异步执行
     async fn handle_session_prompt_deferred(&self, id: RequestId, params: Option<Value>) {
         match self.prepare_prompt(params).await {
-            Ok((session_id, agent_loop, conversation, prompt_text)) => {
-                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text)
+            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools)) => {
+                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools)
                     .await;
             }
             Err(e) => {
@@ -278,10 +282,11 @@ impl AcpRequestHandler {
     }
 
     /// 准备 prompt 执行的参数（校验 + 提取 session）
+    #[allow(clippy::type_complexity)]
     async fn prepare_prompt(
         &self,
         params: Option<Value>,
-    ) -> Result<(String, AgentLoop, Conversation, String), String> {
+    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>), String> {
         let p: PromptParams = params
             .and_then(|v| serde_json::from_value(v).ok())
             .ok_or_else(|| "invalid prompt params".to_string())?;
@@ -296,6 +301,20 @@ impl AcpRequestHandler {
             return Err("session already running".to_string());
         }
         session.is_running = true;
+
+        // 提取记忆上下文
+        let memory_context = session
+            .memory_manager
+            .as_ref()
+            .map(|mm| mm.build_context())
+            .unwrap_or_default();
+        let memory_manager = std::mem::take(&mut session.memory_manager);
+
+        // 提取会话级工具注册表（如有），否则使用基础注册表
+        let session_tools = session
+            .tools
+            .take()
+            .unwrap_or_else(|| self.tools.clone());
 
         let empty_loop = AgentLoop::new(self.agent_config.clone());
         let empty_conv = Conversation::new(None);
@@ -312,10 +331,11 @@ impl AcpRequestHandler {
             .join("\n");
         let user_text = if user_text.is_empty() { "..." } else { &user_text };
 
-        Ok((session_id, agent_loop, conversation, user_text.to_string()))
+        Ok((session_id, agent_loop, conversation, user_text.to_string(), memory_context, memory_manager, session_tools))
     }
 
     /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
+    #[allow(clippy::too_many_arguments)]
     async fn run_prompt_task(
         &self,
         id: RequestId,
@@ -323,13 +343,16 @@ impl AcpRequestHandler {
         mut agent_loop: AgentLoop,
         mut conversation: Conversation,
         prompt_text: String,
+        memory_context: String,
+        memory_manager: Option<MemoryManager>,
+        tools: Arc<ToolRegistry>,
     ) {
         conversation
             .push_user_message(vec![ContentBlock::text(&prompt_text)]);
 
         let sink = AcpOutputSink::new(session_id.clone(), self.output_tx.clone());
         let provider: Arc<dyn LlmProvider> = self.provider.clone();
-        let tools = self.tools.clone();
+        let tools_for_spawn = tools.clone();
         let sid = session_id.clone();
 
         // 第一层：处理循环（可能 panic）
@@ -338,10 +361,10 @@ impl AcpRequestHandler {
                 &mut agent_loop,
                 &mut conversation,
                 provider.as_ref(),
-                tools.as_ref(),
+                tools_for_spawn.as_ref(),
                 &sink,
-                "",
-                "",
+                &memory_context,
+                "", // skills_catalog
             )
             .await;
             (agent_loop, conversation) // 正常完成后返还所有权
@@ -354,10 +377,22 @@ impl AcpRequestHandler {
             match processing_handle.await {
                 Ok((agent_loop, conversation)) => {
                     // 处理正常完成，保存会话状态
+                    // 写入记忆
+                    let summary = if prompt_text.len() > 200 {
+                        &prompt_text[..200]
+                    } else {
+                        &prompt_text
+                    };
+                    if let Some(mm) = &memory_manager {
+                        mm.write_memory(summary, &["conversation"], &prompt_text);
+                    }
+
                     let mut sessions = sessions_arc2.lock().await;
                     if let Some(s) = sessions.get(&sid) {
                         drop(std::mem::replace(&mut s.conversation, conversation));
                         drop(std::mem::replace(&mut s.agent_loop, agent_loop));
+                        s.memory_manager = memory_manager;
+                        s.tools = Some(tools);
                         s.is_running = false;
                     }
                 }
@@ -366,6 +401,7 @@ impl AcpRequestHandler {
                     tracing::error!("Processing task panicked: {:?}", panic_err);
                     let mut sessions = sessions_arc2.lock().await;
                     if let Some(s) = sessions.get(&sid) {
+                        s.memory_manager = memory_manager;
                         s.is_running = false;
                     }
                 }
@@ -414,19 +450,62 @@ impl AcpRequestHandler {
         let session_id = uuid::Uuid::new_v4().to_string();
         let agent_loop = AgentLoop::new(self.agent_config.clone());
 
-        // 从 cwd 检测工作区并构建系统提示词
-        let system_prompt = p.cwd.as_ref().and_then(|cwd| {
-            let path = std::path::Path::new(cwd);
-            let ws = qianxun_core::workspace::detect_workspace(path);
-            ws.as_ref().map(|w| {
-                let ctx = qianxun_core::workspace::build_workspace_context(w);
-                qianxun_core::agent::system_prompt::build_system_prompt(&ctx, "", None)
-            })
+        // 从 cwd 检测工作区并构建系统提示词和记忆管理器
+        let ws = p.cwd.as_ref().and_then(|cwd| {
+            qianxun_core::workspace::detect_workspace(std::path::Path::new(cwd))
         });
+        let system_prompt = ws.as_ref().map(|w| {
+            let ctx = qianxun_core::workspace::build_workspace_context(w);
+            let skills_catalog = qianxun_core::skills::SkillManager::load_all(Some(&w.root))
+                .build_catalog_prompt();
+            qianxun_core::agent::system_prompt::build_system_prompt(&ctx, &skills_catalog, None)
+        });
+        let memory_manager = ws.as_ref().and_then(build_memory_manager);
+
+        // 构建会话级 ToolRegistry：从基础注册表克隆，添加 MCP 工具
+        let mut session_tools = (*self.tools).clone();
+        let mcp_servers = parse_mcp_server_configs(p.mcp_servers.as_ref());
+        for config in &mcp_servers {
+            match McpClient::connect(config.clone()).await {
+                Ok(client) => {
+                    let server_name = client.server_name().to_string();
+                    match client.list_tools().await {
+                        Ok(tools) => {
+                            let count = tools.len();
+                            for tool in tools {
+                                session_tools.register_mcp_tool(
+                                    qianxun_core::tools::McpToolEntry {
+                                        client_id: server_name.clone(),
+                                        name: tool.name,
+                                        description: tool.description,
+                                        input_schema: tool.input_schema,
+                                    },
+                                );
+                            }
+                            tracing::info!("MCP '{server_name}' connected with {count} tools");
+                        }
+                        Err(e) => {
+                            tracing::warn!("MCP '{server_name}' list_tools failed: {e}");
+                        }
+                    }
+                    session_tools.register_mcp_client(std::sync::Arc::new(client));
+                }
+                Err(e) => {
+                    tracing::warn!("MCP '{}' connect failed: {e}", config.name);
+                }
+            }
+        }
+        let session_tools = std::sync::Arc::new(session_tools);
 
         let mut sessions = self.sessions.lock().await;
         sessions
-            .create(session_id.clone(), system_prompt, agent_loop)
+            .create(
+                session_id.clone(),
+                system_prompt,
+                agent_loop,
+                memory_manager,
+                Some(session_tools),
+            )
             .map_err(|e| e.to_string())?;
 
         tracing::info!("Session created: {session_id}");
@@ -448,18 +527,21 @@ impl AcpRequestHandler {
             return Ok(serde_json::json!({}));
         }
 
-        let system_prompt = cwd.and_then(|cwd| {
-            let path = std::path::Path::new(cwd);
-            let ws = qianxun_core::workspace::detect_workspace(path);
-            ws.as_ref().map(|w| {
-                let ctx = qianxun_core::workspace::build_workspace_context(w);
-                qianxun_core::agent::system_prompt::build_system_prompt(&ctx, "", None)
-            })
+        let ws = cwd.and_then(|cwd| {
+            qianxun_core::workspace::detect_workspace(std::path::Path::new(cwd))
         });
+        let system_prompt = ws.as_ref().map(|w| {
+            let ctx = qianxun_core::workspace::build_workspace_context(w);
+            let skills_catalog = qianxun_core::skills::SkillManager::load_all(Some(&w.root))
+                .build_catalog_prompt();
+            qianxun_core::agent::system_prompt::build_system_prompt(&ctx, &skills_catalog, None)
+        });
+        let memory_manager = ws.as_ref().and_then(build_memory_manager);
 
         let agent_loop = AgentLoop::new(self.agent_config.clone());
+        let session_tools = build_session_tools_from_ws(cwd, &self.tools).await;
         sessions
-            .create(session_id, system_prompt, agent_loop)
+            .create(session_id, system_prompt, agent_loop, memory_manager, session_tools)
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({}))
@@ -475,6 +557,8 @@ impl AcpRequestHandler {
             .and_then(|v| serde_json::from_value(v).ok())
             .ok_or_else(|| "missing session_id".to_string())?;
 
+        // 关闭会话。
+        // MCP 子进程通过 kill_on_drop(true) 在 McpTransport drop 时自动清理。
         let mut sessions = self.sessions.lock().await;
         if sessions.close(&p.session_id) {
             tracing::info!("Session closed: {}", p.session_id);
@@ -507,4 +591,99 @@ impl AcpRequestHandler {
             tracing::info!("Session cancelled: {}", p.session_id);
         }
     }
+}
+
+/// 从工作区根路径构建 MemoryManager。
+fn build_memory_manager(ws: &qianxun_core::workspace::Workspace) -> Option<MemoryManager> {
+    let home = if cfg!(target_os = "windows") {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    }?;
+    let base_dir = PathBuf::from(home).join(".qianxun").join("memory");
+    Some(MemoryManager::new(base_dir, &ws.root, 5))
+}
+
+/// 解析 ACP 会话参数中的 MCP 服务器配置列表。
+fn parse_mcp_server_configs(mcp_servers: Option<&Vec<Value>>) -> Vec<McpServerConfig> {
+    let Some(servers) = mcp_servers else {
+        return Vec::new();
+    };
+
+    servers
+        .iter()
+        .filter_map(|v| {
+            let name = v.get("name").and_then(|n| n.as_str())?;
+            let command = v.get("command").and_then(|c| c.as_str())?;
+            let args: Vec<String> = v
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let env: std::collections::HashMap<String, String> = v
+                .get("env")
+                .and_then(|e| serde_json::from_value(e.clone()).ok())
+                .unwrap_or_default();
+
+            Some(McpServerConfig {
+                name: name.to_string(),
+                command: command.to_string(),
+                args,
+                env,
+            })
+        })
+        .collect()
+}
+
+/// 异步构建基于工作区 MCP 配置的会话级 ToolRegistry。
+async fn build_session_tools_from_ws(
+    cwd: Option<&str>,
+    base_tools: &Arc<ToolRegistry>,
+) -> Option<Arc<ToolRegistry>> {
+    let cwd = cwd?;
+    let ws = qianxun_core::workspace::detect_workspace(std::path::Path::new(cwd))?;
+    let mcp_cfg = qianxun_core::mcp::config::McpConfigFile::find_in_workspace(&ws.root)
+        .ok()
+        .and_then(|c| c)?;
+
+    let configs = mcp_cfg.to_server_configs();
+    if configs.is_empty() {
+        return None;
+    }
+
+    let mut session_tools = (**base_tools).clone();
+    for config in &configs {
+        match McpClient::connect(config.clone()).await {
+            Ok(client) => {
+                let server_name = client.server_name().to_string();
+                match client.list_tools().await {
+                    Ok(tools) => {
+                        let count = tools.len();
+                        for tool in tools {
+                            session_tools.register_mcp_tool(qianxun_core::tools::McpToolEntry {
+                                client_id: server_name.clone(),
+                                name: tool.name,
+                                description: tool.description,
+                                input_schema: tool.input_schema,
+                            });
+                        }
+                        tracing::info!("MCP '{server_name}' connected with {count} tools (from workspace mcp.json)");
+                    }
+                    Err(e) => {
+                        tracing::warn!("MCP '{server_name}' list_tools failed: {e}");
+                    }
+                }
+                session_tools.register_mcp_client(std::sync::Arc::new(client));
+            }
+            Err(e) => {
+                tracing::warn!("MCP '{}' connect failed: {e}", config.name);
+            }
+        }
+    }
+
+    Some(std::sync::Arc::new(session_tools))
 }

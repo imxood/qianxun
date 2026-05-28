@@ -8,10 +8,6 @@ pub struct TokenBudget {
     pub max_output_tokens: Option<u64>,
 }
 
-pub trait TokenCounter: Send + Sync {
-    fn count(&self, text: &str) -> u64;
-}
-
 #[allow(dead_code)]
 pub struct Conversation {
     system_prompt: Option<String>,
@@ -91,7 +87,7 @@ impl Conversation {
                 let text_len: u64 = serde_json::to_string(msg)
                     .map(|s| s.len() as u64)
                     .unwrap_or(0);
-                total += text_len / 4;
+                total += text_len / 3;
                 if total > max_tokens {
                     keep_from = i;
                     break;
@@ -110,7 +106,7 @@ impl Conversation {
             .iter()
             .flat_map(serde_json::to_string)
             .collect();
-        let count = (text.len() / 4) as u64;
+        let count = (text.len() / 3) as u64;
         TokenUsage {
             input: count,
             output: 0,

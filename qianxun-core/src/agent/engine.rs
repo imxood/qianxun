@@ -16,14 +16,6 @@ pub enum AgentState {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentTransition {
-    ContinueLlm,
-    EndTurn,
-    Retry,
-    Error(String),
-}
-
 #[derive(Debug)]
 pub struct AgentLoop {
     pub state: AgentState,
@@ -122,7 +114,7 @@ pub mod processing_loop {
                     Ok(LlmStreamEvent::Text(text)) => {
                         response_text.push_str(&text);
                         text_buffer.push_str(&text);
-                        if text_buffer.len() >= 50 {
+                        if text_buffer.len() >= 200 {
                             sink.on_text(&text_buffer).await;
                             text_buffer.clear();
                         }
@@ -157,8 +149,17 @@ pub mod processing_loop {
                             agent.state = AgentState::ToolExecuting;
                             let mut results = Vec::new();
                             for (id, name, args) in &tool_calls {
+                                tracing::info!(
+                                    "[tool] execute: {name} ({id}) args={}",
+                                    serde_json::to_string(args).unwrap_or_default(),
+                                );
                                 match tools.execute_async(name, args.clone()).await {
                                     Ok(output) => {
+                                        tracing::info!(
+                                            "[tool] result: {name} ({id}) is_error={} len={}",
+                                            output.is_error,
+                                            output.content.len(),
+                                        );
                                         results.push((
                                             id.clone(),
                                             output.content,
@@ -166,6 +167,7 @@ pub mod processing_loop {
                                         ));
                                     }
                                     Err(e) => {
+                                        tracing::error!("[tool] error: {name} ({id}): {e}");
                                         sink.on_error(&crate::types::LlmError::ApiError {
                                             provider: "tool".into(),
                                             status: 0,
@@ -211,7 +213,7 @@ pub mod processing_loop {
                         if !text.is_empty() {
                             current_thinking_text.push_str(&text);
                             thinking_buffer.push_str(&text);
-                            if thinking_buffer.len() >= 50 {
+                            if thinking_buffer.len() >= 200 {
                                 sink.on_thinking(&thinking_buffer).await;
                                 thinking_buffer.clear();
                             }

@@ -1,6 +1,7 @@
 use super::{AgentTool, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing;
 
 pub struct ReadTextFileTool;
 
@@ -344,6 +345,14 @@ impl AgentTool for GrepTool {
                     if results.len() >= max_results {
                         break;
                     }
+                    // 跳过过大的文件
+                    const MAX_GREP_FILE_SIZE: u64 = 10 * 1024 * 1024;
+                    if let Ok(meta) = tokio::fs::metadata(&path).await {
+                        if meta.len() > MAX_GREP_FILE_SIZE {
+                            tracing::debug!("grep: skipping large file {} ({} bytes)", path.display(), meta.len());
+                            continue;
+                        }
+                    }
                     // 读取文件并搜索
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         for (i, line) in content.lines().enumerate() {
@@ -515,6 +524,548 @@ fn dir_size_sync(dir: &std::path::Path) -> u64 {
     total
 }
 
+// ─── ExecuteCommandTool ─────────────────────────────────────
+
+pub struct ExecuteCommandTool;
+
+#[async_trait]
+impl AgentTool for ExecuteCommandTool {
+    fn name(&self) -> &str {
+        "execute_command"
+    }
+
+    fn description(&self) -> &str {
+        "执行 shell 命令并返回输出。会使用系统 shell 运行（Unix: sh -c, Windows: cmd /C）。"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "要执行的命令"
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "工作目录，默认当前目录"
+                },
+                "timeout_ms": {
+                    "type": "number",
+                    "description": "超时时间（毫秒），默认 60000"
+                }
+            },
+            "required": ["command"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let command = arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing command".into()))?;
+        let working_dir = arguments.get("working_dir").and_then(|v| v.as_str());
+        let timeout_ms = arguments
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(60_000);
+
+        use tokio::process::Command;
+        use tokio::time::Duration;
+
+        let mut child = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.args(["/C", command]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", command]);
+            c
+        };
+
+        child.stdout(std::process::Stdio::piped());
+        child.stderr(std::process::Stdio::piped());
+        child.kill_on_drop(true);
+
+        if let Some(dir) = working_dir {
+            child.current_dir(dir);
+        }
+
+        let child = match child.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolOutput {
+                    content: format!("Failed to spawn command: {e}"),
+                    is_error: true,
+                });
+            }
+        };
+
+        let output = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Ok(ToolOutput {
+                    content: format!("Failed to read command output: {e}"),
+                    is_error: true,
+                });
+            }
+            Err(_) => {
+                return Ok(ToolOutput {
+                    content: format!("Command timed out after {timeout_ms}ms"),
+                    is_error: true,
+                });
+            }
+        };
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // 截断总输出到 100KB
+        const MAX_OUTPUT: usize = 100_000;
+        let mut result = format!("Exit code: {exit_code}\n");
+        if !stdout.is_empty() {
+            let label = "\n--- stdout ---\n";
+            result.push_str(label);
+            let remaining = MAX_OUTPUT.saturating_sub(result.len());
+            if stdout.len() > remaining {
+                result.push_str(&stdout[..remaining]);
+                result.push_str(&format!("\n... [truncated, total stdout {} bytes]", stdout.len()));
+            } else {
+                result.push_str(&stdout);
+            }
+        }
+        if !stderr.is_empty() {
+            let label = "\n--- stderr ---\n";
+            let remaining = MAX_OUTPUT.saturating_sub(result.len());
+            if remaining > label.len() {
+                result.push_str(label);
+                let remaining = MAX_OUTPUT.saturating_sub(result.len());
+                if stderr.len() > remaining {
+                    result.push_str(&stderr[..remaining]);
+                    result.push_str(&format!("\n... [truncated, total stderr {} bytes]", stderr.len()));
+                } else {
+                    result.push_str(&stderr);
+                }
+            }
+        }
+
+        Ok(ToolOutput {
+            content: result,
+            is_error: !output.status.success(),
+        })
+    }
+}
+
+// ─── EditFileTool ────────────────────────────────────────────
+
+pub struct EditFileTool;
+
+#[async_trait]
+impl AgentTool for EditFileTool {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+
+    fn description(&self) -> &str {
+        "精确编辑文件：搜索 old_string 并用 new_string 替换。old_string 必须在文件中唯一匹配。"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "文件路径"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "要被替换的精确文本（必须唯一匹配）"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "替换后的新文本"
+                }
+            },
+            "required": ["file_path", "old_string", "new_string"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let file_path = arguments
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing file_path".into()))?;
+        let old_string = arguments
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing old_string".into()))?;
+        let new_string = arguments
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing new_string".into()))?;
+
+        let content = match tokio::fs::read_to_string(file_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolOutput {
+                    content: format!("Error reading file: {e}"),
+                    is_error: true,
+                });
+            }
+        };
+
+        let count = content.matches(old_string).count();
+        if count == 0 {
+            // 显示文件上下文帮助 LLM 调整
+            let preview: String = content.chars().take(500).collect();
+            let hint = if content.len() > 500 {
+                format!("{preview}... [file truncated, total {} bytes]", content.len())
+            } else {
+                preview
+            };
+            return Ok(ToolOutput {
+                content: format!(
+                    "old_string not found in file. File has {} bytes.\nFirst 500 chars:\n{hint}",
+                    content.len()
+                ),
+                is_error: true,
+            });
+        }
+        if count > 1 {
+            return Ok(ToolOutput {
+                content: format!("old_string found {count} times — must match exactly once. Provide more context."),
+                is_error: true,
+            });
+        }
+
+        let new_content = content.replace(old_string, new_string);
+        match tokio::fs::write(file_path, &new_content).await {
+            Ok(_) => Ok(ToolOutput {
+                content: format!(
+                    "Successfully applied edit to {file_path} ({} chars replaced)",
+                    old_string.len()
+                ),
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolOutput {
+                content: format!("Error writing file: {e}"),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── GlobTool ────────────────────────────────────────────────
+
+pub struct GlobTool;
+
+#[async_trait]
+impl AgentTool for GlobTool {
+    fn name(&self) -> &str {
+        "glob"
+    }
+
+    fn description(&self) -> &str {
+        "按 glob 模式搜索文件路径（匹配完整相对路径，支持 ** 递归）。例如 src/**/*.rs 搜索 src 下所有 Rust 文件。"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "glob 模式，如 **/*.rs 或 src/**/mod.rs"
+                },
+                "root": {
+                    "type": "string",
+                    "description": "搜索起始目录，默认当前目录"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let pattern = arguments
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing pattern".into()))?;
+        let root = arguments
+            .get("root")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let root_path = std::path::PathBuf::from(root);
+        let mut results = Vec::new();
+        let max_results = 500;
+        let mut dirs = vec![root_path.clone()];
+
+        while let Some(dir) = dirs.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            loop {
+                let entry = match entries.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if let Ok(rel) = path.strip_prefix(&root_path) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    if glob_match(pattern, &rel_str) {
+                        results.push(path.to_string_lossy().to_string());
+                        if results.len() >= max_results {
+                            break;
+                        }
+                    }
+                }
+            }
+            if results.len() >= max_results {
+                break;
+            }
+        }
+
+        if results.is_empty() {
+            Ok(ToolOutput {
+                content: format!("No files matching '{pattern}'"),
+                is_error: false,
+            })
+        } else {
+            Ok(ToolOutput {
+                content: results.join("\n"),
+                is_error: false,
+            })
+        }
+    }
+}
+
+// ─── DeleteFileTool ──────────────────────────────────────────
+
+pub struct DeleteFileTool;
+
+#[async_trait]
+impl AgentTool for DeleteFileTool {
+    fn name(&self) -> &str {
+        "delete_file"
+    }
+
+    fn description(&self) -> &str {
+        "删除文件或空目录。recursive=true 时递归删除目录及其内容。"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "要删除的文件或目录路径"
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "是否递归删除（用于目录），默认 false"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing path".into()))?;
+        let recursive = arguments
+            .get("recursive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let p = std::path::Path::new(path);
+        if !p.exists() {
+            return Ok(ToolOutput {
+                content: format!("Path does not exist: {path}"),
+                is_error: true,
+            });
+        }
+
+        if p.is_dir() {
+            if recursive {
+                match tokio::fs::remove_dir_all(p).await {
+                    Ok(_) => Ok(ToolOutput {
+                        content: format!("Successfully deleted directory (recursive): {path}"),
+                        is_error: false,
+                    }),
+                    Err(e) => Ok(ToolOutput {
+                        content: format!("Error deleting directory: {e}"),
+                        is_error: true,
+                    }),
+                }
+            } else {
+                // Try removing empty directory
+                match tokio::fs::remove_dir(p).await {
+                    Ok(_) => Ok(ToolOutput {
+                        content: format!("Successfully deleted empty directory: {path}"),
+                        is_error: false,
+                    }),
+                    Err(e) => Ok(ToolOutput {
+                        content: format!("Directory not empty (use recursive=true): {e}"),
+                        is_error: true,
+                    }),
+                }
+            }
+        } else {
+            match tokio::fs::remove_file(p).await {
+                Ok(_) => Ok(ToolOutput {
+                    content: format!("Successfully deleted file: {path}"),
+                    is_error: false,
+                }),
+                Err(e) => Ok(ToolOutput {
+                    content: format!("Error deleting file: {e}"),
+                    is_error: true,
+                }),
+            }
+        }
+    }
+}
+
+// ─── CreateDirectoryTool ─────────────────────────────────────
+
+pub struct CreateDirectoryTool;
+
+#[async_trait]
+impl AgentTool for CreateDirectoryTool {
+    fn name(&self) -> &str {
+        "create_directory"
+    }
+
+    fn description(&self) -> &str {
+        "递归创建目录（类似 mkdir -p）。如果目录已存在则返回成功。"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "要创建的目录路径"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing path".into()))?;
+
+        match tokio::fs::create_dir_all(path).await {
+            Ok(_) => Ok(ToolOutput {
+                content: format!("Directory ready: {path}"),
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolOutput {
+                content: format!("Error creating directory: {e}"),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── FetchUrlTool ────────────────────────────────────────────
+
+pub struct FetchUrlTool;
+
+#[async_trait]
+impl AgentTool for FetchUrlTool {
+    fn name(&self) -> &str {
+        "fetch_url"
+    }
+
+    fn description(&self) -> &str {
+        "HTTP GET 请求获取 URL 内容（文本）。适用于获取网页、API 响应等。"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "要获取的 URL"
+                }
+            },
+            "required": ["url"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+        let url = arguments
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing url".into()))?;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to create client: {e}")))?;
+
+        let resp = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(ToolOutput {
+                    content: format!("HTTP request failed: {e}"),
+                    is_error: true,
+                });
+            }
+        };
+
+        let status = resp.status();
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(ToolOutput {
+                    content: format!("Failed to read response body: {e}"),
+                    is_error: true,
+                });
+            }
+        };
+
+        const MAX_BODY: usize = 1_000_000;
+        let truncated = if body.len() > MAX_BODY {
+            let mut b = body[..MAX_BODY].to_string();
+            b.push_str(&format!(
+                "\n\n... [response truncated, total {} bytes]",
+                body.len()
+            ));
+            b
+        } else {
+            body
+        };
+
+        let result = if status.is_success() {
+            format!("HTTP {status}\n\n{truncated}")
+        } else {
+            format!("HTTP {status} (error)\n\n{truncated}")
+        };
+
+        Ok(ToolOutput {
+            content: result,
+            is_error: !status.is_success(),
+        })
+    }
+}
+
 /// 注册所有内置工具到 ToolRegistry
 pub fn register_all(registry: &mut super::ToolRegistry) {
     use std::sync::Arc;
@@ -523,4 +1074,10 @@ pub fn register_all(registry: &mut super::ToolRegistry) {
     registry.register_builtin(Arc::new(SearchTool));
     registry.register_builtin(Arc::new(GrepTool));
     registry.register_builtin(Arc::new(ListDirectoryTool));
+    registry.register_builtin(Arc::new(ExecuteCommandTool));
+    registry.register_builtin(Arc::new(EditFileTool));
+    registry.register_builtin(Arc::new(GlobTool));
+    registry.register_builtin(Arc::new(DeleteFileTool));
+    registry.register_builtin(Arc::new(CreateDirectoryTool));
+    registry.register_builtin(Arc::new(FetchUrlTool));
 }
