@@ -1,5 +1,8 @@
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct SkillName(String);
@@ -74,7 +77,7 @@ impl SkillManager {
     }
 
     /// 全局技能目录 `~/.qianxun/skills/`。
-    fn global_skills_dir() -> Option<PathBuf> {
+    pub fn global_skills_dir() -> Option<PathBuf> {
         let home = if cfg!(target_os = "windows") {
             std::env::var("USERPROFILE").ok()
         } else {
@@ -308,5 +311,72 @@ impl SkillManager {
             .iter()
             .map(|(_, m)| m.name.as_str().to_string())
             .collect()
+    }
+}
+
+/// 监听技能目录文件变更，自动触发 SkillManager::reload()。
+pub struct SkillWatcher {
+    changed: Arc<AtomicBool>,
+    _watcher: Option<RecommendedWatcher>,
+}
+
+impl SkillWatcher {
+    /// 监听全局 `~/.qianxun/skills/` 和项目 `.claude/skills/` 目录。
+    /// 目录不存在时静默跳过，不报错。
+    pub fn new(project_dir: Option<&Path>) -> Self {
+        let changed = Arc::new(AtomicBool::new(false));
+        let changed_clone = changed.clone();
+
+        let watcher_result = RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    let is_md = event.paths.iter().any(|p| {
+                        p.extension().and_then(|e| e.to_str()) == Some("md")
+                    });
+                    if is_md {
+                        changed_clone.store(true, Ordering::SeqCst);
+                    }
+                }
+            },
+            Config::default(),
+        );
+
+        let mut watcher = match watcher_result {
+            Ok(w) => Some(w),
+            Err(e) => {
+                tracing::warn!("[skill_watcher] failed to create: {e}");
+                return Self { changed, _watcher: None };
+            }
+        };
+
+        // 监听全局技能目录
+        if let Some(global_dir) = SkillManager::global_skills_dir() {
+            if global_dir.is_dir() {
+                if let Some(ref mut w) = watcher {
+                    if let Err(e) = w.watch(&global_dir, RecursiveMode::NonRecursive) {
+                        tracing::warn!("[skill_watcher] watch {:?} failed: {e}", global_dir);
+                    }
+                }
+            }
+        }
+
+        // 监听项目技能目录
+        if let Some(proj) = project_dir {
+            let project_skills = proj.join(".claude").join("skills");
+            if project_skills.is_dir() {
+                if let Some(ref mut w) = watcher {
+                    if let Err(e) = w.watch(&project_skills, RecursiveMode::NonRecursive) {
+                        tracing::warn!("[skill_watcher] watch {:?} failed: {e}", project_skills);
+                    }
+                }
+            }
+        }
+
+        Self { changed, _watcher: watcher }
+    }
+
+    /// 自上次检查后是否有 `.md` 文件变更（原子读取+重置）。
+    pub fn has_changed(&mut self) -> bool {
+        self.changed.swap(false, Ordering::AcqRel)
     }
 }

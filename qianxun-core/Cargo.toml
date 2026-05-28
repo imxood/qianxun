@@ -18,4 +18,5 @@ chrono = { workspace = true, features = ["serde"] }
 lru = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 reqwest = { workspace = true }
-json5 = { workspace = true }
+json_comments = { workspace = true }
+notify = { workspace = true }

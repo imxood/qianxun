@@ -6,6 +6,7 @@ use crate::types::{rpc_success, IncomingMessage};
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::types::AgentConfig;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
@@ -18,13 +19,21 @@ pub async fn run_acp_server(
     provider: Box<dyn LlmProvider>,
     agent_config: AgentConfig,
     compact_config: Option<ResolvedCompactionConfig>,
-    _budget_input: Option<u64>,
-    _budget_output: Option<u64>,
+    budget_input: Option<u64>,
+    budget_output: Option<u64>,
 ) -> anyhow::Result<()> {
     let (transport, mut inbox) = AcpTransport::new();
     let transport = Arc::new(transport);
     let provider: Arc<dyn LlmProvider> = Arc::from(provider);
-    let sessions = Arc::new(Mutex::new(SessionManager::new(10)));
+
+    // 会话持久化目录: ~/.qianxun/sessions/
+    let sessions = {
+        let dir = home_dir().map(|h| h.join(".qianxun").join("sessions"));
+        Arc::new(Mutex::new(match dir {
+            Some(d) => SessionManager::new_with_dir(10, d),
+            None => SessionManager::new(10),
+        }))
+    };
     let tools = Arc::new(build_acp_tool_registry(transport.clone()));
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
 
@@ -36,6 +45,8 @@ pub async fn run_acp_server(
         output_tx,
         agent_config,
         compact_config,
+        budget_input,
+        budget_output,
     };
 
     tracing::info!("ACP server started, waiting for messages...");
@@ -99,4 +110,13 @@ pub async fn run_acp_server(
 
     tracing::info!("ACP server shutdown");
     Ok(())
+}
+
+/// 用户 home 目录
+fn home_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    } else {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
 }

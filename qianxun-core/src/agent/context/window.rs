@@ -122,7 +122,7 @@ impl AutoCompactWindow {
     /// 检查是否应该执行 MicroCompact（超 TTL）。
     pub fn should_micro_compact(&self) -> bool {
         match self.last_assistant_time {
-            Some(t) => t.elapsed().as_secs() > self.micro_compact_ttl_secs,
+            Some(t) => t.elapsed().as_secs() >= self.micro_compact_ttl_secs,
             None => false,
         }
     }

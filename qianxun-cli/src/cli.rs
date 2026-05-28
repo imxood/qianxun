@@ -11,6 +11,7 @@ use qianxun_core::agent::system_prompt;
 use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::SkillManager;
+use qianxun_core::skills::SkillWatcher;
 use qianxun_core::tools::ToolRegistry;
 
 use rustyline::completion::{Completer, Pair};
@@ -90,10 +91,11 @@ impl Highlighter for ReplHelper {
 
 impl Validator for ReplHelper {
     fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
-        let input = ctx.input().trim().to_string();
+        let raw = ctx.input();
+        let input = raw.trim().to_string();
 
-        // 空行结束多行模式
-        if input.is_empty() && input.contains('\n') {
+        // 空行（raw 含换行且 trim 后为空）结束多行模式
+        if input.is_empty() && raw.contains('\n') {
             return Ok(ValidationResult::Valid(None));
         }
 
@@ -121,6 +123,7 @@ pub struct Repl {
     workspace_context: String,
     memory_manager: Option<MemoryManager>,
     skill_manager: SkillManager,
+    skill_watcher: SkillWatcher,
     skills_catalog: String,
     skills_list: String,
     skills_count: usize,
@@ -130,11 +133,11 @@ pub struct Repl {
     cancel_flag: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
     rl: Editor<ReplHelper, FileHistory>,
-    #[allow(dead_code)]
     ws_root: Option<PathBuf>,
     sessions_dir: Option<PathBuf>,
     current_session: Option<String>,
     resume: bool,
+    global_instructions: Option<String>,
 }
 
 impl Repl {
@@ -147,12 +150,14 @@ impl Repl {
         workspace_context: String,
         memory_manager: Option<MemoryManager>,
         skill_manager: SkillManager,
+        skill_watcher: SkillWatcher,
         skills_catalog: String,
         skills_list: String,
         skills_count: usize,
         tools_list: String,
         ws_root: Option<PathBuf>,
         resume: bool,
+        global_instructions: Option<String>,
     ) -> Self {
         let budget = (
             conversation.budget().max_input_tokens,
@@ -181,6 +186,7 @@ impl Repl {
             workspace_context,
             memory_manager,
             skill_manager,
+            skill_watcher,
             skills_catalog,
             skills_list,
             skills_count,
@@ -194,6 +200,7 @@ impl Repl {
             sessions_dir: Self::sessions_dir(),
             current_session: None,
             resume,
+            global_instructions,
         }
     }
 
@@ -302,7 +309,7 @@ impl Repl {
 
     /// 创建新会话 ID（基于当前时间）
     fn new_session_id() -> String {
-        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
+        chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
     }
 
     /// 恢复历史会话（模糊匹配 ID）
@@ -564,11 +571,24 @@ impl Repl {
         eprintln!("  输入 /help 查看命令  |  /quit 退出");
     }
 
+    /// 检查技能目录是否有文件变更，有则自动重载。
+    fn check_skill_reload(&mut self, source: &str) {
+        if !self.skill_watcher.has_changed() {
+            return;
+        }
+        tracing::info!("[skill_watcher] file change detected ({source}), reloading skills");
+        self.skill_manager.reload(self.ws_root.as_deref());
+        self.skills_catalog = self.skill_manager.build_catalog_prompt();
+        self.skills_list = self.skill_manager.build_skills_list();
+        self.skills_count = self.skill_manager.skill_count();
+    }
+
     // ─── 命令分发 ───────────────────────────────────────────
 
     async fn handle_slash(&mut self, cmd: &str) {
         match cmd {
             "/quit" | "/exit" => {
+                self.save_conversation().await;
                 eprintln!("再见！");
                 self.shutdown_notify.notify_one();
                 self.running = false;
@@ -607,7 +627,7 @@ impl Repl {
                 // 保存当前会话后再重置
                 self.save_conversation().await;
                 let sys = system_prompt::build_system_prompt(
-                    &self.workspace_context, &self.skills_catalog, None,
+                    &self.workspace_context, self.global_instructions.as_deref(),
                 );
                 self.conversation = Conversation::new(Some(sys));
                 self.conversation.set_budget(self.budget.0, self.budget.1);
@@ -636,6 +656,7 @@ impl Repl {
                 }
             }
             "/skills" => {
+                self.check_skill_reload("handle_slash");
                 if self.skills_list.is_empty() {
                     eprintln!("未加载任何技能。");
                 } else {
@@ -753,6 +774,9 @@ impl Repl {
     // ─── 消息处理 ───────────────────────────────────────────
 
     async fn handle_message(&mut self, msg: &str) {
+        // 检查技能文件变更
+        self.check_skill_reload("handle_message");
+
         // 重置取消标志，以便上一次取消不影响本轮
         self.cancel_flag.store(false, Ordering::SeqCst);
 
@@ -836,7 +860,12 @@ impl Repl {
 
         // 轮次后写入记忆
         if let Some(mm) = &self.memory_manager {
-            let summary = if msg.len() > 200 { &msg[..200] } else { &msg };
+            let summary = if msg.len() > 200 {
+                let end = (0..=200).rev().find(|&i| msg.is_char_boundary(i)).unwrap_or(0);
+                &msg[..end]
+            } else {
+                &msg
+            };
             mm.write_memory(summary, &["conversation"], &msg);
         }
 

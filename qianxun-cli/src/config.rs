@@ -9,39 +9,63 @@ const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
 
 {
   // ── Provider ──────────────────────────────────────────────
-  providers: {
-    // deepseek: {
+  "providers": {
+    // "deepseek": {
     //   // API 密钥（可选，默认走 DEEPSEEK_API_KEY 环境变量）
-    //   // api_key: "sk-...",
+    //   // "api_key": "sk-...",
     //
     //   // 模型名（可选，可被 --model CLI 参数覆盖）
-    //   // model: "deepseek-v4-flash",
+    //   // "model": "deepseek-v4-flash",
     //
     //   // API 基础地址
-    //   // base_url: "https://api.deepseek.com/anthropic",
+    //   // "base_url": "https://api.deepseek.com/anthropic",
     //
-    //   // 生成温度（可选，None = API 默认值）
-    //   // temperature: 0.7,
+    //   // 生成温度（可选，null = API 默认值）
+    //   // "temperature": 0.7,
     //
     //   // 单次响应最大 token（可选）
-    //   // max_tokens: 4096,
+    //   // "max_tokens": 4096,
     // },
   },
 
   // ── Agent ─────────────────────────────────────────────────
-  agent: {
+  "agent": {
     // 每轮对话最大交互次数
-    max_turns: 50,
+    "max_turns": 50,
     // LLM API 调用重试次数
-    max_retries: 3,
+    "max_retries": 3,
   },
 
   // ── Token 预算 ─────────────────────────────────────────
-  budget: {
+  "budget": {
     // 对话窗口上限（超过时自动丢弃早期消息）
-    max_input_tokens: 100_000,
+    "max_input_tokens": 100000,
     // 单次响应 token 上限
-    max_output_tokens: 4096,
+    "max_output_tokens": 4096,
+  },
+
+  // ── 上下文压缩 ─────────────────────────────────────
+  "compaction": {
+    // 启用上下文压缩（默认 true）
+    // "enabled": true,
+    // 模型窗口大小 token 数（DeepSeek = 1M）
+    // "model_window": 1000000,
+    // 裁剪前保留的最近轮次数
+    // "snip_fresh_turns": 3,
+    // 微压缩保留的最后消息数
+    // "micro_compact_keep": 20,
+    // 微压缩 TTL 秒数
+    // "micro_compact_ttl_secs": 60,
+    // 折叠比率（0.0-1.0）
+    // "collapse_ratio": 0.90,
+    // 阻塞比率（0.0-1.0）
+    // "block_ratio": 0.95,
+    // 自动压缩触发比率（0.0-1.0）
+    // "auto_compact_ratio": 0.85,
+    // 断路器限制
+    // "circuit_breaker_limit": 3,
+    // 追踪范围: "body_after_prefix" 或 "total"
+    // "scope": "body_after_prefix",
   },
 }
 "#;
@@ -75,7 +99,7 @@ pub fn write_default_config() -> Result<PathBuf, String> {
 
 /// 检测当前平台的默认配置文件路径。
 ///
-/// 所有平台统一使用 `~/.qianxun/config.json5`
+/// 所有平台统一使用 `~/.qianxun/config.json`
 pub fn default_config_path() -> Option<PathBuf> {
     let home = if cfg!(target_os = "windows") {
         std::env::var("USERPROFILE").ok()
@@ -86,7 +110,7 @@ pub fn default_config_path() -> Option<PathBuf> {
     home.map(|base| {
         let mut path = PathBuf::from(base);
         path.push(".qianxun");
-        path.push("config.json5");
+        path.push("config.json");
         path
     })
 }

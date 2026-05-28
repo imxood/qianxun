@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// 检测到的项目类型
@@ -14,8 +15,57 @@ pub enum ProjectType {
 pub struct Workspace {
     pub root: PathBuf,
     pub project_type: ProjectType,
-    pub claude_md: Option<String>,
+    /// 项目提示词内容（来自 AGENTS.md 或 CLAUDE.md）
+    pub project_instructions: Option<String>,
     pub detected_files: Vec<String>,
+}
+
+/// 项目级 .qianxun/config.json 配置
+#[derive(Debug, Deserialize, Default)]
+struct ProjectConfig {
+    /// 指定使用哪个提示词文件："AGENTS.md" 或 "CLAUDE.md"
+    /// 未指定时自动检测
+    #[serde(rename = "prompt_file")]
+    prompt_file: Option<String>,
+}
+
+/// 读取 `.qianxun/config.json`，返回 `prompt_file` 设置。
+fn read_project_prompt_file(root: &Path) -> Option<String> {
+    let config_path = root.join(".qianxun").join("config.json");
+    if !config_path.exists() {
+        return None;
+    }
+    let file = std::fs::File::open(config_path).ok()?;
+    let reader = json_comments::StripComments::new(file);
+    let cfg: ProjectConfig = serde_json::from_reader(reader).ok()?;
+    cfg.prompt_file
+}
+
+/// 确定项目提示词内容。
+///
+/// 优先级：
+/// 1. `.qianxun/config.json` 中指定 `prompt_file` → 读取该文件
+/// 2. 自动检测：两者都存在时 `AGENTS.md` 优先
+fn resolve_project_instructions(root: &Path, agents_content: &Option<String>, claude_content: &Option<String>) -> Option<String> {
+    // Priority 1: config 指定 prompt_file
+    if let Some(file) = read_project_prompt_file(root) {
+        let path = root.join(&file);
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let trimmed = content.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+        return None;
+    }
+
+    // Priority 2: auto-detect
+    if agents_content.is_some() {
+        return agents_content.clone();
+    }
+    claude_content.clone()
 }
 
 /// 直接从给定路径创建 Workspace（不向上查找）。
@@ -32,6 +82,7 @@ pub fn workspace_from_root(root: &Path) -> Workspace {
     let mut has_package_json = false;
     let mut has_python = false;
     let mut claude_content = None;
+    let mut agents_content = None;
 
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
@@ -45,8 +96,13 @@ pub fn workspace_from_root(root: &Path) -> Workspace {
                     has_package_json = true;
                     detected.push(name);
                 }
-                "CLAUDE.md" => {
-                    claude_content = std::fs::read_to_string(entry.path()).ok();
+                "AGENTS.md" | "CLAUDE.md" => {
+                    let content = std::fs::read_to_string(entry.path()).ok();
+                    match name.as_str() {
+                        "AGENTS.md" => agents_content = content,
+                        "CLAUDE.md" => claude_content = content,
+                        _ => {}
+                    }
                     detected.push(name);
                 }
                 "pyproject.toml" | "setup.py" | "requirements.txt" => {
@@ -62,6 +118,9 @@ pub fn workspace_from_root(root: &Path) -> Workspace {
         let is_ws = claude_content.as_ref()
             .map(|c| c.contains("[workspace]"))
             .unwrap_or(false)
+            || agents_content.as_ref()
+                .map(|c| c.contains("[workspace]"))
+                .unwrap_or(false)
             || std::fs::read_to_string(root.join("Cargo.toml"))
                 .map(|c| c.contains("[workspace]"))
                 .unwrap_or(false);
@@ -74,10 +133,12 @@ pub fn workspace_from_root(root: &Path) -> Workspace {
         ProjectType::Generic
     };
 
+    let project_instructions = resolve_project_instructions(&root, &agents_content, &claude_content);
+
     Workspace {
         root,
         project_type,
-        claude_md: claude_content,
+        project_instructions,
         detected_files: detected,
     }
 }
@@ -102,6 +163,7 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
         let mut has_package_json = false;
         let mut has_python = false;
         let mut claude_content = None;
+        let mut agents_content = None;
 
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -122,8 +184,13 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
                     has_package_json = true;
                     detected.push(name);
                 }
-                "CLAUDE.md" => {
-                    claude_content = std::fs::read_to_string(entry.path()).ok();
+                "AGENTS.md" | "CLAUDE.md" => {
+                    let content = std::fs::read_to_string(entry.path()).ok();
+                    match name.as_str() {
+                        "AGENTS.md" => agents_content = content,
+                        "CLAUDE.md" => claude_content = content,
+                        _ => {}
+                    }
                     detected.push(name);
                 }
                 "pyproject.toml" | "setup.py" | "requirements.txt" => {
@@ -136,10 +203,12 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
 
         if !detected.is_empty() {
             let project_type = if has_cargo_toml {
-                // 检查是否是 workspace
                 let is_ws = claude_content.as_ref()
                     .map(|c| c.contains("[workspace]"))
                     .unwrap_or(false)
+                    || agents_content.as_ref()
+                        .map(|c| c.contains("[workspace]"))
+                        .unwrap_or(false)
                     || std::fs::read_to_string(dir.join("Cargo.toml"))
                         .map(|c| c.contains("[workspace]"))
                         .unwrap_or(false);
@@ -152,10 +221,12 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
                 ProjectType::Generic
             };
 
+            let project_instructions = resolve_project_instructions(dir, &agents_content, &claude_content);
+
             return Some(Workspace {
                 root: dir.to_path_buf(),
                 project_type,
-                claude_md: claude_content,
+                project_instructions,
                 detected_files: detected,
             });
         }
@@ -185,17 +256,41 @@ pub fn build_workspace_context(ws: &Workspace) -> String {
         parts.push(format!("- 关键文件: {}", ws.detected_files.join(", ")));
     }
 
-    if let Some(ref rules) = ws.claude_md {
-        // 截取 CLAUDE.md 前 2000 字符避免撑爆 prompt
+    if let Some(ref rules) = ws.project_instructions {
         let truncated = if rules.len() > 2000 {
             format!("{}...\n[以下内容已截断，原长度 {} 字符]", &rules[..2000], rules.len())
         } else {
             rules.clone()
         };
-        parts.push(format!("\n### 项目规则 (CLAUDE.md)\n{truncated}"));
+        parts.push(format!("\n### 项目规则\n{truncated}"));
     }
 
     parts.join("\n")
+}
+
+/// 读取全局用户指令 `~/.qianxun/AGENTS.md`。
+/// 截断到 4000 字符，文件不存在或为空时返回 None。
+pub fn read_global_agents_md() -> Option<String> {
+    let home = if cfg!(target_os = "windows") {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    }?;
+    let path = PathBuf::from(home).join(".qianxun").join("AGENTS.md");
+    if !path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return None;
+    }
+    if content.len() > 4000 {
+        let end = (0..=4000).rev().find(|&i| content.is_char_boundary(i)).unwrap_or(0);
+        Some(format!("{}...\n[以下内容已截断，原长度 {} 字符]", &content[..end], content.len()))
+    } else {
+        Some(content)
+    }
 }
 
 #[cfg(test)]
@@ -238,12 +333,45 @@ mod tests {
         let ws = Workspace {
             root: PathBuf::from("/test/project"),
             project_type: ProjectType::Rust { is_workspace: false },
-            claude_md: None,
+            project_instructions: None,
             detected_files: vec!["Cargo.toml".into()],
         };
         let ctx = build_workspace_context(&ws);
         assert!(ctx.contains("/test/project"));
         assert!(ctx.contains("Rust"));
         assert!(ctx.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_resolve_agents_preferred() {
+        let dir = std::env::temp_dir().join("qianxun_test_agents_first");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"test\"\n").ok();
+        std::fs::write(dir.join("AGENTS.md"), "# AGENTS rules").ok();
+        std::fs::write(dir.join("CLAUDE.md"), "# CLAUDE rules").ok();
+
+        let ws = workspace_from_root(&dir);
+        assert_eq!(ws.project_instructions.as_deref(), Some("# AGENTS rules"));
+        assert!(ws.detected_files.contains(&"AGENTS.md".to_string()));
+        assert!(ws.detected_files.contains(&"CLAUDE.md".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_config_prompt_file_override() {
+        let dir = std::env::temp_dir().join("qianxun_test_cfg_override");
+        let _ = std::fs::create_dir_all(&dir);
+        let qx_dir = dir.join(".qianxun");
+        let _ = std::fs::create_dir_all(&qx_dir);
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"test\"\n").ok();
+        std::fs::write(dir.join("AGENTS.md"), "# AGENTS rules").ok();
+        std::fs::write(dir.join("CLAUDE.md"), "# CLAUDE rules").ok();
+        std::fs::write(qx_dir.join("config.json"), r#"{"prompt_file": "CLAUDE.md"}"#).ok();
+
+        let ws = workspace_from_root(&dir);
+        assert_eq!(ws.project_instructions.as_deref(), Some("# CLAUDE rules"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -17,7 +17,6 @@ pub const BASE_PROMPT: &str = r#"你是千寻（Qianxun），一个高效的 AI 
 
 pub fn build_system_prompt(
     workspace_context: &str,
-    _skills_catalog: &str,
     custom_instructions: Option<&str>,
 ) -> String {
     let mut parts = vec![BASE_PROMPT.to_string()];
@@ -39,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_with_all_parts() {
-        let prompt = build_system_prompt("工作区上下文", "技能目录", Some("自定义指令"));
+        let prompt = build_system_prompt("工作区上下文", Some("自定义指令"));
         assert!(prompt.contains("千寻"));
         assert!(prompt.contains("工作区上下文"));
         assert!(prompt.contains("自定义指令"));
@@ -47,7 +46,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_empty_context() {
-        let prompt = build_system_prompt("", "", None);
+        let prompt = build_system_prompt("", None);
         assert!(prompt.contains("千寻"));
         assert_eq!(prompt, BASE_PROMPT);
     }

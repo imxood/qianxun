@@ -1,6 +1,6 @@
 use crate::agent::message::{ContentBlock, Message, UserMessageId};
 use crate::provider::types::CompletionRequest;
-use crate::types::{AgentConfig, TokenUsage};
+use crate::types::AgentConfig;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -10,12 +10,10 @@ pub struct TokenBudget {
     pub max_output_tokens: Option<u64>,
 }
 
-#[allow(dead_code)]
 pub struct Conversation {
     system_prompt: Option<String>,
     messages: Vec<Message>,
     budget: TokenBudget,
-    cache_breakpoint: Option<usize>,
 }
 
 impl Conversation {
@@ -27,12 +25,7 @@ impl Conversation {
                 max_input_tokens: None,
                 max_output_tokens: None,
             },
-            cache_breakpoint: None,
         }
-    }
-
-    pub fn system_prompt(&self) -> Option<&str> {
-        self.system_prompt.as_deref()
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -113,22 +106,6 @@ impl Conversation {
             if keep_from > 0 && keep_from < self.messages.len() {
                 self.messages.drain(0..keep_from);
             }
-        }
-    }
-
-    /// 消耗的 token 估算
-    pub fn estimated_tokens(&self) -> TokenUsage {
-        let text: String = self
-            .messages
-            .iter()
-            .flat_map(serde_json::to_string)
-            .collect();
-        let count = (text.len() / 3) as u64;
-        TokenUsage {
-            input: count,
-            output: 0,
-            cache_creation_input: None,
-            cache_read_input: None,
         }
     }
 

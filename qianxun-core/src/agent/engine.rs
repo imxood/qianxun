@@ -67,7 +67,7 @@ impl AgentLoop {
         self.turn_count = 0;
         self.retry_count = 0;
         self.accumulated_usage = TokenUsage::default();
-        self.compact_window = None;
+        // 保留 compact_window — reset 只清运行时状态，不丢压缩窗口配置
     }
 }
 
@@ -112,11 +112,11 @@ pub mod processing_loop {
                 return;
             }
 
+            // ── Normalize (always — fixes tool_use/tool_result pairing) ──
+            normalize::normalize_messages(conversation.messages_mut());
+
             // ── Context compression pipeline ──
             if let (Some(ref mut cw), Some(cc)) = (agent.compact_window.as_mut(), agent.compact_config.as_ref()) {
-                // Always normalize (fix tool_use/tool_result pairing)
-                normalize::normalize_messages(conversation.messages_mut());
-
                 // Update token tracking
                 cw.update(&agent.accumulated_usage);
 
@@ -136,6 +136,7 @@ pub mod processing_loop {
 
                 // L3/L4: Check zone and attempt compression
                 let zone = cw.compute_zone(cc.scope);
+                cw.zone = zone;
                 match zone {
                     CompactZone::Blocked | CompactZone::Danger => {
                         if cw.is_circuit_broken() {
@@ -239,12 +240,12 @@ pub mod processing_loop {
                         tool_calls.push((id, tool_name, arguments));
                     }
                     Ok(LlmStreamEvent::UsageUpdate(usage)) => {
+                        // UsageUpdate from DeepSeek is cumulative (message_start has
+                        // input=500, message_delta has input=2000).  Replace — don't add.
+                        agent.accumulated_usage = usage.clone();
                         if let Some(ref mut cw) = agent.compact_window {
-                            cw.update(&usage);
+                            cw.update(&agent.accumulated_usage);
                         }
-                        agent.accumulated_usage = agent
-                            .accumulated_usage
-                            .clone() + usage;
                         sink.on_token_usage(&agent.accumulated_usage).await;
                     }
                     Ok(LlmStreamEvent::Stop(reason)) => {
@@ -322,7 +323,10 @@ pub mod processing_loop {
                                 })
                                 .collect();
                             conversation.push_message(Message::user(result_blocks));
-                            agent.turn_count += 1;
+                            // turn_count is incremented at the top of this function once per
+                            // user→assistant exchange.  Tool round-trips within one exchange
+                            // should NOT consume additional turns — the loop naturally
+                            // terminates when the LLM stops requesting tools.
                             tracing::info!(
                                 "工具执行完成，回送 {} 个结果到 LLM (turn {})",
                                 result_count,

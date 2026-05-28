@@ -3,7 +3,6 @@ pub mod config;
 pub mod output;
 
 pub async fn run_repl(
-    _verbose: bool,
     resolved: &qianxun_core::config::ResolvedConfig,
     workspace: Option<qianxun_core::workspace::Workspace>,
     resume: bool,
@@ -15,6 +14,7 @@ pub async fn run_repl(
     use qianxun_core::context::memory::MemoryManager;
     use qianxun_core::provider::deepseek::DeepSeekProvider;
     use qianxun_core::provider::LlmProvider;
+    use qianxun_core::skills::SkillWatcher;
     use qianxun_core::tools::ToolRegistry;
     use std::path::PathBuf;
     use crate::cli::Repl;
@@ -30,7 +30,8 @@ pub async fn run_repl(
     let skills_catalog = skills_mgr.build_catalog_prompt();
     let skills_list = skills_mgr.build_skills_list();
     let skills_count = skills_mgr.skill_count();
-    let system_prompt = system_prompt::build_system_prompt(&ws_context, &skills_catalog, None);
+    let global_instructions = qianxun_core::workspace::read_global_agents_md();
+    let system_prompt = system_prompt::build_system_prompt(&ws_context, global_instructions.as_deref());
 
     // 对话
     let mut conversation = Conversation::new(Some(system_prompt));
@@ -109,13 +110,16 @@ pub async fn run_repl(
     // 工具列表（用于 /tools 命令）
     let tools_list = tools.format_tools_list();
 
+    // 启动文件变更监听
+    let skill_watcher = SkillWatcher::new(workspace.as_ref().map(|ws| ws.root.as_path()));
+
     // 启动 REPL
     let ws_root = workspace.as_ref().map(|ws| ws.root.clone());
     let mut repl = Repl::new(
         agent_loop, conversation, provider, tools,
         ws_context, memory_manager,
-        skills_mgr, skills_catalog, skills_list, skills_count,
-        tools_list, ws_root, resume,
+        skills_mgr, skill_watcher, skills_catalog, skills_list, skills_count,
+        tools_list, ws_root, resume, global_instructions,
     );
     repl.run().await
 }

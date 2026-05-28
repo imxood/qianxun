@@ -21,7 +21,7 @@ cargo run -- --generate-config   # 生成默认配置文件
 
 ### 配置文件
 
-默认路径 `~/.qianxun/config.json5`（JSON5 格式），可用 `--config <path>` 覆盖。
+默认路径 `~/.qianxun/config.json`（JSON 格式，支持 `//` 和 `/* */` 注释），可用 `--config <path>` 覆盖。
 
 优先级：CLI 参数 > 环境变量 > 配置文件 > 内置默认值
 

@@ -104,7 +104,8 @@ fn format_messages_for_prompt(messages: &[Message]) -> String {
                 "tool_result" => {
                     let text = block.text.as_deref().unwrap_or("[已清除]");
                     let preview = if text.len() > 500 {
-                        format!("{}...(+{}字符)", &text[..500], text.len() - 500)
+                        let end = (0..=500).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+                        format!("{}...(+{}字符)", &text[..end], text.len() - 500)
                     } else {
                         text.to_string()
                     };

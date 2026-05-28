@@ -39,7 +39,7 @@ qianxun/                 # workspace 根
 ├── qianxun-core/        # 核心库
 │   ├── src/
 │   │   ├── types.rs     # LlmError, TokenUsage, AgentConfig 等核心类型
-│   │   ├── config.rs    # 全局配置 (json5) + 解析
+│   │   ├── config.rs    # 全局配置 (JSON 带注释) + 解析
 │   │   ├── output.rs    # OutputSink trait (输出抽象)
 │   │   ├── event.rs     # AgentEvent, EventBus
 │   │   ├── workspace.rs # 工作区检测 (detect_workspace, build_workspace_context)

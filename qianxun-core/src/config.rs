@@ -2,10 +2,11 @@ use crate::agent::conversation::TokenBudget;
 use crate::agent::context::window::TokenScope;
 use crate::types::{AgentConfig, ThinkingConfig};
 use serde::Deserialize;
+use json_comments::StripComments;
 use std::collections::HashMap;
 use std::path::Path;
 
-// ─── Raw config (from JSON5 file) ─────────────────────────
+// ─── Raw config (from JSON file with comments) ────────────
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -173,17 +174,18 @@ pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
     Io { path: String, source: std::io::Error },
     #[error("failed to parse config file {path}: {source}")]
-    Parse { path: String, source: json5::Error },
+    Parse { path: String, source: serde_json::Error },
 }
 
 // ─── Implementation ───────────────────────────────────────
 
 impl Config {
-    /// Parse a JSON5 config file. Returns empty Config if file not found.
+    /// Parse a JSON config file (supports `//` and `/* */` comments).
+    /// Returns empty Config if file not found.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
@@ -195,11 +197,8 @@ impl Config {
             }
         };
 
-        if content.trim().is_empty() {
-            return Ok(Self::default());
-        }
-
-        json5::from_str(&content).map_err(|e| ConfigError::Parse {
+        let reader = StripComments::new(file);
+        serde_json::from_reader(reader).map_err(|e| ConfigError::Parse {
             path: path.display().to_string(),
             source: e,
         })

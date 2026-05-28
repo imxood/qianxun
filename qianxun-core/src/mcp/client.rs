@@ -31,28 +31,18 @@ pub struct McpClient {
     capabilities: McpServerCapabilities,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct McpInitializeResult {
     #[serde(default)]
     pub protocol_version: String,
     #[serde(default)]
     pub capabilities: Option<McpServerCapabilitiesRaw>,
-    #[serde(default)]
-    pub server_info: Option<McpServerInfo>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct McpServerCapabilitiesRaw {
     #[serde(default)]
     pub tools: Option<Value>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, serde::Deserialize)]
-struct McpServerInfo {
-    pub name: String,
-    pub version: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

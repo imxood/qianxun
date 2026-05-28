@@ -31,7 +31,7 @@ struct Cli {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// 配置文件路径（默认: ~/.qianxun/config.json5）
+    /// 配置文件路径（默认: ~/.qianxun/config.json）
     #[arg(long)]
     config: Option<String>,
 
@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("工作区已检测: {}", ws.root.display());
         }
 
-        qianxun_cli::run_repl(cli.verbose, &resolved, workspace, cli.resume).await?;
+        qianxun_cli::run_repl(&resolved, workspace, cli.resume).await?;
     }
 
     Ok(())
