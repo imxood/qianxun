@@ -68,6 +68,7 @@ pub enum StopReason {
     StopSequence,
     ToolUse,
     ContentFiltered,
+    Cancelled,
     Error,
     Unknown(String),
 }

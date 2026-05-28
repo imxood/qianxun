@@ -46,6 +46,10 @@ struct Cli {
     /// 日志文件路径（指定后将日志写入文件而非 stderr）
     #[arg(long)]
     log_file: Option<String>,
+
+    /// 启动时恢复最后一次会话
+    #[arg(long)]
+    resume: bool,
 }
 
 #[tokio::main]
@@ -55,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let filter = if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::EnvFilter::from_default_env()
     } else if cli.verbose {
-        tracing_subscriber::EnvFilter::new("debug")
+        tracing_subscriber::EnvFilter::new("debug,rustyline=info")
     } else {
         tracing_subscriber::EnvFilter::new("info")
     };
@@ -150,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
         qianxun_acp::run_acp_server(
             provider,
             resolved.agent.clone(),
+            Some(resolved.compaction.clone()),
             resolved.budget.max_input_tokens,
             resolved.budget.max_output_tokens,
         )
@@ -159,7 +164,12 @@ async fn main() -> anyhow::Result<()> {
 
         // 检测工作区
         let workspace = if let Some(ref w) = cli.workspace {
-            qianxun_core::workspace::detect_workspace(std::path::Path::new(w))
+            // 用户显式指定 -w，直接作为工作区根目录并切换 CWD
+            let path = std::path::Path::new(w);
+            if let Err(e) = std::env::set_current_dir(path) {
+                tracing::warn!("无法切换工作目录到 {}: {e}", path.display());
+            }
+            Some(qianxun_core::workspace::workspace_from_root(path))
         } else {
             std::env::current_dir()
                 .ok()
@@ -171,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("工作区已检测: {}", ws.root.display());
         }
 
-        qianxun_cli::run_repl(cli.verbose, &resolved, workspace).await?;
+        qianxun_cli::run_repl(cli.verbose, &resolved, workspace, cli.resume).await?;
     }
 
     Ok(())

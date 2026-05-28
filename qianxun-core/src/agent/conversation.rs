@@ -1,6 +1,8 @@
 use crate::agent::message::{ContentBlock, Message, UserMessageId};
 use crate::provider::types::CompletionRequest;
 use crate::types::{AgentConfig, TokenUsage};
+use std::path::Path;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
@@ -37,6 +39,10 @@ impl Conversation {
         &self.messages
     }
 
+    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+        &mut self.messages
+    }
+
     pub fn push_user_message(&mut self, content: Vec<ContentBlock>) -> UserMessageId {
         let msg = Message::user(content);
         let id = msg.id().to_string();
@@ -53,16 +59,27 @@ impl Conversation {
         tools: &[crate::tools::ToolDefinition],
         memory_context: &str,
         skills_catalog: &str,
+        skill_injections: &str,
         agent_config: &AgentConfig,
     ) -> CompletionRequest {
-        let system = match (&self.system_prompt, memory_context.is_empty(), skills_catalog.is_empty()) {
-            (Some(base), false, false) => Some(format!("{base}\n\n{memory_context}\n\n{skills_catalog}")),
-            (Some(base), false, true) => Some(format!("{base}\n\n{memory_context}")),
-            (Some(base), true, false) => Some(format!("{base}\n\n{skills_catalog}")),
-            (Some(base), true, true) => Some(base.clone()),
-            (None, false, _) if !memory_context.is_empty() => Some(memory_context.to_string()),
-            (None, _, false) if !skills_catalog.is_empty() => Some(skills_catalog.to_string()),
-            _ => None,
+        // 拼接: system_prompt → memory_context → skills_catalog → skill_injections
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(base) = &self.system_prompt {
+            parts.push(base);
+        }
+        if !memory_context.is_empty() {
+            parts.push(memory_context);
+        }
+        if !skills_catalog.is_empty() {
+            parts.push(skills_catalog);
+        }
+        if !skill_injections.is_empty() {
+            parts.push(skill_injections);
+        }
+        let system = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
         };
 
         CompletionRequest {
@@ -124,5 +141,48 @@ impl Conversation {
             max_input_tokens: max_input,
             max_output_tokens: max_output,
         };
+    }
+
+    /// JSONL 格式保存到文件。
+    /// 第一行: {"type":"system","prompt":"..."}
+    /// 后续行: 每个 Message 一行 JSON
+    pub async fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let mut file = tokio::fs::File::create(path).await?;
+        let header = serde_json::json!({"type": "system", "prompt": self.system_prompt});
+        let line = serde_json::to_string(&header).expect("header serialization");
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        for msg in &self.messages {
+            let line = serde_json::to_string(msg).expect("message serialization");
+            file.write_all(line.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+        }
+        Ok(())
+    }
+
+    /// 从 JSONL 文件加载会话。
+    pub async fn load_from(path: &Path) -> std::io::Result<Self> {
+        let content = tokio::fs::read_to_string(path).await?;
+        let mut lines = content.lines();
+        let mut system_prompt = None;
+        let mut messages = Vec::new();
+
+        if let Some(first) = lines.next() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(first) {
+                if val.get("type").and_then(|v| v.as_str()) == Some("system") {
+                    system_prompt = val.get("prompt").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        }
+
+        for line in lines {
+            if let Ok(msg) = serde_json::from_str::<Message>(line) {
+                messages.push(msg);
+            }
+        }
+
+        let mut conv = Self::new(system_prompt);
+        conv.messages = messages;
+        Ok(conv)
     }
 }

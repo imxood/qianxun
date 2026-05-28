@@ -258,7 +258,7 @@ impl DeepSeekProvider {
                 streaming: true,
                 thinking: true,
                 tool_use: true,
-                max_tokens: Some(8192),
+                max_tokens: Some(16384),
                 supports_system_prompt: true,
                 supports_cache_control: false,
             },
@@ -310,7 +310,7 @@ impl DeepSeekProvider {
         // ── assemble ──
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "max_tokens": request.max_tokens.unwrap_or(16384),
             "stream": stream,
             "messages": messages,
             "tool_choice": tool_choice,

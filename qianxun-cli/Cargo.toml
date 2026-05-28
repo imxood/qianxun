@@ -22,3 +22,5 @@ anyhow = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+rustyline = { workspace = true }
+reqwest = { workspace = true }

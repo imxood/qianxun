@@ -84,6 +84,7 @@ impl OutputSink for AcpOutputSink {
             StopReason::StopSequence => "stop_sequence",
             StopReason::ToolUse => "tool_use",
             StopReason::ContentFiltered => "content_filtered",
+            StopReason::Cancelled => "cancelled",
             StopReason::Error => "error",
             StopReason::Unknown(s) => s.as_str(),
         };

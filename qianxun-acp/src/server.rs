@@ -4,6 +4,7 @@ use crate::session::SessionManager;
 use crate::transport::AcpTransport;
 use crate::types::{rpc_success, IncomingMessage};
 use qianxun_core::provider::LlmProvider;
+use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::types::AgentConfig;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -16,6 +17,7 @@ use tracing;
 pub async fn run_acp_server(
     provider: Box<dyn LlmProvider>,
     agent_config: AgentConfig,
+    compact_config: Option<ResolvedCompactionConfig>,
     _budget_input: Option<u64>,
     _budget_output: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -33,6 +35,7 @@ pub async fn run_acp_server(
         sessions,
         output_tx,
         agent_config,
+        compact_config,
     };
 
     tracing::info!("ACP server started, waiting for messages...");

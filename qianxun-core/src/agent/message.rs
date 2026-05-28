@@ -115,4 +115,20 @@ impl Message {
             Message::Assistant { .. } => "assistant",
         }
     }
+
+    pub fn content_mut(&mut self) -> &mut Vec<ContentBlock> {
+        match self {
+            Message::User { content, .. } | Message::Assistant { content, .. } => content,
+        }
+    }
+
+    /// Returns true if this is a user message containing only tool_result blocks.
+    pub fn is_tool_result_only(&self) -> bool {
+        match self {
+            Message::User { content, .. } => {
+                !content.is_empty() && content.iter().all(|b| b.r#type == "tool_result")
+            }
+            Message::Assistant { .. } => false,
+        }
+    }
 }

@@ -1,11 +1,16 @@
 use crate::agent::conversation::Conversation;
+use crate::agent::context::{normalize, compact, AutoCompactWindow};
+use crate::agent::context::window::CompactZone;
 use crate::agent::message::{ContentBlock, Message};
+use crate::config::ResolvedCompactionConfig;
 use crate::output::OutputSink;
 use crate::provider::types::LlmStreamEvent;
 use crate::provider::LlmProvider;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentConfig, StopReason, TokenUsage};
 use futures::StreamExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Truncate a string for debug logging at char boundary, appending count of truncated chars.
 fn trunc(s: &str, max: usize) -> String {
@@ -36,6 +41,8 @@ pub struct AgentLoop {
     pub retry_count: u32,
     pub config: AgentConfig,
     pub accumulated_usage: TokenUsage,
+    pub compact_window: Option<AutoCompactWindow>,
+    pub compact_config: Option<ResolvedCompactionConfig>,
 }
 
 impl AgentLoop {
@@ -46,6 +53,8 @@ impl AgentLoop {
             retry_count: 0,
             config,
             accumulated_usage: TokenUsage::default(),
+            compact_window: None,
+            compact_config: None,
         }
     }
 
@@ -58,6 +67,7 @@ impl AgentLoop {
         self.turn_count = 0;
         self.retry_count = 0;
         self.accumulated_usage = TokenUsage::default();
+        self.compact_window = None;
     }
 }
 
@@ -67,6 +77,9 @@ pub mod processing_loop {
     use super::*;
 
     /// 处理用户消息：stream → tool_loop → 输出
+    /// - `skills_catalog`: Layer 1 技能目录（注入 system prompt）
+    /// - `skill_injections`: Layer 2 技能完整内容（自动/手动匹配后注入）
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_user_message(
         agent: &mut AgentLoop,
         conversation: &mut Conversation,
@@ -75,12 +88,20 @@ pub mod processing_loop {
         sink: &dyn OutputSink,
         memory_context: &str,
         skills_catalog: &str,
+        skill_injections: &str,
+        cancel_flag: Arc<AtomicBool>,
     ) {
         agent.state = AgentState::WaitingLlm;
         agent.turn_count += 1;
         tracing::info!("[turn {}] processing user message", agent.turn_count);
 
         loop {
+            if cancel_flag.load(Ordering::SeqCst) {
+                sink.on_status("用户已取消").await;
+                agent.state = AgentState::Idle;
+                return;
+            }
+
             if !agent.can_continue() {
                 agent.state = AgentState::Stopping;
                 sink.on_turn_finished(
@@ -91,12 +112,71 @@ pub mod processing_loop {
                 return;
             }
 
-            // ── budget → build → stream ──
-            conversation.enforce_budget(&tools.definitions()).await;
+            // ── Context compression pipeline ──
+            if let (Some(ref mut cw), Some(cc)) = (agent.compact_window.as_mut(), agent.compact_config.as_ref()) {
+                // Always normalize (fix tool_use/tool_result pairing)
+                normalize::normalize_messages(conversation.messages_mut());
 
+                // Update token tracking
+                cw.update(&agent.accumulated_usage);
+
+                // L1: Always snip old tool_results
+                compact::snip_tool_results(
+                    conversation.messages_mut(),
+                    cc.snip_fresh_turns,
+                );
+
+                // L2: MicroCompact if time threshold exceeded
+                if cw.should_micro_compact() {
+                    compact::micro_compact(
+                        conversation.messages_mut(),
+                        cc.micro_compact_keep,
+                    );
+                }
+
+                // L3/L4: Check zone and attempt compression
+                let zone = cw.compute_zone(cc.scope);
+                match zone {
+                    CompactZone::Blocked | CompactZone::Danger => {
+                        if cw.is_circuit_broken() {
+                            let old_len = conversation.messages().len();
+                            conversation.enforce_budget(&[]).await;
+                            let removed = old_len - conversation.messages().len();
+                            if removed > 0 {
+                                sink.on_status(&format!("熔断降级：已截断 {removed} 条最旧消息")).await;
+                            }
+                        } else {
+                            sink.on_status("上下文使用率较高，正在压缩...").await;
+                            let n = compact::attempt_compression(
+                                conversation.messages_mut(),
+                                provider,
+                                cc,
+                                cw,
+                            )
+                            .await;
+                            if n > 0 {
+                                cw.record_compaction();
+                                sink.on_status(&format!("压缩完成，释放 {n} 条消息")).await;
+                            } else {
+                                let broken = cw.record_failure();
+                                if broken {
+                                    sink.on_status("压缩连续失败，已熔断").await;
+                                }
+                            }
+                        }
+                    }
+                    CompactZone::Warning => {
+                        let pct = cw.usage_ratio(cc.scope) * 100.0;
+                        tracing::info!("上下文使用率 {pct:.1}%");
+                    }
+                    CompactZone::Safe => {}
+                }
+            }
+
+            // ── build → stream ──
             let request = {
                 let defs = tools.definitions();
-                conversation.build_request(&defs, memory_context, skills_catalog, &agent.config)
+                conversation.build_request(&defs, memory_context, skills_catalog, skill_injections, &agent.config)
             };
 
             tracing::info!(
@@ -136,11 +216,15 @@ pub mod processing_loop {
             let mut thinking_blocks: Vec<(String, Option<String>)> = Vec::new();
             #[allow(unused_assignments)]
             let mut current_thinking_text = String::new();
+            let mut thinking_logged_len = 0;
             #[allow(unused_assignments)]
             let mut current_thinking_sig: Option<String> = None;
             let mut received_stop = false;
 
             while let Some(event) = stream.next().await {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    break;
+                }
                 match event {
                     Ok(LlmStreamEvent::Text(text)) => {
                         response_text.push_str(&text);
@@ -155,6 +239,9 @@ pub mod processing_loop {
                         tool_calls.push((id, tool_name, arguments));
                     }
                     Ok(LlmStreamEvent::UsageUpdate(usage)) => {
+                        if let Some(ref mut cw) = agent.compact_window {
+                            cw.update(&usage);
+                        }
                         agent.accumulated_usage = agent
                             .accumulated_usage
                             .clone() + usage;
@@ -169,6 +256,10 @@ pub mod processing_loop {
                                 &tool_calls,
                                 &thinking_blocks,
                             );
+                            // Record assistant time for L2 TTL
+                            if let Some(ref mut cw) = agent.compact_window {
+                                cw.set_last_assistant_time(std::time::Instant::now());
+                            }
 
                             // execute tools
                             sink.on_thinking_flush().await;
@@ -247,16 +338,23 @@ pub mod processing_loop {
                                 &tool_calls,
                                 &thinking_blocks,
                             );
+                            // Record assistant time for L2 TTL
+                            if let Some(ref mut cw) = agent.compact_window {
+                                cw.set_last_assistant_time(std::time::Instant::now());
+                            }
 
                             agent.state = AgentState::Idle;
                             tracing::info!(
-                                "LLM 回复完成: reason={reason:?}, text={}chars, tool_calls={}, thinking={}",
+                                "LLM 回复完成: reason={reason:?}, text={}chars, tool_calls={}, thinking={}blocks",
                                 response_text.len(),
                                 tool_calls.len(),
                                 thinking_blocks.len(),
                             );
                             if !response_text.is_empty() {
                                 tracing::debug!("=== LLM 回复文本 ===\n{}", trunc(&response_text, 10000));
+                            }
+                            for (i, (t, _)) in thinking_blocks.iter().enumerate() {
+                                tracing::debug!("=== thinking block {i} ===\n{}", trunc(t, 5000));
                             }
                             sink.on_turn_finished(&reason, &turn_usage).await;
                             return;
@@ -266,14 +364,28 @@ pub mod processing_loop {
                         if !text.is_empty() {
                             current_thinking_text.push_str(&text);
                             sink.on_thinking(&text).await;
+
+                            // 积累约 1000 字符后输出一条 [thinking] 日志
+                            if current_thinking_text.len() - thinking_logged_len >= 1000 {
+                                let chunk = &current_thinking_text[thinking_logged_len..];
+                                tracing::debug!("[thinking] {}", trunc(chunk, 2000));
+                                thinking_logged_len = current_thinking_text.len();
+                            }
                         }
                         if let Some(sig) = signature {
+                            // 输出块内剩余未日志的 thinking 内容
+                            if thinking_logged_len < current_thinking_text.len() {
+                                let chunk = &current_thinking_text[thinking_logged_len..];
+                                tracing::debug!("[thinking] {}", trunc(chunk, 2000));
+                            }
+                            tracing::debug!("[thinking block complete] {} chars", current_thinking_text.len());
                             sink.on_thinking_flush().await;
                             current_thinking_sig = Some(sig);
                             thinking_blocks.push((
                                 std::mem::take(&mut current_thinking_text),
                                 current_thinking_sig.take(),
                             ));
+                            thinking_logged_len = 0;
                         }
                     }
                     Err(e) => {
@@ -284,6 +396,16 @@ pub mod processing_loop {
                 }
             }
             // ── end while stream ──
+
+            // ── check cancellation after stream ──
+            if cancel_flag.load(Ordering::SeqCst) {
+                if !response_text.is_empty() || !tool_calls.is_empty() {
+                    build_turn(conversation, &response_text, &tool_calls, &thinking_blocks);
+                }
+                sink.on_turn_finished(&StopReason::Cancelled, &agent.accumulated_usage).await;
+                agent.state = AgentState::Idle;
+                return;
+            }
 
             if !received_stop {
                 // Stream ended without a Stop event (e.g. network cut, non-SSE response).

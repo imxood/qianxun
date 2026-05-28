@@ -18,6 +18,70 @@ pub struct Workspace {
     pub detected_files: Vec<String>,
 }
 
+/// 直接从给定路径创建 Workspace（不向上查找）。
+/// 仅扫描该目录，检测项目类型和标志文件。
+pub fn workspace_from_root(root: &Path) -> Workspace {
+    let root = if root.is_relative() {
+        std::env::current_dir().map(|p| p.join(root)).unwrap_or(root.to_path_buf())
+    } else {
+        root.to_path_buf()
+    };
+
+    let mut detected = Vec::new();
+    let mut has_cargo_toml = false;
+    let mut has_package_json = false;
+    let mut has_python = false;
+    let mut claude_content = None;
+
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            match name.as_str() {
+                "Cargo.toml" => {
+                    has_cargo_toml = true;
+                    detected.push(name);
+                }
+                "package.json" => {
+                    has_package_json = true;
+                    detected.push(name);
+                }
+                "CLAUDE.md" => {
+                    claude_content = std::fs::read_to_string(entry.path()).ok();
+                    detected.push(name);
+                }
+                "pyproject.toml" | "setup.py" | "requirements.txt" => {
+                    has_python = true;
+                    detected.push(name);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let project_type = if has_cargo_toml {
+        let is_ws = claude_content.as_ref()
+            .map(|c| c.contains("[workspace]"))
+            .unwrap_or(false)
+            || std::fs::read_to_string(root.join("Cargo.toml"))
+                .map(|c| c.contains("[workspace]"))
+                .unwrap_or(false);
+        ProjectType::Rust { is_workspace: is_ws }
+    } else if has_package_json {
+        ProjectType::Node
+    } else if has_python {
+        ProjectType::Python
+    } else {
+        ProjectType::Generic
+    };
+
+    Workspace {
+        root,
+        project_type,
+        claude_md: claude_content,
+        detected_files: detected,
+    }
+}
+
 /// 从指定目录向上查找项目标志文件，最多 3 层父目录。
 pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
     let cwd = if cwd.is_relative() {
@@ -104,7 +168,7 @@ pub fn detect_workspace(cwd: &Path) -> Option<Workspace> {
 
 /// 构建可注入 system prompt 的工作区上下文字符串。
 pub fn build_workspace_context(ws: &Workspace) -> String {
-    let mut parts = vec!["## 工作区上下文".to_string()];
+    let mut parts = vec!["## 工作区上下文\n这是你的工作区，所有 `execute_command` 命令默认在此目录下执行。".to_string()];
 
     parts.push(format!("- 项目路径: {}", ws.root.display()));
 

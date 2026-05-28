@@ -3,9 +3,11 @@ use crate::session::SessionManager;
 use crate::transport::AcpTransport;
 use crate::types::*;
 use qianxun_core::agent::conversation::Conversation;
+use qianxun_core::agent::context::window::AutoCompactWindow;
 use qianxun_core::agent::engine::processing_loop;
 use qianxun_core::agent::engine::AgentLoop;
 use qianxun_core::agent::message::ContentBlock;
+use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::mcp::client::McpClient;
 use qianxun_core::mcp::McpServerConfig;
@@ -15,6 +17,7 @@ use qianxun_core::types::AgentConfig;
 use serde_json::Value;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
@@ -223,6 +226,21 @@ pub struct AcpRequestHandler {
     pub sessions: Arc<Mutex<SessionManager>>,
     pub output_tx: mpsc::UnboundedSender<AcpOutputEvent>,
     pub agent_config: AgentConfig,
+    pub compact_config: Option<ResolvedCompactionConfig>,
+}
+
+/// 创建 AgentLoop 并初始化上下文压缩窗口（如有配置）。
+fn new_agent_loop(agent_config: AgentConfig, compact_config: &Option<ResolvedCompactionConfig>) -> AgentLoop {
+    let mut agent_loop = AgentLoop::new(agent_config);
+    if let Some(cc) = compact_config {
+        agent_loop.compact_config = Some(cc.clone());
+        agent_loop.compact_window = Some(AutoCompactWindow::new(
+            cc.model_window,
+            cc.max_output_tokens,
+            cc.circuit_breaker_limit,
+        ));
+    }
+    agent_loop
 }
 
 impl AcpRequestHandler {
@@ -270,8 +288,8 @@ impl AcpRequestHandler {
     /// session/prompt 的延迟处理入口：先校验参数，然后异步执行
     async fn handle_session_prompt_deferred(&self, id: RequestId, params: Option<Value>) {
         match self.prepare_prompt(params).await {
-            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog)) => {
-                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog)
+            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog, skill_injections)) => {
+                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog, skill_injections)
                     .await;
             }
             Err(e) => {
@@ -286,7 +304,7 @@ impl AcpRequestHandler {
     async fn prepare_prompt(
         &self,
         params: Option<Value>,
-    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>, String), String> {
+    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>, String, String), String> {
         let p: PromptParams = params
             .and_then(|v| serde_json::from_value(v).ok())
             .ok_or_else(|| "invalid prompt params".to_string())?;
@@ -318,7 +336,7 @@ impl AcpRequestHandler {
 
         let skills_catalog = session.skills_catalog.clone();
 
-        let empty_loop = AgentLoop::new(self.agent_config.clone());
+        let empty_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
         let empty_conv = Conversation::new(None);
         let agent_loop = std::mem::replace(&mut session.agent_loop, empty_loop);
         let conversation = std::mem::replace(&mut session.conversation, empty_conv);
@@ -331,9 +349,29 @@ impl AcpRequestHandler {
             .filter_map(|block| block.get("text").and_then(|v| v.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
-        let user_text = if user_text.is_empty() { "..." } else { &user_text };
 
-        Ok((session_id, agent_loop, conversation, user_text.to_string(), memory_context, memory_manager, session_tools, skills_catalog))
+        // 构建技能注入内容（Layer 2 — 自动匹配 + 手动引用）
+        let skill_injections = {
+            let skills_mgr = qianxun_core::skills::SkillManager::load_all(None::<&std::path::Path>);
+            let user_text_for_match = if user_text.is_empty() { "..." } else { &user_text };
+
+            // 手动引用 @技能名
+            let manual_names: Vec<String> = qianxun_core::skills::SkillManager::extract_manual_mentions(user_text_for_match)
+                .into_iter()
+                .filter(|name| skills_mgr.select_by_name(name).is_some())
+                .collect();
+
+            // 自动匹配
+            let exclude: Vec<&str> = manual_names.iter().map(|s| s.as_str()).collect();
+            let auto_names = skills_mgr.auto_select(user_text_for_match, &exclude);
+
+            let mut inject_names = manual_names;
+            inject_names.extend(auto_names);
+
+            skills_mgr.build_injections(&inject_names)
+        };
+
+        Ok((session_id, agent_loop, conversation, user_text, memory_context, memory_manager, session_tools, skills_catalog, skill_injections))
     }
 
     /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
@@ -349,6 +387,7 @@ impl AcpRequestHandler {
         memory_manager: Option<MemoryManager>,
         tools: Arc<ToolRegistry>,
         skills_catalog: String,
+        skill_injections: String,
     ) {
         conversation
             .push_user_message(vec![ContentBlock::text(&prompt_text)]);
@@ -357,9 +396,11 @@ impl AcpRequestHandler {
         let provider: Arc<dyn LlmProvider> = self.provider.clone();
         let tools_for_spawn = tools.clone();
         let skills_catalog_for_spawn = skills_catalog;
+        let skill_injections_for_spawn = skill_injections;
         let sid = session_id.clone();
 
         // 第一层：处理循环（可能 panic）
+        let noop_cancel = Arc::new(AtomicBool::new(false));
         let processing_handle = tokio::spawn(async move {
             processing_loop::handle_user_message(
                 &mut agent_loop,
@@ -369,6 +410,8 @@ impl AcpRequestHandler {
                 &sink,
                 &memory_context,
                 &skills_catalog_for_spawn,
+                &skill_injections_for_spawn,
+                noop_cancel,
             )
             .await;
             (agent_loop, conversation) // 正常完成后返还所有权
@@ -452,9 +495,7 @@ impl AcpRequestHandler {
             });
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let agent_loop = AgentLoop::new(self.agent_config.clone());
-
-        // 从 cwd 检测工作区并构建系统提示词和记忆管理器
+        let agent_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
         let ws = p.cwd.as_ref().and_then(|cwd| {
             qianxun_core::workspace::detect_workspace(std::path::Path::new(cwd))
         });
@@ -543,7 +584,7 @@ impl AcpRequestHandler {
         }).unwrap_or((None, String::new()));
         let memory_manager = ws.as_ref().and_then(build_memory_manager);
 
-        let agent_loop = AgentLoop::new(self.agent_config.clone());
+        let agent_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
         let session_tools = build_session_tools_from_ws(cwd, &self.tools).await;
         sessions
             .create(session_id, system_prompt, agent_loop, memory_manager, session_tools, skills_catalog)

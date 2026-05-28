@@ -2,6 +2,7 @@ pub mod message;
 pub mod conversation;
 pub mod engine;
 pub mod system_prompt;
+pub mod context;
 
 pub use message::Message;
 pub use conversation::Conversation;

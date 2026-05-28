@@ -14,6 +14,7 @@ impl SkillName {
 pub struct SkillMetadata {
     pub name: SkillName,
     pub description: String,
+    pub trigger_keywords: Vec<String>,
     pub disable_model_invocation: bool,
 }
 
@@ -123,6 +124,7 @@ impl SkillManager {
 
         let mut name = String::new();
         let mut description = String::new();
+        let mut trigger_keywords = Vec::new();
 
         for line in frontmatter.lines() {
             let line = line.trim();
@@ -130,6 +132,13 @@ impl SkillManager {
                 name = val.trim().to_string();
             } else if let Some(val) = line.strip_prefix("description:") {
                 description = val.trim().to_string();
+            } else if let Some(val) = line.strip_prefix("triggers:") {
+                trigger_keywords = val
+                    .trim()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
         }
 
@@ -141,6 +150,7 @@ impl SkillManager {
             metadata: SkillMetadata {
                 name: SkillName(name),
                 description,
+                trigger_keywords,
                 disable_model_invocation: false,
             },
             source,
@@ -195,26 +205,102 @@ impl SkillManager {
         self.skills.len()
     }
 
-    /// 构建注入到 system prompt 的技能目录（含 body 内容）。
+    /// 构建技能目录（Layer 1 — 始终注入 system prompt）。
+    /// 仅显示名称、描述和触发词，不含完整 body。
     pub fn build_catalog_prompt(&self) -> String {
         if self.skills.is_empty() {
             return String::new();
         }
 
-        let mut catalog = String::new();
+        let mut catalog = String::from("## 可用技能\n");
+        catalog.push_str("当你的需求匹配触发词时，系统会自动注入完整指令。你也可以用 @技能名 手动引用。\n\n");
+
         for (_source, meta) in &self.skills {
-            catalog.push_str(&format!("### {}\n", meta.name.as_str()));
+            catalog.push_str(&format!("- **{}**", meta.name.as_str()));
             if !meta.description.is_empty() {
-                catalog.push_str(&format!("{}\n", meta.description));
+                catalog.push_str(&format!(": {}", meta.description));
             }
-            if let Some(body) = self.body_cache.get(meta.name.as_str()) {
-                if !body.is_empty() {
-                    catalog.push_str(&format!("\n{body}\n"));
-                }
+            if !meta.trigger_keywords.is_empty() {
+                catalog.push_str(&format!("。触发词: {}", meta.trigger_keywords.join("、")));
+            } else {
+                catalog.push_str(&format!("。手动引用: @{}", meta.name.as_str()));
             }
             catalog.push('\n');
         }
         catalog
+    }
+
+    /// 自动匹配：根据用户消息中的关键词选择匹配的技能。
+    /// - `user_message`: 用户当前输入
+    /// - `exclude_names`: 排除列表（最近已注入的 + 手动已选的）
+    /// - 返回匹配的技能名称列表
+    pub fn auto_select(&self, user_message: &str, exclude_names: &[&str]) -> Vec<String> {
+        if self.skills.is_empty() {
+            return Vec::new();
+        }
+
+        let msg_lower = user_message.to_lowercase();
+        let mut matched = Vec::new();
+
+        for (_, meta) in &self.skills {
+            if exclude_names.contains(&meta.name.as_str()) {
+                continue;
+            }
+            if meta.trigger_keywords.is_empty() {
+                continue;
+            }
+            for kw in &meta.trigger_keywords {
+                if msg_lower.contains(&kw.to_lowercase()) {
+                    matched.push(meta.name.as_str().to_string());
+                    break;
+                }
+            }
+        }
+
+        matched
+    }
+
+    /// 通过名称精确选择技能（用于 @技能名 手动引用）。
+    pub fn select_by_name(&self, name: &str) -> Option<&SkillMetadata> {
+        self.skills
+            .iter()
+            .map(|(_, meta)| meta)
+            .find(|meta| meta.name.as_str() == name)
+    }
+
+    /// 构建单技能的注入 body（Layer 2 — 完整指令内容）。
+    pub fn build_injection_body(&self, name: &str) -> Option<String> {
+        let body = self.body_cache.get(name)?;
+        Some(format!(
+            "<skill>\n<name>{name}</name>\n{body}\n</skill>",
+        ))
+    }
+
+    /// 从消息中提取 @技能名 手动引用。
+    pub fn extract_manual_mentions(msg: &str) -> Vec<String> {
+        msg.split_whitespace()
+            .filter_map(|word| {
+                if let Some(rest) = word.strip_prefix('@') {
+                    let name = rest.trim_end_matches(|c: char| c.is_ascii_punctuation());
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+
+    /// 构建多个技能的注入（Layer 2），供 Conversation::build_request 使用。
+    pub fn build_injections(&self, names: &[String]) -> String {
+        let mut result = String::new();
+        for name in names {
+            if let Some(body) = self.build_injection_body(name) {
+                result.push_str(&body);
+                result.push('\n');
+            }
+        }
+        result
     }
 
     pub fn available_skills(&self) -> Vec<String> {

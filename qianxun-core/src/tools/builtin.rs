@@ -1,7 +1,8 @@
 use super::{AgentTool, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
-use tracing;
+use std::sync::OnceLock;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub struct ReadTextFileTool;
 
@@ -34,24 +35,53 @@ impl AgentTool for ReadTextFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments("missing path".into()))?;
 
-        match tokio::fs::read_to_string(path).await {
-            Ok(content) => {
-                let truncated = if content.len() > 100_000 {
-                    let head = &content[..50_000];
-                    let tail = &content[content.len() - 50_000..];
-                    format!("{head}\n... [truncated, total {} bytes]\n{tail}", content.len())
-                } else {
-                    content
-                };
-                Ok(ToolOutput {
-                    content: truncated,
-                    is_error: false,
-                })
-            }
-            Err(e) => Ok(ToolOutput {
+        let meta = match tokio::fs::metadata(path).await {
+            Ok(m) => m,
+            Err(e) => return Ok(ToolOutput {
                 content: format!("Error reading file: {e}"),
                 is_error: true,
             }),
+        };
+
+        if meta.len() > 100_000 {
+            // 大文件：只读头尾各 50K，避免完整加载
+            let mut file = match tokio::fs::File::open(path).await {
+                Ok(f) => f,
+                Err(e) => return Ok(ToolOutput {
+                    content: format!("Error opening file: {e}"),
+                    is_error: true,
+                }),
+            };
+
+            let mut head = vec![0u8; 50_000.min(meta.len() as usize)];
+            let n = file.read(&mut head).await.unwrap_or(0);
+            head.truncate(n);
+
+            let tail_offset = meta.len().saturating_sub(50_000);
+            let tail_len = (meta.len() - tail_offset) as usize;
+            let mut tail = vec![0u8; tail_len];
+            if let Err(e) = file.seek(std::io::SeekFrom::Start(tail_offset)).await {
+                return Ok(ToolOutput {
+                    content: format!("Error seeking file: {e}"),
+                    is_error: true,
+                });
+            }
+            file.read_exact(&mut tail).await.unwrap_or_default();
+
+            let head_str = String::from_utf8_lossy(&head);
+            let tail_str = String::from_utf8_lossy(&tail);
+            Ok(ToolOutput {
+                content: format!("{head_str}\n... [truncated, total {} bytes]\n{tail_str}", meta.len()),
+                is_error: false,
+            })
+        } else {
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => Ok(ToolOutput { content, is_error: false }),
+                Err(e) => Ok(ToolOutput {
+                    content: format!("Error reading file: {e}"),
+                    is_error: true,
+                }),
+            }
         }
     }
 }
@@ -147,35 +177,42 @@ impl AgentTool for SearchTool {
             .unwrap_or(".");
 
         let mut results = Vec::new();
-        let mut dirs = vec![std::path::PathBuf::from(root)];
         let max_results = 200;
+        let mut pending = vec![std::path::PathBuf::from(root)];
 
-        while let Some(dir) = dirs.pop() {
-            let mut entries = match tokio::fs::read_dir(&dir).await {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+        while !pending.is_empty() && results.len() < max_results {
+            let batch: Vec<_> = pending.drain(..pending.len().min(8)).collect();
+            let mut handles = Vec::new();
 
-            loop {
-                let entry = match entries.next_entry().await {
-                    Ok(Some(e)) => e,
-                    Ok(None) => break,
-                    Err(_) => continue,
-                };
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if glob_match(pattern, name) {
-                        results.push(path.to_string_lossy().to_string());
-                        if results.len() >= max_results {
-                            break;
+            for dir in batch {
+                let pat = pattern.to_string();
+                let max = max_results;
+                handles.push(tokio::spawn(async move {
+                    let mut files = Vec::new();
+                    let mut subdirs = Vec::new();
+                    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            let path = entry.path();
+                            if files.len() >= max { break; }
+                            if path.is_dir() {
+                                subdirs.push(path);
+                            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                if glob_match(&pat, name) {
+                                    files.push(path.to_string_lossy().to_string());
+                                }
+                            }
                         }
                     }
-                }
+                    (files, subdirs)
+                }));
             }
-            if results.len() >= max_results {
-                break;
+
+            for handle in handles {
+                if let Ok((files, subdirs)) = handle.await {
+                    let remaining = max_results.saturating_sub(results.len());
+                    results.extend(files.into_iter().take(remaining));
+                    pending.extend(subdirs);
+                }
             }
         }
 
@@ -318,61 +355,65 @@ impl AgentTool for GrepTool {
             .unwrap_or(200) as usize;
 
         let mut results = Vec::new();
-        let mut dirs = vec![std::path::PathBuf::from(root)];
+        let mut pending = vec![std::path::PathBuf::from(root)];
 
-        while let Some(dir) = dirs.pop() {
-            let mut entries = match tokio::fs::read_dir(&dir).await {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+        while !pending.is_empty() && results.len() < max_results {
+            let batch: Vec<_> = pending.drain(..pending.len().min(8)).collect();
+            let mut handles = Vec::new();
 
-            loop {
-                let entry = match entries.next_entry().await {
-                    Ok(Some(e)) => e,
-                    Ok(None) => break,
-                    Err(_) => continue,
-                };
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else {
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if let Some(glob) = include {
-                        if !glob_match(glob, name) {
-                            continue;
-                        }
-                    }
-                    if results.len() >= max_results {
-                        break;
-                    }
-                    // 跳过过大的文件
-                    const MAX_GREP_FILE_SIZE: u64 = 10 * 1024 * 1024;
-                    if let Ok(meta) = tokio::fs::metadata(&path).await {
-                        if meta.len() > MAX_GREP_FILE_SIZE {
-                            tracing::debug!("grep: skipping large file {} ({} bytes)", path.display(), meta.len());
-                            continue;
-                        }
-                    }
-                    // 读取文件并搜索
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        for (i, line) in content.lines().enumerate() {
-                            if line.contains(pattern) {
-                                results.push(format!(
-                                    "{}:{}: {}",
-                                    path.display(),
-                                    i + 1,
-                                    line
-                                ));
-                                if results.len() >= max_results {
-                                    break;
+            for dir in batch {
+                let pat = pattern.to_string();
+                let glob_filter = include.map(|s| s.to_string());
+                handles.push(tokio::spawn(async move {
+                    let mut lines = Vec::new();
+                    let mut subdirs = Vec::new();
+                    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if lines.len() >= max_results { break; }
+                            let path = entry.path();
+                            if path.is_dir() {
+                                subdirs.push(path);
+                            } else {
+                                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                if let Some(ref glob) = glob_filter {
+                                    if !glob_match(glob, name) {
+                                        continue;
+                                    }
+                                }
+                                // 跳过过大的文件
+                                const MAX_GREP_FILE_SIZE: u64 = 10 * 1024 * 1024;
+                                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                                    if meta.len() > MAX_GREP_FILE_SIZE {
+                                        continue;
+                                    }
+                                }
+                                // 读取文件并搜索
+                                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                                    for (i, line) in content.lines().enumerate() {
+                                        if line.contains(&pat) {
+                                            lines.push(format!(
+                                                "{}:{}: {}",
+                                                path.display(),
+                                                i + 1,
+                                                line
+                                            ));
+                                            if lines.len() >= max_results { break; }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
+                    (lines, subdirs)
+                }));
             }
-            if results.len() >= max_results {
-                break;
+
+            for handle in handles {
+                if let Ok((lines, subdirs)) = handle.await {
+                    let remaining = max_results.saturating_sub(results.len());
+                    results.extend(lines.into_iter().take(remaining));
+                    pending.extend(subdirs);
+                }
             }
         }
 
@@ -444,7 +485,7 @@ impl AgentTool for ListDirectoryTool {
             });
         }
 
-        let lines = collect_tree(&path, "", depth);
+        let lines = collect_tree_async(&path, depth).await;
         Ok(ToolOutput {
             content: lines.join("\n"),
             is_error: false,
@@ -452,76 +493,111 @@ impl AgentTool for ListDirectoryTool {
     }
 }
 
-/// 递归收集目录树（同步 I/O，避免 async 递归限制）
-fn collect_tree(dir: &std::path::Path, prefix: &str, depth: usize) -> Vec<String> {
-    if depth == 0 {
-        return Vec::new();
+/// 异步迭代式目录树收集（避免 sync I/O 阻塞和 async 递归限制）
+async fn collect_tree_async(dir: &std::path::Path, max_depth: usize) -> Vec<String> {
+    struct WorkItem {
+        path: std::path::PathBuf,
+        prefix: String,
+        depth: usize,
     }
 
     let mut lines = Vec::new();
-    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
-        Ok(r) => r
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| !n.starts_with('.'))
-                    .unwrap_or(false)
-            })
-            .collect(),
-        Err(_) => return lines,
-    };
-    entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    let mut stack = vec![WorkItem {
+        path: dir.to_path_buf(),
+        prefix: String::new(),
+        depth: max_depth,
+    }];
 
-    for (i, path) in entries.iter().enumerate() {
-        let is_last = i == entries.len() - 1;
-        let connector = if is_last { "└── " } else { "├── " };
-        let child_prefix = if is_last { "    " } else { "│   " };
+    while let Some(item) = stack.pop() {
+        if item.depth == 0 {
+            continue;
+        }
 
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.is_dir() {
-            let size = dir_size_sync(path);
-            let size_str = if size > 1024 * 1024 {
-                format!(" ({:.1} MB)", size as f64 / (1024.0 * 1024.0))
-            } else if size > 1024 {
-                format!(" ({:.1} KB)", size as f64 / 1024.0)
+        let mut entries: Vec<_> = match tokio::fs::read_dir(&item.path).await {
+            Ok(r) => {
+                let mut v = Vec::new();
+                let mut stream = r;
+                while let Ok(Some(entry)) = stream.next_entry().await {
+                    let p = entry.path();
+                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        if !name.starts_with('.') {
+                            v.push(p);
+                        }
+                    }
+                }
+                v
+            }
+            Err(_) => continue,
+        };
+        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+        for (i, entry_path) in entries.iter().enumerate() {
+            let is_last = i == entries.len() - 1;
+            let connector = if is_last { "└── " } else { "├── " };
+            let child_prefix = if is_last { "    " } else { "│   " };
+
+            let name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if entry_path.is_dir() {
+                let size = dir_size_limited(entry_path, 500).await;
+                let size_str = format_size(size);
+                if item.depth > 1 {
+                    stack.push(WorkItem {
+                        path: entry_path.clone(),
+                        prefix: format!("{}{}", item.prefix, child_prefix),
+                        depth: item.depth - 1,
+                    });
+                }
+                lines.push(format!("{}{}{}/{}", item.prefix, connector, name, size_str));
             } else {
-                format!(" ({size} B)")
-            };
-            lines.push(format!("{prefix}{connector}{name}/{size_str}"));
-            lines.extend(collect_tree(path, &format!("{prefix}{child_prefix}"), depth - 1));
-        } else {
-            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            let size_str = if size > 1024 * 1024 {
-                format!(" ({:.1} MB)", size as f64 / (1024.0 * 1024.0))
-            } else if size > 1024 {
-                format!(" ({:.1} KB)", size as f64 / 1024.0)
-            } else {
-                format!(" ({size} B)")
-            };
-            lines.push(format!("{prefix}{connector}{name}{size_str}"));
+                let size = tokio::fs::metadata(entry_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let size_str = format_size(size);
+                lines.push(format!("{}{}{}{}", item.prefix, connector, name, size_str));
+            }
         }
     }
+
     lines
 }
 
-fn dir_size_sync(dir: &std::path::Path) -> u64 {
+/// 扫描目录大小，最多遍历 500 个条目（防止 node_modules 等大目录 O(n²)）
+async fn dir_size_limited(dir: &std::path::Path, max_entries: u64) -> u64 {
     let mut total = 0u64;
+    let mut count = 0u64;
     let mut dirs = vec![dir.to_path_buf()];
+
     while let Some(d) = dirs.pop() {
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else {
-                    total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if count >= max_entries {
+            break;
+        }
+        if let Ok(mut entries) = tokio::fs::read_dir(&d).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                count += 1;
+                if count > max_entries {
+                    break;
+                }
+                let p = entry.path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if let Ok(meta) = tokio::fs::metadata(&p).await {
+                    total += meta.len();
                 }
             }
         }
     }
     total
+}
+
+fn format_size(size: u64) -> String {
+    if size > 1024 * 1024 {
+        format!(" ({:.1} MB)", size as f64 / (1024.0 * 1024.0))
+    } else if size > 1024 {
+        format!(" ({:.1} KB)", size as f64 / 1024.0)
+    } else {
+        format!(" ({size} B)")
+    }
 }
 
 // ─── ExecuteCommandTool ─────────────────────────────────────
@@ -716,7 +792,21 @@ impl AgentTool for EditFileTool {
             }
         };
 
-        let count = content.matches(old_string).count();
+        // 单次遍历：同时计数 + 定位匹配位置
+        let mut count = 0usize;
+        let mut match_start = 0;
+        let mut search_from = 0;
+        while let Some(pos) = content[search_from..].find(old_string) {
+            count += 1;
+            if count == 1 {
+                match_start = search_from + pos;
+            }
+            if count > 1 {
+                break;
+            }
+            search_from += pos + 1;
+        }
+
         if count == 0 {
             // 显示文件上下文帮助 LLM 调整
             let preview: String = content.chars().take(500).collect();
@@ -740,7 +830,8 @@ impl AgentTool for EditFileTool {
             });
         }
 
-        let new_content = content.replace(old_string, new_string);
+        // 单次遍历已完成计数，用切片构造避免二次 replace 遍历
+        let new_content = format!("{}{}{}", &content[..match_start], new_string, &content[match_start + old_string.len()..]);
         match tokio::fs::write(file_path, &new_content).await {
             Ok(_) => Ok(ToolOutput {
                 content: format!(
@@ -801,35 +892,43 @@ impl AgentTool for GlobTool {
         let root_path = std::path::PathBuf::from(root);
         let mut results = Vec::new();
         let max_results = 500;
-        let mut dirs = vec![root_path.clone()];
+        let mut pending = vec![root_path.clone()];
 
-        while let Some(dir) = dirs.pop() {
-            let mut entries = match tokio::fs::read_dir(&dir).await {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+        while !pending.is_empty() && results.len() < max_results {
+            let batch: Vec<_> = pending.drain(..pending.len().min(8)).collect();
+            let mut handles = Vec::new();
 
-            loop {
-                let entry = match entries.next_entry().await {
-                    Ok(Some(e)) => e,
-                    Ok(None) => break,
-                    Err(_) => continue,
-                };
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else if let Ok(rel) = path.strip_prefix(&root_path) {
-                    let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    if glob_match(pattern, &rel_str) {
-                        results.push(path.to_string_lossy().to_string());
-                        if results.len() >= max_results {
-                            break;
+            for dir in batch {
+                let pat = pattern.to_string();
+                let root_clone = root_path.clone();
+                let max = max_results;
+                handles.push(tokio::spawn(async move {
+                    let mut files = Vec::new();
+                    let mut subdirs = Vec::new();
+                    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if files.len() >= max { break; }
+                            let path = entry.path();
+                            if path.is_dir() {
+                                subdirs.push(path);
+                            } else if let Ok(rel) = path.strip_prefix(&root_clone) {
+                                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                                if glob_match(&pat, &rel_str) {
+                                    files.push(path.to_string_lossy().to_string());
+                                }
+                            }
                         }
                     }
-                }
+                    (files, subdirs)
+                }));
             }
-            if results.len() >= max_results {
-                break;
+
+            for handle in handles {
+                if let Ok((files, subdirs)) = handle.await {
+                    let remaining = max_results.saturating_sub(results.len());
+                    results.extend(files.into_iter().take(remaining));
+                    pending.extend(subdirs);
+                }
             }
         }
 
@@ -1015,10 +1114,13 @@ impl AgentTool for FetchUrlTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments("missing url".into()))?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to create client: {e}")))?;
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("reqwest::Client")
+        });
 
         let resp = match client.get(url).send().await {
             Ok(r) => r,

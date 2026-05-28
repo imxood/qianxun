@@ -6,9 +6,11 @@ pub async fn run_repl(
     _verbose: bool,
     resolved: &qianxun_core::config::ResolvedConfig,
     workspace: Option<qianxun_core::workspace::Workspace>,
+    resume: bool,
 ) -> anyhow::Result<()> {
     use qianxun_core::agent::conversation::Conversation;
     use qianxun_core::agent::engine::AgentLoop;
+    use qianxun_core::agent::context::AutoCompactWindow;
     use qianxun_core::agent::system_prompt;
     use qianxun_core::context::memory::MemoryManager;
     use qianxun_core::provider::deepseek::DeepSeekProvider;
@@ -17,7 +19,7 @@ pub async fn run_repl(
     use std::path::PathBuf;
     use crate::cli::Repl;
 
-    // 系统提示词（包含工作区上下文 + 技能）
+    // 系统提示词（包含工作区上下文 + 技能目录 Layer 1）
     let ws_context = workspace
         .as_ref()
         .map(qianxun_core::workspace::build_workspace_context)
@@ -35,7 +37,13 @@ pub async fn run_repl(
     conversation.set_budget(resolved.budget.max_input_tokens, resolved.budget.max_output_tokens);
 
     // Agent 循环
-    let agent_loop = AgentLoop::new(resolved.agent.clone());
+    let mut agent_loop = AgentLoop::new(resolved.agent.clone());
+    agent_loop.compact_config = Some(resolved.compaction.clone());
+    agent_loop.compact_window = Some(AutoCompactWindow::new(
+        resolved.compaction.model_window,
+        resolved.compaction.max_output_tokens,
+        resolved.compaction.circuit_breaker_limit,
+    ));
 
     // LLM Provider
     let provider: Box<dyn LlmProvider> = Box::new(DeepSeekProvider::new(
@@ -102,6 +110,12 @@ pub async fn run_repl(
     let tools_list = tools.format_tools_list();
 
     // 启动 REPL
-    let mut repl = Repl::new(agent_loop, conversation, provider, tools, ws_context, memory_manager, skills_catalog, skills_list, skills_count, tools_list);
+    let ws_root = workspace.as_ref().map(|ws| ws.root.clone());
+    let mut repl = Repl::new(
+        agent_loop, conversation, provider, tools,
+        ws_context, memory_manager,
+        skills_mgr, skills_catalog, skills_list, skills_count,
+        tools_list, ws_root, resume,
+    );
     repl.run().await
 }
