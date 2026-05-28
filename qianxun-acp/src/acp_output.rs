@@ -31,12 +31,6 @@ impl AcpOutputSink {
 #[async_trait]
 impl OutputSink for AcpOutputSink {
     async fn on_text(&self, text: &str) {
-        let preview: String = text.chars().take(200).collect();
-        if text.len() > 200 {
-            tracing::debug!("on_text: {} bytes: \"{preview}...\"", text.len());
-        } else {
-            tracing::debug!("on_text: {} bytes: \"{preview}\"", text.len());
-        }
         let content = SessionUpdateContent::AgentMessageChunk {
             text: text.to_string(),
         };
@@ -45,14 +39,7 @@ impl OutputSink for AcpOutputSink {
     }
 
     async fn on_thinking(&self, text: &str) {
-        if !text.is_empty() {
-            let preview: String = text.chars().take(200).collect();
-            if text.len() > 200 {
-                tracing::debug!("on_thinking: {} bytes: \"{preview}...\"", text.len());
-            } else {
-                tracing::debug!("on_thinking: {} bytes: \"{preview}\"", text.len());
-            }
-        }
+        if text.is_empty() { return; }
         let content = SessionUpdateContent::AgentThoughtChunk {
             text: text.to_string(),
         };
@@ -61,13 +48,6 @@ impl OutputSink for AcpOutputSink {
     }
 
     async fn on_tool_call(&self, tool_call_id: &str, tool_name: &str, arguments: &Value) {
-        let args_str = serde_json::to_string(arguments).unwrap_or_default();
-        let preview: String = args_str.chars().take(200).collect();
-        if args_str.len() > 200 {
-            tracing::debug!("on_tool_call: {tool_name} ({tool_call_id}) args: {preview}...");
-        } else {
-            tracing::debug!("on_tool_call: {tool_name} ({tool_call_id}) args: {preview}");
-        }
         let content = SessionUpdateContent::ToolCall {
             tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),

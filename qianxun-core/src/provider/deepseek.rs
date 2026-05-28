@@ -438,7 +438,22 @@ impl super::LlmProvider for DeepSeekProvider {
         request: CompletionRequest,
     ) -> Result<BoxStream<'static, Result<LlmStreamEvent, LlmError>>, LlmError> {
         let body = self.build_body(&request, true);
+        tracing::info!(
+            "发送 LLM 请求: model={}, messages={}, tools={}, max_tokens={}",
+            body["model"].as_str().unwrap_or("?"),
+            body["messages"].as_array().map_or(0, |a| a.len()),
+            body["tools"].as_array().map_or(0, |a| a.len()),
+            body["max_tokens"].as_u64().unwrap_or(0),
+        );
+        tracing::debug!(
+            "LLM 请求 body (counted sizes): system={}, messages={}, tools={}",
+            body["system"].as_str().map_or(0, |s| s.len()),
+            serde_json::to_string(&body["messages"]).map_or(0, |s| s.len()),
+            serde_json::to_string(&body["tools"]).map_or(0, |s| s.len()),
+        );
         let response = self.send_request(body).await?;
+
+        tracing::info!("LLM 请求已连接, 开始接收 SSE 流");
 
         // ── SSE parsing in a background task ──
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmStreamEvent, LlmError>>(32);

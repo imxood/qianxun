@@ -1,5 +1,8 @@
 use clap::Parser;
+use std::time::Duration;
 use tracing_subscriber::fmt::time::FormatTime;
+
+mod buf_writer;
 
 struct LocalTimer;
 
@@ -66,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(log_file) => {
                 tracing_subscriber::fmt()
                     .with_timer(LocalTimer)
-                    .with_writer(std::sync::Mutex::new(log_file))
+                    .with_writer(buf_writer::TimedBufWriter::new(log_file, 4096, Duration::from_secs(1)))
                     .with_env_filter(filter)
                     .with_ansi(false)
                     .init();

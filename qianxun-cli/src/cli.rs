@@ -48,7 +48,7 @@ impl Repl {
             conversation,
             provider,
             tools,
-            sink: CliOutputSink,
+            sink: CliOutputSink::new(),
             budget,
             workspace_context,
             memory_manager,

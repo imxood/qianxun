@@ -7,6 +7,19 @@ use crate::tools::ToolRegistry;
 use crate::types::{AgentConfig, StopReason, TokenUsage};
 use futures::StreamExt;
 
+/// Truncate a string for debug logging at char boundary, appending count of truncated chars.
+fn trunc(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…(+{}chars)", &s[..end], s.len() - max)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentState {
     Idle,
@@ -65,6 +78,7 @@ pub mod processing_loop {
     ) {
         agent.state = AgentState::WaitingLlm;
         agent.turn_count += 1;
+        tracing::info!("[turn {}] processing user message", agent.turn_count);
 
         loop {
             if !agent.can_continue() {
@@ -85,6 +99,25 @@ pub mod processing_loop {
                 conversation.build_request(&defs, memory_context, skills_catalog, &agent.config)
             };
 
+            tracing::info!(
+                "发送 LLM 请求: {} 条消息, {} 个工具定义",
+                request.messages.len(),
+                request.tools.len(),
+            );
+            tracing::debug!(
+                "LLM 请求详情: system_len={}, messages=[{}], tools=[{}]",
+                request.system.as_ref().map_or(0, |s| s.len()),
+                request.messages.iter().map(|m| format!(
+                    "{}:{}",
+                    m.role(),
+                    m.content().iter().map(|b| b.r#type.as_str()).collect::<Vec<_>>().join(","),
+                )).collect::<Vec<_>>().join(" | "),
+                request.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "),
+            );
+            if let Some(sys) = &request.system {
+                tracing::debug!("=== System Prompt ===\n{}", trunc(sys, 2000));
+            }
+
             let mut stream = match provider.stream_completion(request).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -99,8 +132,6 @@ pub mod processing_loop {
 
             // ── consume the stream ──
             let mut response_text = String::new();
-            let mut text_buffer = String::new();
-            let mut thinking_buffer = String::new();
             let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut thinking_blocks: Vec<(String, Option<String>)> = Vec::new();
             #[allow(unused_assignments)]
@@ -113,19 +144,13 @@ pub mod processing_loop {
                 match event {
                     Ok(LlmStreamEvent::Text(text)) => {
                         response_text.push_str(&text);
-                        text_buffer.push_str(&text);
-                        if text_buffer.len() >= 200 {
-                            sink.on_text(&text_buffer).await;
-                            text_buffer.clear();
-                        }
+                        sink.on_text(&text).await;
                     }
                     Ok(LlmStreamEvent::ToolCall {
                         id,
                         tool_name,
                         arguments,
                     }) => {
-                        flush_text(sink, &mut text_buffer).await;
-                        flush_thinking(sink, &mut thinking_buffer).await;
                         sink.on_tool_call(&id, &tool_name, &arguments).await;
                         tool_calls.push((id, tool_name, arguments));
                     }
@@ -146,7 +171,23 @@ pub mod processing_loop {
                             );
 
                             // execute tools
+                            sink.on_thinking_flush().await;
                             agent.state = AgentState::ToolExecuting;
+                            let tool_names: Vec<&str> = tool_calls.iter().map(|(_, n, _)| n.as_str()).collect();
+                            tracing::info!(
+                                "LLM 返回工具调用: {} 个 — {:?}",
+                                tool_calls.len(),
+                                tool_names,
+                            );
+                            if !response_text.is_empty() {
+                                tracing::debug!("=== LLM 回复文本 (tool_use 前) ===\n{}", trunc(&response_text, 5000));
+                            }
+                            for (_, name, args) in &tool_calls {
+                                tracing::debug!(
+                                    "  工具 {name}: args={}",
+                                    trunc(&serde_json::to_string(args).unwrap_or_default(), 2000),
+                                );
+                            }
                             let mut results = Vec::new();
                             for (id, name, args) in &tool_calls {
                                 sink.on_status(&format!("执行工具: {name}")).await;
@@ -160,6 +201,10 @@ pub mod processing_loop {
                                             "[tool] result: {name} ({id}) is_error={} len={}",
                                             output.is_error,
                                             output.content.len(),
+                                        );
+                                        tracing::debug!(
+                                            "[tool] result content: {name} ({id})\n{}",
+                                            trunc(&output.content, 5000),
                                         );
                                         results.push((
                                             id.clone(),
@@ -175,11 +220,10 @@ pub mod processing_loop {
                                 }
                             }
 
-                            flush_text(sink, &mut text_buffer).await;
-                            flush_thinking(sink, &mut thinking_buffer).await;
                             sink.on_status("工具执行完成，继续请求 LLM...").await;
 
                             // Push tool results and loop back to LLM
+                            let result_count = results.len();
                             let result_blocks: Vec<ContentBlock> = results
                                 .into_iter()
                                 .map(|(id, content, is_error)| {
@@ -188,6 +232,11 @@ pub mod processing_loop {
                                 .collect();
                             conversation.push_message(Message::user(result_blocks));
                             agent.turn_count += 1;
+                            tracing::info!(
+                                "工具执行完成，回送 {} 个结果到 LLM (turn {})",
+                                result_count,
+                                agent.turn_count,
+                            );
                             break; // exit stream loop → outer loop continues
                         } else {
                             // End of turn
@@ -200,8 +249,15 @@ pub mod processing_loop {
                             );
 
                             agent.state = AgentState::Idle;
-                            flush_text(sink, &mut text_buffer).await;
-                            flush_thinking(sink, &mut thinking_buffer).await;
+                            tracing::info!(
+                                "LLM 回复完成: reason={reason:?}, text={}chars, tool_calls={}, thinking={}",
+                                response_text.len(),
+                                tool_calls.len(),
+                                thinking_blocks.len(),
+                            );
+                            if !response_text.is_empty() {
+                                tracing::debug!("=== LLM 回复文本 ===\n{}", trunc(&response_text, 10000));
+                            }
                             sink.on_turn_finished(&reason, &turn_usage).await;
                             return;
                         }
@@ -209,14 +265,10 @@ pub mod processing_loop {
                     Ok(LlmStreamEvent::Thinking { text, signature }) => {
                         if !text.is_empty() {
                             current_thinking_text.push_str(&text);
-                            thinking_buffer.push_str(&text);
-                            if thinking_buffer.len() >= 200 {
-                                sink.on_thinking(&thinking_buffer).await;
-                                thinking_buffer.clear();
-                            }
+                            sink.on_thinking(&text).await;
                         }
                         if let Some(sig) = signature {
-                            flush_thinking(sink, &mut thinking_buffer).await;
+                            sink.on_thinking_flush().await;
                             current_thinking_sig = Some(sig);
                             thinking_blocks.push((
                                 std::mem::take(&mut current_thinking_text),
@@ -225,8 +277,6 @@ pub mod processing_loop {
                         }
                     }
                     Err(e) => {
-                        flush_text(sink, &mut text_buffer).await;
-                        flush_thinking(sink, &mut thinking_buffer).await;
                         sink.on_error(&e).await;
                         agent.state = AgentState::Error(e.to_string());
                         return;
@@ -242,8 +292,6 @@ pub mod processing_loop {
                 if !response_text.is_empty() || !tool_calls.is_empty() {
                     build_turn(conversation, &response_text, &tool_calls, &thinking_blocks);
                 }
-                flush_text(sink, &mut text_buffer).await;
-                flush_thinking(sink, &mut thinking_buffer).await;
                 sink.on_turn_finished(
                     &StopReason::Error,
                     &agent.accumulated_usage,
@@ -254,22 +302,6 @@ pub mod processing_loop {
             }
         }
         // ── end loop ──
-    }
-
-    /// Flush buffered text to the sink.
-    async fn flush_text(sink: &dyn OutputSink, buf: &mut String) {
-        if !buf.is_empty() {
-            sink.on_text(buf).await;
-            buf.clear();
-        }
-    }
-
-    /// Flush buffered thinking to the sink.
-    async fn flush_thinking(sink: &dyn OutputSink, buf: &mut String) {
-        if !buf.is_empty() {
-            sink.on_thinking(buf).await;
-            buf.clear();
-        }
     }
 
     /// Append assistant message to conversation, including tool_use blocks.

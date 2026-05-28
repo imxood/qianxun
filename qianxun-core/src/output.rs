@@ -11,7 +11,9 @@ pub trait OutputSink: Send + Sync {
     async fn on_turn_finished(&self, reason: &StopReason, usage: &TokenUsage);
     /// 状态更新（如工具执行进度），sink 可酌情显示。
     async fn on_status(&self, status: &str) {
-        // 默认空实现，兼容已有 sink
         let _ = status;
     }
+
+    /// Flush 思考内容缓冲区。sink 应将缓存的思考文本一次性输出。
+    async fn on_thinking_flush(&self) {}
 }
