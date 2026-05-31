@@ -1,8 +1,9 @@
-# 千寻记忆子系统设计文档 v0.2
+# 千寻系统架构设计文档 v0.3
 
 > 版本: 0.3 | 更新: 2026-05-29 | 状态: 草案
 >
-> 基于 v0.2 评估后的修订版，关键变更：Memory 独立为 qianxun-memory crate、
+> 覆盖记忆子系统设计、Crate 结构、多主机架构、VPS Server + Node 中心化控制。
+> 关键变更：Memory 独立为 qianxun-memory crate、
 > 通过 trait 与 qianxun-core 解耦、redb+文件双重存储、Daemon 模式集成设计。
 
 ---
