@@ -1,5 +1,6 @@
 use crate::acp_output::AcpOutputEvent;
-use crate::handler::{build_acp_tool_registry, AcpRequestHandler};
+use crate::forwarding_tools::build_acp_tool_registry;
+use crate::handler::AcpRequestHandler;
 use crate::session::SessionManager;
 use crate::transport::AcpTransport;
 use crate::types::{rpc_success, IncomingMessage};

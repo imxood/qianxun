@@ -173,6 +173,37 @@ impl SessionManager {
         self.sessions.get_mut(id)
     }
 
+    /// 从现有会话 fork 出一个新会话（复制会话状态到新 ID）。
+    /// 新会话获得独立的 conversation/agent_loop，共享 tools（Arc）。
+    /// memory_manager 和 skill_watcher 不支持 clone，fork 后设为 None。
+    pub fn fork(&mut self, new_id: &str, source_id: &str) -> Result<&mut AcpSession, String> {
+        if self.sessions.len() as u32 >= self.max_sessions {
+            return Err("max sessions reached".into());
+        }
+        let source = self.sessions.get(source_id).ok_or_else(|| format!("source session not found: {source_id}"))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        self.sessions.insert(
+            new_id.to_string(),
+            AcpSession {
+                id: new_id.to_string(),
+                conversation: source.conversation.clone(),
+                agent_loop: source.agent_loop.clone(),
+                created_at: now,
+                is_running: false,
+                memory_manager: None,
+                tools: source.tools.clone(),
+                skills_catalog: source.skills_catalog.clone(),
+                ws_root: source.ws_root.clone(),
+                skill_manager: source.skill_manager.clone(),
+                skill_watcher: None,
+                cancel_flag: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        Ok(self.sessions.get_mut(new_id).unwrap())
+    }
+
     /// 关闭会话
     pub fn close(&mut self, id: &str) -> bool {
         self.sessions.remove(id).is_some()

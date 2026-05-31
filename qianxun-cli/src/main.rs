@@ -144,13 +144,7 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.acp_mode {
         tracing::info!("以 ACP 协议模式启动");
-        let provider: Box<dyn qianxun_core::provider::LlmProvider> = Box::new(
-            qianxun_core::provider::deepseek::DeepSeekProvider::new(
-                resolved.deepseek.api_key.clone(),
-                resolved.deepseek.base_url.clone(),
-                resolved.deepseek.model.clone(),
-            ),
-        );
+        let provider = qianxun_core::provider::create_provider(&resolved.deepseek);
         qianxun_acp::run_acp_server(
             provider,
             resolved.agent.clone(),

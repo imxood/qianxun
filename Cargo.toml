@@ -26,3 +26,5 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 json_comments = "0.2"
 rustyline = "15"
 notify = "7"
+indicatif = "0.17"
+console = "0.15"

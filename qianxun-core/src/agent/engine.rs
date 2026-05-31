@@ -34,7 +34,7 @@ pub enum AgentState {
     Error(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AgentLoop {
     pub state: AgentState,
     pub turn_count: u32,

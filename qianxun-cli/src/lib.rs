@@ -12,8 +12,6 @@ pub async fn run_repl(
     use qianxun_core::agent::context::AutoCompactWindow;
     use qianxun_core::agent::system_prompt;
     use qianxun_core::context::memory::MemoryManager;
-    use qianxun_core::provider::deepseek::DeepSeekProvider;
-    use qianxun_core::provider::LlmProvider;
     use qianxun_core::skills::SkillWatcher;
     use qianxun_core::tools::ToolRegistry;
     use crate::cli::Repl;
@@ -46,11 +44,7 @@ pub async fn run_repl(
     ));
 
     // LLM Provider
-    let provider: Box<dyn LlmProvider> = Box::new(DeepSeekProvider::new(
-        resolved.deepseek.api_key.clone(),
-        resolved.deepseek.base_url.clone(),
-        resolved.deepseek.model.clone(),
-    ));
+    let provider = qianxun_core::provider::create_provider(&resolved.deepseek);
 
     // 工具注册
     let mut tools = ToolRegistry::new();

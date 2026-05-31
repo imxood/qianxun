@@ -3,6 +3,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::{processing_loop, AgentLoop};
@@ -16,14 +20,21 @@ use qianxun_core::tools::ToolRegistry;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
+use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::history::FileHistory;
-use rustyline::highlight::CmdKind;
 use rustyline::{Config, Context, Editor, Helper};
 
 use crate::output::CliOutputSink;
+
+// ─── 颜色助手（与 output.rs 色调一致）──────────────────────
+// 注意：不再使用 apply_to()，改为直接 style(X).color256(N) 内联
+
+const HORIZ: &str = "─";
+const TOP_L: &str = "╭";
+const BOT_L: &str = "╰";
+const VERT: &str = "│";
 
 const SLASH_COMMANDS: &[&str] = &[
     "/help", "/quit", "/exit", "/reset",
@@ -78,7 +89,7 @@ impl Hinter for ReplHelper {
 impl Highlighter for ReplHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         if line.starts_with('/') {
-            Cow::Owned(format!("\x1b[36m{line}\x1b[0m"))
+            Cow::Owned(style(line).cyan().to_string())
         } else {
             Cow::Borrowed(line)
         }
@@ -314,7 +325,7 @@ impl Repl {
         if matches.len() > 1 {
             eprintln!("\"{partial}\" 匹配了多个会话：");
             for s in &matches {
-                eprintln!("  \x1b[36m{}\x1b[0m  {} 条消息  {}", s.id, s.message_count, s.preview);
+                eprintln!("  {}  {} 条消息  {}", style(&s.id).cyan(), s.message_count, s.preview);
             }
             eprintln!("请提供更精确的 ID。");
             return;
@@ -339,7 +350,7 @@ impl Repl {
                 self.current_session = Some(session.id.clone());
                 self.agent_loop.reset();
                 self.recently_injected.clear();
-                eprintln!("已恢复会话: \x1b[36m{}\x1b[0m ({} 条消息)", session.id, session.message_count);
+                eprintln!("已恢复会话: {} ({} 条消息)", style(&session.id).cyan(), session.message_count);
                 Self::print_conversation(&self.conversation);
             }
             Err(e) => {
@@ -382,7 +393,7 @@ impl Repl {
             self.current_session = None;
         }
 
-        eprintln!("已删除会话: \x1b[36m{}\x1b[0m", session.id);
+        eprintln!("已删除会话: {}", style(&session.id).cyan());
     }
 
     /// 启动时恢复最后一次会话
@@ -406,13 +417,13 @@ impl Repl {
                 self.agent_loop.reset();
                 self.recently_injected.clear();
                 eprintln!(
-                    "\x1b[32m已恢复会话: {} ({} 条消息)\x1b[0m",
-                    latest.id, msg_count,
+                    "{}",
+                    style(format!("已恢复会话: {} ({} 条消息)", latest.id, msg_count)).green(),
                 );
                 Self::print_conversation(&self.conversation);
             }
             Err(e) => {
-                eprintln!("\x1b[33m恢复会话失败: {e}\x1b[0m");
+                eprintln!("{}", style(format!("恢复会话失败: {e}")).yellow());
             }
         }
     }
@@ -423,7 +434,9 @@ impl Repl {
         if messages.is_empty() {
             return;
         }
-        eprintln!("\x1b[2m━━━ 历史消息 ━━━\x1b[0m");
+        let msg_count = messages.len();
+        let mut content_lines: Vec<String> = Vec::new();
+
         for msg in messages {
             match msg {
                 Message::User { content, .. } => {
@@ -431,7 +444,7 @@ impl Repl {
                         if block.r#type == "text" {
                             if let Some(ref text) = block.text {
                                 for line in text.lines() {
-                                    eprintln!("\x1b[32m❯ {}\x1b[0m", line);
+                                    content_lines.push(style(format!("❯ {line}")).color256(34).to_string());
                                 }
                             }
                         }
@@ -443,23 +456,51 @@ impl Repl {
                             "text" => {
                                 if let Some(ref text) = block.text {
                                     for line in text.lines() {
-                                        eprintln!("{}", line);
+                                        content_lines.push(line.to_string());
                                     }
                                 }
                             }
                             "tool_use" => {
                                 if let Some(ref name) = block.tool_name {
-                                    eprintln!("\x1b[2m  [工具调用: {name}]\x1b[0m");
+                                    content_lines.push(style(format!("  [工具: {name}]")).dim().to_string());
                                 }
                             }
                             _ => {}
                         }
                     }
-                    eprintln!();
+                    content_lines.push(String::new());
                 }
             }
         }
-        eprintln!("\x1b[2m━━━━━━━━━━━━━━━\x1b[0m");
+
+        // 计算框线宽度
+        let max_w = content_lines
+            .iter()
+            .map(|l| {
+                let mut len = 0;
+                let mut in_esc = false;
+                for ch in l.chars() {
+                    if ch == '\x1b' { in_esc = true; }
+                    else if in_esc { if ch == 'm' { in_esc = false; } }
+                    else { len += 1; }
+                }
+                len
+            })
+            .fold(0, usize::max);
+        let inner_w = max_w.clamp(20, 80);
+
+        let title = format!(" 历史消息 ({msg_count} 条) ");
+        eprintln!("{}╭{}{}",
+            style("").color256(236),
+            title,
+            style(HORIZ.repeat(inner_w.saturating_sub(title.chars().count()) + 2)).color256(236),
+        );
+
+        for line in &content_lines {
+            eprintln!("{} {}", style(VERT).color256(236), line);
+        }
+
+        eprintln!("{}{}", style(BOT_L).color256(236), style(HORIZ.repeat(inner_w + 2)).color256(236));
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -497,7 +538,13 @@ impl Repl {
         });
 
         while self.running {
-            match self.rl.readline("\n❯ ") {
+            let turn_count = self.agent_loop.turn_count;
+            let prompt = if turn_count > 0 {
+                format!("\n{} ❯ ", style(format!("[{turn_count}]")))
+            } else {
+                "\n❯ ".to_string()
+            };
+            match self.rl.readline(&prompt) {
                 Ok(input) => {
                     let trimmed = input.trim().to_string();
                     if trimmed.is_empty() {
@@ -523,7 +570,7 @@ impl Repl {
                 }
                 Err(e) => {
                     tracing::error!("input error: {e}");
-                    eprintln!("\x1b[31m输入错误: {e}\x1b[0m");
+                    eprintln!("{}", style(format!("输入错误: {e}")).red());
                     break;
                 }
             }
@@ -546,19 +593,66 @@ impl Repl {
             "技能: 无".to_string()
         };
         let mcp_count = self.tools.mcp_client_count();
+        let ws_info = if self.workspace_context.is_empty() {
+            String::new()
+        } else {
+            "  工作区上下文已加载".to_string()
+        };
 
-        eprintln!("🐾 \x1b[1m千寻 (Qianxun)\x1b[0m — AI 编程助手");
-        eprintln!("\x1b[2m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
-        if !self.workspace_context.is_empty() {
-            eprintln!("  工作区上下文已加载");
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            " {} {} — AI 编程助手",
+            style("千寻 (Qianxun)").bold(),
+            style("").color256(244),
+        ));
+        lines.push(String::new());
+        if !ws_info.is_empty() {
+            lines.push(format!("  {}", style(ws_info).dim()));
         }
-        eprintln!("  模型: {model}");
-        eprintln!("  {skills_info}");
+        lines.push(format!("  模型: {model}"));
+        lines.push(format!("  {skills_info}"));
         if mcp_count > 0 {
-            eprintln!("  MCP: {mcp_count} 个已连接");
+            lines.push(format!("  MCP: {mcp_count} 个已连接"));
         }
-        eprintln!("\x1b[2m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
-        eprintln!("  输入 /help 查看命令  |  /quit 退出");
+        lines.push(String::new());
+        lines.push(format!(
+            "  {}  {}  {}",
+            style("输入 /help 查看命令").color256(244),
+            style("|").dim(),
+            style("/quit 退出").color256(244),
+        ));
+
+        let block = self.boxed_banner(&lines);
+        eprint!("{block}");
+    }
+
+    /// 框线横幅（与 output.rs 风格一致，但横幅无顶线）
+    fn boxed_banner(&self, lines: &[String]) -> String {
+        let max_w = lines
+            .iter()
+            .map(|l| console::measure_text_width(l))
+            .fold(0, usize::max);
+        let inner_w = max_w.max(20);
+        let mut out = String::new();
+
+        out.push_str(&format!(
+            "{}{}\n",
+            style(TOP_L).color256(236),
+            style(HORIZ.repeat(inner_w + 2)).color256(236),
+        ));
+
+        for line in lines {
+            out.push_str(&format!(
+                "{} {line}\n", style(VERT).color256(236),
+            ));
+        }
+
+        out.push_str(&format!(
+            "{}{}\n",
+            style(BOT_L).color256(236),
+            style(HORIZ.repeat(inner_w + 2)).color256(236),
+        ));
+        out
     }
 
     /// 检查技能目录是否有文件变更，有则自动重载。
@@ -584,24 +678,42 @@ impl Repl {
                 self.running = false;
             }
             "/help" => {
-                eprintln!("\x1b[1m\x1b[4m对话控制:\x1b[0m");
-                eprintln!("  \x1b[36m/quit\x1b[0m      退出千寻");
-                eprintln!("  \x1b[36m/reset\x1b[0m     重置对话（开始新会话）");
-                eprintln!("  \x1b[36m/retry\x1b[0m     重新发送上一条消息");
-                eprintln!("  \x1b[36m/edit\x1b[0m      编辑上一条消息并重发");
-                eprintln!();
-                eprintln!("\x1b[1m\x1b[4m会话管理:\x1b[0m");
-                eprintln!("  \x1b[36m/sessions\x1b[0m      列出历史会话");
-                eprintln!("  \x1b[36m/sessions <id>\x1b[0m  恢复历史会话");
-                eprintln!("  \x1b[36m/sessions delete <id>\x1b[0m  删除历史会话");
-                eprintln!();
-                eprintln!("\x1b[1m\x1b[4m信息查询:\x1b[0m");
-                eprintln!("  \x1b[36m/help\x1b[0m      显示此帮助");
-                eprintln!("  \x1b[36m/usage\x1b[0m     Token 用量");
-                eprintln!("  \x1b[36m/workspace\x1b[0m 工作区信息");
-                eprintln!("  \x1b[36m/skills\x1b[0m    已加载技能");
-                eprintln!("  \x1b[36m/tools\x1b[0m     可用工具");
-                eprintln!("  \x1b[36m/memory\x1b[0m    最近记忆");
+                let inner_w = 50;
+                // 顶框
+                eprintln!("  {}╭ 帮助 {}", style("").color256(236), style(HORIZ.repeat(inner_w - 4)).color256(236));
+
+                let sections: &[(&str, &[(&str, &str)])] = &[
+                    ("对话控制", &[
+                        ("/quit", "退出千寻"),
+                        ("/reset", "重置对话（开始新会话）"),
+                        ("/retry", "重新发送上一条消息"),
+                        ("/edit", "编辑上一条消息并重发"),
+                    ]),
+                    ("会话管理", &[
+                        ("/sessions", "列出历史会话"),
+                        ("/sessions <id>", "恢复历史会话"),
+                        ("/sessions delete <id>", "删除历史会话"),
+                    ]),
+                    ("信息查询", &[
+                        ("/help", "显示此帮助"),
+                        ("/usage", "Token 用量"),
+                        ("/workspace", "工作区信息"),
+                        ("/skills", "已加载技能"),
+                        ("/tools", "可用工具"),
+                        ("/memory", "最近记忆"),
+                    ]),
+                ];
+
+                for (sec_title, items) in sections.iter() {
+                    let h = HORIZ.repeat(inner_w.saturating_sub(sec_title.chars().count() + 2));
+                    eprintln!("  {}├ {} {} {}", style("").color256(236), style(sec_title).color256(244), style("").color256(236), style(h).color256(236));
+                    for (cmd, desc) in *items {
+                        eprintln!("  {}  {}  {desc}", style(VERT).color256(236), style(cmd).color256(75));
+                    }
+                }
+
+                // 底框
+                eprintln!("  {}{}", style(BOT_L).color256(236), style(HORIZ.repeat(inner_w + 2)).color256(236));
             }
             "/reset" => {
                 eprint!("确定要重置对话吗？(y/N): ");
@@ -635,34 +747,49 @@ impl Repl {
             }
             "/usage" => {
                 let usage = &self.agent_loop.accumulated_usage;
-                eprintln!("Token 用量：");
-                eprintln!("  输入 token: {}", usage.input);
-                eprintln!("  输出 token: {}", usage.output);
+                let b = |s: &str| style(s).color256(236).to_string();
+                eprintln!("{}╭ Token 用量 {}", b(""), b(&HORIZ.repeat(22)));
+                eprintln!("{}  输入 token: {}", b(VERT), usage.input);
+                eprintln!("{}  输出 token: {}", b(VERT), usage.output);
                 if let Some(cc) = usage.cache_creation_input {
-                    eprintln!("  缓存创建: {cc}");
+                    eprintln!("{}  缓存创建: {cc}", b(VERT));
                 }
                 if let Some(cr) = usage.cache_read_input {
-                    eprintln!("  缓存读取: {cr}");
+                    eprintln!("{}  缓存读取: {cr}", b(VERT));
                 }
+                eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(24)));
             }
             "/skills" => {
                 self.check_skill_reload("handle_slash");
+                let b = |s: &str| style(s).color256(236).to_string();
                 if self.skills_list.is_empty() {
-                    eprintln!("未加载任何技能。");
+                    eprintln!("{}╭ 技能 {}", b(""), b(&HORIZ.repeat(18)));
+                    eprintln!("{}  未加载任何技能。", b(VERT));
+                    eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(22)));
                 } else {
-                    eprintln!("已加载的技能: ({})", self.skills_count);
-                    eprintln!();
-                    eprintln!("{}", self.skills_list);
-                    eprintln!("\x1b[2m自动注入: 消息包含触发词时自动注入完整技能指令");
-                    eprintln!("手动注入: 在消息中使用 @技能名 手动引用技能\x1b[0m");
+                    let title = format!(" 已加载的技能 ({}) ", self.skills_count);
+                    eprintln!("{}╭{}{}", b(""), title, b(&HORIZ.repeat(72usize.saturating_sub(title.chars().count()) + 2)));
+                    for line in self.skills_list.lines() {
+                        eprintln!("{}  {line}", b(VERT));
+                    }
+                    eprintln!("{}", b(VERT));
+                    eprintln!("{}  {}", b(VERT), style("自动注入: 消息包含触发词时自动注入完整技能指令").dim());
+                    eprintln!("{}  {}", b(VERT), style("手动注入: 在消息中使用 @技能名 手动引用技能").dim());
+                    eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(74)));
                 }
             }
             "/tools" => {
+                let b = |s: &str| style(s).color256(236).to_string();
                 if self.tools_list.is_empty() {
-                    eprintln!("无可用工具。");
+                    eprintln!("{}╭ 工具 {}", b(""), b(&HORIZ.repeat(18)));
+                    eprintln!("{}  无可用工具。", b(VERT));
+                    eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(22)));
                 } else {
-                    eprintln!("可用工具：");
-                    eprintln!("{}", self.tools_list);
+                    eprintln!("{}╭ 可用工具 {}", b(""), b(&HORIZ.repeat(64)));
+                    for line in self.tools_list.lines() {
+                        eprintln!("{}  {line}", b(VERT));
+                    }
+                    eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(74)));
                 }
             }
             "/memory" => {
@@ -682,27 +809,30 @@ impl Repl {
             }
             "/sessions" => {
                 let sessions = Self::list_sessions();
+                let b = |s: &str| style(s).color256(236).to_string();
                 if sessions.is_empty() {
-                    eprintln!("无历史会话。");
+                    eprintln!("{}╭ 历史会话 {}", b(""), b(&HORIZ.repeat(18)));
+                    eprintln!("{}  无历史会话。", b(VERT));
+                    eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(22)));
                 } else {
-                    eprintln!("历史会话 ({}):", sessions.len());
-                    eprintln!();
+                    eprintln!("{}╭ 历史会话 ({}) {}", b(""), sessions.len(), b(&HORIZ.repeat(56)));
+                    eprintln!("{}", b(VERT));
                     for s in &sessions {
                         let marker = self.current_session.as_deref()
                             .filter(|id| *id == s.id)
                             .map(|_| " ← 当前")
                             .unwrap_or("");
-                        let preview = if s.preview.len() > 50 {
-                            let end = (0..=50).rev().find(|&i| s.preview.is_char_boundary(i)).unwrap_or(0);
+                        let preview = if s.preview.len() > 40 {
+                            let end = (0..=40).rev().find(|&i| s.preview.is_char_boundary(i)).unwrap_or(0);
                             &s.preview[..end]
                         } else {
                             &s.preview
                         };
-                        eprintln!("  \x1b[36m{}\x1b[0m  {} 条消息  {}{}", s.id, s.message_count, preview, marker);
+                        eprintln!("{}  {}  {} 条  {preview}{marker}", b(VERT), style(&s.id).color256(75), s.message_count);
                     }
-                    eprintln!();
-                    eprintln!("使用 \x1b[36m/sessions <id>\x1b[0m 恢复会话（支持部分匹配）");
-                    eprintln!("使用 \x1b[36m/sessions delete <id>\x1b[0m 删除会话");
+                    eprintln!("{}", b(VERT));
+                    eprintln!("{}  使用 {} 恢复  |  {} 删除", b(VERT), style("/sessions <id>").color256(75), style("/sessions delete <id>").color256(75));
+                    eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(60)));
                 }
             }
             "/retry" => {
@@ -727,7 +857,7 @@ impl Repl {
                             eprintln!("已取消。");
                         }
                         Err(e) => {
-                            eprintln!("\x1b[31m编辑失败: {e}\x1b[0m");
+                            eprintln!("{}", style(format!("编辑失败: {e}")).red());
                         }
                     }
                 } else {
@@ -834,6 +964,17 @@ impl Repl {
         self.conversation
             .push_user_message(vec![ContentBlock::text(&full_msg)]);
 
+        // ── Spinner: LLM 生成期间的活动指示器 ──
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::with_template("{spinner:.blue} {msg}")
+                .unwrap()
+                .tick_chars("⠁⠁⠉⠙⠚⠒⠂⠂⠒⠲⠴⠤⠄⠄⠤⠠⠠⠤⠦⠧⠇⠇⠧⠶⠶"),
+        );
+        spinner.set_message("正在思考...");
+        spinner.enable_steady_tick(Duration::from_millis(80));
+        self.sink.attach_spinner(spinner.clone());
+
         processing_loop::handle_user_message(
             &mut self.agent_loop,
             &mut self.conversation,
@@ -846,6 +987,9 @@ impl Repl {
             self.cancel_flag.clone(),
         )
         .await;
+
+        // 停止并移除 spinner
+        self.sink.detach_spinner();
 
         // 轮次后写入记忆
         if let Some(mm) = &self.memory_manager {
@@ -887,7 +1031,8 @@ fn expand_file_refs(msg: &str, ws_root: Option<&std::path::Path>) -> String {
                 result.replace_range(start..start + 6 + end, &replacement);
             }
             Err(e) => {
-                let err_msg = format!("\n\x1b[31m[FILE 错误] {} — {e}\x1b[0m\n", resolved.display());
+                let styled = style(format!("[FILE 错误] {} — {e}", resolved.display())).red();
+                let err_msg = format!("\n{}\n", styled);
                 result.replace_range(start..start + 6 + end, &err_msg);
             }
         }

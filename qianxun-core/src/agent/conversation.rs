@@ -10,6 +10,7 @@ pub struct TokenBudget {
     pub max_output_tokens: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct Conversation {
     system_prompt: Option<String>,
     messages: Vec<Message>,

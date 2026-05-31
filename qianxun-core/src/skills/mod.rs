@@ -35,6 +35,7 @@ pub struct Skill {
     pub body: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SkillManager {
     skills: Vec<(SkillSource, SkillMetadata)>,
     body_cache: HashMap<String, String>,

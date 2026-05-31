@@ -1,223 +1,20 @@
-use crate::acp_output::{AcpOutputEvent, AcpOutputSink};
+use crate::acp_output::AcpOutputEvent;
+use crate::prompt::new_agent_loop;
 use crate::session::SessionManager;
 use crate::transport::AcpTransport;
 use crate::types::*;
-use qianxun_core::agent::conversation::Conversation;
-use qianxun_core::agent::context::window::AutoCompactWindow;
-use qianxun_core::agent::engine::processing_loop;
-use qianxun_core::agent::engine::AgentLoop;
-use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::mcp::client::McpClient;
 use qianxun_core::mcp::McpServerConfig;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::{SkillManager, SkillWatcher};
-use qianxun_core::tools::{AgentTool, ToolError, ToolOutput, ToolRegistry};
+use qianxun_core::tools::ToolRegistry;
 use qianxun_core::types::AgentConfig;
 use serde_json::Value;
-use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
-
-// ─── 转发工具（替代内置文件工具，通过 ACP 向客户端请求） ──
-
-/// 通过 ACP 双向请求转发 read_text_file
-pub struct ForwardingReadFileTool {
-    transport: Arc<AcpTransport>,
-}
-
-impl ForwardingReadFileTool {
-    pub fn new(transport: Arc<AcpTransport>) -> Self {
-        Self { transport }
-    }
-}
-
-#[async_trait]
-impl AgentTool for ForwardingReadFileTool {
-    fn name(&self) -> &str {
-        "read_text_file"
-    }
-
-    fn description(&self) -> &str {
-        "读取指定文件的内容（通过编辑器转发）"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径"
-                }
-            },
-            "required": ["path"]
-        })
-    }
-
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
-        let path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArguments("missing path".into()))?;
-
-        let params = serde_json::json!({ "path": path });
-        match self
-            .transport
-            .send_request("fs/read_text_file", params, std::time::Duration::from_secs(30))
-            .await
-        {
-            Ok(resp) => {
-                if let Some(result) = resp.result {
-                    if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
-                        return Ok(ToolOutput {
-                            content: content.to_string(),
-                            is_error: false,
-                        });
-                    }
-                }
-                tracing::warn!("Client returned invalid read_text_file response, falling back to local");
-                fallback_read_file(path)
-            }
-            Err(e) => {
-                tracing::warn!("ACP forward failed for read_text_file: {e}, falling back to local");
-                fallback_read_file(path)
-            }
-        }
-    }
-}
-
-fn fallback_read_file(path: &str) -> Result<ToolOutput, ToolError> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            let truncated = if content.len() > 100_000 {
-                let head_end = (0..=50_000).rev().find(|&i| content.is_char_boundary(i)).unwrap_or(0);
-                let tail_start = (content.len() - 50_000..content.len()).find(|&i| content.is_char_boundary(i)).unwrap_or(content.len());
-                let head = &content[..head_end];
-                let tail = &content[tail_start..];
-                format!("{head}\n... [truncated, total {} bytes]\n{tail}", content.len())
-            } else {
-                content
-            };
-            Ok(ToolOutput {
-                content: truncated,
-                is_error: false,
-            })
-        }
-        Err(e) => Ok(ToolOutput {
-            content: format!("Error reading file: {e}"),
-            is_error: true,
-        }),
-    }
-}
-
-/// 通过 ACP 双向请求转发 write_text_file
-pub struct ForwardingWriteFileTool {
-    transport: Arc<AcpTransport>,
-}
-
-impl ForwardingWriteFileTool {
-    pub fn new(transport: Arc<AcpTransport>) -> Self {
-        Self { transport }
-    }
-}
-
-#[async_trait]
-impl AgentTool for ForwardingWriteFileTool {
-    fn name(&self) -> &str {
-        "write_text_file"
-    }
-
-    fn description(&self) -> &str {
-        "写入内容到指定文件（通过编辑器转发）"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string" }
-            },
-            "required": ["path", "content"]
-        })
-    }
-
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
-        let path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArguments("missing path".into()))?;
-        let content = arguments
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArguments("missing content".into()))?;
-
-        let params = serde_json::json!({ "path": path, "content": content });
-        match self
-            .transport
-            .send_request("fs/write_text_file", params, std::time::Duration::from_secs(30))
-            .await
-        {
-            Ok(resp) => {
-                if resp.error.is_none() {
-                    Ok(ToolOutput {
-                        content: format!("Successfully wrote {} bytes to {path}", content.len()),
-                        is_error: false,
-                    })
-                } else {
-                    Ok(ToolOutput {
-                        content: format!("Client rejected write: {:?}", resp.error),
-                        is_error: true,
-                    })
-                }
-            }
-            Err(e) => {
-                tracing::warn!("ACP forward failed for write_text_file: {e}, falling back to local");
-                fallback_write_file(path, content)
-            }
-        }
-    }
-}
-
-fn fallback_write_file(path: &str, content: &str) -> Result<ToolOutput, ToolError> {
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::write(path, content) {
-        Ok(_) => Ok(ToolOutput {
-            content: format!("Successfully wrote {} bytes to {path}", content.len()),
-            is_error: false,
-        }),
-        Err(e) => Ok(ToolOutput {
-            content: format!("Error writing file: {e}"),
-            is_error: true,
-        }),
-    }
-}
-
-// ─── 构建带转发工具的 ToolRegistry ─────────────────────
-
-/// 构建 ACP 模式的 ToolRegistry，将文件工具替换为转发版本
-pub fn build_acp_tool_registry(transport: Arc<AcpTransport>) -> ToolRegistry {
-    let mut tools = ToolRegistry::new();
-
-    // 先注册所有内置工具
-    qianxun_core::tools::builtin::register_all(&mut tools);
-
-    // 用转发版本覆盖文件工具
-    tools.register_builtin(std::sync::Arc::new(ForwardingReadFileTool::new(
-        transport.clone(),
-    )));
-    tools.register_builtin(std::sync::Arc::new(ForwardingWriteFileTool::new(
-        transport,
-    )));
-
-    tools
-}
 
 // ─── 请求处理器 ─────────────────────────────────────────
 
@@ -231,20 +28,6 @@ pub struct AcpRequestHandler {
     pub compact_config: Option<ResolvedCompactionConfig>,
     pub budget_input: Option<u64>,
     pub budget_output: Option<u64>,
-}
-
-/// 创建 AgentLoop 并初始化上下文压缩窗口（如有配置）。
-fn new_agent_loop(agent_config: AgentConfig, compact_config: &Option<ResolvedCompactionConfig>) -> AgentLoop {
-    let mut agent_loop = AgentLoop::new(agent_config);
-    if let Some(cc) = compact_config {
-        agent_loop.compact_config = Some(cc.clone());
-        agent_loop.compact_window = Some(AutoCompactWindow::new(
-            cc.model_window,
-            cc.max_output_tokens,
-            cc.circuit_breaker_limit,
-        ));
-    }
-    agent_loop
 }
 
 impl AcpRequestHandler {
@@ -264,7 +47,7 @@ impl AcpRequestHandler {
             "session/load" => self.handle_session_load(req.params).await,
             "session/resume" => self.handle_session_resume(req.params).await,
             "session/delete" => self.handle_session_delete(req.params).await,
-            "session/fork" => Err("not implemented".to_string()),
+            "session/fork" => self.handle_session_fork(req.params).await,
             "session/close" => self.handle_session_close(req.params).await,
             "session/list" => self.handle_session_list().await,
             _ => {
@@ -286,209 +69,6 @@ impl AcpRequestHandler {
         }
 
         Ok(())
-    }
-
-    /// session/prompt 的延迟处理入口：先校验参数，然后异步执行
-    async fn handle_session_prompt_deferred(&self, id: RequestId, params: Option<Value>) {
-        match self.prepare_prompt(params).await {
-            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)) => {
-                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)
-                    .await;
-            }
-            Err(e) => {
-                let resp = rpc_error(id, -32603, e);
-                let _ = self.transport.send_response(&resp).await;
-            }
-        }
-    }
-
-    /// 准备 prompt 执行的参数（校验 + 提取 session）
-    #[allow(clippy::type_complexity)]
-    async fn prepare_prompt(
-        &self,
-        params: Option<Value>,
-    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>, String, String, Arc<AtomicBool>, Option<SkillManager>), String> {
-        let p: PromptParams = params
-            .and_then(|v| serde_json::from_value(v).ok())
-            .ok_or_else(|| "invalid prompt params".to_string())?;
-
-        let session_id = p.session_id.clone();
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(&session_id)
-            .ok_or_else(|| format!("session not found: {session_id}"))?;
-
-        if session.is_running {
-            return Err("session already running".to_string());
-        }
-        session.is_running = true;
-
-        // 提取记忆上下文
-        let memory_context = match &session.memory_manager {
-            Some(mm) => mm.build_context().await,
-            None => String::new(),
-        };
-        let memory_manager = std::mem::take(&mut session.memory_manager);
-
-        // 提取会话级工具注册表（如有），否则使用基础注册表
-        let session_tools = session
-            .tools
-            .take()
-            .unwrap_or_else(|| self.tools.clone());
-
-        let empty_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
-        let empty_conv = Conversation::new(None);
-        let agent_loop = std::mem::replace(&mut session.agent_loop, empty_loop);
-        let conversation = std::mem::replace(&mut session.conversation, empty_conv);
-        let cancel_flag = session.cancel_flag.clone();
-
-        // 检查技能文件变更（在取出 skill_manager 之前）
-        if let Some(ref mut watcher) = session.skill_watcher {
-            if watcher.has_changed() {
-                tracing::info!("[skill_watcher] file change detected (prepare_prompt), reloading skills");
-                if let Some(ref mut sm) = session.skill_manager {
-                    sm.reload(session.ws_root.as_deref());
-                    session.skills_catalog = sm.build_catalog_prompt();
-                }
-            }
-        }
-
-        let skills_catalog = session.skills_catalog.clone();
-        let skill_manager = session.skill_manager.take();
-
-        drop(sessions);
-
-        let user_text: String = p
-            .prompt
-            .iter()
-            .filter_map(|block| block.get("text").and_then(|v| v.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // 构建技能注入内容（Layer 2 — 自动匹配 + 手动引用）
-        // 使用会话缓存的 skill_manager，避免每个 prompt 从磁盘重载
-        let loaded_fallback;
-        let skills_mgr: &SkillManager = match skill_manager.as_ref() {
-            Some(sm) => sm,
-            None => {
-                loaded_fallback = SkillManager::load_all(None::<&std::path::Path>);
-                &loaded_fallback
-            }
-        };
-        let skill_injections = {
-            let user_text_for_match = if user_text.is_empty() { "..." } else { &user_text };
-
-            // 手动引用 @技能名
-            let manual_names: Vec<String> = SkillManager::extract_manual_mentions(user_text_for_match)
-                .into_iter()
-                .filter(|name| skills_mgr.select_by_name(name).is_some())
-                .collect();
-
-            // 自动匹配
-            let exclude: Vec<&str> = manual_names.iter().map(|s| s.as_str()).collect();
-            let auto_names = skills_mgr.auto_select(user_text_for_match, &exclude);
-
-            let mut inject_names = manual_names;
-            inject_names.extend(auto_names);
-
-            skills_mgr.build_injections(&inject_names)
-        };
-
-        Ok((session_id, agent_loop, conversation, user_text, memory_context, memory_manager, session_tools, skills_catalog, skill_injections, cancel_flag, skill_manager))
-    }
-
-    /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
-    #[allow(clippy::too_many_arguments)]
-    async fn run_prompt_task(
-        &self,
-        id: RequestId,
-        session_id: String,
-        mut agent_loop: AgentLoop,
-        mut conversation: Conversation,
-        prompt_text: String,
-        memory_context: String,
-        memory_manager: Option<MemoryManager>,
-        tools: Arc<ToolRegistry>,
-        skills_catalog: String,
-        skill_injections: String,
-        cancel_flag: Arc<AtomicBool>,
-        skill_manager: Option<SkillManager>,
-    ) {
-        conversation
-            .push_user_message(vec![ContentBlock::text(&prompt_text)]);
-
-        let sink = AcpOutputSink::new(session_id.clone(), self.output_tx.clone());
-        let provider: Arc<dyn LlmProvider> = self.provider.clone();
-        let tools_for_spawn = tools.clone();
-        let skills_catalog_for_spawn = skills_catalog;
-        let skill_injections_for_spawn = skill_injections;
-        let sid = session_id.clone();
-
-        // 第一层：处理循环（可能 panic）
-        let processing_handle = tokio::spawn(async move {
-            processing_loop::handle_user_message(
-                &mut agent_loop,
-                &mut conversation,
-                provider.as_ref(),
-                tools_for_spawn.as_ref(),
-                &sink,
-                &memory_context,
-                &skills_catalog_for_spawn,
-                &skill_injections_for_spawn,
-                cancel_flag,
-            )
-            .await;
-            (agent_loop, conversation) // 正常完成后返还所有权
-        });
-
-        // 第二层：监护任务，确保响应一定发送
-        let output_tx = self.output_tx.clone();
-        let sessions_arc2 = self.sessions.clone();
-        tokio::spawn(async move {
-            match processing_handle.await {
-                Ok((agent_loop, conversation)) => {
-                    // 处理正常完成，保存会话状态
-                    // 写入记忆
-                    let summary = if prompt_text.len() > 200 {
-                        let end = (0..=200).rev().find(|&i| prompt_text.is_char_boundary(i)).unwrap_or(0);
-                        &prompt_text[..end]
-                    } else {
-                        &prompt_text
-                    };
-                    if let Some(mm) = &memory_manager {
-                        mm.write_memory(summary, &["conversation"], &prompt_text).await;
-                    }
-
-                    let mut sessions = sessions_arc2.lock().await;
-                    if let Some(s) = sessions.get(&sid) {
-                        drop(std::mem::replace(&mut s.conversation, conversation));
-                        drop(std::mem::replace(&mut s.agent_loop, agent_loop));
-                        s.memory_manager = memory_manager;
-                        s.tools = Some(tools);
-                        s.skill_manager = skill_manager;
-                        s.is_running = false;
-                    }
-                    // 持久化到磁盘
-                    sessions.save_session(&sid).await;
-                }
-                Err(panic_err) => {
-                    // 处理过程 panic，标记会话为未运行
-                    tracing::error!("Processing task panicked: {:?}", panic_err);
-                    let mut sessions = sessions_arc2.lock().await;
-                    if let Some(s) = sessions.get(&sid) {
-                        s.memory_manager = memory_manager;
-                        s.skill_manager = skill_manager;
-                        s.is_running = false;
-                    }
-                }
-            }
-
-            // ★ 关键：无论处理成功还是失败，都必须发送响应
-            let _ = output_tx.send(AcpOutputEvent::PromptResponse {
-                id,
-                stop_reason: "end_turn".to_string(),
-            });
-        });
     }
 
     async fn handle_initialize(&self, params: Option<Value>) -> Result<Value, String> {
@@ -646,6 +226,29 @@ impl AcpRequestHandler {
         } else {
             Err(format!("session not found: {}", p.session_id))
         }
+    }
+
+    async fn handle_session_fork(&self, params: Option<Value>) -> Result<Value, String> {
+        let p: SessionForkParams = params
+            .and_then(|v| serde_json::from_value(v).ok())
+            .ok_or_else(|| "missing session_id".to_string())?;
+
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let mut sessions = self.sessions.lock().await;
+
+        // fork 前先持久化源会话
+        sessions.save_session(&p.session_id).await;
+
+        sessions.fork(&new_id, &p.session_id).map_err(|e| e.to_string())?;
+
+        // 应用 budget
+        if let Some(s) = sessions.get(&new_id) {
+            s.conversation.set_budget(self.budget_input, self.budget_output);
+        }
+
+        tracing::info!("Session forked: {} → {}", p.session_id, new_id);
+
+        serde_json::to_value(SessionForkResult { session_id: new_id }).map_err(|e| e.to_string())
     }
 
     async fn handle_session_delete(&self, params: Option<Value>) -> Result<Value, String> {

@@ -134,6 +134,8 @@ pub struct ResolvedProviderConfig {
 #[derive(Clone)]
 pub struct ResolvedConfig {
     pub deepseek: ResolvedProviderConfig,
+    pub active_provider: String,
+    pub providers: HashMap<String, ResolvedProviderConfig>,
     pub agent: AgentConfig,
     pub budget: TokenBudget,
     pub compaction: ResolvedCompactionConfig,
@@ -151,6 +153,8 @@ impl Default for ResolvedConfig {
                 temperature: None,
                 max_tokens: None,
             },
+            active_provider: "deepseek".into(),
+            providers: HashMap::new(),
             agent: AgentConfig {
                 max_turns: 50,
                 max_retries: 3,
@@ -213,10 +217,27 @@ impl Config {
         cli_model: Option<String>,
     ) -> ResolvedConfig {
         let defaults = ResolvedConfig::default();
-        let pcfg = self
-            .providers
-            .and_then(|mut m| m.remove("deepseek"))
-            .unwrap_or_default();
+
+        // Parse all raw provider configs into ResolvedProviderConfig.
+        // Also extract deepseek for backward-compat priority chain.
+        let mut all_resolved: HashMap<String, ResolvedProviderConfig> = HashMap::new();
+        let mut deepseek_raw = ProviderConfig::default();
+        if let Some(raw_providers) = self.providers {
+            for (name, raw_pcfg) in raw_providers {
+                let resolved = ResolvedProviderConfig {
+                    api_key: raw_pcfg.api_key.clone().unwrap_or_default(),
+                    base_url: raw_pcfg.base_url.clone().unwrap_or_else(|| defaults.deepseek.base_url.clone()),
+                    model: raw_pcfg.model.clone().unwrap_or_else(|| defaults.deepseek.model.clone()),
+                    temperature: raw_pcfg.temperature.or(defaults.deepseek.temperature),
+                    max_tokens: raw_pcfg.max_tokens.or(defaults.agent.max_tokens),
+                };
+                if name == "deepseek" {
+                    deepseek_raw = raw_pcfg;
+                }
+                all_resolved.insert(name, resolved);
+            }
+        }
+        let pcfg = deepseek_raw;
 
         // Priority chain
         let api_key = env_api_key.or(pcfg.api_key).unwrap_or_default();
@@ -271,6 +292,8 @@ impl Config {
                 temperature,
                 max_tokens: provider_max_tokens,
             },
+            active_provider: "deepseek".into(),
+            providers: all_resolved,
             agent: AgentConfig {
                 max_turns,
                 max_retries,

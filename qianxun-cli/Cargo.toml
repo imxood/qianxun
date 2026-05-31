@@ -23,4 +23,6 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 rustyline = { workspace = true }
+indicatif = { workspace = true }
+console = { workspace = true }
 reqwest = { workspace = true }
