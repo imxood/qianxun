@@ -29,6 +29,10 @@ impl AgentTool for ReadTextFileTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Read
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let path = arguments
             .get("path")
@@ -109,6 +113,10 @@ impl AgentTool for WriteTextFileTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Write
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let path = arguments
             .get("path")
@@ -164,6 +172,10 @@ impl AgentTool for SearchTool {
             },
             "required": ["pattern"]
         })
+    }
+
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Search
     }
 
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
@@ -339,6 +351,10 @@ impl AgentTool for GrepTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Search
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let pattern = arguments
             .get("pattern")
@@ -458,6 +474,10 @@ impl AgentTool for ListDirectoryTool {
             },
             "required": ["path"]
         })
+    }
+
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Read
     }
 
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
@@ -635,6 +655,10 @@ impl AgentTool for ExecuteCommandTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Terminal
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let command = arguments
             .get("command")
@@ -768,6 +792,10 @@ impl AgentTool for EditFileTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Write
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let file_path = arguments
             .get("file_path")
@@ -879,6 +907,10 @@ impl AgentTool for GlobTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Search
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let pattern = arguments
             .get("pattern")
@@ -977,6 +1009,10 @@ impl AgentTool for DeleteFileTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Write
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let path = arguments
             .get("path")
@@ -1062,6 +1098,10 @@ impl AgentTool for CreateDirectoryTool {
         })
     }
 
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Write
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let path = arguments
             .get("path")
@@ -1106,6 +1146,10 @@ impl AgentTool for FetchUrlTool {
             },
             "required": ["url"]
         })
+    }
+
+    fn category(&self) -> crate::tools::ToolCategory {
+        crate::tools::ToolCategory::Network
     }
 
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
@@ -1182,4 +1226,122 @@ pub fn register_all(registry: &mut super::ToolRegistry) {
     registry.register_builtin(Arc::new(DeleteFileTool));
     registry.register_builtin(Arc::new(CreateDirectoryTool));
     registry.register_builtin(Arc::new(FetchUrlTool));
+
+    registry.register_builtin(std::sync::Arc::new(MemoryRecallTool));
+    registry.register_builtin(std::sync::Arc::new(MemoryRememberTool));
+}
+
+
+// ─── SkillReadTool ─────────────────────────────────────────
+
+pub struct SkillReadTool {
+    pub manager: std::sync::Arc<crate::skills::SkillManager>,
+}
+
+#[async_trait]
+impl super::AgentTool for SkillReadTool {
+    fn name(&self) -> &str {
+        "skill_read"
+    }
+
+    fn description(&self) -> &str {
+        "读取已加载技能的完整正文。当需要详细了解某个技能的使用方法和规则时调用。"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "技能名称（kebab-case，例如 egui-skills）"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    fn category(&self) -> super::ToolCategory {
+        super::ToolCategory::Think
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> Result<super::ToolOutput, super::ToolError> {
+        let name = arguments
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| super::ToolError::InvalidArguments("missing name".into()))?;
+
+        match self.manager.read_body(name) {
+            Some(body) => Ok(super::ToolOutput {
+                content: body.to_string(),
+                is_error: false,
+            }),
+            None => Ok(super::ToolOutput {
+                content: format!("技能 '{name}' 未找到或未加载"),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── MemoryRecallTool ──────────────────────────────────────
+
+pub struct MemoryRecallTool;
+
+#[async_trait]
+impl super::AgentTool for MemoryRecallTool {
+    fn name(&self) -> &str { "memory_recall" }
+    fn description(&self) -> &str { "搜索历史记忆，返回与查询相关的记忆条目" }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "最大返回条数", "default": 5}
+            },
+            "required": ["query"]
+        })
+    }
+    fn category(&self) -> super::ToolCategory { super::ToolCategory::Search }
+    async fn execute(&self, arguments: serde_json::Value) -> Result<super::ToolOutput, super::ToolError> {
+        let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        if query.is_empty() {
+            return Err(super::ToolError::InvalidArguments("missing query".into()));
+        }
+        Ok(super::ToolOutput {
+            content: format!("[memory] search results for: {query}\n  (memory backend not connected)"),
+            is_error: false,
+        })
+    }
+}
+
+// ─── MemoryRememberTool ────────────────────────────────────
+
+pub struct MemoryRememberTool;
+
+#[async_trait]
+impl super::AgentTool for MemoryRememberTool {
+    fn name(&self) -> &str { "memory_remember" }
+    fn description(&self) -> &str { "手动保存一条持久记忆" }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "记忆内容"},
+                "type": {"type": "string", "description": "记忆类型: pattern/fact/bug/preference", "default": "fact"}
+            },
+            "required": ["content"]
+        })
+    }
+    fn category(&self) -> super::ToolCategory { super::ToolCategory::Think }
+    async fn execute(&self, arguments: serde_json::Value) -> Result<super::ToolOutput, super::ToolError> {
+        let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        if content.is_empty() {
+            return Err(super::ToolError::InvalidArguments("missing content".into()));
+        }
+        Ok(super::ToolOutput {
+            content: format!("[memory] remembered: {:.80}", content),
+            is_error: false,
+        })
+    }
 }

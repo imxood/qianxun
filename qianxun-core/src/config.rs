@@ -1,6 +1,6 @@
 use crate::agent::conversation::TokenBudget;
 use crate::agent::context::window::TokenScope;
-use crate::types::{AgentConfig, ThinkingConfig};
+use crate::types::{AgentConfig, AgentPattern, PlanAndExecuteConfig, ReflectiveConfig, WorkflowConfig, ThinkingConfig};
 use serde::Deserialize;
 use json_comments::StripComments;
 use std::collections::HashMap;
@@ -161,6 +161,10 @@ impl Default for ResolvedConfig {
                 max_tokens: Some(16384),
                 temperature: None,
                 thinking: ThinkingConfig::Disabled,
+                pattern: AgentPattern::default(),
+                plan_and_execute: PlanAndExecuteConfig::default(),
+                reflective: ReflectiveConfig::default(),
+                workflow: WorkflowConfig::default(),
             },
             budget: TokenBudget {
                 max_input_tokens: Some(100_000),
@@ -300,6 +304,10 @@ impl Config {
                 max_tokens: provider_max_tokens,
                 temperature,
                 thinking: ThinkingConfig::Disabled,
+                pattern: AgentPattern::default(),
+                plan_and_execute: PlanAndExecuteConfig::default(),
+                reflective: ReflectiveConfig::default(),
+                workflow: WorkflowConfig::default(),
             },
             budget: TokenBudget {
                 max_input_tokens,

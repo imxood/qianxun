@@ -7,6 +7,60 @@ use std::sync::{Arc, Mutex};
 
 // ─── ToolError ───────────────────────────────────────────
 
+/// 工具类别，用于模式驱动的权限门控。
+///
+/// 每个内置工具声明一个类别，Agent 模式（如 Plan-and-Execute）通过
+/// ToolCategoryFilter 决定哪些工具在当前阶段可用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolCategory {
+    Read,
+    Write,
+    Search,
+    Terminal,
+    Network,
+    Think,
+}
+
+/// 工具类别过滤器，表示一组允许的工具类别。
+#[derive(Debug, Clone, Default)]
+pub struct ToolCategoryFilter {
+    allowed: std::collections::HashSet<ToolCategory>,
+}
+
+impl ToolCategoryFilter {
+    /// 允许所有工具。
+    pub fn all() -> Self {
+        use ToolCategory::*;
+        Self {
+            allowed: [Read, Write, Search, Terminal, Network, Think].into(),
+        }
+    }
+
+    /// 只允许读取和搜索（Plan-and-Execute 的计划阶段使用）。
+    pub fn read_only() -> Self {
+        use ToolCategory::*;
+        Self {
+            allowed: [Read, Search, Think].into(),
+        }
+    }
+
+    /// 检查指定类别是否被允许。
+    pub fn allows(&self, category: ToolCategory) -> bool {
+        self.allowed.contains(&category)
+    }
+
+    /// 添加允许的类别。
+    pub fn allow(mut self, category: ToolCategory) -> Self {
+        self.allowed.insert(category);
+        self
+    }
+
+    /// 判断是否允许所有类别。
+    pub fn is_all(&self) -> bool {
+        self.allowed.len() == 6
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     #[error("tool not found: {0}")]
@@ -17,6 +71,9 @@ pub enum ToolError {
 
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
+
+    #[error("tool '{tool}' is not allowed in current mode: {mode}")]
+    NotAllowedInCurrentMode { tool: String, mode: String },
 }
 
 // ─── ToolDefinition ──────────────────────────────────────
@@ -44,6 +101,12 @@ pub trait AgentTool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError>;
+
+    /// 返回此工具所属的类别，用于模式驱动的权限门控。
+    /// 默认返回 `ToolCategory::Think`（无副作用）。
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Think
+    }
 }
 
 // ─── ToolRegistry ────────────────────────────────────────
@@ -91,6 +154,17 @@ pub struct McpToolEntry {
 impl ToolRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 获取工具类别。MCP 工具默认归为 Network，builtin 工具由各自实现决定。
+    pub fn get_category(&self, name: &str) -> Option<ToolCategory> {
+        if let Some(tool) = self.builtin.get(name) {
+            return Some(tool.category());
+        }
+        if self.mcp_tools.contains_key(name) {
+            return Some(ToolCategory::Network);
+        }
+        None
     }
 
     pub fn register_builtin(&mut self, tool: Arc<dyn AgentTool>) {
@@ -169,6 +243,27 @@ impl ToolRegistry {
         }
 
         Err(ToolError::NotFound(name.to_string()))
+    }
+
+    /// 带权限门控的异步执行工具。
+    ///
+    /// 如果工具类别不被 filter 允许，返回 `ToolError::NotAllowedInCurrentMode`。
+    /// 否则行为与 `execute_async()` 相同。
+    pub async fn execute_async_with_filter(
+        &self,
+        name: &str,
+        arguments: Value,
+        filter: &ToolCategoryFilter,
+    ) -> Result<ToolOutput, ToolError> {
+        if let Some(category) = self.get_category(name) {
+            if !filter.allows(category) {
+                return Err(ToolError::NotAllowedInCurrentMode {
+                    tool: name.to_string(),
+                    mode: format!("{category:?} tools are restricted"),
+                });
+            }
+        }
+        self.execute_async(name, arguments).await
     }
 
     /// 同步执行工具（通过 block_on，仅用于非 tokio 上下文）。

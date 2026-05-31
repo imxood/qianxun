@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["qianxun-core", "qianxun"]
+members = ["qianxun-core", "qianxun", "qianxun-memory"]
 
 [workspace.package]
 edition = "2024"
@@ -28,3 +28,13 @@ rustyline = "15"
 notify = "7"
 indicatif = "0.17"
 console = "0.15"
+rusqlite = { version = "0.34", features = ["bundled", "vtab", "column_decltype"] }
+regex = "1"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "fs"] }
+keyring = "3"
+argon2 = "0.5"
+jsonwebtoken = "9"
+tokio-stream = "0.1"
+dirs = "6"

@@ -1,8 +1,8 @@
 # 千寻 MCP Client 设计
 
-> 版本: 0.1 | 更新: 2026-05-31 | 状态: 草案
+> 版本: 0.2 | 更新: 2026-06-01 | 状态: 已实现
 >
-> MCP (Model Context Protocol) 外部工具集成的客户端实现设计
+> MCP Client 完整：stdio 子进程 + HTTP/SSE 传输 + ServerManager（崩溃保护）+ ToolWrapper（AgentTool 适配）
 
 ---
 

@@ -339,6 +339,127 @@ impl McpTransport {
     }
 }
 
+// ─── HTTP/SSE 传输 ─────────────────────────────────────────
+
+/// HTTP/SSE 传输层。
+///
+/// 用于连接远程 MCP 服务器（通过 SSE + POST 进行 JSON-RPC 通信）。
+pub struct McpHttpTransport {
+    /// SSE 端点 URL（初始 URL，用于发现 message endpoint）
+    sse_url: String,
+    /// 消息端点 URL（在 SSE 流的 endpoint 事件中发现）
+    message_url: Mutex<Option<String>>,
+    /// API Key（可选，通过 Authorization header 发送）
+    api_key: Option<String>,
+    /// 自定义 HTTP headers
+    headers: HashMap<String, String>,
+    /// 挂起的请求：id → oneshot::Sender（当前未使用，HTTP 同步请求模式不需要）
+    #[allow(dead_code)]
+    pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<McpJsonRpcResponse>>>>,
+    /// 单调递增请求 ID
+    next_id: AtomicU64,
+    /// HTTP 客户端
+    client: reqwest::Client,
+}
+
+impl McpHttpTransport {
+    /// 创建 HTTP/SSE 传输并启动 SSE 监听。
+    pub async fn connect(
+        url: &str,
+        api_key: Option<String>,
+        headers: HashMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to create HTTP client: {e}"))?;
+
+        let pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<McpJsonRpcResponse>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        Ok(Self {
+            sse_url: url.to_string(),
+            message_url: Mutex::new(None),
+            api_key,
+            headers,
+            pending,
+            next_id: AtomicU64::new(1),
+            client,
+        })
+    }
+
+    /// 解析 SSE 端点 URL 为消息端点 URL。
+    /// 默认规则：将 SSE URL 中的 `/sse` 替换为 `/message`。
+    fn resolve_message_url(&self) -> String {
+        let url = self.sse_url.trim_end_matches("/sse");
+        format!("{url}/message")
+    }
+
+    /// 发送 JSON-RPC 请求（通过 HTTP POST）。
+    pub async fn send_request(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<McpJsonRpcResponse, McpTransportError> {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let request = McpJsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id,
+            method: method.into(),
+            params,
+        };
+
+        let body = serde_json::to_string(&request)
+            .map_err(|e| McpTransportError::Serialize(e.to_string()))?;
+
+        let message_url = {
+            let cached = self.message_url.lock().await;
+            cached.clone().unwrap_or_else(|| self.resolve_message_url())
+        };
+
+        let mut http_req = self
+            .client
+            .post(&message_url)
+            .header("Content-Type", "application/json")
+            .body(body.clone());
+
+        if let Some(ref key) = self.api_key {
+            http_req = http_req.header("Authorization", format!("Bearer {key}"));
+        }
+        for (k, v) in &self.headers {
+            http_req = http_req.header(k.as_str(), v.as_str());
+        }
+
+        match tokio::time::timeout(timeout, http_req.send()).await {
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| McpTransportError::Io(format!("response read failed: {e}")))?;
+
+                let response: McpJsonRpcResponse = serde_json::from_slice(&bytes)
+                    .map_err(|e| {
+                        McpTransportError::Serialize(format!(
+                            "invalid JSON-RPC response (status {status}): {e}"
+                        ))
+                    })?;
+
+                Ok(response)
+            }
+            Ok(Err(e)) => Err(McpTransportError::Io(format!("HTTP request failed: {e}"))),
+            Err(_) => Err(McpTransportError::Timeout),
+        }
+    }
+
+    /// 关闭传输。
+    pub async fn shutdown(&self) {
+        tracing::info!("[mcp:http] shutting down");
+    }
+}
+
 // ─── 错误类型 ───────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]

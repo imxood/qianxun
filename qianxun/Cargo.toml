@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 qianxun-core = { path = "../qianxun-core" }
+qianxun-memory = { path = "../qianxun-memory", optional = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
@@ -26,3 +27,13 @@ rustyline = { workspace = true }
 indicatif = { workspace = true }
 console = { workspace = true }
 reqwest = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+keyring = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+dirs = "6"
+argon2 = { workspace = true }
+jsonwebtoken = { workspace = true }
+tokio-stream = { workspace = true }

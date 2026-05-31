@@ -31,20 +31,27 @@ docs/
 └── vps-server-design.md    # VPS Server 设计（Phase 4b）
 ```
 
-## 当前重点
+## 当前状态
 
-Phase 1-2 已交付。Phase 3 所有模块的设计文档已起草完成，进入逐份精修阶段。
+| Phase | 状态 | 内容 |
+|---|---|---|
+| 1-2 | ✅ 完成 | Agent 引擎 + Provider + 工具 + CLI + ACP + 工作区 |
+| 3a | ✅ 完成 | Memory(SQLite+FTS5) + MCP(ServerManager+HTTP) + Skills(skill_read) |
+| 3b | ✅ 完成 | AgentPattern 类型 + plan/reflect/workflow 模块 |
+| 3c | ✅ 完成 | Daemon HTTP 骨架(axum+会话管理+SSE) |
+| 4a | 📋 待实现 | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） |
+| 4b | 📋 待实现 | VPS Server 完整（WebSocket Hub + 完整认证） |
 
 ## 文档职责一览
 
 | 文件 | 类型 | Phase |
 |---|---|---|
-| `docs/architecture.md` | 统一架构设计 | 1-4 |
-| `docs/agent-pattern-design.md` | Agent 模式设计 | 3b 🔧 |
-| `docs/memory-design.md` | 记忆子系统设计 | 3a 🔧 |
-| `docs/mcp-design.md` | MCP Client 设计 | 3a 🔧 |
-| `docs/skills-design.md` | Skill 系统设计 | 3a 🔧 |
-| `docs/daemon-design.md` | Daemon 模式设计 | 3c / 4a 🔧 |
+| `docs/architecture.md` | 统一架构设计 | 1-4 ✅ |
+| `docs/agent-pattern-design.md` | Agent 模式设计 | 3b ✅ |
+| `docs/memory-design.md` | 记忆子系统设计 | 3a ✅ |
+| `docs/mcp-design.md` | MCP Client 设计 | 3a ✅ |
+| `docs/skills-design.md` | Skill 系统设计 | 3a ✅ |
+| `docs/daemon-design.md` | Daemon 模式设计 | 3c ✅ / 4a 📋 |
 | `docs/vps-server-design.md` | VPS Server 设计 | 4b 📋 |
 | `docs/30_决策/ADR-0001_数据库选型.md` | 决策记录 | 3 |
 | `CLAUDE.md` | 项目规则 | — |

@@ -5,6 +5,8 @@ use tracing_subscriber::fmt::time::FormatTime;
 mod buf_writer;
 mod acp;
 mod cli;
+mod daemon;
+mod server;
 
 struct LocalTimer;
 
@@ -52,6 +54,23 @@ struct Cli {
     /// 启动时恢复最后一次会话
     #[arg(long)]
     resume: bool,
+
+    /// 以 Daemon 模式运行（HTTP 服务常驻）
+    #[arg(long)]
+    daemon: bool,
+
+    /// Daemon HTTP 端口（默认 23900）
+    #[arg(long, default_value_t = 23900)]
+    port: u16,
+
+    /// 连接外部 Daemon 的 URL（例如 http://127.0.0.1:23900）
+    /// 设置后 CLI 作为薄客户端连接 Daemon，不创建本地 AgentLoop
+    #[arg(long)]
+    daemon_url: Option<String>,
+
+    /// 以 VPS Server 模式运行
+    #[arg(long)]
+    server: bool,
 }
 
 #[tokio::main]
@@ -144,6 +163,24 @@ async fn main() -> anyhow::Result<()> {
         cfg
     };
 
+    if cli.server {
+        tracing::info!("以 VPS Server 模式启动（端口 {}）", cli.port);
+        server::run(cli.port).await?;
+        return Ok(());
+    }
+
+    if cli.daemon {
+        tracing::info!("以 Daemon 模式启动（端口 {}）", cli.port);
+        daemon::run(cli.port).await?;
+        return Ok(());
+    }
+
+    // 薄客户端模式：连接到远程 Daemon
+    if let Some(ref daemon_url) = cli.daemon_url {
+        tracing::info!("以薄客户端模式连接 Daemon: {daemon_url}");
+        return run_thin_client(daemon_url).await;
+    }
+
     if cli.acp_mode {
         tracing::info!("以 ACP 协议模式启动");
         let provider = qianxun_core::provider::create_provider(&resolved.deepseek);
@@ -177,5 +214,65 @@ async fn main() -> anyhow::Result<()> {
         cli::run::run_repl(&resolved, project_root, cli.resume).await?;
     }
 
+    Ok(())
+}
+
+/// 薄客户端模式：通过 HTTP 连接 Daemon，不创建本地 AgentLoop。
+async fn run_thin_client(daemon_url: &str) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let health_url = format!("{daemon_url}/v1/system/health");
+
+    // 验证 Daemon 连接
+    let resp = client.get(&health_url).send().await
+        .map_err(|e| anyhow::anyhow!("无法连接 Daemon {daemon_url}: {e}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Daemon 返回错误: {}", resp.status());
+    }
+    tracing::info!("Daemon 已连接: {daemon_url}");
+    println!("已连接到 Daemon: {daemon_url}");
+    println!("输入消息后按 Enter 发送（输入 /quit /exit 退出）\n");
+
+    let mut input = String::new();
+    loop {
+        input.clear();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            break;
+        }
+        let input = input.trim();
+        match input {
+            "/quit" | "/exit" => break,
+            "" => continue,
+            _ => {}
+        }
+
+        // 创建会话
+        let session_url = format!("{daemon_url}/v1/chat/session");
+        let session_resp = match client.post(&session_url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                println!("[Daemon] session error: {}", r.status());
+                continue;
+            }
+            Err(e) => {
+                println!("[Daemon] session error: {e}");
+                continue;
+            }
+        };
+        let sid: serde_json::Value = session_resp.json().await.unwrap_or_default();
+        let session_id = sid["session_id"].as_str().unwrap_or("unknown").to_string();
+
+        // 发送 prompt
+        let prompt_url = format!("{daemon_url}/v1/chat/session/{session_id}/prompt");
+        let body = serde_json::json!({"messages": [{"role": "user", "content": input}]});
+        match client.post(&prompt_url).json(&body).send().await {
+            Ok(r) => {
+                let text = r.text().await.unwrap_or_default();
+                println!("{}", text);
+            }
+            Err(e) => {
+                println!("[Daemon] prompt error: {e}");
+            }
+        }
+    }
     Ok(())
 }

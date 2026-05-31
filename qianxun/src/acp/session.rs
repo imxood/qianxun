@@ -95,7 +95,9 @@ impl SessionManager {
             },
         );
 
-        Ok(self.sessions.get_mut(&id).unwrap())
+        self.sessions.get_mut(&id).ok_or_else(|| {
+            format!("session not found: {id}")
+        })
     }
 
     /// 保存会话到 JSONL（含 .meta 文件）。
@@ -201,7 +203,9 @@ impl SessionManager {
             },
         );
 
-        Ok(self.sessions.get_mut(new_id).unwrap())
+        self.sessions.get_mut(new_id).ok_or_else(|| {
+            format!("session not found for fork: {new_id}")
+        })
     }
 
     /// 关闭会话

@@ -102,6 +102,100 @@ pub enum ToolChoice {
     Tool(String),
 }
 
+// ─── AgentPattern ─────────────────────────────────────────
+
+/// Agent 工作模式。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPattern {
+    /// React: 思考 -> 行动 -> 观察 循环（默认）
+    React,
+    /// Plan-and-Execute: 先制定计划再逐步执行
+    PlanAndExecute,
+    /// Reflective: 执行后自检一轮
+    Reflective,
+    /// Workflow: 按预设阶段序列执行
+    Workflow,
+}
+
+impl Default for AgentPattern {
+    fn default() -> Self {
+        Self::React
+    }
+}
+
+// ─── AgentPattern 子配置 ──────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlanAndExecuteConfig {
+    #[serde(default)]
+    pub auto_execute: bool,
+    #[serde(default = "default_plan_turns")]
+    pub max_plan_turns: u32,
+    #[serde(default = "default_execute_turns")]
+    pub max_execute_turns: u32,
+    #[serde(default = "default_approval_timeout")]
+    pub approval_timeout_sec: u64,
+}
+
+fn default_plan_turns() -> u32 { 20 }
+fn default_execute_turns() -> u32 { 50 }
+fn default_approval_timeout() -> u64 { 300 }
+
+impl Default for PlanAndExecuteConfig {
+    fn default() -> Self {
+        Self {
+            auto_execute: false,
+            max_plan_turns: 20,
+            max_execute_turns: 50,
+            approval_timeout_sec: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReflectiveConfig {
+    #[serde(default = "default_review_rounds")]
+    pub max_review_rounds: u32,
+    #[serde(default = "default_confidence")]
+    pub review_confidence_threshold: u8,
+    #[serde(default = "default_review_tool_only")]
+    pub only_review_when_tool_used: bool,
+}
+
+fn default_review_rounds() -> u32 { 2 }
+fn default_confidence() -> u8 { 8 }
+fn default_review_tool_only() -> bool { true }
+
+impl Default for ReflectiveConfig {
+    fn default() -> Self {
+        Self {
+            max_review_rounds: 2,
+            review_confidence_threshold: 8,
+            only_review_when_tool_used: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowConfig {
+    #[serde(default = "default_stage_turns")]
+    pub max_stage_turns: u32,
+    #[serde(default)]
+    pub custom_path: Option<String>,
+}
+
+fn default_stage_turns() -> u32 { 30 }
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            max_stage_turns: 30,
+            custom_path: None,
+        }
+    }
+}
+
 // ─── AgentConfig ─────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -111,4 +205,13 @@ pub struct AgentConfig {
     pub max_tokens: Option<u64>,
     pub temperature: Option<f32>,
     pub thinking: ThinkingConfig,
+
+    #[serde(default)]
+    pub pattern: AgentPattern,
+    #[serde(default)]
+    pub plan_and_execute: PlanAndExecuteConfig,
+    #[serde(default)]
+    pub reflective: ReflectiveConfig,
+    #[serde(default)]
+    pub workflow: WorkflowConfig,
 }

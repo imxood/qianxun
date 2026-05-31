@@ -1,24 +1,36 @@
 # 千寻 VPS Server 设计
 
-> 版本: 0.1 | 更新: 2026-05-31 | 状态: 草案
+> 版本: 0.2 | 更新: 2026-06-01 | 状态: 已实现（骨架）
 >
-> VPS Server 是千寻远程控制面的核心——用户管理、节点发现、命令中转
+> VPS Server 骨架已实现：用户认证（JWT）、设备授权码、用户管理 API。WebSocket Hub 待实现。
 
 ---
 
-### 1.1 文件结构
+### 1.1 文件结构（当前实现）
 
 ```
 qianxun/src/server/             # VPS Server 子命令（在单二进制内）
-├── mod.rs                      # 模块入口 + pub fn run()
-├── config.rs                   # 服务配置解析
-├── db.rs                       # SQLite + 迁移
-├── auth.rs                     # 用户认证（argon2 + JWT）
-├── device.rs                   # 设备授权流程（auth-code / token）
-├── ws_hub.rs                   # WebSocket Hub（多连接路由）
-├── admin.rs                    # 管理员 CLI 子命令
-└── web/                        # Web UI 静态文件（Svelte 构建产物）
-    └── index.html
+├── mod.rs                      # 模块入口 + pub async fn run() + SQLite 初始化
+│   ├── GET  /api/health
+│   ├── POST /api/auth/login    # 用户登录 → JWT（jsonwebtoken）
+│   ├── POST /api/device/auth-code   # 生成授权码
+│   ├── POST /api/device/authorize   # 确认授权
+│   ├── GET  /api/device/token       # 轮询设备 token
+│   └── POST/GET /api/admin/users    # 用户管理
+└── auth.rs                     # 用户认证
+    ├── LoginRequest / LoginResponse
+    ├── Claims (JWT payload)
+    ├── login_handler()         # JWT 签发（HMAC-SHA256, 24h 过期）
+    ├── auth_code_handler()
+    ├── authorize_handler()
+    ├── token_handler()
+    └── create_user_handler() + list_users_handler()
+
+# 待实现:
+# - ws_hub.rs: WebSocket Hub（Daemon ↔ VPS 双向通信）
+# - device.rs: 设备管理（从 auth.rs 拆分）
+# - admin.rs: 管理员 CLI 子命令
+# - argon2: 密码哈希（rand_core 版本冲突已解决后接入）
 ```
 
 

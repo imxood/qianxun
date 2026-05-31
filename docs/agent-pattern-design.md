@@ -1,8 +1,8 @@
 # 千寻 Agent 模式设计
 
-> 版本: 0.2 | 更新: 2026-05-31 | 状态: 草案
+> 版本: 0.3 | 更新: 2026-06-01 | 状态: 已实现（类型定义 + 模块骨架）
 >
-> Agent 模式是 AgentLoop 的上层状态机——决定如何调用 LLM、何时执行工具、何时结束
+> AgentPattern enum、Config 扩展、plan/reflect/workflow 模块已实现。AgentLoop 模式分发待接线（当前统一走 React）。
 
 ---
 

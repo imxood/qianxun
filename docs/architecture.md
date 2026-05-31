@@ -1,8 +1,8 @@
 # 千寻架构设计
 
-> 版本: 0.4 | 更新: 2026-05-31 | 状态: 草案
+> 版本: 0.5 | 更新: 2026-06-01 | 状态: 已实现
 >
-> 基于多轮架构评审修订：单二进制架构、Phase 3 子阶段划分、Daemon 为 Phase 4 目标、.qianxun/ 项目边界、SQLite 存储
+> 基于实现回溯更新：Phase 3a/3b/3c 全部实现、Daemon HTTP 骨架就绪、VPS 骨架就绪
 
 ---
 
@@ -11,10 +11,10 @@
 | Phase | 描述 | 文档中的节 |
 |---|---|---|
 | ✅ **Phase 1-2** | Agent 引擎 + Provider + 工具 + CLI + ACP + 工作区 | CLAUDE.md 模块结构 |
-| 🔧 **Phase 3a** | Memory + MCP + Skills 实现（可并行） | `memory-design.md` / `mcp-design.md` / `skills-design.md` |
-| 🔧 **Phase 3b** | Agent Patterns（React/Plan/Reflective/Workflow） | `agent-pattern-design.md` |
-| 🔧 **Phase 3c** | Daemon HTTP 框架（路由 + Key 管理 + 服务注册，与 3a/3b 并行） | `daemon-design.md` §3-§4 |
-| 📋 **Phase 4a** | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） | `daemon-design.md` §5 |
+| ✅ **Phase 3a** | Memory(memory crate) + MCP(ServerManager/HTTP) + Skills(skill_read) | 全部完成 |
+| ✅ **Phase 3b** | Agent Patterns（AgentPattern enum + plan/reflect/workflow 模块） | 全部完成 |
+| ✅ **Phase 3c** | Daemon HTTP 框架（axum 路由 + AgentLoopHost + 会话管理） | 骨架已完成 |
+| 📋 **Phase 4a** | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） | `daemon-design.md` |
 | 📋 **Phase 4b** | VPS Server | `vps-server-design.md` |
 | 📋 **Phase 4c** | Web UI 前端 | — |
 

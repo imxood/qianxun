@@ -1,8 +1,8 @@
 # 千寻 Daemon 模式设计
 
-> 版本: 0.1 | 更新: 2026-05-31 | 状态: 草案
+> 版本: 0.2 | 更新: 2026-06-01 | 状态: 已实现（骨架）
 >
-> Daemon 是千寻架构中唯一持有 AgentLoop、API Key、MemoryCore 的运行时核心
+> Daemon HTTP 框架已实现：axum 路由 + 会话管理 + SSE 端点。API Key 管理、BudgetManager、WS Client 待补全。
 
 ---
 
@@ -18,19 +18,32 @@ qx daemon [OPTIONS]
   --daemon-url <URL>     连接远程 Daemon（用于 CLI 作为客户端时，默认 http://127.0.0.1:23900）
 ```
 
-### 1.2 文件结构
+### 1.2 文件结构（当前实现）
 
 ```
 qianxun/src/daemon/             # Daemon 子命令（在单二进制内）
-├── mod.rs                      # 模块入口 + pub fn run()
-├── config.rs                   # DaemonConfig 解析
-├── router.rs                   # axum 路由定义 + 中间件
-├── agent_host.rs               # AgentLoopHost（会话管理）
-├── budget.rs                   # BudgetManager（预算 + 限流）
-├── keychain.rs                 # API Key 加密存储（keyring）
-├── service.rs                  # systemd / Windows Service 注册
-├── ws_client.rs                # VPS WS Client（心跳 + 重连）
-└── sse_output.rs               # SseOutputSink（SSE 流式响应）
+├── mod.rs                      # 模块入口 + pub async fn run() + AppState
+├── router.rs                   # axum 路由定义 + 全部 handler
+│   ├── GET  /v1/system/health  # 健康检查
+│   ├── GET  /v1/system/status  # 状态概览
+│   ├── POST /v1/chat/session   # 创建会话
+│   ├── GET/DELETE /v1/chat/session/:id  # 获取/删除会话
+│   ├── POST /v1/chat/session/:id/prompt  # SSE 流式 Prompt
+│   ├── GET  /v1/tools          # 工具列表
+│   ├── GET  /v1/config         # 配置读取
+│   ├── GET/POST /v1/memory/*    # 记忆管理（stub）
+│   ├── GET  /v1/skills         # 技能列表
+│   └── GET/POST /v1/mcp/servers # MCP 管理（stub）
+└── agent_host.rs               # AgentLoopHost（会话管理）
+    ├── create_session()        # 创建会话（sess_YYYYMMDD_HHMMSS_uuuuuu）
+    ├── session_exists()
+    └── delete_session()
+
+# 待实现（设计文档已有规划）:
+# - keychain.rs: API Key 加密存储
+# - budget.rs: Token 预算管理
+# - ws_client.rs: VPS WS Client
+# - service.rs: systemd/Windows Service 注册
 ```
 
 

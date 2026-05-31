@@ -1,8 +1,8 @@
 # 千寻记忆子系统设计
 
-> 版本: 0.2 | 更新: 2026-05-31 | 状态: 草案
-> 
-> 基于架构评审修订：存储层 SQLite 重写、BM25→FTS5、Consolidation 展开
+> 版本: 0.3 | 更新: 2026-06-01 | 状态: 已实现
+>
+> qianxun-memory crate 已创建：8 张 SQLite 表 + FTS5 + 合成压缩 + 隐私清洗 + 向量索引 + 工作插槽 + Consolidation 管线
 
 ---
 
