@@ -12,7 +12,6 @@ use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::{processing_loop, AgentLoop};
 use qianxun_core::agent::message::{ContentBlock, Message};
 use qianxun_core::agent::system_prompt;
-use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::SkillManager;
 use qianxun_core::skills::SkillWatcher;
@@ -132,7 +131,7 @@ pub struct Repl {
     sink: CliOutputSink,
     budget: (Option<u64>, Option<u64>),
     workspace_context: String,
-    memory_manager: Option<MemoryManager>,
+    memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
     skill_manager: SkillManager,
     skill_watcher: SkillWatcher,
     skills_catalog: String,
@@ -159,7 +158,7 @@ impl Repl {
         provider: Box<dyn LlmProvider>,
         tools: ToolRegistry,
         workspace_context: String,
-        memory_manager: Option<MemoryManager>,
+        memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
         skill_manager: SkillManager,
         skill_watcher: SkillWatcher,
         skills_catalog: String,
@@ -195,7 +194,7 @@ impl Repl {
             sink: CliOutputSink::new(),
             budget,
             workspace_context,
-            memory_manager,
+            memory,
             skill_manager,
             skill_watcher,
             skills_catalog,
@@ -793,9 +792,9 @@ impl Repl {
                 }
             }
             "/memory" => {
-                match &self.memory_manager {
-                    Some(mm) => {
-                        let ctx = mm.build_context().await;
+                match &self.memory {
+                    Some(m) => {
+                        let ctx = m.build_context("", 1000).await;
                         if ctx.is_empty() {
                             eprintln!("尚无记忆。");
                         } else {
@@ -803,7 +802,7 @@ impl Repl {
                         }
                     }
                     None => {
-                        eprintln!("未启用记忆（需要工作区）。");
+                        eprintln!("未启用记忆。");
                     }
                 }
             }
@@ -956,8 +955,8 @@ impl Repl {
         }
 
         // 8. 构建记忆上下文
-        let memory_context = match &self.memory_manager {
-            Some(mm) => mm.build_context().await,
+        let memory_context = match &self.memory {
+            Some(m) => m.build_context("", 1000).await,
             None => String::new(),
         };
 
@@ -992,14 +991,14 @@ impl Repl {
         self.sink.detach_spinner();
 
         // 轮次后写入记忆
-        if let Some(mm) = &self.memory_manager {
+        if let Some(m) = &self.memory {
             let summary = if msg.len() > 200 {
                 let end = (0..=200).rev().find(|&i| msg.is_char_boundary(i)).unwrap_or(0);
                 &msg[..end]
             } else {
                 &msg
             };
-            mm.write_memory(summary, &["conversation"], &msg).await;
+            let _ = m.remember(&summary, "conversation").await;
         }
 
         // 自动保存会话（每次轮次后）

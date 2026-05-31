@@ -4,7 +4,6 @@ use crate::acp::session::SessionManager;
 use crate::acp::transport::AcpTransport;
 use crate::acp::types::*;
 use qianxun_core::config::ResolvedCompactionConfig;
-use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::mcp::client::McpClient;
 use qianxun_core::mcp::McpServerConfig;
 use qianxun_core::provider::LlmProvider;
@@ -115,7 +114,7 @@ impl AcpRequestHandler {
             let sc = sm.build_catalog_prompt();
             (Some(qianxun_core::agent::system_prompt::build_system_prompt(&ctx, global_instructions.as_deref())), sc, Some(sm))
         }).unwrap_or((None, String::new(), None));
-        let memory_manager = ws.as_ref().and_then(build_memory_manager);
+        let memory = ws.as_ref().and_then(build_memory);
         let ws_root = ws.as_ref().map(|w| w.root.clone());
         let skill_watcher = ws_root.as_ref().map(|root| SkillWatcher::new(Some(root.as_path())));
 
@@ -129,7 +128,7 @@ impl AcpRequestHandler {
                 session_id.clone(),
                 system_prompt,
                 agent_loop,
-                memory_manager,
+                memory,
                 Some(session_tools),
                 skills_catalog,
                 skill_manager,
@@ -172,7 +171,7 @@ impl AcpRequestHandler {
             let sc = sm.build_catalog_prompt();
             (Some(qianxun_core::agent::system_prompt::build_system_prompt(&ctx, global_instructions.as_deref())), sc, Some(sm))
         }).unwrap_or((None, String::new(), None));
-        let memory_manager = ws.as_ref().and_then(build_memory_manager);
+        let memory = ws.as_ref().and_then(build_memory);
         let ws_root = ws.as_ref().map(|w| w.root.clone());
         let skill_watcher = ws_root.as_ref().map(|root| SkillWatcher::new(Some(root.as_path())));
 
@@ -194,7 +193,7 @@ impl AcpRequestHandler {
             None => None,
         };
         sessions
-            .create(session_id.clone(), system_prompt, agent_loop, memory_manager, session_tools, skills_catalog, skill_manager, skill_watcher, ws_root)
+            .create(session_id.clone(), system_prompt, agent_loop, memory, session_tools, skills_catalog, skill_manager, skill_watcher, ws_root)
             .map_err(|e| e.to_string())?;
 
         if let Some(s) = sessions.get(&session_id) {
@@ -291,10 +290,10 @@ impl AcpRequestHandler {
     }
 }
 
-/// 从工作区根路径构建 MemoryManager。
-fn build_memory_manager(ws: &qianxun_core::workspace::ProjectRoot) -> Option<MemoryManager> {
-    let base_dir = qianxun_core::workspace::qianxun_dir()?.join("memory");
-    Some(MemoryManager::new(base_dir, &ws.root, 5))
+/// 从工作区根路径构建 memory engine。
+fn build_memory(ws: &qianxun_core::workspace::ProjectRoot) -> Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> {
+    let db_path = qianxun_core::workspace::qianxun_dir()?.join("mem.db");
+    Some(Box::new(qianxun_memory::MemoryCore::open(&db_path).ok()?))
 }
 
 /// 解析 ACP 会话参数中的 MCP 服务器配置列表。

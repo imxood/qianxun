@@ -17,3 +17,4 @@ chrono = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4"] }
 lru = { workspace = true }
 regex = { workspace = true }
+async-trait = { workspace = true }

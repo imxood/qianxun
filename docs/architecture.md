@@ -642,7 +642,7 @@ VPS:          qx server install → systemd / Windows Service
 | 内置工具 (tools/) | ✅ 完成 | 5 个工具 + ToolRegistry + ACP 转发 |
 | 项目根检测 (workspace.rs) | ✅ 完成 | .qianxun/ 向上查找 + CLAUDE.md 读取 |
 | ACP 协议 (qianxun/acp/) | ✅ 完成 | JSON-RPC 2.0 + session 管理 + 双向请求 |
-| Memory (context/) | 🔧 骨架 | MemoryManager 所有方法返回空值 |
+| Memory (qianxun-memory) | ✅ 完成 | MemoryObserver trait + MemoryCore(SQLite+FTS5) |
 | Skills (skills/) | 🔧 骨架 | load_all() 为空实现 |
 | MCP Client (mcp/) | 🔧 骨架 | connect/call_tool 为空实现 |
 | Daemon (qx daemon) | 📋 未开始 | Phase 4 |

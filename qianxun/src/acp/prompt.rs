@@ -7,7 +7,6 @@ use qianxun_core::agent::engine::processing_loop;
 use qianxun_core::agent::engine::AgentLoop;
 use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::config::ResolvedCompactionConfig;
-use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::SkillManager;
 use qianxun_core::tools::ToolRegistry;
@@ -37,8 +36,8 @@ impl AcpRequestHandler {
     /// session/prompt 的延迟处理入口：先校验参数，然后异步执行
     pub(crate) async fn handle_session_prompt_deferred(&self, id: RequestId, params: Option<Value>) {
         match self.prepare_prompt(params).await {
-            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)) => {
-                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory_manager, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)
+            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)) => {
+                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)
                     .await;
             }
             Err(e) => {
@@ -53,7 +52,7 @@ impl AcpRequestHandler {
     async fn prepare_prompt(
         &self,
         params: Option<Value>,
-    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<MemoryManager>, Arc<ToolRegistry>, String, String, Arc<AtomicBool>, Option<SkillManager>), String> {
+    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>, Arc<ToolRegistry>, String, String, Arc<AtomicBool>, Option<SkillManager>), String> {
         let p: PromptParams = params
             .and_then(|v| serde_json::from_value(v).ok())
             .ok_or_else(|| "invalid prompt params".to_string())?;
@@ -70,11 +69,11 @@ impl AcpRequestHandler {
         session.is_running = true;
 
         // 提取记忆上下文
-        let memory_context = match &session.memory_manager {
-            Some(mm) => mm.build_context().await,
+        let memory_context = match &session.memory {
+            Some(m) => m.build_context("", 1000).await,
             None => String::new(),
         };
-        let memory_manager = std::mem::take(&mut session.memory_manager);
+        let memory = std::mem::take(&mut session.memory);
 
         // 提取会话级工具注册表（如有），否则使用基础注册表
         let session_tools = session
@@ -140,7 +139,7 @@ impl AcpRequestHandler {
             skills_mgr.build_injections(&inject_names)
         };
 
-        Ok((session_id, agent_loop, conversation, user_text, memory_context, memory_manager, session_tools, skills_catalog, skill_injections, cancel_flag, skill_manager))
+        Ok((session_id, agent_loop, conversation, user_text, memory_context, memory, session_tools, skills_catalog, skill_injections, cancel_flag, skill_manager))
     }
 
     /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
@@ -153,7 +152,7 @@ impl AcpRequestHandler {
         mut conversation: Conversation,
         prompt_text: String,
         memory_context: String,
-        memory_manager: Option<MemoryManager>,
+        memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
         tools: Arc<ToolRegistry>,
         skills_catalog: String,
         skill_injections: String,
@@ -201,15 +200,15 @@ impl AcpRequestHandler {
                     } else {
                         &prompt_text
                     };
-                    if let Some(mm) = &memory_manager {
-                        mm.write_memory(summary, &["conversation"], &prompt_text).await;
+                    if let Some(m) = &memory {
+                        let _ = m.remember(&summary, "conversation").await;
                     }
 
                     let mut sessions = sessions_arc2.lock().await;
                     if let Some(s) = sessions.get(&sid) {
                         drop(std::mem::replace(&mut s.conversation, conversation));
                         drop(std::mem::replace(&mut s.agent_loop, agent_loop));
-                        s.memory_manager = memory_manager;
+                        s.memory = memory;
                         s.tools = Some(tools);
                         s.skill_manager = skill_manager;
                         s.is_running = false;
@@ -222,7 +221,7 @@ impl AcpRequestHandler {
                     tracing::error!("Processing task panicked: {:?}", panic_err);
                     let mut sessions = sessions_arc2.lock().await;
                     if let Some(s) = sessions.get(&sid) {
-                        s.memory_manager = memory_manager;
+                        s.memory = memory;
                         s.skill_manager = skill_manager;
                         s.is_running = false;
                     }

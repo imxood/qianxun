@@ -39,7 +39,7 @@ fn migrate(conn: &Connection) -> SqlResult<()> {
 }
 
 /// 创建所有表（版本 1）。
-fn create_tables(conn: &Connection) -> SqlResult<()> {
+pub fn create_tables(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "
         -- === 会话

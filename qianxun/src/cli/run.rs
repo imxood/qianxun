@@ -3,7 +3,6 @@ use qianxun_core::agent::engine::AgentLoop;
 use qianxun_core::agent::context::AutoCompactWindow;
 use qianxun_core::agent::system_prompt;
 use qianxun_core::config::ResolvedConfig;
-use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::skills::SkillWatcher;
 use qianxun_core::tools::ToolRegistry;
 use qianxun_core::workspace::ProjectRoot;
@@ -87,10 +86,21 @@ pub async fn run_repl(
         }
     }
 
-    // Memory（基于工作区）
-    let memory_manager = workspace.as_ref().and_then(|ws| {
-        let base_dir = qianxun_core::workspace::qianxun_dir()?.join("memory");
-        Some(MemoryManager::new(base_dir, &ws.root, 5))
+    // Memory（新引擎：SQLite）
+    let memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> = qianxun_core::workspace::qianxun_dir().map(|mem_dir| {
+        let db_path = mem_dir.join("mem.db");
+        match qianxun_memory::MemoryCore::open(&db_path) {
+            Ok(mc) => {
+                tracing::info!("memory opened: {}", db_path.display());
+                Box::new(mc) as Box<dyn qianxun_core::context::MemoryObserver + Send>
+            }
+            Err(e) => {
+                tracing::warn!("memory init failed: {e}");
+                // 没有 MemoryObserver 实现时返回一个无操作的默认实现
+                Box::new(qianxun_memory::MemoryCore::open_in_memory().expect("in-memory fallback"))
+                    as Box<dyn qianxun_core::context::MemoryObserver + Send>
+            }
+        }
     });
 
     // 工具列表（用于 /tools 命令）
@@ -103,7 +113,7 @@ pub async fn run_repl(
     let ws_root = workspace.as_ref().map(|ws| ws.root.clone());
     let mut repl = Repl::new(
         agent_loop, conversation, provider, tools,
-        ws_context, memory_manager,
+        ws_context, memory,
         skills_mgr, skill_watcher, skills_catalog, skills_list, skills_count,
         tools_list, ws_root, resume, global_instructions,
     );

@@ -1,6 +1,5 @@
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::AgentLoop;
-use qianxun_core::context::memory::MemoryManager;
 use qianxun_core::skills::{SkillManager, SkillWatcher};
 use qianxun_core::tools::ToolRegistry;
 use std::collections::HashMap;
@@ -15,7 +14,7 @@ pub struct AcpSession {
     pub agent_loop: AgentLoop,
     pub created_at: String,
     pub is_running: bool,
-    pub memory_manager: Option<MemoryManager>,
+    pub memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
     /// 会话级工具注册表（含 MCP 工具），None 表示使用基础注册表
     pub tools: Option<Arc<ToolRegistry>>,
     /// 会话级技能目录，在 prompt 时注入
@@ -63,7 +62,7 @@ impl SessionManager {
         id: String,
         system_prompt: Option<String>,
         agent_loop: AgentLoop,
-        memory_manager: Option<MemoryManager>,
+        memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
         tools: Option<Arc<ToolRegistry>>,
         skills_catalog: String,
         skill_manager: Option<SkillManager>,
@@ -85,7 +84,7 @@ impl SessionManager {
                 agent_loop,
                 created_at: now,
                 is_running: false,
-                memory_manager,
+                memory,
                 tools,
                 skills_catalog,
                 ws_root,
@@ -177,7 +176,7 @@ impl SessionManager {
 
     /// 从现有会话 fork 出一个新会话（复制会话状态到新 ID）。
     /// 新会话获得独立的 conversation/agent_loop，共享 tools（Arc）。
-    /// memory_manager 和 skill_watcher 不支持 clone，fork 后设为 None。
+    /// memory 和 skill_watcher 不支持 clone，fork 后设为 None。
     pub fn fork(&mut self, new_id: &str, source_id: &str) -> Result<&mut AcpSession, String> {
         if self.sessions.len() as u32 >= self.max_sessions {
             return Err("max sessions reached".into());
@@ -193,7 +192,7 @@ impl SessionManager {
                 agent_loop: source.agent_loop.clone(),
                 created_at: now,
                 is_running: false,
-                memory_manager: None,
+                memory: None,
                 tools: source.tools.clone(),
                 skills_catalog: source.skills_catalog.clone(),
                 ws_root: source.ws_root.clone(),
