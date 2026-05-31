@@ -1,25 +1,23 @@
-pub mod cli;
-pub mod config;
-pub mod output;
+use qianxun_core::agent::conversation::Conversation;
+use qianxun_core::agent::engine::AgentLoop;
+use qianxun_core::agent::context::AutoCompactWindow;
+use qianxun_core::agent::system_prompt;
+use qianxun_core::config::ResolvedConfig;
+use qianxun_core::context::memory::MemoryManager;
+use qianxun_core::skills::SkillWatcher;
+use qianxun_core::tools::ToolRegistry;
+use qianxun_core::workspace::ProjectRoot;
+use crate::cli::cli::Repl;
 
 pub async fn run_repl(
-    resolved: &qianxun_core::config::ResolvedConfig,
-    workspace: Option<qianxun_core::workspace::Workspace>,
+    resolved: &ResolvedConfig,
+    workspace: Option<ProjectRoot>,
     resume: bool,
 ) -> anyhow::Result<()> {
-    use qianxun_core::agent::conversation::Conversation;
-    use qianxun_core::agent::engine::AgentLoop;
-    use qianxun_core::agent::context::AutoCompactWindow;
-    use qianxun_core::agent::system_prompt;
-    use qianxun_core::context::memory::MemoryManager;
-    use qianxun_core::skills::SkillWatcher;
-    use qianxun_core::tools::ToolRegistry;
-    use crate::cli::Repl;
-
-    // 系统提示词（包含工作区上下文 + 技能目录 Layer 1）
+    // 系统提示词（包含项目根路径 + 项目规则）
     let ws_context = workspace
         .as_ref()
-        .map(qianxun_core::workspace::build_workspace_context)
+        .map(qianxun_core::workspace::build_project_context)
         .unwrap_or_default();
     let skills_mgr = qianxun_core::skills::SkillManager::load_all(
         workspace.as_ref().map(|ws| ws.root.as_path()),

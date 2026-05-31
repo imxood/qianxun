@@ -1,111 +1,281 @@
 # 千寻架构设计
 
-> 版本: 0.1 | 更新: 2026-05-29 | 状态: 草案
+> 版本: 0.4 | 更新: 2026-05-31 | 状态: 草案
+>
+> 基于多轮架构评审修订：单二进制架构、Phase 3 子阶段划分、Daemon 为 Phase 4 目标、.qianxun/ 项目边界、SQLite 存储
+
+---
+
+## 阶段状态总览
+
+| Phase | 描述 | 文档中的节 |
+|---|---|---|
+| ✅ **Phase 1-2** | Agent 引擎 + Provider + 工具 + CLI + ACP + 工作区 | CLAUDE.md 模块结构 |
+| 🔧 **Phase 3a** | Memory + MCP + Skills 实现（可并行） | `memory-design.md` / `mcp-design.md` / `skills-design.md` |
+| 🔧 **Phase 3b** | Agent Patterns（React/Plan/Reflective/Workflow） | `agent-pattern-design.md` |
+| 🔧 **Phase 3c** | Daemon HTTP 框架（路由 + Key 管理 + 服务注册，与 3a/3b 并行） | `daemon-design.md` §3-§4 |
+| 📋 **Phase 4a** | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） | `daemon-design.md` §5 |
+| 📋 **Phase 4b** | VPS Server | `vps-server-design.md` |
+| 📋 **Phase 4c** | Web UI 前端 | — |
 
 ---
 
 ## 1. 概述
 
-千寻（Qianxun）是一个个人 AI 助手系统，既可以作为本地编程助手（REPL + ACP），也可以部署为分布式架构（VPS Server + Node）。
+千寻（Qianxun）是一个个人 AI 助手系统。在本地以 CLI REPL + ACP 协议 + Daemon 三种入口运行，可选部署远程 VPS Server 实现多设备互联和远程控制。
 
-### 运行模式
+### 运行模式（Phase 4 目标）
 
-千寻有三种运行入口，但底层架构统一：
+所有入口都依赖 Daemon 提供 AgentLoop、LLM 推理和 Memory 服务。CLI/ACP 是薄客户端，不持有 AgentLoop，不直接调 LLM。
 
-| 入口 | 适用场景 | AgentLoop 位置 | Memory 访问 |
-|---|---|---|---|
-| **qx cli** | 终端交互 | HTTP → Node daemon | 通过 Node HTTP API |
-| **qx acp** | Zed 编辑器集成 | HTTP → Node daemon | 通过 Node HTTP API |
-| **qx node** | 守护进程常驻 | 自身进程 | 直接 MemoryCore |
+> **Phase 3 开发期**：Daemon 尚未实现。CLI 以 standalone 模式运行，进程内链接 AgentLoop + Memory + MCP + Skills。详见 §3 Phase 3 过渡路径。
 
-CLI 和 ACP 在架构上是等价的——都是 qx 进程，通过 HTTP 连接本地的 Node daemon。
-Node daemon 是核心，它持有 MemoryCore 并提供 REST API。
+| 入口 | 适用场景 | 依赖（Phase 4） |
+|---|---|---|
+| **qx cli** | 终端交互 | HTTP → Daemon |
+| **qx acp** | Zed 编辑器集成 | HTTP → Daemon |
+| **qx daemon** | 守护进程常驻 | 自身：AgentLoop + MemoryCore + HTTP API |
 
-当 Node daemon 未运行时，CLI 也可降级为进程内模式（直接链接 MemoryCore）。
+**架构定位**：
+- Daemon 是目标架构的唯一运行时（Phase 4）
+- Phase 3 开发期：CLI 以 standalone 模式运行，进程内链接 core + memory + MCP + skills
+- Phase 4 目标：CLI/ACP 是薄客户端，通过 HTTP → Daemon
+- 多前端实例共享同一个 Daemon 的 token 预算和 LLM Provider 池
+- CLI standalone 模式在 Phase 4 后保留，用于快速调试
 
 ---
 
 ## 2. 整体架构
 
+### 2.1 目标架构图
+
 ```mermaid
 graph TB
-    subgraph "Node Daemon（每台开发机一个，常驻）"
-        NODE_HTTP["HTTP Server :8321<br/>REST API"]
-        NODE_WS["WS Client → VPS"]
-        MC[MemoryCore<br/>redb + BM25 + Vector]
-        NODE_WEB["Web UI<br/>Svelte + Vite"]
+    subgraph "Daemon（每台开发机一个，常驻）— Phase 4"
+        DAEMON_HTTP["HTTP Server :23900<br/>REST API"]
+        DAEMON_WS["WS Client → VPS"]
+        MC[MemoryCore<br/>SQLite + FTS5 + Vector]
+        DAEMON_WEB["Web UI<br/>Svelte + Vite"]
     end
 
-    subgraph "本地客户端（短暂进程）"
+    subgraph "客户端（短暂进程）"
         CLI["qx cli<br/>REPL 终端"]
         ACP["qx acp<br/>Zed ACP 协议"]
     end
 
-    subgraph "远程"
+    subgraph "远程 — Phase 4"
         VPS[VPS Server<br/>节点发现 / 命令中转]
         APP[App / Web UI]
     end
 
-    CLI -->|HTTP :8321| NODE_HTTP
-    ACP -->|HTTP :8321| NODE_HTTP
-    NODE_HTTP --- MC
-    NODE_WS ---|WS| VPS
+    CLI -.->|HTTP :23900| DAEMON_HTTP
+    ACP -.->|HTTP :23900| DAEMON_HTTP
+    DAEMON_HTTP --- MC
+    DAEMON_WS ---|WS| VPS
     APP ---|WS| VPS
-    VPS ---|WS| NODE_WS
-    NODE_WEB --- NODE_HTTP
+    VPS ---|WS| DAEMON_WS
+    DAEMON_WEB --- DAEMON_HTTP
 ```
 
-### 2.1 设计原则
+### 2.2 AgentLoop 归 Daemon —— 设计论证（Phase 4 目标）
 
+**决策**：AgentLoop 只放在 Daemon 中。CLI/ACP 不包含独立 AgentLoop。
+
+```
+Daemon 持有：
+┌────────────────────────────────────────┐
+│  AgentLoop（Conversation + 状态机）    │ ← 唯一
+│  LlmProvider 池（API Key 集中持有）    │ ← 唯一
+│  MemoryCore（SQLite + FTS5 + Vector） │ ← 唯一
+│  ToolRegistry（builtin + MCP + Skill）│ ← 唯一
+└────────────────────────────────────────┘
+          ↕ HTTP :23900
+  ┌────────┴────────┐
+  │ CLI             │ ACP
+  │ (终端渲染)      │ (协议转换)
+  └────────────────┘
+```
+
+**为什么不保留独立 AgentLoop**：
+
+| 方案 | 独立 AgentLoop（已否决） | 统一 AgentLoop（选定） |
+|---|---|---|
+| API Key 管理 | 散落在各 CLI 进程 | Daemon 集中加密持有 |
+| Token 预算 | 各进程独立，无法全局控制 | 单点统一限流 |
+| 对话恢复 | CLI crash → 丢失 | 重连 Daemon 即可恢复 |
+| 多前端协调 | CLI/ACP 各自为政 | 共享同一个 Conversation |
+| 单点风险 | 无 | Daemon 是单点（可 systemd 自愈） |
+| 额外延迟 | 无 | ~0.5ms（本地 loopback） |
+
+本地 loopback 的 0.5ms 相对于 LLM 推理的秒级延迟可以忽略。
+
+**离线降级**：Daemon 断开 VPS 后，本地 AgentLoop 照常工作。CLI 断开 Daemon 后可尝试重连（systemd 自愈）。
+> Phase 4 后 Daemon 是必需的运行时组件。Phase 3 开发期使用 CLI standalone 模式，不依赖 Daemon。
+
+### 2.3 设计原则
+
+**Phase 1-2 已落地：**
+
+- **分层解耦**：core 不依赖任何 binary，OutputSink 让引擎不感知输出目标。
+- **工具分三层**：builtin / skill / MCP，统一通过 ToolRegistry 调度。
+- **系统提示词组装**：system_prompt.rs 统一构建，注入 memory + skills 上下文。
+- **构建顺序交付**：每个 Phase 交付可运行系统，不提前实现未规划的 feature。
+
+**Phase 4 目标：**
+
+- **Daemon 是本地核心**：持有 AgentLoop + MemoryCore + LLM Provider 池，通过 HTTP :23900 提供服务。
+- **CLI/ACP 是薄客户端**：不持有 AgentLoop，不直接调 LLM。只负责输入输出渲染。
+- **多前端并发**：多个 qx 实例可同时连接同一个 Daemon，各自有独立 Conversation 但共享 MemoryCore。
+- **API Key 集中管理**：所有 Provider 的 API Key 仅在 Daemon 进程中持有，加密存储（AES-GCM）。
 - **VPS 只做控制面**：用户管理、节点发现、命令中转。不存代码、不存记忆、不调 LLM。
-- **Node 是本地核心**：持有 MemoryCore + LLM Provider 池，通过 HTTP :8321 提供服务。
-- **CLI/ACP 是薄客户端**：AgentLoop 在客户端进程内运行，但 LLM 调用和 memory 都通过 HTTP 代理到 Node。
-- **API Key 集中管理**：所有 Provider 的 API Key 仅在 Node 进程中持有，加密存储。CLI/ACP 不需要配置 API Key。
-- **离线降级**：Node 断开 VPS 后，本地 AgentLoop 照常工作；CLI 断开 Node 后可使用进程内 memory 回退。
-- **Web UI = Svelte + Vite**：编译为静态文件，由 Node HTTP Server 内嵌托管。
+- **Web UI = Svelte + Vite**：编译为静态文件，由 Daemon HTTP Server 内嵌托管。
+
+### 2.4 已知限制
+
+| 限制 | 说明 | 规划 |
+|---|---|---|
+| **跨机记忆同步** | 多台开发机各自有独立 MemoryCore，VPS 不存记忆 | Phase 5 评估 |
+| **单机单 Daemon** | 一台开发机只能运行一个 Daemon，不支持多实例 | 无计划 |
+| **Session 非持久** | 当前 ACP 会话仅内存存储 | Phase 3 Memory 实现后持久化 |
 
 ---
 
-## 3. Crate 结构
+## 3. 单二进制架构
+
+千寻以**单二进制 + 子命令**模式交付。所有入口通过同一个 `qx` 命令调用，不同子命令对应不同运行模式。
+
+| 子命令 | 模式 | 运行时形态 | 依赖 |
+|---|---|---|---|
+| `qx` | CLI REPL | 短暂进程，链接 core | HTTP → Daemon（可选 standalone） |
+| `qx --acp-mode` | ACP 协议桥 | 短暂进程，链接 core + acp | 进程内（Phase 3）/ HTTP → Daemon（Phase 4） |
+| `qx daemon` | 守护进程 | **常驻**，链接 core + memory + acp | 无外部依赖 |
+
+### Phase 3 过渡路径
+
+Phase 3 交付 Memory/Skills/MCP 时，Daemon 尚未实现。因此这些模块在 **CLI standalone 模式**下开发运行：
+
+```
+Phase 3 开发期：
+  qx（standalone）
+    ├─ AgentLoop（进程内）
+    ├─ Memory（进程内，直接链接 qianxun-memory）
+    ├─ MCP Client（进程内）
+    └─ Skill Manager（进程内）
+
+Phase 4 目标：
+  qx daemon（常驻）
+    ├─ AgentLoop（进程内）
+    ├─ Memory（进程内）
+    ├─ MCP（进程内）
+    └─ Skill Manager（进程内）
+  
+  qx（薄客户端）→ HTTP → qx daemon
+  qx --acp-mode（薄协议桥）→ HTTP → qx daemon
+```
+
+CLI standalone 模式在 Phase 4 后仍然保留，用于快速调试和开发场景。
+
+### 3.1 Crate 划分
 
 ```mermaid
 graph LR
-    CORE[qianxun-core<br/>trait 定义]
-    MEM[qianxun-memory<br/>MemoryCore 实现]
-    CLI[qianxun-cli<br/>客户端：REPL]
-    ACP[qianxun-acp<br/>客户端：Zed 集成]
-    SRV[qianxun-server<br/>VPS 服务]
-    NODE[qianxun-node<br/>守护进程 + HTTP API + Web UI]
-
-    CLI -.->|HTTP :8321| NODE
-    ACP -.->|HTTP :8321| NODE
-    NODE --> MEM
-    NODE --> CORE
-    CLI --> CORE
-    ACP --> CORE
-    SRV --> CORE
+    CORE[qianxun-core<br/>trait + 引擎 + 工具]
+    MEM[qianxun-memory<br/>SQLite + FTS5 + Vector — 🔧 3]
+    APP[qianxun<br/>单二进制入口<br/>cli / acp / daemon]
+    
+    APP --> CORE
+    APP --o MEM
 ```
 
-| Crate | 角色 | 依赖 | 运行方式 |
+| Crate | 类型 | 角色 | Phase |
 |---|---|---|---|
-| `qianxun-core` | 核心类型 + trait 定义 | 无特殊 | 库 |
-| `qianxun-memory` | 记忆引擎（redb + BM25 + Vector） | core | 库 |
-| `qianxun-cli` | 客户端：REPL 终端 | core | 短暂进程，通过 HTTP 调用 Node |
-| `qianxun-acp` | 客户端：Zed 集成 | core | 短暂进程，通过 HTTP 调用 Node |
-| `qianxun-server` | VPS 服务 | core | 常驻（systemd） |
-| `qianxun-node` | **核心 daemon**：LLM 代理 + Memory + Web UI | core + memory + reqwest | **常驻（systemd / Windows Service）** |
+| `qianxun-core` | lib | 核心类型、Agent 引擎、Provider、工具、trait 定义 | ✅ 1 |
+| `qianxun-memory` | lib | 记忆引擎（SQLite + FTS5 + Vector 索引） | 🔧 3 |
+| `qianxun` | **bin** | 单二进制入口（cli / acp / daemon 子命令） | 🔧 3-4 |
 
-`qianxun-node` 持有所有 API Key，是唯一直接调 LLM API 的运行时组件。
-CLI/ACP 的 AgentLoop 仍在其进程内运行，但 LLM 调用通过 HTTP 代理到 Node。
+**LlmError** — 统一的 LLM 错误类型:
+- `NoApiKey`, `RateLimitExceeded`, `ApiError`, `AuthenticationError`, `PromptTooLarge`, `StreamEnded`
 
-**关键架构决策**：
-- `qianxun-node` 是唯一直接链接 `qianxun-memory` 的运行时 crate
-- `qianxun-cli` 和 `qianxun-acp` 都不直接链接 `qianxun-memory`——它们通过 HTTP 调用 Node
-- CLI 降级模式下（无 Node），CLI 可进程内链接 memory，但不是默认路径
+**TokenUsage** — token 消耗追踪: `input`, `output`, `cache_creation_input`, `cache_read_input`
 
----
+**AgentConfig** — 代理引擎配置: `max_turns`, `max_retries`, `max_tokens`, `temperature`, `thinking`
+
+**AgentEvent / OutputSink** — 事件通知 + 输出抽象，引擎不感知输出目标。
+
+### 3.2 数据库选型决策
+
+| 决策 | 结论 |
+|---|---|
+| **记忆存储** | SQLite (rusqlite bundled) — 见 [ADR-0001: 数据库选型](../30_决策/ADR-0001_数据库选型.md) |
+| **全文搜索** | SQLite FTS5（取代自建 BM25 HashMap + 全量序列化） |
+| **向量存储** | SQLite BLOB 列（取代 WAL 追加 + 启动重建） |
+
+### 3.3 配置向后兼容
+
+配置格式从 JSON5 改为带注释的 JSON。如果用户存在旧的 `~/.qianxun/config.json5`（Phase 1-2 使用的格式），Config 解析逻辑应自动检测并尝试解析：
+
+```
+启动时：
+  1. 尝试读取 ~/.qianxun/config.json（带注释 JSON，json_comments + serde_json）
+  2. 如果文件不存在 → 尝试读取 ~/.qianxun/config.json5（旧格式）
+  3. 如果旧文件存在且解析成功 → 自动重命名为 config.json.bak，写入新格式
+  4. 如果都不存在 → 使用内置默认配置引导用户生成
+```
+
+### 3.4 工具系统
+
+5 个内置工具：ReadTextFileTool, WriteTextFileTool, SearchTool, GrepTool, ListDirectoryTool。
+
+在 ACP 模式下，文件读写工具可由编辑器代理执行，通过 ACP 双向请求机制转发，失败时回退到本地。
+
+工具分三层：builtin（核心文件/搜索）、skill（动态加载）、MCP（外部协议），统一通过 ToolRegistry 调度。
+
+### 3.5 项目边界模型
+
+千寻以 `.qianxun` 目录定义项目边界，遵循和 `.git` 一致的使用体验：
+
+```
+.qianxun        → 千寻项目根
+.git            → git 仓库边界
+```
+
+**查找规则**：打开目录时，向上逐层查找 `.qianxun` 目录（最多 10 层，到达文件系统根为止）。
+
+```
+~/projects/
+├── qianxun/.qianxun/         ← 找到 → 项目根
+│   └── src/main.rs            ← 属于 qianxun 项目
+│
+├── work/.qianxun/            ← 找到 → 项目根
+│   └── backend/               ← 属于 work 项目
+│
+├── personal/                  ← 无 .qianxun，继续向上
+│   └── blog/.git/             ← 但也不是千寻项目
+│       └── src/                ← "未在千寻项目中"
+```
+
+嵌套时取最近一层 `.qianxun`（同 git 的 `.git` 查找逻辑）。
+
+**和项目上下文的关系**：`build_project_context()` 读取 `.qianxun/config.json` 的 `prompt_file` 设置和项目根下的 CLAUDE.md / AGENTS.md 文件，注入 system prompt。项目类型由 Agent 通过文件读取自行发现，千寻不做静态检测。
+
+### 3.6 项目目录结构
+
+```
+.qianxun/                        # 项目根标记（对千寻有效）
+├── config.json                 # 项目级配置覆写（可选）
+├── node.token                   # 设备 token（Daemon 写入）
+├── skills/                      # 项目级 skill（可选）
+│   └── project-rules.md
+├── workflows/                   # 项目级工作流（可选）
+│   └── deploy.md
+└── .gitignore
+```
+
+全局配置 `~/.qianxun/config.json` 和项目级 `.qianxun/config.json` 合并规则：**项目级覆写全局级同名字段**。这和 `Cargo.toml` 的 `[workspace.metadata]` 覆写逻辑一致。
 
 ## 4. VPS Server 模式
+
+> 📋 Phase 4 规划，当前未实现。
 
 ### 4.1 架构
 
@@ -119,7 +289,7 @@ VPS（公网可达）
     └─ 数据库（用户 + 设备 + 授权码）
 
 Windows 开发机              Linux 开发机              App / Web
-└─ qx node                 └─ qx node               └─ qx app
+└─ qx daemon                 └─ qx daemon               └─ qx app
    ├─ AgentLoop（本地）       ├─ AgentLoop（本地）       ├─ 登录
    ├─ MemoryCore（本地）      ├─ MemoryCore（本地）      ├─ 查看节点
    ├─ 文件 I/O（本地）        ├─ 文件 I/O（本地）        ├─ 发送命令
@@ -141,35 +311,10 @@ Windows 开发机              Linux 开发机              App / Web
 ### 4.3 数据库模型
 
 ```rust
-pub struct User {
-    pub id: String,
-    pub username: String,
-    pub password_hash: String,
-    pub role: UserRole,        // Admin | User
-    pub created_at: DateTime<Utc>,
-}
-
-pub struct Device {
-    pub id: String,
-    pub host_id: String,       // "windows-pc"
-    pub user_id: String,       // 所属用户
-    pub token_hash: String,    // 设备 token 哈希
-    pub host_type: String,     // "windows" | "linux" | "macos"
-    pub projects: Vec<String>, // ["qianxun", "myblog"]
-    pub workers: u32,
-    pub caps: Vec<String>,     // ["read_file","terminal","git"]
-    pub status: DeviceStatus,  // online | offline
-    pub last_seen: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-}
-
-pub struct AuthCode {
-    pub code: String,
-    pub device_id: String,
-    pub user_id: Option<String>,
-    pub expires_at: DateTime<Utc>,
-    pub status: AuthCodeStatus, // Pending | Authorized | Expired
-}
+pub struct User { pub id, pub username, pub password_hash, pub role, pub created_at }
+pub struct Device { pub id, pub host_id, pub user_id, pub token_hash, pub host_type,
+    pub projects, pub workers, pub caps, pub status, pub last_seen, pub created_at }
+pub struct AuthCode { pub code, pub device_id, pub user_id, pub expires_at, pub status }
 ```
 
 ### 4.4 设备授权流程
@@ -177,169 +322,135 @@ pub struct AuthCode {
 ```
 管理员在 Web UI 创建用户 → 用户登录 Web UI
 
-开发机 (Node)              用户 (浏览器)              VPS
+开发机 (Daemon)              用户 (浏览器)              VPS
 ───────────               ──────────              ──────────
-qx node auth
+qx daemon auth
   │ POST /api/device/auth-code                    │
   │← 返回 code=xyz                                 │
   │ 打印 URL                                        │
-  │                                                 │
   │                    打开 https://vps/authorize   │
   │                      ?code=xyz                  │
-  │                                                 │
   │                    Web UI → [授权]               │
   │                      POST /api/device/authorize │
-  │                                                 │
   │ 轮询 token                                      │
   │ GET /api/device/token?code=xyz                  │
   │← device_token                                   │
-  │                                                 │
   │ WS: wss://vps/ws?token=dt_xxx                   │
 ```
 
-| 凭证 | 有效期 | 用途 |
-|---|---|---|
-| 授权码 | 5 分钟 | 换取设备 token |
-| 设备 token | 长期（可吊销） | WS 连接认证 |
-| 用户 JWT | 24 小时 | Web UI / App 登录 |
+> **注意**：上述授权流程是完整的 OAuth Device Authorization Grant 方案，适合多用户团队。
+> 默认使用场景为个人单机时，可通过 `~/.qianxun/config.json` 预配置 API token 跳过此流程。
+> 个人用户无需部署 VPS，Daemon 可完全离线工作。
 
-### 4.5 多用户隔离
+### 4.5 WebSocket 协议
 
 ```
-用户 A 登录 App → 只能看到自己的节点，只能给自己的节点发命令
-用户 B 登录 App → 只能看到自己的节点
-管理员登录 Web UI → 看到所有用户+所有节点，可创建/禁用用户
+Daemon 连接认证:    → {"type":"auth","token":"dt_xxxxx"}
+                    ← {"type":"auth_ok","device_id":"d_abc","user_id":"u_123"}
+
+Daemon 注册能力:    → {"type":"register","projects":[...],"caps":[...]}
+
+App → Daemon 命令:  → {"type":"command","target":"windows-pc","seq":1,
+                       "payload":{"action":"read_file","path":"..."}}
+                    ← {"type":"command_result","host":"windows-pc","seq":1,...}
 ```
 
-### 4.6 WebSocket 协议
-
-```json
-// Node 连接认证
-→ {"type":"auth","token":"dt_xxxxx"}
-← {"type":"auth_ok","device_id":"d_abc","user_id":"u_123"}
-
-// Node 注册能力
-→ {"type":"register","projects":["qianxun"],"caps":["read_file","terminal","git"]}
-→ {"type":"status","status":"busy","workers":2}
-
-// App 连接 → 获取节点列表
-→ {"type":"auth","token":"eyJ..."}
-← {"type":"node_list","nodes":[
-    {"host_id":"windows-pc","projects":["qianxun"],"workers":2,"status":"online"}
-  ]}
-
-// App → Node: 命令（VPS 验证 target 属于当前用户后透传）
-→ {"type":"command","target":"windows-pc","seq":1,
-   "payload":{"action":"read_file","path":"C:\\dev\\README.md"}}
-← {"type":"command_result","host":"windows-pc","seq":1,"data":{"content":"# qianxun\n..."}}
-```
-
-### 4.7 API 清单
+### 4.6 API 清单
 
 ```
-公开:
-  POST   /api/auth/login                 登录 → JWT
-  POST   /api/device/auth-code           生成授权码
-  POST   /api/device/authorize           确认授权
-  GET    /api/device/token               轮询 token
+POST   /api/auth/login                 登录 → JWT
+POST   /api/device/auth-code           生成授权码
+POST   /api/device/authorize           确认授权
+GET    /api/device/token               轮询 token
 
-管理员:
-  POST   /api/admin/users                创建用户
-  GET    /api/admin/users                用户列表
-  DELETE /api/admin/users/:id            禁用用户
-
-Web UI:
-  GET    /login                          登录页
-  GET    /authorize?code=xxx             授权页
-  GET    /admin/users                    用户管理
-  GET    /dashboard                      节点总览
-
-WebSocket:
-  wss://vps:8313/ws                      设备/App 连接
+POST   /api/admin/users                创建用户（管理员）
+GET    /api/admin/users                用户列表（管理员）
+WS     wss://vps:23901/ws               设备/App 连接
 ```
 
 ---
 
-## 5. Node 模式
+## 5. Daemon 模式
+
+> 📋 Phase 4 规划。当前千寻以 CLI/ACP 模式运行，Daemon 是 Phase 4 的核心交付。
 
 ### 5.1 架构
 
-Node 是运行在开发机上的守护进程（`qx node`），是整个系统的本地核心。
-它持有 MemoryCore 并对外提供 HTTP API，供 CLI/ACP 进程和 Web UI 调用。
+Daemon 是运行在开发机上的守护进程（`qx daemon`），是整个系统的本地核心。
+它持有 AgentLoop + MemoryCore + LLM Provider，对外提供 HTTP API。
 
 ```
-Node 进程（常驻）：
+Daemon 进程（常驻）— Phase 4 目标：
 ┌─────────────────────────────────────────────────────┐
-│  HTTP Server (127.0.0.1:8321)                       │
+│  HTTP Server (127.0.0.1:23900)                       │
 │  ├─ /v1/llm/*             LLM Provider 管理         │
-│  ├─ /v1/llm/chat          LLM 推理代理              │
+│  ├─ /v1/llm/chat          LLM 推理代理（SSE 流式）  │
 │  ├─ /v1/memory/*          记忆管理                   │
 │  ├─ /v1/skills/*          技能管理                   │
 │  ├─ /v1/mcp/*             MCP 管理                   │
 │  ├─ /v1/projects/*        项目列表/状态              │
 │  ├─ /v1/config/*          配置管理                   │
-│  ├─ /v1/agent/*           Agent 实例管理             │
+│  ├─ /v1/chat/*            AgentLoop 代理 / 会话管理  │
 │  └─ /v1/system/*          系统状态/健康检查           │
 │                                                     │
+│  AgentLoop（向量化）                                 │
+│  ├─ Conversation（对话状态机）                       │
+│  ├─ LlmProvider（DeepSeek/OpenAI）                   │
+│  ├─ ToolRegistry（builtin + MCP + Skill）            │
+│  └─ MemoryObserver（记忆捕获钩子）                   │
+│                                                     │
 │  MemoryCore（直接链接）                               │
-│  ├─ redb + 本地文件                                 │
-│  ├─ BM25 SearchIndex                                │
-│  └─ VectorIndex                                     │
+│  ├─ SQLite + FTS5                                   │
+│  └─ VectorIndex（BLOB 列持久化）                     │
 │                                                     │
 │  VPS WS Client（可选）                               │
-│  └─ wss://vps:8313/ws                               │
+│  └─ wss://vps:23901/ws                               │
 │                                                     │
 │  Web UI（Svelte + Vite，内嵌）                        │
-│  └─ http://127.0.0.1:8321/_ui                       │
+│  └─ http://127.0.0.1:23900/_ui                       │
 └─────────────────────────────────────────────────────┘
-       ↑ HTTP :8321           ↑ stdio
-       │                      │
-  ┌────┴─────┐          ┌────┴─────┐
-  │ qx cli   │          │ qx acp   │
-  │ (REPL)   │          │ (Zed)    │
-  └──────────┘          └──────────┘
+       ↑ HTTP :23900
+       │
+  ┌────┴─────┐          ┌───────────┐
+  │ qx cli   │          │ qx acp    │
+  │ (REPL)   │          │ (Zed)     │
+  └──────────┘          └───────────┘
 ```
 
 ### 5.2 启动流程
 
 ```
-1. 读取配置 ~/.qx/config.yaml
-2. 初始化 MemoryCore（打开 redb + 重建索引）
-3. 启动 HTTP Server :8321
-4. 如果配置了 VPS 连接：
-   a. 读取 ~/.qx/node.token
-   b. 连接 wss://vps:8313/ws?token=xxx
+1. 读取配置 ~/.qianxun/config.json
+2. 初始化 MemoryCore（打开 SQLite + 重建向量索引 + FTS5 就绪）
+3. 初始化 AgentLoop（LlmProvider + ToolRegistry）
+4. 启动 HTTP Server :23900
+5. 如果配置了 VPS 连接：
+   a. 读取 ~/.qianxun/daemon.token
+   b. 连接 wss://vps:23901/ws?token=xxx
    c. 注册能力列表和项目信息
-5. 启动 Web UI（内嵌 Svelte 静态文件）
-6. 等待客户端连接或远程命令
+6. 启动 Web UI（内嵌 Svelte 静态文件）
+7. 等待客户端连接或远程命令
 ```
 
 ### 5.3 HTTP API 设计
 
 #### 5.3.1 LLM API
 
-LLM 管理是 Node 的核心能力之一。Node 持有所有 Provider 的 API Key，
-CLI/ACP 不直接调 LLM，而是通过 Node 代理：
-
 ```
-CLI/ACP                    Node:8321                  LLM API（DeepSeek/OpenAI）
+CLI/ACP                  Daemon:23900                  LLM API (DeepSeek/OpenAI)
   │                          │                          │
-  ├─ POST /v1/llm/chat ─────→│                          │
+  │ POST /v1/llm/chat ──────→│                          │
   │   { messages, tools }    │                          │
   │                          ├─ POST /v1/chat/completions ──→│
   │                          │←─ SSE stream ───────────────│
-  │←─ SSE stream ────────────│                          │
+  │←─ SSE stream ───────────│                          │
 ```
 
-```
-POST /v1/llm/chat             LLM 推理（流式返回 SSE）
-  Body: { provider, model, messages, tools, temperature, max_tokens }
-  Response: SSE stream（text + tool_call + usage）
+API 端点：
 
+```
+POST /v1/llm/chat             LLM 推理（流式 SSE）
 POST /v1/llm/embed            文本嵌入
-  Body: { provider, model, input }
-  Response: { embedding: [f32] }
-
 GET  /v1/llm/providers        已配置的 Provider 列表
 POST /v1/llm/providers        添加 Provider 配置
 PUT  /v1/llm/providers/:name  更新 Provider 配置
@@ -347,31 +458,14 @@ DELETE /v1/llm/providers/:name 删除 Provider 配置
 POST /v1/llm/providers/:name/test  测试连接
 ```
 
-Provider 配置示例：
-
-```json
-{
-  "name": "deepseek",
-  "api_base": "https://api.deepseek.com/anthropic/v1",
-  "api_key": "sk-xxx",
-  "default_model": "deepseek-v4-flash",
-  "models": [
-    { "id": "deepseek-v4-flash", "max_tokens": 128000 },
-    { "id": "deepseek-v4", "max_tokens": 128000 }
-  ],
-  "caps": ["chat", "streaming", "thinking"]
-}
-```
-
-**API Key 存储**：API Key 仅在 Node 进程中持有内存，
-磁盘存储时加密（AES-GCM），密钥来自系统密钥链（macOS Keychain / Linux secret-tool / Windows Credential Manager）。
+**API Key 存储**：仅在 Daemon 进程内存中持有。磁盘存储时加密（AES-GCM），密钥来自系统密钥链（macOS Keychain / Linux secret-tool / Windows Credential Manager）。
 
 #### 5.3.2 Memory API
 
 ```
 POST /v1/memory/observe         记录工具调用
 POST /v1/memory/search          搜索记忆
-POST /v1/memory/build_context   构建上下文（给 CLI/ACP 用）
+POST /v1/memory/build_context   构建上下文
 POST /v1/memory/remember        手动保存持久记忆
 POST /v1/memory/forget          删除记忆
 GET  /v1/memory/sessions        会话列表
@@ -384,147 +478,77 @@ POST /v1/memory/slots            创建新插槽
 DELETE /v1/memory/slots/:label   删除插槽
 ```
 
-所有 memory API 转发到 MemoryCore。CLI/ACP 进程不直接链接 qianxun-memory crate，
-只通过 HTTP 调用。
-
-#### 5.3.3 Skills API
+#### 5.3.3 Skills / MCP / Project / Config / System API
 
 ```
 GET  /v1/skills                 技能列表
 POST /v1/skills/scan            扫描技能目录
-POST /v1/skills/install         安装技能（从 Git 或目录）
-POST /v1/skills/:name/enable   启用技能
-POST /v1/skills/:name/disable  禁用技能
+POST /v1/skills/install         安装技能
+POST /v1/skills/:name/enable   启用/禁用技能
 DELETE /v1/skills/:name         删除技能
-GET  /v1/skills/:name           技能详情
-PUT  /v1/skills/:name           更新技能配置
-```
 
-#### 5.3.4 MCP API
-
-```
-GET  /v1/mcp/servers            已配置的 MCP 服务器列表
+GET  /v1/mcp/servers            MCP 服务器列表
 POST /v1/mcp/servers            添加 MCP 服务器
 DELETE /v1/mcp/servers/:id      删除 MCP 服务器
 POST /v1/mcp/servers/:id/test   测试连接
-GET  /v1/mcp/servers/:id/tools  工具列表
-```
 
-#### 5.3.5 Project API
-
-```
-GET  /v1/projects               项目列表（带活跃 worker 数）
+GET  /v1/projects               项目列表
 POST /v1/projects               添加项目
-GET  /v1/projects/:name         项目详情
 DELETE /v1/projects/:name       删除项目
-POST /v1/projects/:name/start   启动项目（创建 worker）
-POST /v1/projects/:name/stop    停止项目（关闭所有 worker）
-```
 
-#### 5.3.6 Config API
-
-```
 GET  /v1/config                 读取配置
 PUT  /v1/config                 更新配置
-GET  /v1/config/provider        查看 LLM Provider 配置
-PUT  /v1/config/provider        更新 LLM Provider 配置
-GET  /v1/config/agent           查看 Agent 默认配置
-PUT  /v1/config/agent           更新 Agent 默认配置
-```
 
-#### 5.3.7 System API
-
-```
 GET  /v1/system/health          健康检查
-GET  /v1/system/status          状态概览（内存/CPU/uptime）
-GET  /v1/system/logs            实时日志流
-POST /v1/system/restart         重启 Node
-POST /v1/system/shutdown        关闭 Node
+GET  /v1/system/status          状态概览
+POST /v1/system/restart         重启 Daemon
+POST /v1/system/shutdown        关闭 Daemon
 ```
 
 ### 5.4 Web UI（Svelte + Vite）
 
-```
-Web UI 是 Node 的内嵌前端，通过 Node 的 HTTP Server 提供服务。
+> 📋 Phase 4 规划。技术选型待前端实现时评估确认。
 
-技术选型：
-  - Svelte 5 + Vite（构建工具）
-  - TypeScript
-  - 编译后为纯静态文件，嵌入 qx node 二进制
-  - 通过 Node HTTP Server 的 /_ui 路由提供访问
-
-页面结构：
-  /_ui/
-  ├── /                        仪表盘（节点总览）
-  ├── /llm                     LLM 管理
-  │   ├── /providers           Provider 列表/配置
-  │   ├── /providers/:name     Provider 详情
-  │   └── /chat                Playground（测试对话）
-  ├── /memory                  记忆管理器
-  │   ├── /sessions            会话列表
-  │   ├── /sessions/:id        会话详情
-  │   ├── /memories            持久记忆
-  │   ├── /search              记忆搜索
-  │   └── /slots               工作记忆插槽
-  ├── /skills                  技能管理
-  ├── /mcp                     MCP 服务器管理
-  ├── /projects                项目管理
-  ├── /config                  配置管理
-  └── /system                  系统状态
-
-构建流程：
-  pnpm build:web → dist/web/
-  构建产物被 qx node 编译时 embed 到二进制中
-  或作为独立目录跟随 Node 一起部署
-```
+Web UI 是 Daemon 的内嵌前端，通过 Daemon HTTP Server 提供 `/v1/` REST API 的浏览器界面。
+编译后为纯静态文件，嵌入 `qx daemon` 二进制，通过 `/_ui` 路由访问。
 
 ### 5.5 离线降级
 
 ```
-有网时：
-  Node → VPS（App 可见，可远程控制）
-
-断网时：
-  Node 检测 WS 断开
-  → 本地 AgentLoop（CLI/ACP）正常工作
-  → 本地 Web UI 正常工作
-  → 记忆写入本地 MemoryCore
-  → 网络恢复后自动重连
-  → 不尝试同步离线期间的记忆（VPS 不存记忆）
+有网时：Daemon → VPS（App 可见，可远程控制）
+断网时：Daemon 检测 WS 断开 → 本地 AgentLoop 照常工作
+       → 本地 Web UI 照常工作 → 记忆写入本地 MemoryCore
+       → 网络恢复后自动重连 → 不同步离线期间的记忆（VPS 不存记忆）
 ```
 
 ---
 
 ## 6. 记忆子系统
 
-记忆子系统的完整设计见 [`docs/memory-design.md`](./memory-design.md)。这里仅概述 crate 边界。
+> 🔧 Phase 3 设计中。完整设计见 `docs/memory-design.md`。此处仅概述 crate 边界。
 
 ```mermaid
 graph LR
     subgraph "qianxun-core"
         MO[MemoryObserver trait<br/>6 个方法]
     end
-    
     subgraph "qianxun-memory"
         MC[MemoryCore]
-        MC --> R[(redb<br/>~/.qianxun/mem.db)]
+        MC --> DB[(SQLite<br/>~/.qianxun/mem.db)]
         MC --> F[(本地文件<br/>~/.qianxun/memory/)]
-        MC --> BM[BM25 SearchIndex]
-        MC --> VI[VectorIndex]
+        MC --> FTS[FTS5 全文索引]
+        MC --> VI[VectorIndex<br/>BLOB 列持久化]
     end
 ```
-
-AgentLoop 通过 `Option<Box<dyn MemoryObserver>>` 持有记忆能力，不依赖具体实现。
 
 ```rust
 #[async_trait]
 pub trait MemoryObserver: Send + Sync {
-    async fn observe(&self, hook_type: HookType, tool_name: &str,
-        tool_input: Option<Value>, tool_output: Option<&str>);
+    async fn observe(&self, hook_type, tool_name, tool_input, tool_output);
     async fn build_context(&self, query: &str, token_budget: u32) -> String;
     async fn remember(&self, content: &str, mem_type: &str) -> Result<String>;
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
-    async fn session_start(&self, session_id: &str, project: &str, cwd: &str);
+    async fn session_start(&self, session_id, project, cwd);
     async fn session_end(&self);
 }
 ```
@@ -533,161 +557,50 @@ pub trait MemoryObserver: Send + Sync {
 
 ## 7. 记忆与 AgentLoop 的运行时交互
 
-本章描述一次完整的用户交互中，记忆子系统在 AgentLoop 中的调用时序。
+> 🔧 Phase 3 实现目标。完整细节见 `memory-design.md`。此处仅概述关键流程。
 
-### 7.1 完整调用链
-
-#### 阶段一：用户输入 → 构建 system prompt
+### 阶段一：用户输入 → 构建 system prompt
 
 ```
-用户输入 "帮我在 src/auth.rs 加一个 JWT 中间件"
-  │
-  ▼
-handle_message()
-  │
-  ├─ memory_core.build_context(query, token_budget=4000)
-  │   │
-  │   ├─ 读取 pinned slots（始终注入）
-  │   ├─ hybrid_search(query, filter=project) → 查找相关历史
-  │   │   ├─ bm25.read().search("JWT 中间件 auth.rs")
-  │   │   └─（可选）vector 搜索
-  │   └─ 格式化 → "上次你用了 jose 库..."
-  │
-  ├─ push_user_message("帮我在 src/auth.rs 加一个 JWT 中间件")
-  │
-  └─ handle_user_message(memory_context="上次你用了 jose 库...", ...)
-       │
-       ▼
-     build_request()
-       │ system_prompt(BASE)
-       │ + "\n\n" + memory_context        ← 记忆上下文在此注入
-       │ + "\n\n" + skills_catalog
-       │ + "\n\n" + skill_injections
-       │
-       ▼
-     发送给 LLM
-       system: """
-         你是千寻...
-         ## 记忆上下文（自动注入的上次会话记忆）
-         [FileEdit] 编辑 src/auth.ts: 添加 JWT 验证
-         — 使用了 jose 库
-         (---memory end---)
-       """
-       messages: [{ role: "user", content: "加一个 JWT 中间件" }]
+用户输入 → build_context(query) → 混合检索（FTS5 + Vector）
+  → 注入 system prompt：BASE + memory_context + skills_catalog + skill_injections
+  → 发送给 LLM
 ```
 
-#### 阶段二：LLM 回复 + 工具执行 + 记忆捕获（循环）
+### 阶段二：LLM 回复 + 工具执行 + 记忆捕获
 
 ```
-LLM 流式返回 tool_call(edit_file, { path: "src/auth.rs", ... })
-  │
-  ▼
-handle_user_message() 检测到 StopReason::ToolUse
-  │
-  ├─ 保存 assistant 消息到 conversation
-  │
-  ├─ for each tool_call:
-  │     │
-  │     ├─ observe(PreToolUse, name, args)        ← 读：记录工具即将执行
-  │     │
-  │     ├─ tools.execute_async(name, args)
-  │     │    → 读取 src/auth.rs（返回数千行代码）
-  │     │    → LLM 改写
-  │     │    → 写入新内容（返回 diff 或确认）
-  │     │
-  │     ├─ observe(PostToolUse, name, None, result)  ← 写：捕获工具结果
-  │     │    │
-  │     │    │   observe() 内部处理大量文本的策略：
-  │     │    │   （详细说明见 memory-design.md 第 5.4 节）
-  │     │    │
-  │     │    │   1. strip_private_data(result)     ← 脱敏
-  │     │    │   2. compressor.build_synthetic()   ← 压缩
-  │     │    │      从数万字符的 tool_output 中提取：
-  │     │    │        title: "编辑 src/auth.rs: 添加 JWT 中间件"
-  │     │    │        type: FileEdit
-  │     │    │        facts: ["使用了 jose 库"]
-  │     │    │        narrative: "在 auth.rs 中添加了 JWT 验证中间件，
-  │     │    │                    使用 jose 库处理 token 解析"
-  │     │    │        importance: 6
-  │     │    │      原始文件内容 **不存储**，只有摘要
-  │     │    │
-  │     │    │   3. db.upsert_observation()          ← spawn_blocking
-  │     │    │   4. bm25.write().add(&obs)            ← 0.01ms
-  │     │    │   5. vector.write().add(id, vec)       ← 0.01ms
-  │     │    │   6. db.append_vector_wal(id, vec)     ← spawn_blocking
-  │     │    │
-  │     │    └─ ✅ 此条记忆立即可被搜索
-  │     │
-  │     └─ push tool result
-  │
-  ├─ push_message(tool_results) → 继续调 LLM
-  │
-  └─ break → 回到外循环
+LLM 流式返回 tool_call
+  → observe(PreToolUse, name, args)           ← 记录工具即将执行
+  → tools.execute_async(name, args)
+  → observe(PostToolUse, name, result)        ← 捕获工具结果
+    → strip_private_data() → compressor.build_synthetic()
+    → BatchWriter.push() → SQLite + FTS5 + Vector（立即可搜索）
+  → push tool results → 继续调 LLM
 ```
 
-#### 阶段三：会话结束 → 持久化
+### 阶段三：会话结束 → 持久化
 
 ```
-LLM 返回 EndTurn
-  │
-  ▼
-handle_message() 返回
-  │
-  └─ memory_core.session_end()
-       │
-       ├─ consolidation_pipeline()
-       │   ├─ 扫描本 session 的 Observation
-       │   ├─ 按 concepts 聚类
-       │   ├─ 生成 Memory（avg importance > 6）
-       │   └─ 更新索引
-       │
-       └─ 生成 SessionSummary
+session_end()
+  → consolidation_pipeline()
+    → 获取 advisory lock（防止并发）
+    → 扫描本 session 的 Observation
+    → 按 concepts 集合 Jaccard > 0.5 聚类
+    → 生成 Memory（avg importance > 6 或其他条件）
+    → 与已有 Memory 合并（Jaccard > 0.7 版本升级）
+  → 生成 SessionSummary
 ```
 
-### 7.2 记忆的读写时机汇总
+### 大量文本的处理原则
 
-| 阶段 | 操作 | 调用点 | 数据量 |
-|---|---|---|---|
-| 用户输入后 | **读** build_context() | cli.rs → MemoryCore | 小（摘要） |
-| 工具执行前 | **写** observe(PreToolUse) | engine.rs 循环 | 小（工具名 + 参数） |
-| 工具执行后 | **写** observe(PostToolUse) | engine.rs 循环 | **大 → 压缩后小** |
-| 任何时间 | **读** search() 或 memory_recall | Agent 主动调 / 用户 | 小（摘要） |
-| 会话结束时 | **写** consolidation | cli.rs → MemoryCore | 小（Memory 摘要） |
-
-### 7.3 大量文本的处理原则
-
-当工具调用涉及大量文本读写时（如 `read_file` 返回 5000 行代码），memory **不存储原始内容**：
-
-```
-原始 tool_result（数千行代码）：
-  ┌──────────────────────────────────────────────┐
-  │ fn verify_token(token: &str) -> Result<...> { │
-  │     let decoder = Decoder::new();            │
-  │     let payload = decoder.decode(token);     │
-  │     if payload.exp < now { return Err(...) } │
-  │     Ok(payload.claims)                       │
-  │ }                                            │
-  │ ... 数百行 ...                               │
-  └──────────────────────────────────────────────┘
-                       ↓
-  合成压缩后存储的 Observation：
-  ┌──────────────────────────────────────────────┐
-  │ title: "编辑 src/auth.rs: 添加 verify_token"  │
-  │ type: FileEdit                                │
-  │ importance: 6                                 │
-  │ facts: ["函数 verify_token 用于 JWT 验证"]    │
-  │ narrative: "在 auth.rs 中添加了 JWT token      │
-  │             验证函数"                          │
-  │ files: ["src/auth.rs"]                        │
-  │ concepts: ["JWT", "verify_token", "auth"]    │
-  └──────────────────────────────────────────────┘
-```
-
-原始文件内容仅在 LLM 上下文中短暂存在，不会被写入 memory 数据库。
+Memory **不存储原始文件内容**。原始 `tool_output` 的 150KB 代码只生成 ~200 字节的合成摘要（路径 + 类型 + 概念），压缩率 ~750:1。原始内容仅在 LLM 上下文中短暂存在。
 
 ---
 
 ## 8. 部署
+
+> 📋 Phase 4 规划。当前千寻以 CLI/ACP 模式运行，Daemon 就绪后升级。
 
 ### 8.1 VPS 部署要求
 
@@ -696,26 +609,70 @@ handle_message() 返回
 | CPU | 1 核（足够，不做推理） |
 | 内存 | 512 MB - 1 GB |
 | 磁盘 | 10 GB（只存用户+设备数据） |
-| 网络 | 公网可达，开放 8313 端口 |
+| 网络 | 公网可达，开放 23901 端口 |
 | 数据库 | SQLite（内嵌，无额外服务） |
-| 域名（可选） | 用于 TLS 证书 |
 
 ### 8.2 开发机要求
 
 | 项 | 要求 |
 |---|---|
-| Node | 完整的独立系统，AgentLoop + MemoryCore |
+| Daemon | 完整的独立系统，AgentLoop + MemoryCore |
 | 离线 | 可完全离线工作 |
 | VPS 连接 | 可选，用于远程控制 |
 
 ### 8.3 跨平台服务注册
 
 ```
-VPS:
-  Linux:   qx server install → systemd service
-  Windows: qx server install → Windows Service (via rust)
-
-开发机 Node:
-  Linux:   qx node install → systemd --user
-  Windows: qx node install → 用户级自动启动
+VPS:          qx server install → systemd / Windows Service
+开发机 Daemon: qx daemon install → systemd --user / 用户级自动启动
 ```
+
+---
+
+## 9. 当前状态与已知问题
+
+### 9.1 模块实现状态
+
+| 模块 | 状态 | 说明 |
+|---|---|---|
+| 核心类型 (types/config) | ✅ 完成 | LlmError, TokenUsage, AgentConfig, Config |
+| Agent 引擎 (agent/) | ✅ 完成 | Conversation, AgentLoop, system_prompt |
+| LLM Provider (provider/) | ✅ 完成 | LlmProvider trait + DeepSeek 实现 |
+| 输出抽象 (output.rs) | ✅ 完成 | OutputSink + CliOutputSink + AcpOutputSink |
+| 内置工具 (tools/) | ✅ 完成 | 5 个工具 + ToolRegistry + ACP 转发 |
+| 项目根检测 (workspace.rs) | ✅ 完成 | .qianxun/ 向上查找 + CLAUDE.md 读取 |
+| ACP 协议 (qianxun/acp/) | ✅ 完成 | JSON-RPC 2.0 + session 管理 + 双向请求 |
+| Memory (context/) | 🔧 骨架 | MemoryManager 所有方法返回空值 |
+| Skills (skills/) | 🔧 骨架 | load_all() 为空实现 |
+| MCP Client (mcp/) | 🔧 骨架 | connect/call_tool 为空实现 |
+| Daemon (qx daemon) | 📋 未开始 | Phase 4 |
+| VPS Server (qx server) | 📋 未开始 | Phase 4 |
+
+### 9.2 设计取舍
+
+| 取舍 | 决策 | 理由 |
+|---|---|---|
+| Token 估计 | 字符长度近似 | 避免 tiktoken-rs 依赖，预算裁剪非关键路径 |
+| Session 持久化 | Phase 2 不持久 | 与 Zed 的工作会话不需要跨进程持久化 |
+| `execute_async` vs `execute` | 共存 | `execute` 是 `block_on` 包装，用于非 tokio 上下文 |
+
+### 9.3 已知问题（开发期修复）
+
+| 严重度 | 问题 | 位置 |
+|---|---|---|
+| 中 | MCP 工具执行未接线 | tools/mod.rs |
+| 中 | Skills 空加载 | skills/mod.rs |
+| 中 | 无持久化记忆 | context/memory.rs |
+| 中 | 会话仅内存 | qianxun/src/acp/session.rs |
+
+### 9.4 构建顺序
+
+| Phase | 交付 |
+|---|---|
+| 1 | 代码骨架 + 核心类型 + REPL CLI + DeepSeek Provider + AgentLoop + 5 内置工具 + 全局配置 ✅ |
+| 2 | ACP 协议 + 工作空间支持 ✅ |
+| 3a | Memory + MCP + Skills 实现 🔧 |
+| 3b | Agent Patterns（React/Plan/Reflective/Workflow） 🔧 |
+| 3c | Daemon HTTP 框架（与 3a/3b 并行） 🔧 |
+| 4a | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） 📋 |
+| 4b | VPS Server + Web UI 📋 |

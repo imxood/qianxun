@@ -36,34 +36,39 @@
 
 ```
 qianxun/                 # workspace 根
-├── qianxun-core/        # 核心库
+├── qianxun-core/        # 核心库 (lib)
 │   ├── src/
 │   │   ├── types.rs     # LlmError, TokenUsage, AgentConfig 等核心类型
 │   │   ├── config.rs    # 全局配置 (JSON 带注释) + 解析
 │   │   ├── output.rs    # OutputSink trait (输出抽象)
 │   │   ├── event.rs     # AgentEvent, EventBus
-│   │   ├── workspace.rs # 工作区检测 (detect_workspace, build_workspace_context)
+│   │   ├── workspace.rs # .qianxun/ 项目根查找 + CLAUDE.md 读取
 │   │   ├── agent/       # Conversation, Message, AgentLoop, system_prompt
 │   │   ├── provider/    # LlmProvider trait, DeepSeek 实现
 │   │   ├── tools/       # AgentTool trait, ToolRegistry, 5 个内置工具
 │   │   ├── context/     # ContextProvider trait, MemoryManager
 │   │   ├── skills/      # SkillManager (骨架)
 │   │   └── mcp/         # MCP Client (骨架)
-├── qianxun-acp/         # ACP 协议实现
-│   └── src/
-│       ├── types.rs     # JSON-RPC 2.0 信封 + ACP 协议类型
-│       ├── transport.rs # stdio 行帧读写 + 双向请求路由
-│       ├── session.rs   # SessionManager (会话创建/关闭/查询)
-│       ├── acp_output.rs# AcpOutputSink (OutputSink → ACP session/update)
-│       ├── prompt.rs    # session/prompt → processing_loop 桥接
-│       ├── handler.rs   # 请求路由 + ForwardingToolRegistry
-│       └── server.rs    # ACP 主循环
-└── qianxun-cli/         # CLI 二进制
+└── qianxun/             # 单二进制 (bin: qx)
     └── src/
-        ├── main.rs      # 入口 (clap), 双模式路由
-        ├── cli.rs       # REPL 循环
-        ├── config.rs    # 配置路径 + 默认配置生成
-        └── output.rs    # CliOutputSink (ANSI 终端输出)
+        ├── main.rs      # 入口 (clap), cli/acp/daemon 模式路由
+        ├── buf_writer.rs# 日志缓冲写入
+        ├── cli/          # CLI REPL 模块
+        │   ├── mod.rs
+        │   ├── cli.rs    # REPL 循环
+        │   ├── config.rs # 配置路径 + 默认配置生成
+        │   ├── output.rs # CliOutputSink (ANSI 终端输出)
+        │   └── run.rs    # run_repl 启动流程
+        └── acp/          # ACP 协议模块
+            ├── mod.rs
+            ├── types.rs      # JSON-RPC 2.0 信封 + ACP 协议类型
+            ├── transport.rs  # stdio 行帧读写 + 双向请求路由
+            ├── session.rs    # SessionManager
+            ├── output.rs     # AcpOutputSink
+            ├── prompt.rs     # session/prompt → processing_loop 桥接
+            ├── forwarding_tools.rs
+            ├── handler.rs    # 请求路由
+            └── server.rs     # ACP 主循环
 ```
 
 ## 构建顺序

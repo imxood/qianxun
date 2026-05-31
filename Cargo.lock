@@ -1223,24 +1223,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qianxun-acp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures",
- "qianxun-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "qianxun-cli"
+name = "qianxun"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1250,12 +1233,12 @@ dependencies = [
  "console",
  "futures",
  "indicatif",
- "qianxun-acp",
  "qianxun-core",
  "reqwest",
  "rustyline",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

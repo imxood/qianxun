@@ -26,7 +26,7 @@ use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::history::FileHistory;
 use rustyline::{Config, Context, Editor, Helper};
 
-use crate::output::CliOutputSink;
+use crate::cli::output::CliOutputSink;
 
 // ─── 颜色助手（与 output.rs 色调一致）──────────────────────
 // 注意：不再使用 apply_to()，改为直接 style(X).color256(N) 内联
