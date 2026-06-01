@@ -11,15 +11,14 @@ use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::{SkillManager, SkillWatcher};
 use qianxun_core::tools::{ToolRegistry, builtin};
 use qianxun_core::types::{LlmError, Mode, StopReason, TokenUsage};
-use ratatui::Frame;
+use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
+use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +29,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 const MAX_MESSAGES: usize = 400;
 const PALETTE_MAX_ROWS: usize = 9;
+const INLINE_VIEWPORT_HEIGHT: u16 = 8;
 
 const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
@@ -98,7 +98,9 @@ pub async fn run(
     global_instructions: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(config, project_root, global_instructions).await?;
-    let mut terminal = ratatui::try_init()?;
+    let mut terminal = ratatui::try_init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+    })?;
     let result = app.run(&mut terminal).await;
     ratatui::try_restore()?;
     result
@@ -111,9 +113,9 @@ struct App {
     mode: Mode,
     running: bool,
     agent_running: bool,
-    scroll: u16,
-    auto_scroll: bool,
+    scrollback_cursor: usize,
     command_palette: CommandPalette,
+    visible_command_rows: usize,
     modal: Option<Modal>,
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
@@ -127,6 +129,7 @@ struct App {
     tools_list: String,
     recently_injected: Vec<String>,
     last_message: Option<String>,
+    queued_messages: VecDeque<String>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::UnboundedSender<AgentEvent>,
     rx: mpsc::UnboundedReceiver<AgentEvent>,
@@ -196,9 +199,9 @@ impl App {
             mode: Mode::Auto,
             running: true,
             agent_running: false,
-            scroll: 0,
-            auto_scroll: true,
+            scrollback_cursor: 0,
             command_palette: CommandPalette::default(),
+            visible_command_rows: 0,
             modal: None,
             provider,
             tools,
@@ -212,6 +215,7 @@ impl App {
             tools_list,
             recently_injected: Vec::new(),
             last_message: None,
+            queued_messages: VecDeque::new(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             tx,
             rx,
@@ -229,7 +233,8 @@ impl App {
 
     async fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
         while self.running {
-            self.drain_agent_events();
+            self.drain_agent_events().await;
+            self.flush_completed_messages_to_scrollback(terminal)?;
             if self.last_tick.elapsed() >= Duration::from_millis(120) {
                 self.last_tick = Instant::now();
                 if self.agent_running {
@@ -250,6 +255,11 @@ impl App {
             }
         }
 
+        self.command_palette.visible = false;
+        self.command_palette.selected = 0;
+        self.modal = None;
+        terminal.clear()?;
+
         if self.agent_running {
             self.cancel_flag.store(true, Ordering::SeqCst);
         }
@@ -258,18 +268,36 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut Frame) {
-        let [header, body, input, status] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Fill(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
+        self.visible_command_rows = 0;
+        let area = frame.area();
+        let live_lines = self.live_message_lines();
+        let live_height = (live_lines.len() as u16).min(area.height.saturating_sub(2));
+        let body = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: live_height,
+        };
+        let input = Rect {
+            x: area.x,
+            y: area.y.saturating_add(live_height),
+            width: area.width,
+            height: area.height.saturating_sub(live_height).min(1),
+        };
+        let footer = Rect {
+            x: area.x,
+            y: input.y.saturating_add(input.height),
+            width: area.width,
+            height: area
+                .height
+                .saturating_sub(live_height)
+                .saturating_sub(input.height)
+                .min(1),
+        };
 
-        self.render_header(frame, header);
-        self.render_messages(frame, body);
+        self.render_messages(frame, body, live_lines);
         self.render_input(frame, input);
-        self.render_status(frame, status);
+        self.render_footer(frame, footer);
 
         if self.command_palette.visible {
             self.render_command_palette(frame, input);
@@ -279,104 +307,133 @@ impl App {
         }
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let title = Line::from(vec![
-            Span::styled(
-                " 千寻 ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("qx"),
-        ]);
-        let line = Line::from(vec![
-            Span::raw("模式: "),
-            Span::styled(
-                self.mode.display_name(),
-                Style::default().fg(mode_color(self.mode)),
-            ),
-            Span::raw("  |  "),
-            Span::raw(format!("技能: {}", self.skills.skill_count())),
-            Span::raw("  |  "),
-            Span::raw(format!("工具: {}", self.tools.definitions().len())),
-            Span::raw("  |  "),
-            Span::raw(if self.agent_running {
-                "运行中"
-            } else {
-                "就绪"
-            }),
-        ]);
-        let widget =
-            Paragraph::new(line).block(Block::default().title(title).borders(Borders::ALL));
-        frame.render_widget(widget, area);
+    fn render_messages(&mut self, frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+        if area.height == 0 {
+            return;
+        }
+        let scroll = lines.len().saturating_sub(area.height as usize) as u16;
+        let paragraph = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0));
+        frame.render_widget(paragraph, area);
     }
 
-    fn render_messages(&mut self, frame: &mut Frame, area: Rect) {
-        let inner_height = area.height.saturating_sub(2);
-        let lines = self.message_lines();
-        let max_scroll = lines.len().saturating_sub(inner_height as usize) as u16;
-        if self.auto_scroll {
-            self.scroll = max_scroll;
-        } else if self.scroll > max_scroll {
-            self.scroll = max_scroll;
+    fn flush_completed_messages_to_scrollback<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> Result<(), B::Error> {
+        let end = self.completed_scrollback_end();
+        if self.scrollback_cursor >= end {
+            return Ok(());
         }
 
-        let block = Block::default().title(" 对话 ").borders(Borders::ALL);
-        let paragraph = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0));
-        frame.render_widget(paragraph, area);
+        let lines = message_lines_for(&self.messages[self.scrollback_cursor..end]);
+        let height = lines.len().min(u16::MAX as usize) as u16;
+        if height == 0 {
+            self.scrollback_cursor = end;
+            return Ok(());
+        }
 
-        let mut scrollbar = ScrollbarState::new(max_scroll as usize + inner_height as usize)
-            .position(self.scroll as usize);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            area.inner(Margin {
-                vertical: 1,
-                horizontal: 0,
-            }),
-            &mut scrollbar,
-        );
+        terminal.insert_before(height, |buf| {
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(buf.area, buf);
+        })?;
+        self.scrollback_cursor = end;
+        Ok(())
+    }
+
+    fn completed_scrollback_end(&self) -> usize {
+        if self.agent_running
+            && self
+                .messages
+                .last()
+                .is_some_and(|message| message.role == UiRole::Assistant && message.title == "回复")
+        {
+            self.messages.len().saturating_sub(1)
+        } else {
+            self.messages.len()
+        }
+    }
+
+    fn live_message_lines(&self) -> Vec<Line<'static>> {
+        message_lines_for(&self.messages[self.scrollback_cursor..])
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
-        let width = area.width.saturating_sub(4) as usize;
+        let width = area.width.saturating_sub(2) as usize;
         let scroll = self.input.visual_scroll(width);
         let visible = self.input.value().chars().skip(scroll).collect::<String>();
-        let title = if self.agent_running {
-            " 输入 | 生成中, Ctrl+C/Esc 取消 "
+        let line = if visible.is_empty() {
+            Line::from(vec![
+                Span::styled("› ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    "给千寻发送消息, 或输入 / 查看命令",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
         } else {
-            " 输入 "
+            Line::from(vec![
+                Span::styled("› ", Style::default().fg(Color::Cyan)),
+                Span::raw(visible),
+            ])
         };
-        let widget = Paragraph::new(format!("› {visible}"))
-            .block(Block::default().title(title).borders(Borders::ALL));
+        let widget = Paragraph::new(line);
         frame.render_widget(widget, area);
 
-        if self.modal.is_none() && !self.command_palette.visible {
+        if self.modal.is_none() {
             let cursor_x = area
                 .x
                 .saturating_add(2)
                 .saturating_add(self.input.visual_cursor().saturating_sub(scroll) as u16)
-                .min(area.right().saturating_sub(2));
-            frame.set_cursor_position((cursor_x, area.y.saturating_add(1)));
+                .min(area.right().saturating_sub(1));
+            frame.set_cursor_position((cursor_x, area.y));
         }
     }
 
-    fn render_status(&self, frame: &mut Frame, area: Rect) {
+    fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let spinner = ["-", "\\", "|", "/"][self.spinner_index];
-        let prefix = if self.agent_running { spinner } else { " " };
-        let text = format!("{prefix} {}", self.status);
-        frame.render_widget(
-            Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-            area,
-        );
+        let queue = (!self.queued_messages.is_empty())
+            .then(|| format!("已排队 {}", self.queued_messages.len()));
+        let text = if self.command_palette.visible {
+            Some("↑↓ 选择 | Tab 补全 | Enter 执行 | Esc 关闭".to_string())
+        } else if self.agent_running {
+            Some(match queue {
+                Some(queue) => format!("{spinner} 运行中 | {queue}"),
+                None => format!("{spinner} 运行中"),
+            })
+        } else if let Some(queue) = queue {
+            Some(queue)
+        } else if self.status != "就绪" {
+            Some(self.status.clone())
+        } else {
+            None
+        };
+        let line = Line::from(Span::styled(
+            text.unwrap_or_default(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn render_command_palette(&self, frame: &mut Frame, input_area: Rect) {
+    fn render_command_palette(&mut self, frame: &mut Frame, input_area: Rect) {
         let filtered = self.command_palette.filtered(self.input.value());
-        let height = filtered.len().min(PALETTE_MAX_ROWS).max(1) as u16 + 2;
-        let y = input_area.y.saturating_sub(height);
+        let desired_height = filtered.len().min(PALETTE_MAX_ROWS).max(1) as u16;
+        let frame_area = frame.area();
+        let (y, height) = if input_area.y > frame_area.y {
+            let height = desired_height.min(input_area.y - frame_area.y);
+            (input_area.y - height, height)
+        } else {
+            let y = input_area.bottom();
+            let height = desired_height.min(frame_area.bottom().saturating_sub(y));
+            (y, height)
+        };
+        if height == 0 {
+            return;
+        }
+        self.visible_command_rows = filtered.len().min(height as usize);
+        self.command_palette
+            .clamp_selection_to_len(self.visible_command_rows);
         let width = input_area.width.min(56);
         let area = Rect {
             x: input_area.x,
@@ -389,7 +446,7 @@ impl App {
         } else {
             filtered
                 .iter()
-                .take(PALETTE_MAX_ROWS)
+                .take(self.visible_command_rows)
                 .enumerate()
                 .map(|(row, idx)| {
                     let cmd = COMMANDS[*idx];
@@ -410,36 +467,7 @@ impl App {
         };
 
         frame.render_widget(Clear, area);
-        frame.render_widget(
-            List::new(items).block(Block::default().title(" 命令 ").borders(Borders::ALL)),
-            area,
-        );
-    }
-
-    fn message_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for message in &self.messages {
-            let (label, color) = match message.role {
-                UiRole::User => ("你", Color::Green),
-                UiRole::Assistant => ("千寻", Color::Cyan),
-                UiRole::Tool => ("工具", Color::Magenta),
-                UiRole::System => ("系统", Color::DarkGray),
-                UiRole::Error => ("错误", Color::Red),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    label,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(message.title.clone(), Style::default().fg(Color::DarkGray)),
-            ]));
-            for line in message.content.lines() {
-                lines.push(Line::from(format!("  {line}")));
-            }
-            lines.push(Line::from(""));
-        }
-        lines
+        frame.render_widget(List::new(items), area);
     }
 
     async fn handle_key(&mut self, key: KeyEvent) {
@@ -449,6 +477,10 @@ impl App {
 
         if self.agent_running {
             match key.code {
+                KeyCode::Esc if self.command_palette.visible => {
+                    self.command_palette.visible = false;
+                    self.command_palette.selected = 0;
+                }
                 KeyCode::Esc => {
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status = "正在取消当前生成...".to_string();
@@ -457,7 +489,25 @@ impl App {
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status = "正在取消当前生成...".to_string();
                 }
+                KeyCode::Enter => {
+                    self.queue_current_input();
+                }
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab if self.command_palette.visible => {
+                    self.handle_running_palette_key(key);
+                }
                 _ => {}
+            }
+            if !matches!(
+                key.code,
+                KeyCode::Esc
+                    | KeyCode::Enter
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Tab
+            ) && !key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                let _ = self.input.handle_event(&Event::Key(key));
+                self.sync_command_palette_with_input();
             }
             return;
         }
@@ -493,16 +543,6 @@ impl App {
                     self.modal = Some(Modal::confirm_quit());
                 }
             }
-            KeyCode::PageUp => {
-                self.auto_scroll = false;
-                self.scroll = self.scroll.saturating_sub(8);
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(8);
-            }
-            KeyCode::End => {
-                self.auto_scroll = true;
-            }
             _ => {
                 let _ = self.input.handle_event(&Event::Key(key));
                 self.sync_command_palette_with_input();
@@ -511,13 +551,54 @@ impl App {
     }
 
     fn sync_command_palette_with_input(&mut self) {
-        if self.input.value().starts_with('/') {
+        if self.input.value().starts_with('/')
+            && !self.command_palette.filtered(self.input.value()).is_empty()
+        {
             self.command_palette.visible = true;
             self.command_palette.clamp_selection(self.input.value());
         } else {
             self.command_palette.visible = false;
             self.command_palette.selected = 0;
         }
+    }
+
+    fn handle_running_palette_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => {
+                self.command_palette.selected = self.command_palette.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let len = self.visible_command_count();
+                if len > 0 {
+                    self.command_palette.selected =
+                        (self.command_palette.selected + 1).min(len - 1);
+                }
+            }
+            KeyCode::Tab => {
+                self.complete_selected_command();
+                self.sync_command_palette_with_input();
+            }
+            _ => {}
+        }
+    }
+
+    fn queue_current_input(&mut self) {
+        let value = self.input.value().trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        if value.starts_with('/') {
+            self.status = "生成中暂不执行命令, 可取消后再执行.".to_string();
+            return;
+        }
+        self.input.reset();
+        self.command_palette.visible = false;
+        self.command_palette.selected = 0;
+        self.queued_messages.push_back(value);
+        self.status = format!(
+            "已排队 {} 条消息, 当前生成结束后自动发送.",
+            self.queued_messages.len()
+        );
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) -> bool {
@@ -551,7 +632,7 @@ impl App {
                 self.command_palette.selected = self.command_palette.selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                let len = self.command_palette.filtered(self.input.value()).len();
+                let len = self.visible_command_count();
                 if len > 0 {
                     self.command_palette.selected =
                         (self.command_palette.selected + 1).min(len - 1);
@@ -581,15 +662,28 @@ impl App {
         if filtered.is_empty() {
             return false;
         }
-        let idx = filtered[self.command_palette.selected.min(filtered.len() - 1)];
+        let max_selected = self.visible_command_count().saturating_sub(1);
+        let idx = filtered[self.command_palette.selected.min(max_selected)];
         self.input = Input::new(COMMANDS[idx].name.to_string());
         true
+    }
+
+    fn visible_command_count(&self) -> usize {
+        self.command_palette
+            .filtered(self.input.value())
+            .len()
+            .min(PALETTE_MAX_ROWS)
+            .min(self.visible_command_rows.max(1))
     }
 
     async fn handle_command(&mut self, command: &str) {
         let base = command.split_whitespace().next().unwrap_or(command);
         match base {
-            "/quit" | "/exit" => self.modal = Some(Modal::confirm_quit()),
+            "/quit" | "/exit" => {
+                self.command_palette.visible = false;
+                self.command_palette.selected = 0;
+                self.running = false;
+            }
             "/help" => self.push_panel(
                 "帮助",
                 "基本\n  /help 显示帮助\n  /quit 退出\n  /reset 重置对话\n\n模式\n  /mode 查看模式\n  /mode plan 切换计划模式\n  /mode auto 切换自动模式\n  /plan 切换计划模式\n\n信息\n  /usage token 用量\n  /workspace 工作区\n  /skills 技能\n  /tools 工具\n  /memory 最近记忆\n\n对话\n  /retry 重试上一条消息\n  /edit 编辑上一条消息",
@@ -719,7 +813,6 @@ impl App {
         self.last_message = Some(text.clone());
         self.push_message(UiMessage::user(text.clone()));
         self.agent_running = true;
-        self.auto_scroll = true;
         self.cancel_flag.store(false, Ordering::SeqCst);
         self.status = "正在请求模型...".to_string();
 
@@ -792,7 +885,7 @@ impl App {
         self.skills.build_injections(&names)
     }
 
-    fn drain_agent_events(&mut self) {
+    async fn drain_agent_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 AgentEvent::Text(text) => self.append_assistant_text(&text),
@@ -825,11 +918,23 @@ impl App {
                     conversation,
                     memory,
                 } => {
+                    let was_cancelled = self.cancel_flag.load(Ordering::SeqCst);
                     self.agent_loop = Some(agent_loop);
                     self.conversation = Some(conversation);
                     self.memory = memory;
                     self.agent_running = false;
-                    if self.status.starts_with("正在") {
+                    if was_cancelled {
+                        if let Some(next) = self.queued_messages.pop_front() {
+                            self.input = Input::new(next);
+                            self.status = "已取消, 已将排队消息放回输入框.".to_string();
+                        } else {
+                            self.status = "已取消.".to_string();
+                        }
+                        self.cancel_flag.store(false, Ordering::SeqCst);
+                    } else if let Some(next) = self.queued_messages.pop_front() {
+                        self.status = "正在发送排队消息...".to_string();
+                        self.submit_message(next).await;
+                    } else if self.status.starts_with("正在") {
                         self.status = "就绪".to_string();
                     }
                 }
@@ -861,9 +966,10 @@ impl App {
     fn push_message(&mut self, message: UiMessage) {
         self.messages.push(message);
         if self.messages.len() > MAX_MESSAGES {
-            self.messages.drain(0..self.messages.len() - MAX_MESSAGES);
+            let removed = self.messages.len() - MAX_MESSAGES;
+            self.messages.drain(0..removed);
+            self.scrollback_cursor = self.scrollback_cursor.saturating_sub(removed);
         }
-        self.auto_scroll = true;
     }
 
     fn reset_conversation(&mut self) {
@@ -882,6 +988,7 @@ impl App {
             agent.reset();
         }
         self.messages.clear();
+        self.scrollback_cursor = 0;
         self.push_message(UiMessage::system("对话已重置."));
         self.status = "对话已重置.".to_string();
     }
@@ -912,6 +1019,32 @@ impl App {
     }
 }
 
+fn message_lines_for(messages: &[UiMessage]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for message in messages {
+        let (label, color) = match message.role {
+            UiRole::User => ("你", Color::Green),
+            UiRole::Assistant => ("千寻", Color::Cyan),
+            UiRole::Tool => ("工具", Color::Magenta),
+            UiRole::System => ("系统", Color::DarkGray),
+            UiRole::Error => ("错误", Color::Red),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(message.title.clone(), Style::default().fg(Color::DarkGray)),
+        ]));
+        for line in message.content.lines() {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
 #[derive(Default)]
 struct CommandPalette {
     visible: bool,
@@ -925,6 +1058,10 @@ impl CommandPalette {
 
     fn clamp_selection(&mut self, input: &str) {
         let len = self.filtered(input).len();
+        self.clamp_selection_to_len(len);
+    }
+
+    fn clamp_selection_to_len(&mut self, len: usize) {
         if len == 0 {
             self.selected = 0;
         } else {
@@ -1136,13 +1273,6 @@ fn unique_command_match(input: &str) -> Option<CommandSpec> {
     }
 }
 
-fn mode_color(mode: Mode) -> Color {
-    match mode {
-        Mode::Auto => Color::Green,
-        Mode::Plan => Color::Cyan,
-    }
-}
-
 fn mode_desc(mode: Mode) -> &'static str {
     match mode {
         Mode::Auto => "所有工具可用",
@@ -1241,9 +1371,9 @@ mod tests {
             mode: Mode::Auto,
             running: true,
             agent_running: false,
-            scroll: 0,
-            auto_scroll: true,
+            scrollback_cursor: 0,
             command_palette: CommandPalette::default(),
+            visible_command_rows: 0,
             modal: None,
             provider: qianxun_core::provider::create_provider(&cfg.deepseek).into(),
             tools,
@@ -1257,6 +1387,7 @@ mod tests {
             tools_list: String::new(),
             recently_injected: Vec::new(),
             last_message: None,
+            queued_messages: VecDeque::new(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             tx,
             rx,
@@ -1295,11 +1426,107 @@ mod tests {
         assert!(!app.command_palette.visible);
     }
 
+    #[tokio::test]
+    async fn command_palette_closes_for_unknown_prefix() {
+        let mut app = test_app("");
+
+        for ch in ['/', 'z', 'z', 'z'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+
+        assert_eq!(app.input.value(), "/zzz");
+        assert!(!app.command_palette.visible);
+    }
+
+    #[tokio::test]
+    async fn slash_q_exits_without_confirmation() {
+        let mut app = test_app("/q");
+        app.command_palette.visible = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(!app.running);
+        assert!(app.modal.is_none());
+        assert!(!app.command_palette.visible);
+        assert_eq!(app.command_palette.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn command_palette_down_stops_at_last_visible_item() {
+        let mut app = test_app("/");
+        app.command_palette.visible = true;
+        app.visible_command_rows = 7;
+
+        for _ in 0..(PALETTE_MAX_ROWS + 5) {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .await;
+        }
+
+        assert_eq!(app.command_palette.selected, 6);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(app.command_palette.selected, 6);
+        assert_eq!(app.input.value(), "/");
+    }
+
+    #[tokio::test]
+    async fn enter_queues_message_while_agent_is_running() {
+        let mut app = test_app("next task");
+        app.agent_running = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(app.input.value(), "");
+        assert_eq!(app.queued_messages.len(), 1);
+        assert_eq!(app.queued_messages.front().unwrap(), "next task");
+        assert!(app.status.contains("已排队"));
+    }
+
+    #[test]
+    fn live_messages_exclude_completed_scrollback() {
+        let mut app = test_app("");
+        app.messages = (0..8)
+            .map(|idx| UiMessage::system(format!("message {idx}")))
+            .collect();
+        app.scrollback_cursor = 7;
+
+        let lines = app.live_message_lines();
+
+        assert!(lines
+            .iter()
+            .any(|line| format!("{line:?}").contains("message 7")));
+        assert!(!lines
+            .iter()
+            .any(|line| format!("{line:?}").contains("message 6")));
+    }
+
     #[test]
     fn renders_basic_layout() {
         let mut app = test_app("hello");
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn renders_command_palette_in_non_zero_viewport() {
+        let mut app = test_app("/");
+        app.messages.clear();
+        app.command_palette.visible = true;
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 23, 68, 8)),
+            },
+        )
+        .unwrap();
+
         terminal.draw(|frame| app.render(frame)).unwrap();
     }
 }
