@@ -194,8 +194,11 @@ impl App {
         agent_loop.config.max_tokens = config.budget.max_output_tokens;
 
         let memory = build_memory();
-        let provider: Arc<dyn LlmProvider> =
-            qianxun_core::provider::create_provider(&config.deepseek).into();
+        let provider: Arc<dyn LlmProvider> = qianxun_core::provider::create_provider(
+            &config.active_provider,
+            &config.active_provider_config(),
+        )
+        .into();
         let (tx, rx) = mpsc::unbounded_channel();
         let status = format!(
             "就绪 | 模式: {} | 技能: {} | 工具: {}",
@@ -1537,7 +1540,11 @@ mod tests {
             command_palette: CommandPalette::default(),
             visible_command_rows: 0,
             modal: None,
-            provider: qianxun_core::provider::create_provider(&cfg.deepseek).into(),
+            provider: qianxun_core::provider::create_provider(
+                &cfg.active_provider,
+                &cfg.active_provider_config(),
+            )
+            .into(),
             tools,
             agent_loop: Some(AgentLoop::new(cfg.agent.clone())),
             conversation: Some(Conversation::new(None)),

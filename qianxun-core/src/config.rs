@@ -11,6 +11,9 @@ use std::path::Path;
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// 当前激活的 provider 名称. 留空则默认 "deepseek".
+    /// 优先级: CLI --provider > env QIANXUN_ACTIVE_PROVIDER > 本字段 > "deepseek"
+    pub active_provider: Option<String>,
     pub providers: Option<HashMap<String, ProviderConfig>>,
     pub agent: Option<AgentDefaults>,
     pub budget: Option<BudgetConfig>,
@@ -133,12 +136,27 @@ pub struct ResolvedProviderConfig {
 
 #[derive(Clone)]
 pub struct ResolvedConfig {
+    /// 向后兼容: 始终等于 active provider 的 config (如果 active 是 deepseek, 仍是 deepseek).
+    /// 旧代码用 `resolved.deepseek` 直接取 config, 仍能工作.
     pub deepseek: ResolvedProviderConfig,
+    /// 当前激活的 provider 名称. 例如 "deepseek" / "MiniMax" / 自定义.
     pub active_provider: String,
+    /// 全部 provider 解析后的 ResolvedProviderConfig, 按名称索引.
     pub providers: HashMap<String, ResolvedProviderConfig>,
     pub agent: AgentConfig,
     pub budget: TokenBudget,
     pub compaction: ResolvedCompactionConfig,
+}
+
+impl ResolvedConfig {
+    /// 获取当前激活 provider 的 config.
+    /// 若 active_provider 不在 providers HashMap 中 (罕见), 回退到 deepseek 字段.
+    pub fn active_provider_config(&self) -> ResolvedProviderConfig {
+        self.providers
+            .get(&self.active_provider)
+            .cloned()
+            .unwrap_or_else(|| self.deepseek.clone())
+    }
 }
 
 // ─── Defaults ─────────────────────────────────────────────
@@ -214,46 +232,93 @@ impl Config {
 
     /// Resolve config with env/CLI overrides.
     ///
-    /// Priority: CLI args > Env vars > Config file > Built-in defaults
+    /// 优先级 (从高到低):
+    ///   1. CLI `--provider` / `--model`
+    ///   2. Env `QIANXUN_ACTIVE_PROVIDER` (仅 active_provider)
+    ///   3. 配置文件 `active_provider` / `providers.<name>.*`
+    ///   4. 内置默认值 (`"deepseek"`)
+    ///
+    /// 每个 provider 的 API key 查找顺序 (在 `resolve()` 内部, 不依赖外部传参):
+    ///   1. 预设的硬编码 env var (例如 MiniMax → `ANTHROPIC_AUTH_TOKEN`)
+    ///   2. 通用约定 `<PROVIDER>_API_KEY`
+    ///   3. 通用约定 `<PROVIDER>_AUTH_TOKEN`
+    ///   4. 配置文件 `providers.<name>.api_key`
     pub fn resolve(
         self,
-        env_api_key: Option<String>,
         cli_model: Option<String>,
+        cli_provider: Option<String>,
     ) -> ResolvedConfig {
         let defaults = ResolvedConfig::default();
 
-        // Parse all raw provider configs into ResolvedProviderConfig.
-        // Also extract deepseek for backward-compat priority chain.
+        // ── 1. 解析 active_provider ──
+        let active_provider = cli_provider
+            .or_else(|| std::env::var("QIANXUN_ACTIVE_PROVIDER").ok())
+            .or_else(|| self.active_provider.clone())
+            .unwrap_or_else(|| "deepseek".to_string());
+
+        // ── 2. 解析所有 raw providers → ResolvedProviderConfig ──
         let mut all_resolved: HashMap<String, ResolvedProviderConfig> = HashMap::new();
-        let mut deepseek_raw = ProviderConfig::default();
         if let Some(raw_providers) = self.providers {
             for (name, raw_pcfg) in raw_providers {
-                let resolved = ResolvedProviderConfig {
-                    api_key: raw_pcfg.api_key.clone().unwrap_or_default(),
-                    base_url: raw_pcfg.base_url.clone().unwrap_or_else(|| defaults.deepseek.base_url.clone()),
-                    model: raw_pcfg.model.clone().unwrap_or_else(|| defaults.deepseek.model.clone()),
-                    temperature: raw_pcfg.temperature.or(defaults.deepseek.temperature),
-                    max_tokens: raw_pcfg.max_tokens.or(defaults.agent.max_tokens),
-                };
-                if name == "deepseek" {
-                    deepseek_raw = raw_pcfg;
-                }
-                all_resolved.insert(name, resolved);
+                let env_key = env_api_key_for(&name);
+                let api_key = env_key
+                    .or_else(|| raw_pcfg.api_key.clone())
+                    .unwrap_or_default();
+
+                let base_url = raw_pcfg
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| default_base_url_for(&name));
+
+                let model = raw_pcfg
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| default_model_for(&name));
+
+                all_resolved.insert(
+                    name,
+                    ResolvedProviderConfig {
+                        api_key,
+                        model,
+                        base_url,
+                        temperature: raw_pcfg.temperature,
+                        max_tokens: raw_pcfg.max_tokens,
+                    },
+                );
             }
         }
-        let pcfg = deepseek_raw;
 
-        // Priority chain
-        let api_key = env_api_key.or(pcfg.api_key).unwrap_or_default();
-        let model = cli_model
-            .or(pcfg.model)
-            .unwrap_or_else(|| defaults.deepseek.model.clone());
-        let base_url = pcfg
-            .base_url
-            .unwrap_or_else(|| defaults.deepseek.base_url.clone());
-        let temperature = pcfg.temperature.or(defaults.deepseek.temperature);
-        let provider_max_tokens = pcfg.max_tokens.or(defaults.agent.max_tokens);
+        // ── 3. 保证激活的 provider 至少有一个 config (即使 config 文件没定义) ──
+        if !all_resolved.contains_key(&active_provider) {
+            let default_cfg = ResolvedProviderConfig {
+                api_key: env_api_key_for(&active_provider).unwrap_or_default(),
+                model: default_model_for(&active_provider),
+                base_url: default_base_url_for(&active_provider),
+                temperature: None,
+                max_tokens: None,
+            };
+            all_resolved.insert(active_provider.clone(), default_cfg);
+        }
 
+        // ── 4. 取出 active config ──
+        let active_cfg = all_resolved.get(&active_provider).cloned().unwrap();
+
+        // CLI --model 覆盖 active provider 的 model
+        let active_cfg = ResolvedProviderConfig {
+            model: cli_model.unwrap_or_else(|| active_cfg.model.clone()),
+            ..active_cfg
+        };
+        // 回写到 HashMap
+        all_resolved.insert(active_provider.clone(), active_cfg.clone());
+
+        // ── 5. deepseek 字段向后兼容 ──
+        // 始终等于 active provider 的 config (如果 deepseek 在 HashMap 中, 用 deepseek 的; 否则用 active)
+        let deepseek_legacy = all_resolved
+            .get("deepseek")
+            .cloned()
+            .unwrap_or_else(|| active_cfg.clone());
+
+        // ── 6. Agent / Budget / Compaction 解析 ──
         let max_turns = self
             .agent
             .as_ref()
@@ -276,10 +341,10 @@ impl Config {
             .and_then(|b| b.max_output_tokens)
             .or(defaults.budget.max_output_tokens);
 
-        // Resolve compaction config
         let raw_compaction = self.compaction.unwrap_or_default();
         let model_window = raw_compaction.model_window.unwrap_or(defaults.compaction.model_window);
-        let compaction_max_output = raw_compaction.max_output_tokens
+        let compaction_max_output = raw_compaction
+            .max_output_tokens
             .or(max_output_tokens)
             .unwrap_or(defaults.compaction.max_output_tokens);
         let effective_window = model_window - compaction_max_output.min(20_000);
@@ -289,20 +354,14 @@ impl Config {
         };
 
         ResolvedConfig {
-            deepseek: ResolvedProviderConfig {
-                api_key,
-                model,
-                base_url,
-                temperature,
-                max_tokens: provider_max_tokens,
-            },
-            active_provider: "deepseek".into(),
+            deepseek: deepseek_legacy,
+            active_provider,
             providers: all_resolved,
             agent: AgentConfig {
                 max_turns,
                 max_retries,
-                max_tokens: provider_max_tokens,
-                temperature,
+                max_tokens: active_cfg.max_tokens.or(max_output_tokens),
+                temperature: active_cfg.temperature,
                 thinking: ThinkingConfig::Disabled,
                 pattern: AgentPattern::default(),
                 plan_and_execute: PlanAndExecuteConfig::default(),
@@ -329,6 +388,68 @@ impl Config {
                 scope,
                 max_output_tokens: compaction_max_output,
             },
+        }
+    }
+}
+
+// ─── Env / Default helpers ─────────────────────────────────
+
+/// 按 provider 名称查找 API key 环境变量.
+fn env_api_key_for(provider_name: &str) -> Option<String> {
+    // 1. 预设的硬编码 env var
+    let specific: &[&str] = match provider_name {
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "MiniMax" => &["ANTHROPIC_AUTH_TOKEN"],
+        _ => &[],
+    };
+    for var in specific {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    // 2. 通用约定: <PROVIDER>_API_KEY
+    let generic = format!("{}_API_KEY", provider_name.to_uppercase());
+    if let Ok(v) = std::env::var(&generic) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    // 3. Anthropic 风格: <PROVIDER>_AUTH_TOKEN
+    let anthropic = format!("{}_AUTH_TOKEN", provider_name.to_uppercase());
+    if let Ok(v) = std::env::var(&anthropic) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn default_base_url_for(provider_name: &str) -> String {
+    match provider_name {
+        "deepseek" => "https://api.deepseek.com/anthropic".into(),
+        "MiniMax" => "https://api.minimaxi.com/anthropic".into(),
+        "anthropic" => "https://api.anthropic.com".into(),
+        other => {
+            tracing::warn!(
+                "[config] unknown provider '{other}', set `base_url` explicitly in config"
+            );
+            String::new()
+        }
+    }
+}
+
+fn default_model_for(provider_name: &str) -> String {
+    match provider_name {
+        "deepseek" => "deepseek-v4-flash".into(),
+        "MiniMax" => "MiniMax-M3".into(),
+        "anthropic" => "claude-sonnet-4-5".into(),
+        other => {
+            tracing::warn!(
+                "[config] unknown provider '{other}', set `model` explicitly in config"
+            );
+            other.to_string()
         }
     }
 }

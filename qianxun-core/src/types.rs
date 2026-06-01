@@ -80,9 +80,14 @@ pub struct ProviderCapabilities {
     pub streaming: bool,
     pub thinking: bool,
     pub tool_use: bool,
+    /// 单次响应最大 token 数
     pub max_tokens: Option<u64>,
+    /// 上下文窗口大小 (input token 上限)
+    pub max_input_tokens: Option<u64>,
     pub supports_system_prompt: bool,
     pub supports_cache_control: bool,
+    /// 是否支持图片/图像输入 (多模态)
+    pub supports_image_input: bool,
 }
 
 // ─── ThinkingConfig ──────────────────────────────────────

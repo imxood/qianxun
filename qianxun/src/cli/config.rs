@@ -3,12 +3,29 @@ use std::path::PathBuf;
 const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
 //
 // 优先级（从高到低）:
-//   CLI 参数 (--model) > 环境变量 (DEEPSEEK_API_KEY) > 配置文件 > 内置默认值
+//   CLI 参数 (--provider / --model) > 环境变量 > 配置文件 > 内置默认值
+//
+// 切换 LLM provider:
+//   1. 修改下方 "active_provider" 字段为 "deepseek" / "MiniMax" 或其他
+//   2. 在 "providers" 区块添加对应 provider 的 api_key / model / base_url
+//   3. 也可通过 CLI 临时覆盖:  qx --provider MiniMax
+//
+// API key 解析顺序（每个 provider 独立查找）:
+//   1. 预设的硬编码 env var:
+//        - "deepseek" → DEEPSEEK_API_KEY
+//        - "MiniMax" → ANTHROPIC_AUTH_TOKEN
+//   2. 通用约定: <PROVIDER>_API_KEY
+//   3. Anthropic 风格: <PROVIDER>_AUTH_TOKEN
+//   4. 本配置文件中 providers.<name>.api_key
 //
 // 所有字段均为可选项，缺失 = 使用对应级别的默认值。
 
 {
-  // ── Provider ──────────────────────────────────────────────
+  // ── 当前激活的 Provider ─────────────────────────────
+  // 留空 → "deepseek" (向后兼容)
+  "active_provider": "deepseek",
+
+  // ── Provider 配置 ─────────────────────────────────
   "providers": {
     // "deepseek": {
     //   // API 密钥（可选，默认走 DEEPSEEK_API_KEY 环境变量）
@@ -26,9 +43,20 @@ const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
     //   // 单次响应最大 token（可选）
     //   // "max_tokens": 4096,
     // },
+
+    // "MiniMax": {
+    //   // API 密钥（可选，默认走 ANTHROPIC_AUTH_TOKEN 环境变量）
+    //   // 也可填在这里: "api_key": "eyJ..."
+    //
+    //   // 模型名（可选，默认 MiniMax-M3, 支持 1M 上下文 + thinking + tool_use + 图片）
+    //   // "model": "MiniMax-M3",
+    //
+    //   // API 基础地址（Anthropic 兼容端点）
+    //   // "base_url": "https://api.minimaxi.com/anthropic",
+    // },
   },
 
-  // ── Agent ─────────────────────────────────────────────────
+  // ── Agent ─────────────────────────────────────────
   "agent": {
     // 每轮对话最大交互次数
     "max_turns": 50,
@@ -36,7 +64,7 @@ const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
     "max_retries": 3,
   },
 
-  // ── Token 预算 ─────────────────────────────────────────
+  // ── Token 预算 ─────────────────────────────────
   "budget": {
     // 对话窗口上限（超过时自动丢弃早期消息）
     "max_input_tokens": 100000,
@@ -44,11 +72,11 @@ const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
     "max_output_tokens": 4096,
   },
 
-  // ── 上下文压缩 ─────────────────────────────────────
+  // ── 上下文压缩 ───────────────────────────────
   "compaction": {
     // 启用上下文压缩（默认 true）
     // "enabled": true,
-    // 模型窗口大小 token 数（DeepSeek = 1M）
+    // 模型窗口大小 token 数（DeepSeek / MiniMax-M3 = 1M）
     // "model_window": 1000000,
     // 裁剪前保留的最近轮次数
     // "snip_fresh_turns": 3,

@@ -40,6 +40,11 @@ struct Cli {
     #[arg(short, long)]
     model: Option<String>,
 
+    /// 指定 LLM provider 名称 (例如 "deepseek" / "MiniMax").
+    /// 默认从 config.active_provider 读取, 留空则 "deepseek".
+    #[arg(long)]
+    provider: Option<String>,
+
     /// 配置文件路径（默认: ~/.qianxun/config.json）
     #[arg(long)]
     config: Option<String>,
@@ -146,31 +151,52 @@ async fn main() -> anyhow::Result<()> {
     let resolved = if let Some(ref path) = config_path {
         match qianxun_core::config::Config::from_file(path) {
             Ok(raw) => {
-                let env_key = std::env::var("DEEPSEEK_API_KEY").ok();
-                raw.resolve(env_key, cli.model.clone())
+                // env var 读取由 resolve() 内部按 provider 分发 (DEEPSEEK_API_KEY / ANTHROPIC_AUTH_TOKEN / 通用约定)
+                raw.resolve(cli.model.clone(), cli.provider.clone())
             }
             Err(e) => {
                 eprintln!("警告: 无法读取配置文件 {}: {e}", path.display());
-                let env_key = std::env::var("DEEPSEEK_API_KEY")
-                    .expect("DEEPSEEK_API_KEY environment variable or config file is required");
                 let mut cfg = qianxun_core::config::ResolvedConfig::default();
-                cfg.deepseek.api_key = env_key;
-                if let Some(ref m) = cli.model {
-                    cfg.deepseek.model = m.clone();
+                if let Some(ref p) = cli.provider {
+                    cfg.active_provider = p.clone();
                 }
-                cfg
+                // 用 resolve() 走 env 路径, 统一处理
+                let env_resolved = qianxun_core::config::Config::default()
+                    .resolve(cli.model.clone(), cli.provider.clone());
+                // env 缺失时回退到原始 cfg (保持向后兼容)
+                if env_resolved.active_provider_config().api_key.is_empty() {
+                    cfg
+                } else {
+                    env_resolved
+                }
             }
         }
     } else {
-        let env_key = std::env::var("DEEPSEEK_API_KEY")
-            .expect("DEEPSEEK_API_KEY environment variable or config file is required");
-        let mut cfg = qianxun_core::config::ResolvedConfig::default();
-        cfg.deepseek.api_key = env_key;
-        if let Some(ref m) = cli.model {
-            cfg.deepseek.model = m.clone();
-        }
-        cfg
+        // 无 config 文件 → 用默认 Config (空), 完全依赖 env vars
+        qianxun_core::config::Config::default().resolve(cli.model.clone(), cli.provider.clone())
     };
+
+    // 验证 active provider 的 api_key 非空
+    if resolved.active_provider_config().api_key.is_empty() {
+        let provider = &resolved.active_provider;
+        let env_var = match provider.as_str() {
+            "deepseek" => "DEEPSEEK_API_KEY",
+            "MiniMax" => "ANTHROPIC_AUTH_TOKEN",
+            other => {
+                // 通用约定
+                tracing::warn!(
+                    "[main] no api_key for provider '{other}'; tried {}_API_KEY / {}_AUTH_TOKEN env vars and config.providers.{other}.api_key",
+                    other.to_uppercase(),
+                    other.to_uppercase()
+                );
+                "<PROVIDER>_API_KEY or <PROVIDER>_AUTH_TOKEN"
+            }
+        };
+        eprintln!(
+            "错误: provider '{provider}' 缺少 API key. 请设置 env var {env_var} 或在 config.json 的 providers.{provider}.api_key 填写."
+        );
+        std::process::exit(1);
+    }
 
     if cli.server {
         tracing::info!("以 VPS Server 模式启动（端口 {}）", cli.port);
@@ -191,8 +217,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.acp_mode {
-        tracing::info!("以 ACP 协议模式启动");
-        let provider = qianxun_core::provider::create_provider(&resolved.deepseek);
+        tracing::info!("以 ACP 协议模式启动 (provider={})", resolved.active_provider);
+        let provider = qianxun_core::provider::create_provider(
+            &resolved.active_provider,
+            &resolved.active_provider_config(),
+        );
         crate::acp::run_acp_server(
             provider,
             resolved.agent.clone(),
