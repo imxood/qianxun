@@ -29,6 +29,13 @@ use tui_input::backend::crossterm::EventHandler;
 
 const MAX_MESSAGES: usize = 400;
 const PALETTE_MAX_ROWS: usize = 9;
+
+// ── 脏标记 ──
+const DIRTY_INPUT: u8 = 0b0001;
+const DIRTY_MESSAGES: u8 = 0b0010;
+const DIRTY_STATUS: u8 = 0b0100;
+const DIRTY_LAYOUT: u8 = 0b1000;
+const DIRTY_ALL: u8 = 0b1111;
 const INLINE_VIEWPORT_HEIGHT: u16 = 8;
 
 const COMMANDS: &[CommandSpec] = &[
@@ -139,6 +146,13 @@ struct App {
     budget: (Option<u64>, Option<u64>),
     last_tick: Instant,
     spinner_index: usize,
+
+    // ── 脏标记 / 帧率控制 ──
+    dirty: u8,
+    last_draw: Instant,
+
+    // ── 增量行缓存 ──
+    cached_lines: Vec<Vec<Line<'static>>>,
 }
 
 impl App {
@@ -228,30 +242,53 @@ impl App {
             ),
             last_tick: Instant::now(),
             spinner_index: 0,
+
+            dirty: DIRTY_ALL,
+            last_draw: Instant::now(),
+
+            cached_lines: Vec::new(),
         })
     }
 
     async fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
         while self.running {
+            // ── 事件消费 ──
             self.drain_agent_events().await;
             self.flush_completed_messages_to_scrollback(terminal)?;
-            if self.last_tick.elapsed() >= Duration::from_millis(120) {
+
+            // ── Spinner 更新（仅 agent 运行时） ──
+            if self.agent_running && self.last_tick.elapsed() >= Duration::from_millis(120) {
                 self.last_tick = Instant::now();
-                if self.agent_running {
-                    self.spinner_index = (self.spinner_index + 1) % 4;
+                self.spinner_index = (self.spinner_index + 1) % 4;
+                self.dirty |= DIRTY_STATUS;
+            }
+
+            // ── 脏检查 —— 没有变化时阻塞等待事件，不轮询 ──
+            if self.dirty == 0 {
+                let timeout = if self.agent_running {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_millis(200)
+                };
+                if event::poll(timeout)? {
+                    self.handle_event().await;
                 }
+                continue;
+            }
+
+            // ── 帧率限制（最大 ~30fps） ──
+            let elapsed = self.last_draw.elapsed();
+            if elapsed < Duration::from_millis(33) {
+                tokio::time::sleep(Duration::from_millis(33) - elapsed).await;
             }
 
             terminal.draw(|frame| self.render(frame))?;
+            self.last_draw = Instant::now();
+            self.dirty = 0;
 
-            if event::poll(Duration::from_millis(30))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key).await;
-                    }
-                    Event::Resize(_, _) => {}
-                    _ => {}
-                }
+            // ── 非阻塞处理绘制期间到达的事件 ──
+            while event::poll(Duration::ZERO)? {
+                self.handle_event().await;
             }
         }
 
@@ -267,11 +304,25 @@ impl App {
         Ok(())
     }
 
+    async fn handle_event(&mut self) {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                self.handle_key(key).await;
+            }
+            Ok(Event::Resize(_, _)) => {
+                self.dirty |= DIRTY_LAYOUT;
+            }
+            _ => {}
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         self.visible_command_rows = 0;
         let area = frame.area();
-        let live_lines = self.live_message_lines();
-        let live_height = (live_lines.len() as u16).min(area.height.saturating_sub(2));
+        // live 区最多可见行数（减去输入行和脚注）
+        let max_body_height = area.height.saturating_sub(2);
+        let live_lines = self.live_message_lines(max_body_height);
+        let live_height = live_lines.len() as u16;
         let body = Rect {
             x: area.x,
             y: area.y,
@@ -328,17 +379,24 @@ impl App {
         }
 
         let lines = message_lines_for(&self.messages[self.scrollback_cursor..end]);
-        let height = lines.len().min(u16::MAX as usize) as u16;
-        if height == 0 {
+        let total = lines.len().min(u16::MAX as usize);
+        if total == 0 {
             self.scrollback_cursor = end;
             return Ok(());
         }
 
-        terminal.insert_before(height, |buf| {
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .render(buf.area, buf);
-        })?;
+        // 分块写入（最多 200 行/块），避免 terminal 卡顿
+        // insert_before 会导致后续块出现在更上方，因此反转顺序写入
+        const CHUNK: usize = 200;
+        for chunk in lines[..total].chunks(CHUNK).rev() {
+            let chunk_lines: Vec<Line<'static>> = chunk.to_vec();
+            terminal.insert_before(chunk_lines.len() as u16, |buf| {
+                Paragraph::new(chunk_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(buf.area, buf);
+            })?;
+            std::thread::yield_now();
+        }
         self.scrollback_cursor = end;
         Ok(())
     }
@@ -356,8 +414,16 @@ impl App {
         }
     }
 
-    fn live_message_lines(&self) -> Vec<Line<'static>> {
-        message_lines_for(&self.messages[self.scrollback_cursor..])
+    /// 从缓存构建可见消息行，最多 `max_height` 行
+    fn live_message_lines(&self, max_height: u16) -> Vec<Line<'static>> {
+        let mut all = Vec::new();
+        for cached in self.cached_lines[self.scrollback_cursor..].iter() {
+            all.extend_from_slice(cached);
+        }
+        // 只保留最后 max_height 行（可见区域）
+        let start = all.len().saturating_sub(max_height as usize);
+        all.drain(..start);
+        all
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
@@ -480,20 +546,25 @@ impl App {
                 KeyCode::Esc if self.command_palette.visible => {
                     self.command_palette.visible = false;
                     self.command_palette.selected = 0;
+                    self.dirty |= DIRTY_LAYOUT;
                 }
                 KeyCode::Esc => {
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status = "正在取消当前生成...".to_string();
+                    self.dirty |= DIRTY_STATUS;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status = "正在取消当前生成...".to_string();
+                    self.dirty |= DIRTY_STATUS;
                 }
                 KeyCode::Enter => {
                     self.queue_current_input();
+                    self.dirty |= DIRTY_STATUS;
                 }
                 KeyCode::Up | KeyCode::Down | KeyCode::Tab if self.command_palette.visible => {
                     self.handle_running_palette_key(key);
+                    self.dirty |= DIRTY_LAYOUT;
                 }
                 _ => {}
             }
@@ -508,12 +579,14 @@ impl App {
             {
                 let _ = self.input.handle_event(&Event::Key(key));
                 self.sync_command_palette_with_input();
+                self.dirty |= DIRTY_INPUT;
             }
             return;
         }
 
         if self.command_palette.visible {
             self.handle_palette_key(key).await;
+            self.dirty |= DIRTY_LAYOUT;
             return;
         }
 
@@ -527,6 +600,7 @@ impl App {
                     self.input.reset();
                     self.command_palette.visible = false;
                     self.command_palette.selected = 0;
+                    self.dirty |= DIRTY_INPUT | DIRTY_LAYOUT;
                     self.handle_command(&value).await;
                 } else {
                     self.submit_message(value).await;
@@ -535,22 +609,27 @@ impl App {
             KeyCode::Char('/') if self.input.value().is_empty() => {
                 let _ = self.input.handle_event(&Event::Key(key));
                 self.sync_command_palette_with_input();
+                self.dirty |= DIRTY_INPUT | DIRTY_LAYOUT;
             }
             KeyCode::Esc => {
                 if !self.input.value().is_empty() {
                     self.input.reset();
+                    self.dirty |= DIRTY_INPUT;
                 } else {
                     self.modal = Some(Modal::confirm_quit());
+                    self.dirty |= DIRTY_LAYOUT;
                 }
             }
             _ => {
                 let _ = self.input.handle_event(&Event::Key(key));
                 self.sync_command_palette_with_input();
+                self.dirty |= DIRTY_INPUT;
             }
         }
     }
 
     fn sync_command_palette_with_input(&mut self) {
+        let was_visible = self.command_palette.visible;
         if self.input.value().starts_with('/')
             && !self.command_palette.filtered(self.input.value()).is_empty()
         {
@@ -559,6 +638,9 @@ impl App {
         } else {
             self.command_palette.visible = false;
             self.command_palette.selected = 0;
+        }
+        if was_visible != self.command_palette.visible {
+            self.dirty |= DIRTY_LAYOUT;
         }
     }
 
@@ -595,6 +677,7 @@ impl App {
         self.command_palette.visible = false;
         self.command_palette.selected = 0;
         self.queued_messages.push_back(value);
+        self.dirty |= DIRTY_INPUT | DIRTY_LAYOUT;
         self.status = format!(
             "已排队 {} 条消息, 当前生成结束后自动发送.",
             self.queued_messages.len()
@@ -608,6 +691,7 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.modal = None;
+                self.dirty |= DIRTY_LAYOUT;
                 match kind {
                     ModalKind::Quit => self.running = false,
                     ModalKind::Reset => self.reset_conversation(),
@@ -616,6 +700,7 @@ impl App {
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.modal = None;
+                self.dirty |= DIRTY_LAYOUT;
                 true
             }
             _ => true,
@@ -682,13 +767,20 @@ impl App {
             "/quit" | "/exit" => {
                 self.command_palette.visible = false;
                 self.command_palette.selected = 0;
+                self.dirty |= DIRTY_LAYOUT;
                 self.running = false;
             }
-            "/help" => self.push_panel(
-                "帮助",
-                "基本\n  /help 显示帮助\n  /quit 退出\n  /reset 重置对话\n\n模式\n  /mode 查看模式\n  /mode plan 切换计划模式\n  /mode auto 切换自动模式\n  /plan 切换计划模式\n\n信息\n  /usage token 用量\n  /workspace 工作区\n  /skills 技能\n  /tools 工具\n  /memory 最近记忆\n\n对话\n  /retry 重试上一条消息\n  /edit 编辑上一条消息",
-            ),
-            "/reset" => self.modal = Some(Modal::confirm_reset()),
+            "/help" => {
+                self.push_panel(
+                    "帮助",
+                    "基本\n  /help 显示帮助\n  /quit 退出\n  /reset 重置对话\n\n模式\n  /mode 查看模式\n  /mode plan 切换计划模式\n  /mode auto 切换自动模式\n  /plan 切换计划模式\n\n信息\n  /usage token 用量\n  /workspace 工作区\n  /skills 技能\n  /tools 工具\n  /memory 最近记忆\n\n对话\n  /retry 重试上一条消息\n  /edit 编辑上一条消息",
+                );
+                self.dirty |= DIRTY_LAYOUT;
+            }
+            "/reset" => {
+                self.modal = Some(Modal::confirm_reset());
+                self.dirty |= DIRTY_LAYOUT;
+            }
             "/usage" => {
                 let usage = &self
                     .agent_loop
@@ -744,14 +836,17 @@ impl App {
                     self.submit_message(last).await;
                 } else {
                     self.status = "尚无消息可重试.".to_string();
+                    self.dirty |= DIRTY_STATUS;
                 }
             }
             "/edit" => {
                 if let Some(last) = self.last_message.clone() {
                     self.input = Input::new(last);
                     self.status = "已将上一条消息放回输入框.".to_string();
+                    self.dirty |= DIRTY_INPUT | DIRTY_STATUS;
                 } else {
                     self.status = "尚无消息可编辑.".to_string();
+                    self.dirty |= DIRTY_STATUS;
                 }
             }
             "/mode" => self.handle_mode_command(command),
@@ -767,6 +862,7 @@ impl App {
                     Box::pin(self.handle_command(matched.name)).await;
                 } else {
                     self.status = format!("未知命令: {command}");
+                    self.dirty |= DIRTY_STATUS;
                 }
             }
         }
@@ -793,6 +889,7 @@ impl App {
         self.mode = mode;
         self.rebuild_system_prompt();
         self.status = format!("已切换到 {}: {}", mode.display_name(), mode_desc(mode));
+        self.dirty |= DIRTY_STATUS;
     }
 
     async fn submit_message(&mut self, text: String) {
@@ -815,6 +912,7 @@ impl App {
         self.agent_running = true;
         self.cancel_flag.store(false, Ordering::SeqCst);
         self.status = "正在请求模型...".to_string();
+        self.dirty |= DIRTY_STATUS | DIRTY_INPUT;
 
         self.reload_skills_if_needed();
         let skill_injections = self.skill_injections_for(&text);
@@ -892,6 +990,7 @@ impl App {
                 AgentEvent::Thinking(text) => {
                     if !text.is_empty() {
                         self.status = format!("思考中: 已接收 {} 字符", text.len());
+                        self.dirty |= DIRTY_STATUS;
                     }
                 }
                 AgentEvent::ThinkingFlush => {}
@@ -903,15 +1002,18 @@ impl App {
                 }
                 AgentEvent::TokenUsage(usage) => {
                     self.status = format!("Token: 输入 {}, 输出 {}", usage.input, usage.output);
+                    self.dirty |= DIRTY_STATUS;
                 }
                 AgentEvent::Status(status) => {
                     self.status = status;
+                    self.dirty |= DIRTY_STATUS;
                 }
                 AgentEvent::Error(error) => {
                     self.push_message(UiMessage::error(error));
                 }
                 AgentEvent::TurnFinished(reason) => {
                     self.status = format!("本轮结束: {reason:?}");
+                    self.dirty |= DIRTY_STATUS;
                 }
                 AgentEvent::RunFinished {
                     agent_loop,
@@ -923,6 +1025,7 @@ impl App {
                     self.conversation = Some(conversation);
                     self.memory = memory;
                     self.agent_running = false;
+                    self.dirty |= DIRTY_STATUS | DIRTY_MESSAGES;
                     if was_cancelled {
                         if let Some(next) = self.queued_messages.pop_front() {
                             self.input = Input::new(next);
@@ -933,6 +1036,7 @@ impl App {
                         self.cancel_flag.store(false, Ordering::SeqCst);
                     } else if let Some(next) = self.queued_messages.pop_front() {
                         self.status = "正在发送排队消息...".to_string();
+                        self.dirty |= DIRTY_STATUS;
                         self.submit_message(next).await;
                     } else if self.status.starts_with("正在") {
                         self.status = "就绪".to_string();
@@ -946,6 +1050,9 @@ impl App {
         match self.messages.last_mut() {
             Some(last) if last.role == UiRole::Assistant && last.title == "回复" => {
                 last.content.push_str(text);
+                // 实时更新缓存行，避免流式 delta 累积后全量重算
+                let last_idx = self.cached_lines.len().saturating_sub(1);
+                self.cached_lines[last_idx] = render_one_message(last);
             }
             _ => self.push_message(UiMessage {
                 role: UiRole::Assistant,
@@ -953,6 +1060,7 @@ impl App {
                 content: text.to_string(),
             }),
         }
+        self.dirty |= DIRTY_MESSAGES;
     }
 
     fn push_panel(&mut self, title: &str, content: &str) {
@@ -964,10 +1072,14 @@ impl App {
     }
 
     fn push_message(&mut self, message: UiMessage) {
+        let lines = render_one_message(&message);
+        self.cached_lines.push(lines);
         self.messages.push(message);
+        self.dirty |= DIRTY_MESSAGES;
         if self.messages.len() > MAX_MESSAGES {
             let removed = self.messages.len() - MAX_MESSAGES;
             self.messages.drain(0..removed);
+            self.cached_lines.drain(0..removed);
             self.scrollback_cursor = self.scrollback_cursor.saturating_sub(removed);
         }
     }
@@ -988,9 +1100,11 @@ impl App {
             agent.reset();
         }
         self.messages.clear();
+        self.cached_lines.clear();
         self.scrollback_cursor = 0;
         self.push_message(UiMessage::system("对话已重置."));
         self.status = "对话已重置.".to_string();
+        self.dirty |= DIRTY_STATUS;
     }
 
     fn rebuild_system_prompt(&mut self) {
@@ -1022,27 +1136,66 @@ impl App {
 fn message_lines_for(messages: &[UiMessage]) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for message in messages {
-        let (label, color) = match message.role {
-            UiRole::User => ("你", Color::Green),
-            UiRole::Assistant => ("千寻", Color::Cyan),
-            UiRole::Tool => ("工具", Color::Magenta),
-            UiRole::System => ("系统", Color::DarkGray),
-            UiRole::Error => ("错误", Color::Red),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                label,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(message.title.clone(), Style::default().fg(Color::DarkGray)),
-        ]));
-        for line in message.content.lines() {
-            lines.push(Line::from(format!("  {line}")));
-        }
-        lines.push(Line::from(""));
+        lines.extend(render_one_message(message));
     }
     lines
+}
+
+/// 渲染单条消息为 Line 列表（含标签行和内容行，长内容自动折叠）
+fn render_one_message(message: &UiMessage) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let (label, color) = match message.role {
+        UiRole::User => ("你", Color::Green),
+        UiRole::Assistant => ("千寻", Color::Cyan),
+        UiRole::Tool => ("工具", Color::Magenta),
+        UiRole::System => ("系统", Color::DarkGray),
+        UiRole::Error => ("错误", Color::Red),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(message.title.clone(), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let content_lines: Vec<&str> = message.content.lines().collect();
+    let total = content_lines.len();
+
+    // 不同角色不同折叠阈值：工具消息 > 10 行折叠，其余 > 50 行折叠
+    let (threshold, preview) = match message.role {
+        UiRole::Tool => (10, 5),     // 工具输出：10 行阈值，预览 5 行
+        _ => (50, 10),               // 其他：50 行阈值，预览 10 行
+    };
+
+    if total > threshold {
+        for line in &content_lines[..preview.min(total)] {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        let file_path = write_full_output(&message.content);
+        lines.push(Line::from(Span::styled(
+            format!("  ... (共 {total} 行, 完整内容: {file_path})"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for line in &content_lines {
+            lines.push(Line::from(format!("  {line}")));
+        }
+    }
+    lines.push(Line::from(""));
+    lines
+}
+
+/// 将超长内容写入文件，返回文件路径
+fn write_full_output(content: &str) -> String {
+    let dir = dirs::data_dir()
+        .map(|d| d.join("qianxun").join("tool_output"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{}.txt", uuid::Uuid::new_v4()));
+    let _ = std::fs::write(&path, content);
+    path.to_string_lossy().to_string()
 }
 
 #[derive(Default)]
@@ -1351,7 +1504,13 @@ fn truncate_chars(text: &str, max: usize) -> String {
         .map(|(idx, _)| idx)
         .unwrap_or(text.len());
     format!("{}...", &text[..end])
+
+
+
+
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -1397,6 +1556,9 @@ mod tests {
             budget: (None, None),
             last_tick: Instant::now(),
             spinner_index: 0,
+            dirty: 0,
+            last_draw: Instant::now(),
+            cached_lines: Vec::new(),
         }
     }
 
@@ -1409,19 +1571,13 @@ mod tests {
     #[tokio::test]
     async fn command_palette_closes_after_slash_is_removed() {
         let mut app = test_app("");
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
-            .await;
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
         assert_eq!(app.input.value(), "/");
         assert!(app.command_palette.visible);
-
-        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            .await;
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
         assert_eq!(app.input.value(), "");
         assert!(!app.command_palette.visible);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
-            .await;
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)).await;
         assert_eq!(app.input.value(), "h");
         assert!(!app.command_palette.visible);
     }
@@ -1429,12 +1585,9 @@ mod tests {
     #[tokio::test]
     async fn command_palette_closes_for_unknown_prefix() {
         let mut app = test_app("");
-
         for ch in ['/', 'z', 'z', 'z'] {
-            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
-                .await;
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)).await;
         }
-
         assert_eq!(app.input.value(), "/zzz");
         assert!(!app.command_palette.visible);
     }
@@ -1443,10 +1596,7 @@ mod tests {
     async fn slash_q_exits_without_confirmation() {
         let mut app = test_app("/q");
         app.command_palette.visible = true;
-
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .await;
-
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
         assert!(!app.running);
         assert!(app.modal.is_none());
         assert!(!app.command_palette.visible);
@@ -1458,17 +1608,11 @@ mod tests {
         let mut app = test_app("/");
         app.command_palette.visible = true;
         app.visible_command_rows = 7;
-
         for _ in 0..(PALETTE_MAX_ROWS + 5) {
-            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-                .await;
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
         }
-
         assert_eq!(app.command_palette.selected, 6);
-
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .await;
-
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
         assert_eq!(app.command_palette.selected, 6);
         assert_eq!(app.input.value(), "/");
     }
@@ -1477,10 +1621,7 @@ mod tests {
     async fn enter_queues_message_while_agent_is_running() {
         let mut app = test_app("next task");
         app.agent_running = true;
-
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .await;
-
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
         assert_eq!(app.input.value(), "");
         assert_eq!(app.queued_messages.len(), 1);
         assert_eq!(app.queued_messages.front().unwrap(), "next task");
@@ -1490,19 +1631,13 @@ mod tests {
     #[test]
     fn live_messages_exclude_completed_scrollback() {
         let mut app = test_app("");
-        app.messages = (0..8)
-            .map(|idx| UiMessage::system(format!("message {idx}")))
-            .collect();
+        for idx in 0..8 {
+            app.push_message(UiMessage::system(format!("message {idx}")));
+        }
         app.scrollback_cursor = 7;
-
-        let lines = app.live_message_lines();
-
-        assert!(lines
-            .iter()
-            .any(|line| format!("{line:?}").contains("message 7")));
-        assert!(!lines
-            .iter()
-            .any(|line| format!("{line:?}").contains("message 6")));
+        let lines = app.live_message_lines(100);
+        assert!(lines.iter().any(|line| format!("{line:?}").contains("message 7")));
+        assert!(!lines.iter().any(|line| format!("{line:?}").contains("message 6")));
     }
 
     #[test]
@@ -1526,7 +1661,43 @@ mod tests {
             },
         )
         .unwrap();
-
         terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    mod bench {
+        use super::*;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn bench_render(size_kb: usize, label: &str) {
+            let mut app = test_app("");
+            let line = "这是一个测试行，用于性能基准测试。
+";
+            let repeat = (size_kb * 1024) / line.len();
+            let content: String = (0..repeat).map(|_| line).collect();
+            app.push_message(UiMessage {
+                role: UiRole::Assistant,
+                title: "回复".to_string(),
+                content,
+            });
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let start = Instant::now();
+            let frames = 100;
+            for _ in 0..frames {
+                terminal.draw(|frame| app.render(frame)).unwrap();
+            }
+            let avg = start.elapsed().as_micros() as f64 / frames as f64;
+            eprintln!("  {label:>8}: {avg:.1}µs/frame ({frames} frames)");
+        }
+
+        #[test]
+        fn render_10kb() { bench_render(10, "10KB"); }
+
+        #[test]
+        fn render_100kb() { bench_render(100, "100KB"); }
+
+        #[test]
+        fn render_1mb() { bench_render(1024, "1MB"); }
     }
 }
