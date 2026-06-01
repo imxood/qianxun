@@ -23,10 +23,10 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-rustyline = { workspace = true }
-indicatif = { workspace = true }
-console = { workspace = true }
 reqwest = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tui-input = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

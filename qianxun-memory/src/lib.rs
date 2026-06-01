@@ -1,11 +1,11 @@
-pub mod types;
-pub mod db;
 pub mod compressor;
-pub mod privacy;
-pub mod vector;
-pub mod slot;
-pub mod search;
 pub mod consolidation;
+pub mod db;
+pub mod privacy;
+pub mod search;
+pub mod slot;
+pub mod types;
+pub mod vector;
 
 use async_trait::async_trait;
 use qianxun_core::context::{MemoryObserver, SearchResult};
@@ -105,7 +105,11 @@ impl MemoryObserver for MemoryCore {
                     for row in rows.flatten() {
                         if !row.0.is_empty() {
                             let preview: String = row.2.chars().take(120).collect();
-                            parts.push(format!("  [{}] {} — {}", row.1, row.0, preview));
+                            if preview == row.0 || preview.starts_with(&row.0) {
+                                parts.push(format!("  [{}] {}", row.1, row.0));
+                            } else {
+                                parts.push(format!("  [{}] {} — {}", row.1, row.0, preview));
+                            }
                         }
                     }
                 }
@@ -113,7 +117,11 @@ impl MemoryObserver for MemoryCore {
         }
         let ctx = parts.join("\n");
         if ctx.len() as u32 > token_budget * 4 {
-            let end = ctx.char_indices().nth(token_budget as usize * 4).map(|(i,_)| i).unwrap_or(ctx.len());
+            let end = ctx
+                .char_indices()
+                .nth(token_budget as usize * 4)
+                .map(|(i, _)| i)
+                .unwrap_or(ctx.len());
             format!("{}\n...（已截断）", &ctx[..end])
         } else {
             ctx

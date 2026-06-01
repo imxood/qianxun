@@ -138,9 +138,15 @@ pub struct PlanAndExecuteConfig {
     pub approval_timeout_sec: u64,
 }
 
-fn default_plan_turns() -> u32 { 20 }
-fn default_execute_turns() -> u32 { 50 }
-fn default_approval_timeout() -> u64 { 300 }
+fn default_plan_turns() -> u32 {
+    20
+}
+fn default_execute_turns() -> u32 {
+    50
+}
+fn default_approval_timeout() -> u64 {
+    300
+}
 
 impl Default for PlanAndExecuteConfig {
     fn default() -> Self {
@@ -163,9 +169,15 @@ pub struct ReflectiveConfig {
     pub only_review_when_tool_used: bool,
 }
 
-fn default_review_rounds() -> u32 { 2 }
-fn default_confidence() -> u8 { 8 }
-fn default_review_tool_only() -> bool { true }
+fn default_review_rounds() -> u32 {
+    2
+}
+fn default_confidence() -> u8 {
+    8
+}
+fn default_review_tool_only() -> bool {
+    true
+}
 
 impl Default for ReflectiveConfig {
     fn default() -> Self {
@@ -185,13 +197,49 @@ pub struct WorkflowConfig {
     pub custom_path: Option<String>,
 }
 
-fn default_stage_turns() -> u32 { 30 }
+fn default_stage_turns() -> u32 {
+    30
+}
 
 impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
             max_stage_turns: 30,
             custom_path: None,
+        }
+    }
+}
+
+// ─── Mode ──────────────────────────────────────────────────
+
+/// 千寻运行时模式（通过 `/mode` 命令切换）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// 自动模式（默认）：可自由调用所有工具
+    Auto,
+    /// 计划模式：只允许 Read / Search / Think 类工具，禁止写操作
+    Plan,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl Mode {
+    pub fn tool_filter(&self) -> crate::tools::ToolCategoryFilter {
+        match self {
+            Mode::Auto => crate::tools::ToolCategoryFilter::all(),
+            Mode::Plan => crate::tools::ToolCategoryFilter::read_only(),
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Plan => "plan",
         }
     }
 }

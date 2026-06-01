@@ -1,6 +1,46 @@
 use async_trait::async_trait;
-use console::style;
-use indicatif::ProgressBar;
+use std::fmt::Display;
+fn style<D: Display>(d: D) -> AnsiStyled<D> {
+    AnsiStyled(d, Vec::new())
+}
+struct AnsiStyled<D>(D, Vec<&'static str>);
+impl<D: Display> AnsiStyled<D> {
+    fn apply(self, code: &'static str) -> Self {
+        let mut v = self.1;
+        v.push(code);
+        AnsiStyled(self.0, v)
+    }
+    fn cyan(self) -> Self {
+        self.apply("36")
+    }
+    fn green(self) -> Self {
+        self.apply("32")
+    }
+    fn red(self) -> Self {
+        self.apply("31")
+    }
+    fn yellow(self) -> Self {
+        self.apply("33")
+    }
+    fn dim(self) -> Self {
+        self.apply("2")
+    }
+    fn bold(self) -> Self {
+        self.apply("1")
+    }
+    fn color256(self, _c: u8) -> Self {
+        self.apply("90")
+    }
+}
+impl<D: Display> Display for AnsiStyled<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.1.is_empty() {
+            return write!(f, "{}", self.0);
+        }
+        let codes = self.1.join(";");
+        write!(f, "[{codes}m{}[0m", self.0)
+    }
+}
 use qianxun_core::output::OutputSink;
 use qianxun_core::types::{LlmError, StopReason, TokenUsage};
 use std::sync::Mutex;
@@ -21,7 +61,7 @@ fn boxed_lines(title: &str, lines: &[String]) -> String {
     }
 
     // 计算内容最大显示宽度 (忽略 ANSI)
-    let max_content = lines.iter().map(|l| console::measure_text_width(l)).fold(0, usize::max);
+    let max_content = lines.iter().map(|l| l.len()).fold(0, usize::max);
     let title_part = if title.is_empty() {
         String::new()
     } else {
@@ -98,7 +138,10 @@ fn format_value_compact(v: &serde_json::Value) -> String {
                 let (k, v) = o.iter().next().unwrap();
                 format!("{{{k}: {}}}", format_value_compact(v))
             } else {
-                format!("{{{}}}", o.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "{{{}}}",
+                    o.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                )
             }
         }
         serde_json::Value::Null => "null".into(),
@@ -122,12 +165,44 @@ fn stop_reason_label(reason: &StopReason) -> &'static str {
 
 // ─── 主数据结构 ──────────────────────────────────────────────
 
+/// ProgressBar 存根（TUI 迁移中，不再显示 spinner）
+#[derive(Clone)]
+pub struct ProgressBarStub;
+impl ProgressBarStub {
+    pub fn new() -> Self {
+        Self
+    }
+    pub fn set_style(&self, _s: ProgressStyleStub) {}
+    pub fn set_message<T: AsRef<str>>(&self, _m: T) {}
+    pub fn enable_steady_tick(&self, _d: std::time::Duration) {}
+    pub fn tick(&self) {}
+    pub fn finish_and_clear(&self) {}
+    pub fn is_finished(&self) -> bool {
+        true
+    }
+    pub fn suspend<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        f()
+    }
+}
+pub struct ProgressStyleStub;
+impl ProgressStyleStub {
+    pub fn with_template(_s: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self)
+    }
+    pub fn tick_chars(self, _s: &str) -> Self {
+        self
+    }
+}
+
 pub struct CliOutputSink {
     thinking_buf: Mutex<String>,
     text_buf: Mutex<String>,
     /// 可选的 spinner，在 LLM 生成期间显示。
     /// 所有终端输出前会暂停 spinner，输出后恢复。
-    spinner: Mutex<Option<ProgressBar>>,
+    spinner: Mutex<Option<ProgressBarStub>>,
 }
 
 impl CliOutputSink {
@@ -136,7 +211,7 @@ impl CliOutputSink {
     }
 
     /// 绑定一个 spinner，输出事件会暂停/恢复它。
-    pub fn attach_spinner(&self, spinner: ProgressBar) {
+    pub fn attach_spinner(&self, spinner: ProgressBarStub) {
         *self.spinner.lock().unwrap() = Some(spinner);
     }
 
@@ -164,13 +239,19 @@ impl CliOutputSink {
         }
         let total = buf.len();
         let excerpt: String = if total > 200 {
-            let end = buf.char_indices().nth(197).map(|(i, _)| i).unwrap_or(buf.len());
+            let end = buf
+                .char_indices()
+                .nth(197)
+                .map(|(i, _)| i)
+                .unwrap_or(buf.len());
             format!("{}…", &buf[..end])
         } else {
             buf.clone()
         };
         let excerpt = style(excerpt).color256(244).to_string();
-        let summary = style(format!("(共 {total} 字符)")).color256(244).to_string();
+        let summary = style(format!("(共 {total} 字符)"))
+            .color256(244)
+            .to_string();
         let lines = vec![excerpt, summary];
         let block = boxed_lines("思考过程", &lines);
 
@@ -252,7 +333,12 @@ impl OutputSink for CliOutputSink {
         self.flush_thinking_buf();
     }
 
-    async fn on_tool_call(&self, tool_call_id: &str, tool_name: &str, arguments: &serde_json::Value) {
+    async fn on_tool_call(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) {
         self.flush_text_buf();
         self.flush_thinking_buf();
 
@@ -274,7 +360,11 @@ impl OutputSink for CliOutputSink {
         let msg = format!(
             "  {} {}",
             style(format!("{BOT_L}─")).color256(236),
-            style(format!("Token: 输入 {}, 输出 {}", usage.input, usage.output)).dim(),
+            style(format!(
+                "Token: 输入 {}, 输出 {}",
+                usage.input, usage.output
+            ))
+            .dim(),
         );
         self.suspend_spinner(move || {
             eprintln!("{msg}");
@@ -329,9 +419,17 @@ impl OutputSink for CliOutputSink {
         // 无 spinner 时，直接输出状态
         self.suspend_spinner(move || {
             if let Some(tool_name) = status.strip_prefix("执行工具: ") {
-                eprintln!("  {} {}", style(format!("{BOT_L}─")).color256(236), style(format!("执行工具: {tool_name}")).color256(75));
+                eprintln!(
+                    "  {} {}",
+                    style(format!("{BOT_L}─")).color256(236),
+                    style(format!("执行工具: {tool_name}")).color256(75)
+                );
             } else {
-                eprintln!("  {} {}", style(format!("{BOT_L}─")).color256(236), style(status).color256(244));
+                eprintln!(
+                    "  {} {}",
+                    style(format!("{BOT_L}─")).color256(236),
+                    style(status).color256(244)
+                );
             }
         });
     }

@@ -1,25 +1,28 @@
-use crate::acp::output::{AcpOutputEvent, AcpOutputSink};
 use crate::acp::handler::AcpRequestHandler;
+use crate::acp::output::{AcpOutputEvent, AcpOutputSink};
 use crate::acp::types::*;
 use qianxun_core::agent::context::window::AutoCompactWindow;
 use qianxun_core::agent::conversation::Conversation;
-use qianxun_core::agent::engine::processing_loop;
 use qianxun_core::agent::engine::AgentLoop;
+use qianxun_core::agent::engine::processing_loop;
 use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::SkillManager;
-use qianxun_core::tools::ToolRegistry;
+use qianxun_core::tools::{ToolCategoryFilter, ToolRegistry};
 use qianxun_core::types::AgentConfig;
 use serde_json::Value;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tracing;
 
 // ─── 提示词执行桥接 ─────────────────────────────────────
 
 /// 创建 AgentLoop 并初始化上下文压缩窗口（如有配置）。
-pub(crate) fn new_agent_loop(agent_config: AgentConfig, compact_config: &Option<ResolvedCompactionConfig>) -> AgentLoop {
+pub(crate) fn new_agent_loop(
+    agent_config: AgentConfig,
+    compact_config: &Option<ResolvedCompactionConfig>,
+) -> AgentLoop {
     let mut agent_loop = AgentLoop::new(agent_config);
     if let Some(cc) = compact_config {
         agent_loop.compact_config = Some(cc.clone());
@@ -34,11 +37,40 @@ pub(crate) fn new_agent_loop(agent_config: AgentConfig, compact_config: &Option<
 
 impl AcpRequestHandler {
     /// session/prompt 的延迟处理入口：先校验参数，然后异步执行
-    pub(crate) async fn handle_session_prompt_deferred(&self, id: RequestId, params: Option<Value>) {
+    pub(crate) async fn handle_session_prompt_deferred(
+        &self,
+        id: RequestId,
+        params: Option<Value>,
+    ) {
         match self.prepare_prompt(params).await {
-            Ok((session_id, agent_loop, conversation, prompt_text, memory_context, memory, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)) => {
-                self.run_prompt_task(id, session_id, agent_loop, conversation, prompt_text, memory_context, memory, tools, skills_catalog, skill_injections, cancel_flag, skill_manager)
-                    .await;
+            Ok((
+                session_id,
+                agent_loop,
+                conversation,
+                prompt_text,
+                memory_context,
+                memory,
+                tools,
+                skills_catalog,
+                skill_injections,
+                cancel_flag,
+                skill_manager,
+            )) => {
+                self.run_prompt_task(
+                    id,
+                    session_id,
+                    agent_loop,
+                    conversation,
+                    prompt_text,
+                    memory_context,
+                    memory,
+                    tools,
+                    skills_catalog,
+                    skill_injections,
+                    cancel_flag,
+                    skill_manager,
+                )
+                .await;
             }
             Err(e) => {
                 let resp = rpc_error(id, -32603, e);
@@ -52,7 +84,22 @@ impl AcpRequestHandler {
     async fn prepare_prompt(
         &self,
         params: Option<Value>,
-    ) -> Result<(String, AgentLoop, Conversation, String, String, Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>, Arc<ToolRegistry>, String, String, Arc<AtomicBool>, Option<SkillManager>), String> {
+    ) -> Result<
+        (
+            String,
+            AgentLoop,
+            Conversation,
+            String,
+            String,
+            Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
+            Arc<ToolRegistry>,
+            String,
+            String,
+            Arc<AtomicBool>,
+            Option<SkillManager>,
+        ),
+        String,
+    > {
         let p: PromptParams = params
             .and_then(|v| serde_json::from_value(v).ok())
             .ok_or_else(|| "invalid prompt params".to_string())?;
@@ -76,10 +123,7 @@ impl AcpRequestHandler {
         let memory = std::mem::take(&mut session.memory);
 
         // 提取会话级工具注册表（如有），否则使用基础注册表
-        let session_tools = session
-            .tools
-            .take()
-            .unwrap_or_else(|| self.tools.clone());
+        let session_tools = session.tools.take().unwrap_or_else(|| self.tools.clone());
 
         let empty_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
         let empty_conv = Conversation::new(None);
@@ -90,7 +134,9 @@ impl AcpRequestHandler {
         // 检查技能文件变更（在取出 skill_manager 之前）
         if let Some(ref mut watcher) = session.skill_watcher {
             if watcher.has_changed() {
-                tracing::info!("[skill_watcher] file change detected (prepare_prompt), reloading skills");
+                tracing::info!(
+                    "[skill_watcher] file change detected (prepare_prompt), reloading skills"
+                );
                 if let Some(ref mut sm) = session.skill_manager {
                     sm.reload(session.ws_root.as_deref());
                     session.skills_catalog = sm.build_catalog_prompt();
@@ -121,13 +167,18 @@ impl AcpRequestHandler {
             }
         };
         let skill_injections = {
-            let user_text_for_match = if user_text.is_empty() { "..." } else { &user_text };
+            let user_text_for_match = if user_text.is_empty() {
+                "..."
+            } else {
+                &user_text
+            };
 
             // 手动引用 @技能名
-            let manual_names: Vec<String> = SkillManager::extract_manual_mentions(user_text_for_match)
-                .into_iter()
-                .filter(|name| skills_mgr.select_by_name(name).is_some())
-                .collect();
+            let manual_names: Vec<String> =
+                SkillManager::extract_manual_mentions(user_text_for_match)
+                    .into_iter()
+                    .filter(|name| skills_mgr.select_by_name(name).is_some())
+                    .collect();
 
             // 自动匹配
             let exclude: Vec<&str> = manual_names.iter().map(|s| s.as_str()).collect();
@@ -139,7 +190,19 @@ impl AcpRequestHandler {
             skills_mgr.build_injections(&inject_names)
         };
 
-        Ok((session_id, agent_loop, conversation, user_text, memory_context, memory, session_tools, skills_catalog, skill_injections, cancel_flag, skill_manager))
+        Ok((
+            session_id,
+            agent_loop,
+            conversation,
+            user_text,
+            memory_context,
+            memory,
+            session_tools,
+            skills_catalog,
+            skill_injections,
+            cancel_flag,
+            skill_manager,
+        ))
     }
 
     /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
@@ -159,8 +222,7 @@ impl AcpRequestHandler {
         cancel_flag: Arc<AtomicBool>,
         skill_manager: Option<SkillManager>,
     ) {
-        conversation
-            .push_user_message(vec![ContentBlock::text(&prompt_text)]);
+        conversation.push_user_message(vec![ContentBlock::text(&prompt_text)]);
 
         let sink = AcpOutputSink::new(session_id.clone(), self.output_tx.clone());
         let provider: Arc<dyn LlmProvider> = self.provider.clone();
@@ -176,6 +238,7 @@ impl AcpRequestHandler {
                 &mut conversation,
                 provider.as_ref(),
                 tools_for_spawn.as_ref(),
+                ToolCategoryFilter::all(),
                 &sink,
                 &memory_context,
                 &skills_catalog_for_spawn,
@@ -195,7 +258,10 @@ impl AcpRequestHandler {
                     // 处理正常完成，保存会话状态
                     // 写入记忆
                     let summary = if prompt_text.len() > 200 {
-                        let end = (0..=200).rev().find(|&i| prompt_text.is_char_boundary(i)).unwrap_or(0);
+                        let end = (0..=200)
+                            .rev()
+                            .find(|&i| prompt_text.is_char_boundary(i))
+                            .unwrap_or(0);
                         &prompt_text[..end]
                     } else {
                         &prompt_text

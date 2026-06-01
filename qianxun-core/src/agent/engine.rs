@@ -1,12 +1,12 @@
-use crate::agent::conversation::Conversation;
-use crate::agent::context::{normalize, compact, AutoCompactWindow};
 use crate::agent::context::window::CompactZone;
+use crate::agent::context::{AutoCompactWindow, compact, normalize};
+use crate::agent::conversation::Conversation;
 use crate::agent::message::{ContentBlock, Message};
 use crate::config::ResolvedCompactionConfig;
 use crate::output::OutputSink;
-use crate::provider::types::LlmStreamEvent;
 use crate::provider::LlmProvider;
-use crate::tools::ToolRegistry;
+use crate::provider::types::LlmStreamEvent;
+use crate::tools::{ToolCategoryFilter, ToolRegistry};
 use crate::types::{AgentConfig, StopReason, TokenUsage};
 use futures::StreamExt;
 use std::sync::Arc;
@@ -85,6 +85,7 @@ pub mod processing_loop {
         conversation: &mut Conversation,
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
+        tool_filter: ToolCategoryFilter,
         sink: &dyn OutputSink,
         memory_context: &str,
         skills_catalog: &str,
@@ -104,11 +105,8 @@ pub mod processing_loop {
 
             if !agent.can_continue() {
                 agent.state = AgentState::Stopping;
-                sink.on_turn_finished(
-                    &StopReason::MaxTokens,
-                    &agent.accumulated_usage,
-                )
-                .await;
+                sink.on_turn_finished(&StopReason::MaxTokens, &agent.accumulated_usage)
+                    .await;
                 return;
             }
 
@@ -116,22 +114,18 @@ pub mod processing_loop {
             normalize::normalize_messages(conversation.messages_mut());
 
             // ── Context compression pipeline ──
-            if let (Some(ref mut cw), Some(cc)) = (agent.compact_window.as_mut(), agent.compact_config.as_ref()) {
+            if let (Some(ref mut cw), Some(cc)) =
+                (agent.compact_window.as_mut(), agent.compact_config.as_ref())
+            {
                 // Update token tracking
                 cw.update(&agent.accumulated_usage);
 
                 // L1: Always snip old tool_results
-                compact::snip_tool_results(
-                    conversation.messages_mut(),
-                    cc.snip_fresh_turns,
-                );
+                compact::snip_tool_results(conversation.messages_mut(), cc.snip_fresh_turns);
 
                 // L2: MicroCompact if time threshold exceeded
                 if cw.should_micro_compact() {
-                    compact::micro_compact(
-                        conversation.messages_mut(),
-                        cc.micro_compact_keep,
-                    );
+                    compact::micro_compact(conversation.messages_mut(), cc.micro_compact_keep);
                 }
 
                 // L3/L4: Check zone and attempt compression
@@ -144,7 +138,8 @@ pub mod processing_loop {
                             conversation.enforce_budget(&[]).await;
                             let removed = old_len - conversation.messages().len();
                             if removed > 0 {
-                                sink.on_status(&format!("熔断降级：已截断 {removed} 条最旧消息")).await;
+                                sink.on_status(&format!("熔断降级：已截断 {removed} 条最旧消息"))
+                                    .await;
                             }
                         } else {
                             sink.on_status("上下文使用率较高，正在压缩...").await;
@@ -177,7 +172,13 @@ pub mod processing_loop {
             // ── build → stream ──
             let request = {
                 let defs = tools.definitions();
-                conversation.build_request(&defs, memory_context, skills_catalog, skill_injections, &agent.config)
+                conversation.build_request(
+                    &defs,
+                    memory_context,
+                    skills_catalog,
+                    skill_injections,
+                    &agent.config,
+                )
             };
 
             tracing::info!(
@@ -188,12 +189,26 @@ pub mod processing_loop {
             tracing::debug!(
                 "LLM 请求详情: system_len={}, messages=[{}], tools=[{}]",
                 request.system.as_ref().map_or(0, |s| s.len()),
-                request.messages.iter().map(|m| format!(
-                    "{}:{}",
-                    m.role(),
-                    m.content().iter().map(|b| b.r#type.as_str()).collect::<Vec<_>>().join(","),
-                )).collect::<Vec<_>>().join(" | "),
-                request.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "),
+                request
+                    .messages
+                    .iter()
+                    .map(|m| format!(
+                        "{}:{}",
+                        m.role(),
+                        m.content()
+                            .iter()
+                            .map(|b| b.r#type.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+                request
+                    .tools
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             );
             if let Some(sys) = &request.system {
                 tracing::debug!("=== System Prompt ===\n{}", trunc(sys, 2000));
@@ -208,7 +223,13 @@ pub mod processing_loop {
                             if agent.retry_count < agent.config.max_retries {
                                 agent.retry_count += 1;
                                 let wait = retry_after.unwrap_or(std::time::Duration::from_secs(5));
-                                sink.on_status(&format!("速率受限，{}s 后重试 ({}/{})", wait.as_secs(), agent.retry_count, agent.config.max_retries)).await;
+                                sink.on_status(&format!(
+                                    "速率受限，{}s 后重试 ({}/{})",
+                                    wait.as_secs(),
+                                    agent.retry_count,
+                                    agent.config.max_retries
+                                ))
+                                .await;
                                 tokio::time::sleep(wait).await;
                                 continue;
                             }
@@ -263,12 +284,7 @@ pub mod processing_loop {
                     Ok(LlmStreamEvent::Stop(reason)) => {
                         received_stop = true;
                         if reason == StopReason::ToolUse && !tool_calls.is_empty() {
-                            build_turn(
-                                conversation,
-                                &response_text,
-                                &tool_calls,
-                                &thinking_blocks,
-                            );
+                            build_turn(conversation, &response_text, &tool_calls, &thinking_blocks);
                             // Record assistant time for L2 TTL
                             if let Some(ref mut cw) = agent.compact_window {
                                 cw.set_last_assistant_time(std::time::Instant::now());
@@ -277,14 +293,18 @@ pub mod processing_loop {
                             // execute tools
                             sink.on_thinking_flush().await;
                             agent.state = AgentState::ToolExecuting;
-                            let tool_names: Vec<&str> = tool_calls.iter().map(|(_, n, _)| n.as_str()).collect();
+                            let tool_names: Vec<&str> =
+                                tool_calls.iter().map(|(_, n, _)| n.as_str()).collect();
                             tracing::info!(
                                 "LLM 返回工具调用: {} 个 — {:?}",
                                 tool_calls.len(),
                                 tool_names,
                             );
                             if !response_text.is_empty() {
-                                tracing::debug!("=== LLM 回复文本 (tool_use 前) ===\n{}", trunc(&response_text, 5000));
+                                tracing::debug!(
+                                    "=== LLM 回复文本 (tool_use 前) ===\n{}",
+                                    trunc(&response_text, 5000)
+                                );
                             }
                             for (_, name, args) in &tool_calls {
                                 tracing::debug!(
@@ -299,7 +319,10 @@ pub mod processing_loop {
                                     "[tool] execute: {name} ({id}) args={}",
                                     serde_json::to_string(args).unwrap_or_default(),
                                 );
-                                match tools.execute_async(name, args.clone()).await {
+                                match tools
+                                    .execute_async_with_filter(name, args.clone(), &tool_filter)
+                                    .await
+                                {
                                     Ok(output) => {
                                         tracing::info!(
                                             "[tool] result: {name} ({id}) is_error={} len={}",
@@ -310,15 +333,12 @@ pub mod processing_loop {
                                             "[tool] result content: {name} ({id})\n{}",
                                             trunc(&output.content, 5000),
                                         );
-                                        results.push((
-                                            id.clone(),
-                                            output.content,
-                                            output.is_error,
-                                        ));
+                                        results.push((id.clone(), output.content, output.is_error));
                                     }
                                     Err(e) => {
                                         tracing::error!("[tool] error: {name} ({id}): {e}");
-                                        sink.on_status(&format!("工具执行失败: {name} — {e}")).await;
+                                        sink.on_status(&format!("工具执行失败: {name} — {e}"))
+                                            .await;
                                         results.push((id.clone(), format!("Error: {e}"), true));
                                     }
                                 }
@@ -348,12 +368,7 @@ pub mod processing_loop {
                         } else {
                             // End of turn
                             let turn_usage = agent.accumulated_usage.clone();
-                            build_turn(
-                                conversation,
-                                &response_text,
-                                &tool_calls,
-                                &thinking_blocks,
-                            );
+                            build_turn(conversation, &response_text, &tool_calls, &thinking_blocks);
                             // Record assistant time for L2 TTL
                             if let Some(ref mut cw) = agent.compact_window {
                                 cw.set_last_assistant_time(std::time::Instant::now());
@@ -367,7 +382,10 @@ pub mod processing_loop {
                                 thinking_blocks.len(),
                             );
                             if !response_text.is_empty() {
-                                tracing::debug!("=== LLM 回复文本 ===\n{}", trunc(&response_text, 10000));
+                                tracing::debug!(
+                                    "=== LLM 回复文本 ===\n{}",
+                                    trunc(&response_text, 10000)
+                                );
                             }
                             for (i, (t, _)) in thinking_blocks.iter().enumerate() {
                                 tracing::debug!("=== thinking block {i} ===\n{}", trunc(t, 5000));
@@ -394,7 +412,10 @@ pub mod processing_loop {
                                 let chunk = &current_thinking_text[thinking_logged_len..];
                                 tracing::debug!("[thinking] {}", trunc(chunk, 2000));
                             }
-                            tracing::debug!("[thinking block complete] {} chars", current_thinking_text.len());
+                            tracing::debug!(
+                                "[thinking block complete] {} chars",
+                                current_thinking_text.len()
+                            );
                             sink.on_thinking_flush().await;
                             current_thinking_sig = Some(sig);
                             thinking_blocks.push((
@@ -418,7 +439,8 @@ pub mod processing_loop {
                 if !response_text.is_empty() || !tool_calls.is_empty() {
                     build_turn(conversation, &response_text, &tool_calls, &thinking_blocks);
                 }
-                sink.on_turn_finished(&StopReason::Cancelled, &agent.accumulated_usage).await;
+                sink.on_turn_finished(&StopReason::Cancelled, &agent.accumulated_usage)
+                    .await;
                 agent.state = AgentState::Idle;
                 return;
             }
@@ -430,11 +452,8 @@ pub mod processing_loop {
                 if !response_text.is_empty() || !tool_calls.is_empty() {
                     build_turn(conversation, &response_text, &tool_calls, &thinking_blocks);
                 }
-                sink.on_turn_finished(
-                    &StopReason::Error,
-                    &agent.accumulated_usage,
-                )
-                .await;
+                sink.on_turn_finished(&StopReason::Error, &agent.accumulated_usage)
+                    .await;
                 agent.state = AgentState::Error("no stop signal".into());
                 return;
             }

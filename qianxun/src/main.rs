@@ -2,17 +2,22 @@ use clap::Parser;
 use std::time::Duration;
 use tracing_subscriber::fmt::time::FormatTime;
 
-mod buf_writer;
 mod acp;
+mod buf_writer;
 mod cli;
 mod daemon;
 mod server;
+mod tui;
 
 struct LocalTimer;
 
 impl FormatTime for LocalTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))
+        write!(
+            w,
+            "{}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+        )
     }
 }
 
@@ -94,7 +99,11 @@ async fn main() -> anyhow::Result<()> {
             Ok(log_file) => {
                 tracing_subscriber::fmt()
                     .with_timer(LocalTimer)
-                    .with_writer(buf_writer::TimedBufWriter::new(log_file, 4096, Duration::from_secs(1)))
+                    .with_writer(buf_writer::TimedBufWriter::new(
+                        log_file,
+                        4096,
+                        Duration::from_secs(1),
+                    ))
                     .with_env_filter(filter)
                     .with_ansi(false)
                     .init();
@@ -199,7 +208,9 @@ async fn main() -> anyhow::Result<()> {
         // 不改 cwd——Agent 的当前工作目录保持在用户启动 qx 的位置，方便相对路径引用。
         // 项目根仅用于：加载技能、MCP 配置、记忆存储、system prompt 上下文。
         let project_root = if let Some(ref w) = cli.workspace {
-            Some(qianxun_core::workspace::project_root_from(std::path::Path::new(w)))
+            Some(qianxun_core::workspace::project_root_from(
+                std::path::Path::new(w),
+            ))
         } else {
             std::env::current_dir()
                 .ok()
@@ -211,7 +222,8 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("项目根: {}", pr.root.display());
         }
 
-        cli::run::run_repl(&resolved, project_root, cli.resume).await?;
+        let global_instructions = qianxun_core::workspace::read_global_agents_md();
+        cli::run::run_repl(resolved, project_root, global_instructions).await?;
     }
 
     Ok(())
@@ -223,7 +235,10 @@ async fn run_thin_client(daemon_url: &str) -> anyhow::Result<()> {
     let health_url = format!("{daemon_url}/v1/system/health");
 
     // 验证 Daemon 连接
-    let resp = client.get(&health_url).send().await
+    let resp = client
+        .get(&health_url)
+        .send()
+        .await
         .map_err(|e| anyhow::anyhow!("无法连接 Daemon {daemon_url}: {e}"))?;
     if !resp.status().is_success() {
         anyhow::bail!("Daemon 返回错误: {}", resp.status());

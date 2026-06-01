@@ -5,30 +5,62 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
-
 use qianxun_core::agent::conversation::Conversation;
-use qianxun_core::agent::engine::{processing_loop, AgentLoop};
+use qianxun_core::agent::engine::{AgentLoop, processing_loop};
 use qianxun_core::agent::message::{ContentBlock, Message};
 use qianxun_core::agent::system_prompt;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::SkillManager;
 use qianxun_core::skills::SkillWatcher;
-use qianxun_core::tools::ToolRegistry;
-
-use rustyline::completion::{Completer, Pair};
-use rustyline::error::ReadlineError;
-use rustyline::highlight::{CmdKind, Highlighter};
-use rustyline::hint::Hinter;
-use rustyline::validate::{ValidationContext, ValidationResult, Validator};
-use rustyline::history::FileHistory;
-use rustyline::{Config, Context, Editor, Helper};
+use qianxun_core::tools::{ToolCategoryFilter, ToolRegistry};
+use qianxun_core::types::Mode;
 
 use crate::cli::output::CliOutputSink;
 
-// ─── 颜色助手（与 output.rs 色调一致）──────────────────────
-// 注意：不再使用 apply_to()，改为直接 style(X).color256(N) 内联
+// ─── ANSI 颜色助手（console 替代）────────────────────────
+use std::fmt::Display;
+struct Style(usize);
+fn style<D: Display>(d: D) -> AnsiStyled<D> {
+    AnsiStyled(d, Vec::new())
+}
+struct AnsiStyled<D>(D, Vec<&'static str>);
+impl<D: Display> AnsiStyled<D> {
+    fn apply(self, code: &'static str) -> Self {
+        let mut v = self.1;
+        v.push(code);
+        AnsiStyled(self.0, v)
+    }
+    fn cyan(self) -> Self {
+        self.apply("36")
+    }
+    fn green(self) -> Self {
+        self.apply("32")
+    }
+    fn red(self) -> Self {
+        self.apply("31")
+    }
+    fn yellow(self) -> Self {
+        self.apply("33")
+    }
+    fn dim(self) -> Self {
+        self.apply("2")
+    }
+    fn bold(self) -> Self {
+        self.apply("1")
+    }
+    fn color256(self, _c: u8) -> Self {
+        self.apply("90")
+    }
+}
+impl<D: Display> Display for AnsiStyled<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.1.is_empty() {
+            return write!(f, "{}", self.0);
+        }
+        let codes = self.1.join(";");
+        write!(f, "\x1b[{codes}m{}\x1b[0m", self.0)
+    }
+}
 
 const HORIZ: &str = "─";
 const TOP_L: &str = "╭";
@@ -36,89 +68,21 @@ const BOT_L: &str = "╰";
 const VERT: &str = "│";
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/help", "/quit", "/exit", "/reset",
-    "/usage", "/workspace",
-    "/skills", "/tools", "/memory",
-    "/retry", "/edit",
+    "/help",
+    "/quit",
+    "/exit",
+    "/reset",
+    "/usage",
+    "/workspace",
+    "/skills",
+    "/tools",
+    "/memory",
+    "/retry",
+    "/edit",
     "/sessions",
+    "/mode",
+    "/plan",
 ];
-
-// ─── ReplHelper: rustyline 补全/提示/高亮/验证 ─────────────
-
-#[derive(Default)]
-struct ReplHelper;
-
-impl Completer for ReplHelper {
-    type Candidate = Pair;
-
-    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
-        if line.starts_with('/') {
-            let candidates: Vec<Pair> = SLASH_COMMANDS
-                .iter()
-                .filter(|cmd| cmd.starts_with(line))
-                .map(|cmd| Pair {
-                    display: cmd.to_string(),
-                    replacement: cmd.strip_prefix('/').unwrap_or(cmd).to_string(),
-                })
-                .collect();
-            return Ok((1, candidates));
-        }
-        Ok((pos, Vec::new()))
-    }
-}
-
-impl Hinter for ReplHelper {
-    type Hint = String;
-
-    fn hint(&self, line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        if line == "/" {
-            return Some("quit | help | reset | skills | tools | usage | workspace | memory | retry | edit | sessions".into());
-        }
-        if line.starts_with('/') && line.len() > 1 {
-            for cmd in SLASH_COMMANDS {
-                if cmd.starts_with(line) && cmd.len() > line.len() {
-                    return Some(cmd[line.len()..].to_string());
-                }
-            }
-        }
-        None
-    }
-}
-
-impl Highlighter for ReplHelper {
-    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-        if line.starts_with('/') {
-            Cow::Owned(style(line).cyan().to_string())
-        } else {
-            Cow::Borrowed(line)
-        }
-    }
-
-    fn highlight_char(&self, _line: &str, _pos: usize, _ch: CmdKind) -> bool {
-        true
-    }
-}
-
-impl Validator for ReplHelper {
-    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
-        let raw = ctx.input();
-        let input = raw.trim().to_string();
-
-        // 空行（raw 含换行且 trim 后为空）结束多行模式
-        if input.is_empty() && raw.contains('\n') {
-            return Ok(ValidationResult::Valid(None));
-        }
-
-        // { 开头但未闭合 → 多行模式
-        if input.starts_with('{') && !input.ends_with('}') {
-            return Ok(ValidationResult::Incomplete);
-        }
-
-        Ok(ValidationResult::Valid(None))
-    }
-}
-
-impl Helper for ReplHelper {}
 
 // ─── REPL ───────────────────────────────────────────────────
 
@@ -142,11 +106,12 @@ pub struct Repl {
     last_message: Option<String>,
     cancel_flag: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
-    rl: Editor<ReplHelper, FileHistory>,
+
     ws_root: Option<PathBuf>,
     sessions_dir: Option<PathBuf>,
     current_session: Option<String>,
     resume: bool,
+    mode: Mode,
     global_instructions: Option<String>,
 }
 
@@ -174,17 +139,6 @@ impl Repl {
             conversation.budget().max_output_tokens,
         );
 
-        // 初始化 rustyline
-        let config = Config::builder()
-            .max_history_size(100)
-            .expect("max_history_size failed")
-            .build();
-        let mut rl = Editor::<ReplHelper, FileHistory>::with_config(config).expect("failed to create REPL editor");
-        rl.set_helper(Some(ReplHelper));
-        if let Some(path) = Self::history_path() {
-            let _ = rl.load_history(&path);
-        }
-
         Self {
             running: true,
             agent_loop,
@@ -205,21 +159,17 @@ impl Repl {
             last_message: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-            rl,
+
             ws_root,
             sessions_dir: Self::sessions_dir(),
             current_session: None,
             resume,
+            mode: Mode::Auto,
             global_instructions,
         }
     }
 
     /// 历史文件路径: ~/.qianxun/history.txt
-    fn history_path() -> Option<PathBuf> {
-        let dir = qianxun_core::workspace::qianxun_dir()?;
-        let _ = std::fs::create_dir_all(&dir);
-        Some(dir.join("history.txt"))
-    }
 
     /// 会话目录: ~/.qianxun/sessions/
     fn sessions_dir() -> Option<PathBuf> {
@@ -234,7 +184,9 @@ impl Repl {
             Some(d) => d.clone(),
             None => return,
         };
-        let Some(session_id) = self.current_session.as_deref() else { return };
+        let Some(session_id) = self.current_session.as_deref() else {
+            return;
+        };
         let jsonl_path = dir.join(format!("{session_id}.jsonl"));
         let meta_path = dir.join(format!("{session_id}.meta"));
 
@@ -245,9 +197,13 @@ impl Repl {
 
         // 更新 meta 文件
         let msg_count = self.conversation.messages().len();
-        let preview = self.conversation.messages().first()
+        let preview = self
+            .conversation
+            .messages()
+            .first()
             .and_then(|m| {
-                m.content().first()
+                m.content()
+                    .first()
                     .and_then(|b| b.text.as_deref())
                     .map(|t| {
                         if t.len() > 80 {
@@ -264,7 +220,10 @@ impl Repl {
             "message_count": msg_count,
             "preview": preview,
         });
-        let _ = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
+        let _ = std::fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+        );
     }
 
     /// 列出所有会话
@@ -275,14 +234,20 @@ impl Repl {
         };
 
         let mut sessions = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&dir) else { return sessions };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return sessions;
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let id = path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let id = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
             let meta = path.with_extension("meta");
             let (created_at, preview) = if let Ok(content) = std::fs::read_to_string(&meta) {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -300,7 +265,12 @@ impl Repl {
                 .map(|c| c.lines().count().saturating_sub(1))
                 .unwrap_or(0);
 
-            sessions.push(SessionInfo { id, created_at, message_count, preview });
+            sessions.push(SessionInfo {
+                id,
+                created_at,
+                message_count,
+                preview,
+            });
         }
 
         sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -315,7 +285,8 @@ impl Repl {
     /// 恢复历史会话（模糊匹配 ID）
     async fn handle_session_resume(&mut self, partial: &str) {
         let sessions = Self::list_sessions();
-        let matches: Vec<&SessionInfo> = sessions.iter().filter(|s| s.id.contains(partial)).collect();
+        let matches: Vec<&SessionInfo> =
+            sessions.iter().filter(|s| s.id.contains(partial)).collect();
 
         if matches.is_empty() {
             eprintln!("未找到包含 \"{partial}\" 的会话。\n使用 /sessions 查看可用的历史会话。");
@@ -324,7 +295,12 @@ impl Repl {
         if matches.len() > 1 {
             eprintln!("\"{partial}\" 匹配了多个会话：");
             for s in &matches {
-                eprintln!("  {}  {} 条消息  {}", style(&s.id).cyan(), s.message_count, s.preview);
+                eprintln!(
+                    "  {}  {} 条消息  {}",
+                    style(&s.id).cyan(),
+                    s.message_count,
+                    s.preview
+                );
             }
             eprintln!("请提供更精确的 ID。");
             return;
@@ -349,7 +325,11 @@ impl Repl {
                 self.current_session = Some(session.id.clone());
                 self.agent_loop.reset();
                 self.recently_injected.clear();
-                eprintln!("已恢复会话: {} ({} 条消息)", style(&session.id).cyan(), session.message_count);
+                eprintln!(
+                    "已恢复会话: {} ({} 条消息)",
+                    style(&session.id).cyan(),
+                    session.message_count
+                );
                 Self::print_conversation(&self.conversation);
             }
             Err(e) => {
@@ -361,7 +341,8 @@ impl Repl {
     /// 删除历史会话
     async fn handle_session_delete(&mut self, partial: &str) {
         let sessions = Self::list_sessions();
-        let matches: Vec<&SessionInfo> = sessions.iter().filter(|s| s.id.contains(partial)).collect();
+        let matches: Vec<&SessionInfo> =
+            sessions.iter().filter(|s| s.id.contains(partial)).collect();
 
         if matches.is_empty() {
             eprintln!("未找到包含 \"{partial}\" 的会话。");
@@ -443,7 +424,8 @@ impl Repl {
                         if block.r#type == "text" {
                             if let Some(ref text) = block.text {
                                 for line in text.lines() {
-                                    content_lines.push(style(format!("❯ {line}")).color256(34).to_string());
+                                    content_lines
+                                        .push(style(format!("❯ {line}")).color256(34).to_string());
                                 }
                             }
                         }
@@ -461,7 +443,8 @@ impl Repl {
                             }
                             "tool_use" => {
                                 if let Some(ref name) = block.tool_name {
-                                    content_lines.push(style(format!("  [工具: {name}]")).dim().to_string());
+                                    content_lines
+                                        .push(style(format!("  [工具: {name}]")).dim().to_string());
                                 }
                             }
                             _ => {}
@@ -479,9 +462,15 @@ impl Repl {
                 let mut len = 0;
                 let mut in_esc = false;
                 for ch in l.chars() {
-                    if ch == '\x1b' { in_esc = true; }
-                    else if in_esc { if ch == 'm' { in_esc = false; } }
-                    else { len += 1; }
+                    if ch == '\x1b' {
+                        in_esc = true;
+                    } else if in_esc {
+                        if ch == 'm' {
+                            in_esc = false;
+                        }
+                    } else {
+                        len += 1;
+                    }
                 }
                 len
             })
@@ -489,7 +478,8 @@ impl Repl {
         let inner_w = max_w.clamp(20, 80);
 
         let title = format!(" 历史消息 ({msg_count} 条) ");
-        eprintln!("{}╭{}{}",
+        eprintln!(
+            "{}╭{}{}",
             style("").color256(236),
             title,
             style(HORIZ.repeat(inner_w.saturating_sub(title.chars().count()) + 2)).color256(236),
@@ -499,10 +489,16 @@ impl Repl {
             eprintln!("{} {}", style(VERT).color256(236), line);
         }
 
-        eprintln!("{}{}", style(BOT_L).color256(236), style(HORIZ.repeat(inner_w + 2)).color256(236));
+        eprintln!(
+            "{}{}",
+            style(BOT_L).color256(236),
+            style(HORIZ.repeat(inner_w + 2)).color256(236)
+        );
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        // 启动时清屏（使用 console crate 跨平台支持）
+
         self.print_banner();
 
         // --resume：自动恢复最后一次会话
@@ -538,20 +534,13 @@ impl Repl {
 
         while self.running {
             let turn_count = self.agent_loop.turn_count;
-            let prompt = if turn_count > 0 {
-                format!("\n{} ❯ ", style(format!("[{turn_count}]")))
-            } else {
-                "\n❯ ".to_string()
-            };
-            match self.rl.readline(&prompt) {
-                Ok(input) => {
-                    let trimmed = input.trim().to_string();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    self.rl.add_history_entry(&trimmed)?;
-
+            // TUI 接管事件循环
+            let mut input = String::new();
+            print!("❯ ");
+            let _ = std::io::stdout().flush();
+            if std::io::stdin().read_line(&mut input).is_ok() {
+                let trimmed = input.trim().to_string();
+                if !trimmed.is_empty() {
                     if trimmed.starts_with('/') {
                         self.handle_slash(&trimmed).await;
                     } else {
@@ -559,25 +548,7 @@ impl Repl {
                         self.handle_message(&trimmed).await;
                     }
                 }
-                Err(ReadlineError::Interrupted) => {
-                    self.cancel_flag.store(true, Ordering::SeqCst);
-                    continue;
-                }
-                Err(ReadlineError::Eof) => {
-                    // Ctrl+D 退出
-                    self.running = false;
-                }
-                Err(e) => {
-                    tracing::error!("input error: {e}");
-                    eprintln!("{}", style(format!("输入错误: {e}")).red());
-                    break;
-                }
             }
-        }
-
-        // 持久化历史
-        if let Some(path) = Self::history_path() {
-            let _ = self.rl.save_history(&path);
         }
 
         self.tools.shutdown_all().await;
@@ -627,10 +598,7 @@ impl Repl {
 
     /// 框线横幅（与 output.rs 风格一致，但横幅无顶线）
     fn boxed_banner(&self, lines: &[String]) -> String {
-        let max_w = lines
-            .iter()
-            .map(|l| console::measure_text_width(l))
-            .fold(0, usize::max);
+        let max_w = lines.iter().map(|l| l.len()).fold(0, usize::max);
         let inner_w = max_w.max(20);
         let mut out = String::new();
 
@@ -641,9 +609,7 @@ impl Repl {
         ));
 
         for line in lines {
-            out.push_str(&format!(
-                "{} {line}\n", style(VERT).color256(236),
-            ));
+            out.push_str(&format!("{} {line}\n", style(VERT).color256(236),));
         }
 
         out.push_str(&format!(
@@ -668,8 +634,12 @@ impl Repl {
 
     // ─── 命令分发 ───────────────────────────────────────────
 
+    /// cmd 是原始输入（如 "/mode plan"），base 是匹配到的斜杠命令（如 "/mode"）
+    /// 处理子命令时用 cmd 提取子命令参数
     async fn handle_slash(&mut self, cmd: &str) {
-        match cmd {
+        // 提取基础命令名（/mode plan → /mode）
+        let base = cmd.split_whitespace().next().unwrap_or(cmd);
+        match base {
             "/quit" | "/exit" => {
                 self.save_conversation().await;
                 eprintln!("再见！");
@@ -677,42 +647,53 @@ impl Repl {
                 self.running = false;
             }
             "/help" => {
-                let inner_w = 50;
-                // 顶框
-                eprintln!("  {}╭ 帮助 {}", style("").color256(236), style(HORIZ.repeat(inner_w - 4)).color256(236));
+                eprintln!("# 帮助\n");
 
                 let sections: &[(&str, &[(&str, &str)])] = &[
-                    ("对话控制", &[
-                        ("/quit", "退出千寻"),
-                        ("/reset", "重置对话（开始新会话）"),
-                        ("/retry", "重新发送上一条消息"),
-                        ("/edit", "编辑上一条消息并重发"),
-                    ]),
-                    ("会话管理", &[
-                        ("/sessions", "列出历史会话"),
-                        ("/sessions <id>", "恢复历史会话"),
-                        ("/sessions delete <id>", "删除历史会话"),
-                    ]),
-                    ("信息查询", &[
-                        ("/help", "显示此帮助"),
-                        ("/usage", "Token 用量"),
-                        ("/workspace", "工作区信息"),
-                        ("/skills", "已加载技能"),
-                        ("/tools", "可用工具"),
-                        ("/memory", "最近记忆"),
-                    ]),
+                    (
+                        "基本",
+                        &[
+                            ("/mode [plan | auto]", "切换计划/自动模式"),
+                            ("/plan", "切换到计划模式（/mode plan 的快捷方式）"),
+                            ("/quit | /exit", "退出千寻"),
+                            ("/help", "显示此帮助"),
+                        ],
+                    ),
+                    (
+                        "对话",
+                        &[
+                            ("/reset", "重置对话"),
+                            ("/retry", "重新发送上一条消息"),
+                            ("/edit", "编辑上一条消息并重发"),
+                        ],
+                    ),
+                    (
+                        "会话",
+                        &[
+                            ("/sessions", "列出历史会话"),
+                            ("/sessions <id>", "恢复历史会话"),
+                            ("/sessions delete <id>", "删除会话"),
+                        ],
+                    ),
+                    (
+                        "信息",
+                        &[
+                            ("/usage", "Token 用量"),
+                            ("/workspace", "工作区信息"),
+                            ("/skills", "已加载技能"),
+                            ("/tools", "可用工具"),
+                            ("/memory", "最近记忆"),
+                        ],
+                    ),
                 ];
 
-                for (sec_title, items) in sections.iter() {
-                    let h = HORIZ.repeat(inner_w.saturating_sub(sec_title.chars().count() + 2));
-                    eprintln!("  {}├ {} {} {}", style("").color256(236), style(sec_title).color256(244), style("").color256(236), style(h).color256(236));
+                for (sec_title, items) in sections {
+                    eprintln!("## {sec_title}");
                     for (cmd, desc) in *items {
-                        eprintln!("  {}  {}  {desc}", style(VERT).color256(236), style(cmd).color256(75));
+                        eprintln!("  {cmd}  {desc}");
                     }
+                    eprintln!();
                 }
-
-                // 底框
-                eprintln!("  {}{}", style(BOT_L).color256(236), style(HORIZ.repeat(inner_w + 2)).color256(236));
             }
             "/reset" => {
                 eprint!("确定要重置对话吗？(y/N): ");
@@ -727,8 +708,11 @@ impl Repl {
                 }
                 // 保存当前会话后再重置
                 self.save_conversation().await;
+                let mode = self.mode.display_name();
                 let sys = system_prompt::build_system_prompt(
-                    &self.workspace_context, self.global_instructions.as_deref(),
+                    &self.workspace_context,
+                    self.global_instructions.as_deref(),
+                    &mode,
                 );
                 self.conversation = Conversation::new(Some(sys));
                 self.conversation.set_budget(self.budget.0, self.budget.1);
@@ -767,13 +751,26 @@ impl Repl {
                     eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(22)));
                 } else {
                     let title = format!(" 已加载的技能 ({}) ", self.skills_count);
-                    eprintln!("{}╭{}{}", b(""), title, b(&HORIZ.repeat(72usize.saturating_sub(title.chars().count()) + 2)));
+                    eprintln!(
+                        "{}╭{}{}",
+                        b(""),
+                        title,
+                        b(&HORIZ.repeat(72usize.saturating_sub(title.chars().count()) + 2))
+                    );
                     for line in self.skills_list.lines() {
                         eprintln!("{}  {line}", b(VERT));
                     }
                     eprintln!("{}", b(VERT));
-                    eprintln!("{}  {}", b(VERT), style("自动注入: 消息包含触发词时自动注入完整技能指令").dim());
-                    eprintln!("{}  {}", b(VERT), style("手动注入: 在消息中使用 @技能名 手动引用技能").dim());
+                    eprintln!(
+                        "{}  {}",
+                        b(VERT),
+                        style("自动注入: 消息包含触发词时自动注入完整技能指令").dim()
+                    );
+                    eprintln!(
+                        "{}  {}",
+                        b(VERT),
+                        style("手动注入: 在消息中使用 @技能名 手动引用技能").dim()
+                    );
                     eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(74)));
                 }
             }
@@ -791,21 +788,19 @@ impl Repl {
                     eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(74)));
                 }
             }
-            "/memory" => {
-                match &self.memory {
-                    Some(m) => {
-                        let ctx = m.build_context("", 1000).await;
-                        if ctx.is_empty() {
-                            eprintln!("尚无记忆。");
-                        } else {
-                            eprintln!("最近记忆：\n{ctx}");
-                        }
-                    }
-                    None => {
-                        eprintln!("未启用记忆。");
+            "/memory" => match &self.memory {
+                Some(m) => {
+                    let ctx = m.build_context("", 1000).await;
+                    if ctx.is_empty() {
+                        eprintln!("尚无记忆。");
+                    } else {
+                        eprintln!("最近记忆：\n{ctx}");
                     }
                 }
-            }
+                None => {
+                    eprintln!("未启用记忆。");
+                }
+            },
             "/sessions" => {
                 let sessions = Self::list_sessions();
                 let b = |s: &str| style(s).color256(236).to_string();
@@ -814,23 +809,43 @@ impl Repl {
                     eprintln!("{}  无历史会话。", b(VERT));
                     eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(22)));
                 } else {
-                    eprintln!("{}╭ 历史会话 ({}) {}", b(""), sessions.len(), b(&HORIZ.repeat(56)));
+                    eprintln!(
+                        "{}╭ 历史会话 ({}) {}",
+                        b(""),
+                        sessions.len(),
+                        b(&HORIZ.repeat(56))
+                    );
                     eprintln!("{}", b(VERT));
                     for s in &sessions {
-                        let marker = self.current_session.as_deref()
+                        let marker = self
+                            .current_session
+                            .as_deref()
                             .filter(|id| *id == s.id)
                             .map(|_| " ← 当前")
                             .unwrap_or("");
                         let preview = if s.preview.len() > 40 {
-                            let end = (0..=40).rev().find(|&i| s.preview.is_char_boundary(i)).unwrap_or(0);
+                            let end = (0..=40)
+                                .rev()
+                                .find(|&i| s.preview.is_char_boundary(i))
+                                .unwrap_or(0);
                             &s.preview[..end]
                         } else {
                             &s.preview
                         };
-                        eprintln!("{}  {}  {} 条  {preview}{marker}", b(VERT), style(&s.id).color256(75), s.message_count);
+                        eprintln!(
+                            "{}  {}  {} 条  {preview}{marker}",
+                            b(VERT),
+                            style(&s.id).color256(75),
+                            s.message_count
+                        );
                     }
                     eprintln!("{}", b(VERT));
-                    eprintln!("{}  使用 {} 恢复  |  {} 删除", b(VERT), style("/sessions <id>").color256(75), style("/sessions delete <id>").color256(75));
+                    eprintln!(
+                        "{}  使用 {} 恢复  |  {} 删除",
+                        b(VERT),
+                        style("/sessions <id>").color256(75),
+                        style("/sessions delete <id>").color256(75)
+                    );
                     eprintln!("{}{}", b(BOT_L), b(&HORIZ.repeat(60)));
                 }
             }
@@ -843,26 +858,83 @@ impl Repl {
                 }
             }
             "/edit" => {
-                if let Some(last) = &self.last_message.clone() {
-                    match self.rl.readline_with_initial("❯ ", (last.as_str(), "")) {
-                        Ok(edited) => {
-                            let trimmed = edited.trim().to_string();
-                            if !trimmed.is_empty() {
-                                self.last_message = Some(trimmed.clone());
-                                self.handle_message(&trimmed).await;
-                            }
-                        }
-                        Err(ReadlineError::Interrupted) => {
-                            eprintln!("已取消。");
-                        }
-                        Err(e) => {
-                            eprintln!("{}", style(format!("编辑失败: {e}")).red());
+                if let Some(last) = self.last_message.clone() {
+                    eprintln!("编辑（请输入新内容）:");
+                    eprintln!("原消息: {last}");
+                    let mut edited = String::new();
+                    if std::io::stdin().read_line(&mut edited).is_ok() {
+                        let trimmed = edited.trim().to_string();
+                        if !trimmed.is_empty() {
+                            self.last_message = Some(trimmed.clone());
+                            self.handle_message(&trimmed).await;
                         }
                     }
                 } else {
                     eprintln!("尚无消息可编辑。");
                 }
             }
+            "/mode" => {
+                let sub = cmd.strip_prefix("/mode").map(|s| s.trim()).unwrap_or("");
+                match sub {
+                    "plan" => {
+                        self.mode = Mode::Plan;
+                        eprintln!(
+                            "  切换到 {} — 仅允许读取类工具（Read / Search / Think）",
+                            style("计划模式").cyan(),
+                        );
+                    }
+                    "auto" => {
+                        self.mode = Mode::Auto;
+                        eprintln!("  切换到 {} — 所有工具可用", style("自动模式").green(),);
+                    }
+                    "" => {
+                        eprintln!(
+                            "  当前模式: {}  — {}",
+                            style(self.mode.display_name()).cyan(),
+                            match self.mode {
+                                Mode::Auto => "所有工具可用",
+                                Mode::Plan => "仅允许读取类工具（Read / Search / Think）",
+                            },
+                        );
+                        eprintln!("  用法: {} [plan | auto]", style("/mode").cyan());
+                    }
+                    _ => {
+                        eprintln!(
+                            "  未知模式: {}。用法: {}",
+                            style(sub).red(),
+                            style("/mode [plan | auto]").cyan(),
+                        );
+                    }
+                }
+                return;
+            }
+
+            "/plan" => {
+                // /plan 是 /mode plan 的快捷方式，/plan auto 回到自动模式
+                let sub = cmd.strip_prefix("/plan").map(|s| s.trim()).unwrap_or("");
+                match sub {
+                    "auto" => {
+                        self.mode = Mode::Auto;
+                        eprintln!("  切换到 {} — 所有工具可用", style("自动模式").green());
+                    }
+                    _ => {
+                        self.mode = Mode::Plan;
+                        eprintln!(
+                            "  切换到 {} — 仅允许读取类工具（Read / Search / Think）",
+                            style("计划模式").cyan()
+                        );
+                    }
+                    _ => {
+                        eprintln!(
+                            "  未知参数: {}。用法: {}",
+                            style(sub).red(),
+                            style("/plan [auto]").cyan()
+                        );
+                    }
+                }
+                return;
+            }
+
             _ => {
                 // /sessions <id> → 恢复会话
                 // /sessions delete <id> → 删除会话
@@ -878,19 +950,41 @@ impl Repl {
                     }
                 }
 
-                // 模糊匹配: 唯一前缀匹配时直接执行
-                let matches: Vec<&&str> = SLASH_COMMANDS.iter().filter(|c| c.starts_with(cmd)).collect();
+                // 子命令前缀匹配（例如 /h → /help）
+                let matches: Vec<&&str> = SLASH_COMMANDS
+                    .iter()
+                    .filter(|c| c.starts_with(cmd))
+                    .collect();
                 if matches.len() == 1 {
                     eprintln!("  匹配: {}", matches[0]);
                     Box::pin(self.handle_slash(matches[0])).await;
-                } else {
-                    eprintln!("未知命令: {cmd}");
+                    return;
                 }
+
+                // 基础命令匹配（例如 /mode plan → /mode）
+                let base = cmd.split_whitespace().next().unwrap_or(cmd);
+                let base_matches: Vec<&&str> = SLASH_COMMANDS
+                    .iter()
+                    .filter(|c| cmd.starts_with(*c))
+                    .collect();
+                if base_matches.len() == 1 {
+                    Box::pin(self.handle_slash(cmd)).await;
+                    return;
+                }
+
+                eprintln!("未知命令: {cmd}");
             }
         }
     }
 
     // ─── 消息处理 ───────────────────────────────────────────
+
+    fn mode_to_filter(&self) -> ToolCategoryFilter {
+        match self.mode {
+            Mode::Auto => ToolCategoryFilter::all(),
+            Mode::Plan => ToolCategoryFilter::read_only(),
+        }
+    }
 
     async fn handle_message(&mut self, msg: &str) {
         // 检查技能文件变更
@@ -907,7 +1001,10 @@ impl Repl {
         let full_msg = if url_context.is_empty() {
             msg.clone()
         } else {
-            format!("{}\n\n---\n以下是从消息中 URL 自动获取的内容：\n{}", msg, url_context)
+            format!(
+                "{}\n\n---\n以下是从消息中 URL 自动获取的内容：\n{}",
+                msg, url_context
+            )
         };
 
         // 2. 提取手动引用 @技能名
@@ -943,7 +1040,8 @@ impl Repl {
             self.recently_injected.push(name.clone());
         }
         if self.recently_injected.len() > 10 {
-            self.recently_injected.drain(0..self.recently_injected.len() - 10);
+            self.recently_injected
+                .drain(0..self.recently_injected.len() - 10);
         }
 
         if !inject_names.is_empty() {
@@ -963,22 +1061,15 @@ impl Repl {
         self.conversation
             .push_user_message(vec![ContentBlock::text(&full_msg)]);
 
-        // ── Spinner: LLM 生成期间的活动指示器 ──
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::with_template("{spinner:.blue} {msg}")
-                .unwrap()
-                .tick_chars("⠁⠁⠉⠙⠚⠒⠂⠂⠒⠲⠴⠤⠄⠄⠤⠠⠠⠤⠦⠧⠇⠇⠧⠶⠶"),
-        );
-        spinner.set_message("正在思考...");
-        spinner.enable_steady_tick(Duration::from_millis(80));
-        self.sink.attach_spinner(spinner.clone());
+        // ── LLM 生成 ──
 
+        let tool_filter = self.mode_to_filter();
         processing_loop::handle_user_message(
             &mut self.agent_loop,
             &mut self.conversation,
             &*self.provider,
             &self.tools,
+            tool_filter,
             &self.sink,
             &memory_context,
             &self.skills_catalog,
@@ -987,13 +1078,13 @@ impl Repl {
         )
         .await;
 
-        // 停止并移除 spinner
-        self.sink.detach_spinner();
-
         // 轮次后写入记忆
         if let Some(m) = &self.memory {
             let summary = if msg.len() > 200 {
-                let end = (0..=200).rev().find(|&i| msg.is_char_boundary(i)).unwrap_or(0);
+                let end = (0..=200)
+                    .rev()
+                    .find(|&i| msg.is_char_boundary(i))
+                    .unwrap_or(0);
                 &msg[..end]
             } else {
                 &msg
@@ -1016,17 +1107,15 @@ fn expand_file_refs(msg: &str, ws_root: Option<&std::path::Path>) -> String {
     let mut result = msg.to_string();
     while let Some(start) = result.find("$FILE:") {
         let after = &result[start + 6..];
-        let end = after.find(|c: char| c.is_whitespace()).unwrap_or(after.len());
+        let end = after
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(after.len());
         let path_str = &after[..end];
 
         let resolved = resolve_file_path(path_str, ws_root);
         match std::fs::read_to_string(&resolved) {
             Ok(content) => {
-                let replacement = format!(
-                    "\n```\n// {}\n{}\n```\n",
-                    resolved.display(),
-                    content,
-                );
+                let replacement = format!("\n```\n// {}\n{}\n```\n", resolved.display(), content,);
                 result.replace_range(start..start + 6 + end, &replacement);
             }
             Err(e) => {

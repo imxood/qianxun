@@ -4,15 +4,15 @@ use crate::acp::session::SessionManager;
 use crate::acp::transport::AcpTransport;
 use crate::acp::types::*;
 use qianxun_core::config::ResolvedCompactionConfig;
-use qianxun_core::mcp::client::McpClient;
 use qianxun_core::mcp::McpServerConfig;
+use qianxun_core::mcp::client::McpClient;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::{SkillManager, SkillWatcher};
 use qianxun_core::tools::ToolRegistry;
 use qianxun_core::types::AgentConfig;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing;
 
 // ─── 请求处理器 ─────────────────────────────────────────
@@ -104,19 +104,37 @@ impl AcpRequestHandler {
 
         let session_id = format!("sess_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S_%6f"));
         let agent_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
-        let ws = p.cwd.as_ref().and_then(|cwd| {
-            qianxun_core::workspace::find_project_root(std::path::Path::new(cwd))
-        });
+        let ws = p
+            .cwd
+            .as_ref()
+            .and_then(|cwd| qianxun_core::workspace::find_project_root(std::path::Path::new(cwd)));
         let global_instructions = qianxun_core::workspace::read_global_agents_md();
-        let (system_prompt, skills_catalog, skill_manager): (Option<String>, String, Option<SkillManager>) = ws.as_ref().map(|w| {
-            let ctx = qianxun_core::workspace::build_project_context(w);
-            let sm = SkillManager::load_all(Some(&w.root));
-            let sc = sm.build_catalog_prompt();
-            (Some(qianxun_core::agent::system_prompt::build_system_prompt(&ctx, global_instructions.as_deref())), sc, Some(sm))
-        }).unwrap_or((None, String::new(), None));
+        let (system_prompt, skills_catalog, skill_manager): (
+            Option<String>,
+            String,
+            Option<SkillManager>,
+        ) = ws
+            .as_ref()
+            .map(|w| {
+                let ctx = qianxun_core::workspace::build_project_context(w);
+                let sm = SkillManager::load_all(Some(&w.root));
+                let sc = sm.build_catalog_prompt();
+                (
+                    Some(qianxun_core::agent::system_prompt::build_system_prompt(
+                        &ctx,
+                        global_instructions.as_deref(),
+                        "auto",
+                    )),
+                    sc,
+                    Some(sm),
+                )
+            })
+            .unwrap_or((None, String::new(), None));
         let memory = ws.as_ref().and_then(build_memory);
         let ws_root = ws.as_ref().map(|w| w.root.clone());
-        let skill_watcher = ws_root.as_ref().map(|root| SkillWatcher::new(Some(root.as_path())));
+        let skill_watcher = ws_root
+            .as_ref()
+            .map(|root| SkillWatcher::new(Some(root.as_path())));
 
         // 构建会话级 ToolRegistry：从基础注册表克隆，添加 MCP 工具
         let mcp_servers = parse_mcp_server_configs(p.mcp_servers.as_ref());
@@ -139,7 +157,8 @@ impl AcpRequestHandler {
 
         // 应用 budget 到新创建的会话
         if let Some(s) = sessions.get(&session_id) {
-            s.conversation.set_budget(self.budget_input, self.budget_output);
+            s.conversation
+                .set_budget(self.budget_input, self.budget_output);
         }
 
         tracing::info!("Session created: {session_id}");
@@ -161,19 +180,35 @@ impl AcpRequestHandler {
             return Ok(serde_json::json!({}));
         }
 
-        let ws = cwd.and_then(|cwd| {
-            qianxun_core::workspace::find_project_root(std::path::Path::new(cwd))
-        });
+        let ws = cwd
+            .and_then(|cwd| qianxun_core::workspace::find_project_root(std::path::Path::new(cwd)));
         let global_instructions = qianxun_core::workspace::read_global_agents_md();
-        let (system_prompt, skills_catalog, skill_manager): (Option<String>, String, Option<SkillManager>) = ws.as_ref().map(|w| {
-            let ctx = qianxun_core::workspace::build_project_context(w);
-            let sm = SkillManager::load_all(Some(&w.root));
-            let sc = sm.build_catalog_prompt();
-            (Some(qianxun_core::agent::system_prompt::build_system_prompt(&ctx, global_instructions.as_deref())), sc, Some(sm))
-        }).unwrap_or((None, String::new(), None));
+        let (system_prompt, skills_catalog, skill_manager): (
+            Option<String>,
+            String,
+            Option<SkillManager>,
+        ) = ws
+            .as_ref()
+            .map(|w| {
+                let ctx = qianxun_core::workspace::build_project_context(w);
+                let sm = SkillManager::load_all(Some(&w.root));
+                let sc = sm.build_catalog_prompt();
+                (
+                    Some(qianxun_core::agent::system_prompt::build_system_prompt(
+                        &ctx,
+                        global_instructions.as_deref(),
+                        "auto",
+                    )),
+                    sc,
+                    Some(sm),
+                )
+            })
+            .unwrap_or((None, String::new(), None));
         let memory = ws.as_ref().and_then(build_memory);
         let ws_root = ws.as_ref().map(|w| w.root.clone());
-        let skill_watcher = ws_root.as_ref().map(|root| SkillWatcher::new(Some(root.as_path())));
+        let skill_watcher = ws_root
+            .as_ref()
+            .map(|root| SkillWatcher::new(Some(root.as_path())));
 
         let agent_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
         let session_tools = match ws {
@@ -184,7 +219,10 @@ impl AcpRequestHandler {
                         if configs.is_empty() {
                             None
                         } else {
-                            Some(connect_mcp_servers(&configs, &self.tools, "workspace mcp.json").await)
+                            Some(
+                                connect_mcp_servers(&configs, &self.tools, "workspace mcp.json")
+                                    .await,
+                            )
                         }
                     }
                     _ => None,
@@ -193,11 +231,22 @@ impl AcpRequestHandler {
             None => None,
         };
         sessions
-            .create(session_id.clone(), system_prompt, agent_loop, memory, session_tools, skills_catalog, skill_manager, skill_watcher, ws_root)
+            .create(
+                session_id.clone(),
+                system_prompt,
+                agent_loop,
+                memory,
+                session_tools,
+                skills_catalog,
+                skill_manager,
+                skill_watcher,
+                ws_root,
+            )
             .map_err(|e| e.to_string())?;
 
         if let Some(s) = sessions.get(&session_id) {
-            s.conversation.set_budget(self.budget_input, self.budget_output);
+            s.conversation
+                .set_budget(self.budget_input, self.budget_output);
         }
 
         // 尝试从磁盘恢复历史会话数据
@@ -238,11 +287,14 @@ impl AcpRequestHandler {
         // fork 前先持久化源会话
         sessions.save_session(&p.session_id).await;
 
-        sessions.fork(&new_id, &p.session_id).map_err(|e| e.to_string())?;
+        sessions
+            .fork(&new_id, &p.session_id)
+            .map_err(|e| e.to_string())?;
 
         // 应用 budget
         if let Some(s) = sessions.get(&new_id) {
-            s.conversation.set_budget(self.budget_input, self.budget_output);
+            s.conversation
+                .set_budget(self.budget_input, self.budget_output);
         }
 
         tracing::info!("Session forked: {} → {}", p.session_id, new_id);
@@ -274,9 +326,7 @@ impl AcpRequestHandler {
 
     /// 处理 session/cancel 通知（无响应）
     pub async fn handle_cancel_notification(&self, params: Option<Value>) {
-        let p: CancelParams = match params
-            .and_then(|v| serde_json::from_value(v).ok())
-        {
+        let p: CancelParams = match params.and_then(|v| serde_json::from_value(v).ok()) {
             Some(p) => p,
             None => return,
         };
@@ -284,14 +334,18 @@ impl AcpRequestHandler {
         let mut sessions = self.sessions.lock().await;
         if let Some(session) = sessions.get(&p.session_id) {
             session.is_running = false;
-            session.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            session
+                .cancel_flag
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             tracing::info!("Session cancelled: {}", p.session_id);
         }
     }
 }
 
 /// 从工作区根路径构建 memory engine。
-fn build_memory(ws: &qianxun_core::workspace::ProjectRoot) -> Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> {
+fn build_memory(
+    ws: &qianxun_core::workspace::ProjectRoot,
+) -> Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> {
     let db_path = qianxun_core::workspace::qianxun_dir()?.join("mem.db");
     Some(Box::new(qianxun_memory::MemoryCore::open(&db_path).ok()?))
 }
@@ -351,16 +405,16 @@ async fn connect_mcp_servers(
                     Ok(tools) => {
                         let count = tools.len();
                         for tool in tools {
-                            session_tools.register_mcp_tool(
-                                qianxun_core::tools::McpToolEntry {
-                                    client_id: server_name.clone(),
-                                    name: tool.name,
-                                    description: tool.description,
-                                    input_schema: tool.input_schema,
-                                },
-                            );
+                            session_tools.register_mcp_tool(qianxun_core::tools::McpToolEntry {
+                                client_id: server_name.clone(),
+                                name: tool.name,
+                                description: tool.description,
+                                input_schema: tool.input_schema,
+                            });
                         }
-                        tracing::info!("MCP '{server_name}' connected with {count} tools ({source})");
+                        tracing::info!(
+                            "MCP '{server_name}' connected with {count} tools ({source})"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("MCP '{server_name}' list_tools failed: {e}");

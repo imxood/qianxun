@@ -35,11 +35,29 @@ pub const BASE_PROMPT: &str = r#"你是千寻（Qianxun），一个高效的 AI 
 - **仅改计划内的** — 不超范围实现
 "#;
 
+/// 构建系统提示词。
+///
+/// - `mode` — 当前模式：`"plan"` 时 LLM 不应调用写工具，`"auto"` 时全部可用
 pub fn build_system_prompt(
     workspace_context: &str,
     custom_instructions: Option<&str>,
+    mode: &str,
 ) -> String {
     let mut parts = vec![BASE_PROMPT.to_string()];
+
+    // 注入当前模式指令
+    match mode {
+        "plan" => parts.push(
+            concat!(
+                "\n## 当前模式：计划模式\n",
+                "当前模式为 **计划模式**，只允许读取、搜索和思考操作。\n",
+                "**不要调用 write_file、edit_file、execute_command、delete_file 等写操作工具**。\n",
+                "你的任务是分析需求和代码结构，制定执行计划并等待用户确认。\n",
+            )
+            .to_string(),
+        ),
+        _ => parts.push("\n## 当前模式：自动模式\n所有工具可用。\n".to_string()),
+    }
 
     if let Some(instructions) = custom_instructions {
         parts.push(format!("\n## 用户指令\n{instructions}\n"));
@@ -58,7 +76,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_with_all_parts() {
-        let prompt = build_system_prompt("工作区上下文", Some("自定义指令"));
+        let prompt = build_system_prompt("工作区上下文", Some("自定义指令"), "auto");
         assert!(prompt.contains("千寻"));
         assert!(prompt.contains("工作区上下文"));
         assert!(prompt.contains("自定义指令"));
@@ -66,8 +84,8 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_empty_context() {
-        let prompt = build_system_prompt("", None);
+        let prompt = build_system_prompt("", None, "auto");
         assert!(prompt.contains("千寻"));
-        assert_eq!(prompt, BASE_PROMPT);
+        assert!(prompt.contains("自动模式"));
     }
 }
