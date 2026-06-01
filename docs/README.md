@@ -9,20 +9,17 @@ docs/
 ├── README.md               # 本文档 — 总入口
 ├── 00_索引/                # 导航和路由
 │   └── README.md           # 任务路由、仓库地图、术语表
+├── 10_事实源/              # 当前模块真实状态
+│   ├── memory-state.md     # Memory 子系统状态
+│   ├── mcp-state.md        # MCP 子系统状态
+│   ├── skills-state.md     # Skills 子系统状态
+│   ├── daemon-state.md     # Daemon 子系统状态
+│   └── tui-architecture.md # TUI 架构状态
 ├── 20_工作项/              # 阶段性工作上下文
 │   ├── 2026-05-31_Phase3_记忆子系统设计修订/
-│   │   ├── README.md       # 设计修订的目标和范围
-│   │   └── TODO.md         # 任务清单
 │   ├── 2026-05-31_模块设计文档起草/
-│   │   ├── README.md       # 模块设计清单
-│   │   └── TODO.md         # 任务清单
 │   ├── 2026-06-01_qx交互式TUI调研/
-│       ├── README.md       # ratatui 与 qx TUI 调研入口
-│       ├── ratatui学习文档.md
-│       └── qx交互效果分析.md
 │   └── 2026-06-01_TUI性能与Agent开发工具优化/
-│       ├── README.md       # TUI 性能与 Agent 开发工具优化入口
-│       └── 阶段路线.md
 ├── 30_决策/                # 长期架构决策
 │   └── ADR-0001_数据库选型.md  # redb → SQLite 选型记录
 ├── 40_验收/                # 有长期复盘价值的验证证据

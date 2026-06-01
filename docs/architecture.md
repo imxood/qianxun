@@ -642,11 +642,11 @@ VPS:          qx server install → systemd / Windows Service
 | 内置工具 (tools/) | ✅ 完成 | 5 个工具 + ToolRegistry + ACP 转发 |
 | 项目根检测 (workspace.rs) | ✅ 完成 | .qianxun/ 向上查找 + CLAUDE.md 读取 |
 | ACP 协议 (qianxun/acp/) | ✅ 完成 | JSON-RPC 2.0 + session 管理 + 双向请求 |
-| Memory (qianxun-memory) | ✅ 完成 | MemoryObserver trait + MemoryCore(SQLite+FTS5) |
-| Skills (skills/) | 🔧 骨架 | load_all() 为空实现 |
-| MCP Client (mcp/) | 🔧 骨架 | connect/call_tool 为空实现 |
-| Daemon (qx daemon) | 📋 未开始 | Phase 4 |
-| VPS Server (qx server) | 📋 未开始 | Phase 4 |
+| Memory (qianxun-memory) | 🔧 部分实现 | observe/build_context/remember 可用; search 返回空, session_start/end 空实现 |
+| Skills (skills/) | ✅ 完成 | frontmatter 解析 + 自动匹配 + @引用 + 文件监听 + inject 构建 |
+| MCP Client (mcp/) | ✅ 完成 | 连接/握手/list_tools/call_tool/shutdown + ServerManager 崩溃保护 |
+| Daemon (qx daemon) | 🔧 骨架已完成 | AgentLoopHost 会话管理 + HTTP 路由; 未接入真实 AgentLoop/Memory/Skills/MCP |
+| VPS Server (qx server) | 🔧 骨架已完成 | SQLite + 路由 + JWT; 未接 WS Hub / 命令中转 |
 
 ### 9.2 设计取舍
 
@@ -656,14 +656,15 @@ VPS:          qx server install → systemd / Windows Service
 | Session 持久化 | Phase 2 不持久 | 与 Zed 的工作会话不需要跨进程持久化 |
 | `execute_async` vs `execute` | 共存 | `execute` 是 `block_on` 包装，用于非 tokio 上下文 |
 
-### 9.3 已知问题（开发期修复）
+### 9.3 已知问题
 
 | 严重度 | 问题 | 位置 |
 |---|---|---|
-| 中 | MCP 工具执行未接线 | tools/mod.rs |
-| 中 | Skills 空加载 | skills/mod.rs |
-| 中 | 无持久化记忆 | context/memory.rs |
-| 中 | 会话仅内存 | qianxun/src/acp/session.rs |
+| 高 | Memory search 返回空结果 | qianxun-memory/src/search.rs |
+| 高 | session_start/end 空实现，FTS 写入不完整 | qianxun-memory/src/lib.rs |
+| 中 | Daemon 未接入真实 AgentLoop/Memory/Skills/MCP | qianxun/src/daemon/ |
+| 中 | Agent Patterns（plan/reflect/workflow）未接线 | qianxun-core/src/agent/plan.rs |
+| 低 | VPS Server 缺少 WS Hub 和 Argon2 | qianxun/src/server/ |
 
 ### 9.4 构建顺序
 
@@ -671,8 +672,8 @@ VPS:          qx server install → systemd / Windows Service
 |---|---|
 | 1 | 代码骨架 + 核心类型 + REPL CLI + DeepSeek Provider + AgentLoop + 5 内置工具 + 全局配置 ✅ |
 | 2 | ACP 协议 + 工作空间支持 ✅ |
-| 3a | Memory + MCP + Skills 实现 🔧 |
-| 3b | Agent Patterns（React/Plan/Reflective/Workflow） 🔧 |
+| 3a | Memory + MCP + Skills 实现 ✅ |
+| 3b | Agent Patterns（React/Plan/Reflective/Workflow）📋 |
 | 3c | Daemon HTTP 框架（与 3a/3b 并行） 🔧 |
 | 4a | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） 📋 |
 | 4b | VPS Server + Web UI 📋 |
