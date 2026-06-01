@@ -1,10 +1,10 @@
 # 千寻 (Qianxun) 项目规则
 
-> 状态: 生效 | 2026-05-26
+> 状态: 生效 | 2026-06-01
 
 ## 项目概述
 
-千寻是一个 Rust 实现的个人 AI 系统，可作为编程助手（CLI REPL + ACP 协议）和个人 AI 助理（Daemon 模式）。设计上强调分层解耦、构建顺序交付和私有部署。
+千寻是一个 Rust 实现的个人 AI 系统，可作为编程助手（独立 TUI/CLI REPL + ACP 协议）和个人 AI 助理（Daemon 模式、VPS Server）。设计上强调分层解耦、构建顺序交付和私有部署。
 
 ## 技术栈
 
@@ -36,49 +36,65 @@
 
 ```
 qianxun/                 # workspace 根
-├── qianxun-core/        # 核心库 (lib)
+├── qianxun-core/        # 核心库 (lib) — 引擎 + Provider + 工具
 │   ├── src/
 │   │   ├── types.rs     # LlmError, TokenUsage, AgentConfig 等核心类型
 │   │   ├── config.rs    # 全局配置 (JSON 带注释) + 解析
 │   │   ├── output.rs    # OutputSink trait (输出抽象)
 │   │   ├── event.rs     # AgentEvent, EventBus
 │   │   ├── workspace.rs # .qianxun/ 项目根查找 + CLAUDE.md 读取
-│   │   ├── agent/       # Conversation, Message, AgentLoop, system_prompt
+│   │   ├── agent/       # Conversation, Message, AgentLoop, system_prompt, plan/reflect/workflow
+│   │   │   └── context/ # window, normalize, compact (上下文压缩/规范化/窗口管理)
 │   │   ├── provider/    # LlmProvider trait, DeepSeek 实现
-│   │   ├── tools/       # AgentTool trait, ToolRegistry, 5 个内置工具
-│   │   ├── context/     # ContextProvider trait, MemoryManager
-│   │   ├── skills/      # SkillManager (骨架)
-│   │   └── mcp/         # MCP Client (骨架)
-└── qianxun/             # 单二进制 (bin: qx)
+│   │   ├── tools/       # AgentTool trait, ToolRegistry, 内置工具
+│   │   ├── context/     # ContextProvider trait, MemoryObserver trait
+│   │   ├── skills/      # SkillManager (frontmatter 解析 + 项目/全局加载)
+│   │   └── mcp/         # MCP Client + ServerManager + transport (stdio/HTTP)
+├── qianxun-memory/      # 记忆引擎 (lib) — SQLite + FTS5 + Vector 混合检索
+│   └── src/
+│       ├── lib.rs           # MemoryCore 入口，实现 MemoryObserver
+│       ├── types.rs         # MemoryRecord / MemorySearchResult / MemoryStats
+│       ├── db.rs            # SQLite schema (observations/sessions/memories/tags + obs_fts)
+│       ├── search.rs        # BM25 检索
+│       ├── vector.rs        # VectorIndex 骨架
+│       ├── consolidation.rs # Observation → Memory 聚类压缩
+│       ├── compressor.rs    # 文本压缩 + 合成观察
+│       ├── privacy.rs       # 隐私数据清洗
+│       └── slot.rs          # 槽位管理
+└── qianxun/             # 单二进制 (bin: qx) — 四种入口 + 旧 CLI
     └── src/
-        ├── main.rs      # 入口 (clap), cli/acp/daemon 模式路由
+        ├── main.rs      # 入口 (clap), tui/acp/daemon/server 模式路由 + 薄客户端
         ├── buf_writer.rs# 日志缓冲写入
-        ├── cli/          # CLI REPL 模块
-        │   ├── mod.rs
-        │   ├── cli.rs    # REPL 循环
-        │   ├── config.rs # 配置路径 + 默认配置生成
-        │   ├── output.rs # CliOutputSink (ANSI 终端输出)
-        │   └── run.rs    # run_repl 启动流程
-        └── acp/          # ACP 协议模块
-            ├── mod.rs
-            ├── types.rs      # JSON-RPC 2.0 信封 + ACP 协议类型
-            ├── transport.rs  # stdio 行帧读写 + 双向请求路由
-            ├── session.rs    # SessionManager
-            ├── output.rs     # AcpOutputSink
-            ├── prompt.rs     # session/prompt → processing_loop 桥接
-            ├── forwarding_tools.rs
-            ├── handler.rs    # 请求路由
-            └── server.rs     # ACP 主循环
+        ├── tui/         # 交互式 TUI (ratatui + Inline Viewport + 脏标记渲染)
+        │   └── mod.rs   # 单文件 ~1730 行，对话视图 + 命令弹窗 + 流式输出
+        ├── cli/         # 旧 REPL (行将迁移至 TUI/Daemon 客户端)
+        │   ├── cli.rs
+        │   ├── config.rs
+        │   ├── output.rs
+        │   └── run.rs
+        ├── acp/         # ACP 协议 (Zed 集成)
+        │   ├── types.rs, transport.rs, session.rs, output.rs
+        │   ├── prompt.rs, forwarding_tools.rs, handler.rs, server.rs
+        ├── daemon/      # Daemon 模式 (HTTP + axum) — 骨架, 未接 AgentLoop
+        │   ├── mod.rs, router.rs, agent_host.rs
+        └── server/      # VPS Server 模式 (HTTP + jwt + keyring)
+            ├── mod.rs, auth.rs
 ```
 
 ## 构建顺序
 
-| Phase | 交付 |
-|---|---|
-| 1 | 代码骨架 + 核心类型 + REPL CLI + LLM Provider (DeepSeek) + AgentLoop + 内置工具 |
-| 2 | ACP 协议 + 工作空间支持 ✅ |
-| 3 | Memory/Skills/MCP 集成 |
-| 4 | Daemon 模式 + 完整 RAG |
+| Phase | 状态 | 交付 |
+|---|---|---|
+| 1 | ✅ | 代码骨架 + 核心类型 + REPL CLI + LLM Provider (DeepSeek) + AgentLoop + 内置工具 |
+| 2 | ✅ | ACP 协议 + 工作空间支持 |
+| 3a | 🟡 | Memory (SQLite+FTS5) + MCP (ServerManager+transport) + Skills (frontmatter 加载) — 骨架/部分闭环,见 `docs/10_事实源/memory-state.md` |
+| 3b | 🟡 | AgentPattern 类型 + plan/reflect/workflow 模块 — 未接入主链路 |
+| 3c | 🟡 | Daemon HTTP 骨架 (axum + 11 路由 + session CRUD) — 未接 AgentLoop,见 `docs/10_事实源/daemon-state.md` |
+| 3d | ✅ | 独立 TUI 模式 (ratatui, 脏标记驱动渲染 + 增量行缓存) |
+| 4a | 📋 | Daemon 升级为唯一 Agent runtime, TUI/ACP 改 thin client |
+| 4b | 📋 | VPS Server 完整 (WebSocket Hub + 完整认证) + 完整 RAG |
+
+> 实时状态见 `docs/10_事实源/` 各子系统状态文件 + `docs/20_工作项/2026-06-01_TUI性能与Agent开发工具优化/阶段路线.md` (A-G 路线)。
 
 ## 开发命令
 

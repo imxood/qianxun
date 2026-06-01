@@ -209,6 +209,9 @@ impl App {
             messages: vec![UiMessage::system(
                 "千寻 TUI 已启动. 输入消息后按 Enter 发送, 输入 / 打开命令面板.",
             )],
+            cached_lines: vec![render_one_message(&UiMessage::system(
+                "千寻 TUI 已启动. 输入消息后按 Enter 发送, 输入 / 打开命令面板.",
+            ))],
             status,
             mode: Mode::Auto,
             running: true,
@@ -245,8 +248,6 @@ impl App {
 
             dirty: DIRTY_ALL,
             last_draw: Instant::now(),
-
-            cached_lines: Vec::new(),
         })
     }
 
@@ -417,7 +418,9 @@ impl App {
     /// 从缓存构建可见消息行，最多 `max_height` 行
     fn live_message_lines(&self, max_height: u16) -> Vec<Line<'static>> {
         let mut all = Vec::new();
-        for cached in self.cached_lines[self.scrollback_cursor..].iter() {
+        // scrollback_cursor 可能超出 cached_lines（如首次渲染时初始消息尚未入缓存）
+        let start_idx = self.scrollback_cursor.min(self.cached_lines.len());
+        for cached in self.cached_lines[start_idx..].iter() {
             all.extend_from_slice(cached);
         }
         // 只保留最后 max_height 行（可见区域）

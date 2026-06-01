@@ -148,6 +148,66 @@ pub fn create_tables(conn: &Connection) -> SqlResult<()> {
     ",
     )?;
 
+    // === FTS5 同步触发器 ===
+    //
+    // obs_fts 是外部内容 FTS5 表（content='observations', content_rowid='rowid'），
+    // 必须通过 trigger 显式同步，否则 FTS 索引会永远为空。
+    //
+    // 索引字段：title, narrative, facts, concepts, files
+    // 数据来源：observations.data JSON 字段
+    //
+    // 注意：concepts/facts/files 是 JSON 数组，FTS5 unicode61 tokenizer 会
+    // 切分 ["rust","tokio"] → ['[', 'rust', 'tokio', ']']，能匹配搜索但有噪声。
+    // 后续 Phase 可在写入前预先 join 成空格分隔字符串以提升精度。
+    conn.execute_batch(
+        "
+        CREATE TRIGGER IF NOT EXISTS obs_ai_fts AFTER INSERT ON observations
+        BEGIN
+            INSERT INTO obs_fts(rowid, title, narrative, facts, concepts, files)
+            VALUES (
+                new.rowid,
+                COALESCE(json_extract(new.data, '$.title'), ''),
+                COALESCE(json_extract(new.data, '$.narrative'), ''),
+                COALESCE(json_extract(new.data, '$.facts'), '[]'),
+                COALESCE(json_extract(new.data, '$.concepts'), '[]'),
+                COALESCE(json_extract(new.data, '$.files'), '[]')
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS obs_ad_fts AFTER DELETE ON observations
+        BEGIN
+            INSERT INTO obs_fts(obs_fts, rowid, title, narrative, facts, concepts, files)
+            VALUES('delete', old.rowid,
+                COALESCE(json_extract(old.data, '$.title'), ''),
+                COALESCE(json_extract(old.data, '$.narrative'), ''),
+                COALESCE(json_extract(old.data, '$.facts'), '[]'),
+                COALESCE(json_extract(old.data, '$.concepts'), '[]'),
+                COALESCE(json_extract(old.data, '$.files'), '[]')
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS obs_au_fts AFTER UPDATE ON observations
+        BEGIN
+            INSERT INTO obs_fts(obs_fts, rowid, title, narrative, facts, concepts, files)
+            VALUES('delete', old.rowid,
+                COALESCE(json_extract(old.data, '$.title'), ''),
+                COALESCE(json_extract(old.data, '$.narrative'), ''),
+                COALESCE(json_extract(old.data, '$.facts'), '[]'),
+                COALESCE(json_extract(old.data, '$.concepts'), '[]'),
+                COALESCE(json_extract(old.data, '$.files'), '[]')
+            );
+            INSERT INTO obs_fts(rowid, title, narrative, facts, concepts, files)
+            VALUES (new.rowid,
+                COALESCE(json_extract(new.data, '$.title'), ''),
+                COALESCE(json_extract(new.data, '$.narrative'), ''),
+                COALESCE(json_extract(new.data, '$.facts'), '[]'),
+                COALESCE(json_extract(new.data, '$.concepts'), '[]'),
+                COALESCE(json_extract(new.data, '$.files'), '[]')
+            );
+        END;
+        ",
+    )?;
+
     Ok(())
 }
 

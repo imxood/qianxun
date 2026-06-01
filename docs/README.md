@@ -37,26 +37,30 @@ docs/
 
 ## 当前状态
 
+> 校准: 2026-06-01。详细缺口与进度见 `docs/10_事实源/` 五个子系统状态文件,以及 `docs/20_工作项/2026-06-01_TUI性能与Agent开发工具优化/阶段路线.md` (A-G 路线)。
+
 | Phase | 状态 | 内容 |
 |---|---|---|
-| 1-2 | ✅ 完成 | Agent 引擎 + Provider + 工具 + CLI + ACP + 工作区 |
-| 3a | ✅ 完成 | Memory(SQLite+FTS5) + MCP(ServerManager+HTTP) + Skills(skill_read) |
-| 3b | ✅ 完成 | AgentPattern 类型 + plan/reflect/workflow 模块 |
-| 3c | ✅ 完成 | Daemon HTTP 骨架(axum+会话管理+SSE) |
-| 4a | 📋 待实现 | Daemon 功能完整（Memory/MCP/Skills 接入 HTTP） |
-| 4b | 📋 待实现 | VPS Server 完整（WebSocket Hub + 完整认证） |
+| 1-2 | ✅ 完成 | Agent 引擎 + Provider + 工具 + CLI REPL + ACP + 工作区 |
+| 3a | 🟡 部分实现 | Memory (SQLite+FTS5, 闭环缺口) + MCP (ServerManager+transport, 工具注册未完) + Skills (frontmatter 加载, 路径/能力未对齐设计) — 见 `memory-state.md` `mcp-state.md` `skills-state.md` |
+| 3b | 🟡 部分实现 | AgentPattern 类型 + plan/reflect/workflow 模块 — 未接入主链路 |
+| 3c | 🟡 骨架 | Daemon HTTP 骨架 (axum + 11 路由 + session CRUD) — 未接 AgentLoop, 见 `daemon-state.md` |
+| 3d | ✅ 完成 | 独立 TUI 模式 (ratatui + 脏标记渲染 + 增量行缓存 + 1MB 压测) — 见 `tui-architecture.md` |
+| 4a | 📋 待实现 | Daemon 升级为唯一 Agent runtime, TUI/ACP 改 thin client |
+| 4b | 📋 待实现 | VPS Server 完整 (WebSocket Hub + 完整认证) + 完整 RAG |
 
 ## 文档职责一览
 
 | 文件 | 类型 | Phase |
 |---|---|---|
 | `docs/architecture.md` | 统一架构设计 | 1-4 ✅ |
-| `docs/agent-pattern-design.md` | Agent 模式设计 | 3b ✅ |
-| `docs/memory-design.md` | 记忆子系统设计 | 3a ✅ |
-| `docs/mcp-design.md` | MCP Client 设计 | 3a ✅ |
-| `docs/skills-design.md` | Skill 系统设计 | 3a ✅ |
-| `docs/daemon-design.md` | Daemon 模式设计 | 3c ✅ / 4a 📋 |
+| `docs/agent-pattern-design.md` | Agent 模式设计 | 3b 🟡 |
+| `docs/memory-design.md` | 记忆子系统设计 | 3a 🟡 |
+| `docs/mcp-design.md` | MCP Client 设计 | 3a 🟡 |
+| `docs/skills-design.md` | Skill 系统设计 | 3a 🟡 |
+| `docs/daemon-design.md` | Daemon 模式设计 | 3c 🟡 / 4a 📋 |
 | `docs/vps-server-design.md` | VPS Server 设计 | 4b 📋 |
+| `docs/10_事实源/` | 子系统真实状态 | 持续维护 |
 | `docs/30_决策/ADR-0001_数据库选型.md` | 决策记录 | 3 |
 | `CLAUDE.md` | 项目规则 | — |
 
