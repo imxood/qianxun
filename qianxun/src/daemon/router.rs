@@ -66,8 +66,12 @@ async fn status_handler() -> Json<serde_json::Value> {
 async fn create_session(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionCreatedResponse>, (StatusCode, String)> {
+    // Stage 1: 不接 prompt body, 保留 "创建 session" 端点.
+    // Stage 2: 接 CreateSessionRequest { workspace, model, ... } 在此解析.
     match state.agent_host.create_session() {
-        Ok(session_id) => Ok(Json(SessionCreatedResponse { session_id })),
+        Ok(runtime) => Ok(Json(SessionCreatedResponse {
+            session_id: runtime.session_id.clone(),
+        })),
         Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, e)),
     }
 }

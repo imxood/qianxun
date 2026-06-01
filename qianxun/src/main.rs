@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.daemon {
         tracing::info!("以 Daemon 模式启动（端口 {}）", cli.port);
-        daemon::run(cli.port).await?;
+        daemon::run(cli.port, resolved).await?;
         return Ok(());
     }
 
