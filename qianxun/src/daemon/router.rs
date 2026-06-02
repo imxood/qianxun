@@ -3425,3 +3425,72 @@ mod stage7a_endpoint_tests {
     fn _unused_to_suppress_warnings(_: &ContentBlock) {}
 }
 
+// ─── Stage 9c — CSP header 测试 ───────────────────────────────────────
+
+#[cfg(test)]
+mod stage9c_csp_tests {
+    //! Stage 9c: Content-Security-Policy header 在 router 出口存在.
+    //!
+    //! 策略: 复用 stage7a_endpoint_tests::make_test_state() 构造最小 router,
+    //! 发 GET /v1/system/health (公开, 不需 JWT) + GET /, 验证 CSP header.
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use tower::ServiceExt;
+
+    use super::stage7a_endpoint_tests::make_test_state;
+
+    #[tokio::test]
+    async fn csp_header_present_on_health_endpoint() {
+        let state = make_test_state();
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("GET")
+                    .uri("/v1/system/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .expect("CSP header should be present");
+        let csp_str = csp.to_str().unwrap();
+        // 我们生成 CSP 时已 strip 空格, 但 'self' 周围的引号保留. 这里用松散匹配.
+        assert!(csp_str.contains("default-src"), "CSP: {csp_str}");
+        assert!(csp_str.contains("'self'"), "CSP: {csp_str}");
+        assert!(csp_str.contains("script-src"), "CSP: {csp_str}");
+        assert!(csp_str.contains("style-src"), "CSP: {csp_str}");
+        assert!(csp_str.contains("'unsafe-inline'"), "CSP: {csp_str}");
+        assert!(csp_str.contains("connect-src"), "CSP: {csp_str}");
+        assert!(csp_str.contains("img-src"), "CSP: {csp_str}");
+        assert!(csp_str.contains("data:"), "CSP: {csp_str}");
+    }
+
+    #[tokio::test]
+    async fn csp_header_present_on_root_handler() {
+        let state = make_test_state();
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("GET")
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // root handler 也应带 CSP (layer 应用到所有 response)
+        assert!(
+            response.headers().contains_key("content-security-policy"),
+            "CSP missing on /"
+        );
+    }
+}
+

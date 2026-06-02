@@ -33,7 +33,7 @@ rusqlite = { version = "0.34", features = ["bundled", "vtab", "column_decltype"]
 regex = "1"
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "fs", "set-header"] }
 keyring = "3"
 argon2 = "0.5"
 jsonwebtoken = "9"
