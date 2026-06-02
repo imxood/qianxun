@@ -263,6 +263,36 @@ impl AgentLoopHost {
             .count()
     }
 
+    /// Stage 10b: 优雅关闭所有活跃 session.
+    ///
+    /// 行为: 遍历 in-memory `sessions` HashMap, 对每个**未 paused**的 runtime
+    /// 设 `paused = true` (跟 `cancel_session` 同效, 触发 SSE 流的 stop signal).
+    /// 已经 paused 的不动 (避免误覆盖).
+    ///
+    /// 返回: 实际被 mark 为 cancelled 的 session 数 (含已经 paused 的 — 因为
+    /// 这次 mark "cancelled" 仍要 touch 一下, 让 last_active 更新).
+    ///
+    /// 错误: lock poison 会 panic (跟其他方法一致, 不返 Result).
+    pub fn shutdown_all(&self) -> usize {
+        let sessions: Vec<Arc<SessionRuntime>> = {
+            let map = self.sessions.read().expect("AgentLoopHost lock poisoned");
+            map.values().cloned().collect()
+        };
+        let total = sessions.len();
+        let mut cancelled = 0usize;
+        for runtime in sessions {
+            runtime.set_paused(true);
+            runtime.touch();
+            cancelled += 1;
+        }
+        if cancelled > 0 {
+            tracing::info!(
+                "[daemon] shutdown_all: marked {cancelled}/{total} sessions as paused (cancelled)"
+            );
+        }
+        cancelled
+    }
+
     /// Stage 3: 启动恢复 — 加载所有 active session 的 conversation.
     ///
     /// 对 `store.list_active()` 的每个 session:

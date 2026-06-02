@@ -253,6 +253,24 @@ impl SessionStore {
         )?;
         Ok(())
     }
+
+    /// Stage 10b: 优雅关闭时强制 checkpoint WAL, 确保所有挂起写入磁盘.
+    ///
+    /// 行为:
+    /// 1. 拿 db lock (跟其他方法一致)
+    /// 2. 执行 `PRAGMA wal_checkpoint(TRUNCATE)` — 把 WAL 文件截断, 等价
+    ///    完整 checkpoint. SQLite 内部 atomic, 即使有 in-flight 写也会
+    ///    等它们完成后做 checkpoint.
+    /// 3. 返回 Ok(()) 表示成功
+    ///
+    /// 失败模式: lock poison (其他方法一致, panic) 或 SQLite I/O 错
+    /// (返 Err). Graceful shutdown 调用方应 `match`, 失败时 warn 但不
+    /// 中断退出流程 (强迫进程退出).
+    pub fn flush(&self) -> Result<(), SessionStoreError> {
+        let conn = self.db.lock()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
 }
 
 // ─── 内部: 3 张表 DDL ────────────────────────────────────────
