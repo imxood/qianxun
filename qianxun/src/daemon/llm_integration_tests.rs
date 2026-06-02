@@ -111,6 +111,14 @@ async fn spawn_test_daemon(
         started_at: Instant::now(),
         active_conns: Arc::new(AtomicUsize::new(0)),
         log_ring: Arc::new(LogRing::new()),
+        // Stage 10a: admin credential (测试用临时路径, 避免污染 ~/.qianxun/)
+        admin: Arc::new(
+            crate::daemon::auth::AdminCredential::load_or_create(
+                &std::env::temp_dir()
+                    .join(format!("qianxun_itest_admin_{}.json", std::process::id())),
+            )
+            .expect("test admin credential"),
+        ),
     });
 
     // 7. Build router (不带 UI dist, 走 None)
