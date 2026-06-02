@@ -16,9 +16,13 @@ pub struct LoginRequest {
 }
 
 /// JWT 密钥（生产环境应从环境变量读取）
-const JWT_SECRET: &str = "qianxun-dev-secret-2026-change-me";
+pub const JWT_SECRET: &str = "qianxun-dev-secret-2026-change-me";
 
-#[derive(Debug, Serialize)]
+/// JWT claims — 复用 Stage 1.
+///
+/// Stage 4 扩展: 加 `Deserialize`, 让 admin 端点可以从请求中解析
+/// 用户提供的 JWT. `Serialize` 仍保留 (login_handler 签发用).
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub role: String,

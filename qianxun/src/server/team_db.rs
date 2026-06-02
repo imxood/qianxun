@@ -92,7 +92,9 @@ pub struct DeviceRecord {
 /// 写操作串行执行 (单 VPS 实例无高并发需求).
 #[derive(Clone)]
 pub struct TeamDb {
-    conn: Arc<Mutex<Connection>>,
+    /// `pub(crate)` 以便 server 模块内 RBAC 函数直接访问 (Stage 4 cross-agent 兼容).
+    /// 后续重构: 把 RBAC 改成 TeamDb 的成员方法 (`check_rbac(...)` 之类), 再收回私有.
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl TeamDb {

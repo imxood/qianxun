@@ -1,0 +1,39 @@
+# 千寻 VPS Server — Stage 4 Docker Compose
+#
+# 用法:
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+#
+# 资源限制: 1 CPU + 512MB (符合 02-vps-server.md §1.4 极简部署目标)
+# 数据持久化: 命名卷 qxvps-data → /home/qxvps/.qxvps (SQLite + 上传文件)
+
+services:
+  qxvps:
+    # 从 qianxun/ 子目录构建, 使用该目录的 Dockerfile
+    build:
+      context: ./qianxun
+      dockerfile: Dockerfile
+    image: qxvps:stage4
+    container_name: qxvps
+    # 异常退出时自动重启 (Stage 4 简化: 暂不接 healthcheck)
+    restart: unless-stopped
+    ports:
+      - "23901:23901"
+    volumes:
+      # 命名卷: docker compose 自动创建, docker volume ls 可查
+      - qxvps-data:/home/qxvps/.qxvps
+    environment:
+      # RUST_LOG 由 qx 的 tracing-subscriber 解析 (见 main.rs)
+      - RUST_LOG=info,qx_server=debug
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    # 健康检查 (Stage 5 接: 用 /api/health endpoint 替换 docker exec)
+    # Stage 4 简化: 暂不接, 避免 wget/curl 镜像膨胀
+
+volumes:
+  qxvps-data:
+    name: qxvps-data

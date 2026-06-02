@@ -5,6 +5,7 @@ use tracing_subscriber::fmt::time::FormatTime;
 mod acp;
 mod buf_writer;
 mod cli;
+mod client;
 mod daemon;
 mod server;
 mod tui;
@@ -81,6 +82,12 @@ struct Cli {
     /// 以 VPS Server 模式运行
     #[arg(long)]
     server: bool,
+
+    /// 强制内嵌模式 (不连接 daemon, 进程内嵌 AgentLoop).
+    /// 默认行为 (不传此 flag): 启动时探测本地 daemon, 有则走 thin client,
+    /// 无则回退到内嵌模式 (向后兼容 Stage 3 行为).
+    #[arg(long)]
+    standalone: bool,
 }
 
 #[tokio::main]
@@ -210,10 +217,29 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 薄客户端模式：连接到远程 Daemon
+    // 显式指定 daemon URL → 薄客户端模式 (优先于 --standalone)
     if let Some(ref daemon_url) = cli.daemon_url {
         tracing::info!("以薄客户端模式连接 Daemon: {daemon_url}");
-        return run_thin_client(daemon_url).await;
+        return client::run_thin_repl(daemon_url).await;
+    }
+
+    // ── Stage 4: 默认探测 daemon ──
+    // 探测时机: 用户没传 --standalone 也没传 --daemon-url 时.
+    // 有 daemon → thin client; 无 daemon → 回退 standalone (向后兼容).
+    let use_thin = !cli.standalone && client::detect_local_daemon().await.is_some();
+    if use_thin {
+        let daemon_url = client::detect_local_daemon().await.expect("just probed");
+        tracing::info!("[main] 检测到本地 Daemon: {daemon_url}, 走 thin client");
+        if cli.acp_mode {
+            // ACP thin path 暂未实现 (Stage 4a+): 提示并回退 standalone.
+            eprintln!(
+                "[main] ACP thin-client 模式尚未实现, 暂以 standalone 模式运行 (daemon={daemon_url})"
+            );
+        } else {
+            return client::run_thin_repl(&daemon_url).await;
+        }
+    } else if !cli.standalone {
+        tracing::info!("[main] 未检测到本地 Daemon, 回退 standalone 模式");
     }
 
     if cli.acp_mode {
@@ -258,65 +284,3 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 薄客户端模式：通过 HTTP 连接 Daemon，不创建本地 AgentLoop。
-async fn run_thin_client(daemon_url: &str) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
-    let health_url = format!("{daemon_url}/v1/system/health");
-
-    // 验证 Daemon 连接
-    let resp = client
-        .get(&health_url)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("无法连接 Daemon {daemon_url}: {e}"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Daemon 返回错误: {}", resp.status());
-    }
-    tracing::info!("Daemon 已连接: {daemon_url}");
-    println!("已连接到 Daemon: {daemon_url}");
-    println!("输入消息后按 Enter 发送（输入 /quit /exit 退出）\n");
-
-    let mut input = String::new();
-    loop {
-        input.clear();
-        if std::io::stdin().read_line(&mut input).is_err() {
-            break;
-        }
-        let input = input.trim();
-        match input {
-            "/quit" | "/exit" => break,
-            "" => continue,
-            _ => {}
-        }
-
-        // 创建会话
-        let session_url = format!("{daemon_url}/v1/chat/session");
-        let session_resp = match client.post(&session_url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                println!("[Daemon] session error: {}", r.status());
-                continue;
-            }
-            Err(e) => {
-                println!("[Daemon] session error: {e}");
-                continue;
-            }
-        };
-        let sid: serde_json::Value = session_resp.json().await.unwrap_or_default();
-        let session_id = sid["session_id"].as_str().unwrap_or("unknown").to_string();
-
-        // 发送 prompt
-        let prompt_url = format!("{daemon_url}/v1/chat/session/{session_id}/prompt");
-        let body = serde_json::json!({"messages": [{"role": "user", "content": input}]});
-        match client.post(&prompt_url).json(&body).send().await {
-            Ok(r) => {
-                let text = r.text().await.unwrap_or_default();
-                println!("{}", text);
-            }
-            Err(e) => {
-                println!("[Daemon] prompt error: {e}");
-            }
-        }
-    }
-    Ok(())
-}

@@ -480,6 +480,125 @@ impl WsHub {
     pub async fn get_connection(&self, id: &str) -> Option<Arc<Connection>> {
         self.connections.read().await.get(id).cloned()
     }
+
+    /// Stage 4: 取一个 App connection 的 user_id (= principal_id).
+    ///
+    /// **简化**: 只对 `ConnectionType::App` 返回 `principal_id`. Device connection
+    /// 返回 `None` (Stage 5: 通过 device token 反查 users.user_id).
+    ///
+    /// 在 `handle_prompt_frame` 中用此方法取发起 prompt 的 user, 喂给 `check_rbac`.
+    pub async fn user_id_for(&self, connection_id: &str) -> Option<String> {
+        let conns = self.connections.read().await;
+        let conn = conns.get(connection_id)?;
+        match conn.connection_type {
+            ConnectionType::App => Some(conn.principal_id.clone()),
+            // Device 暂不返 user_id (Stage 5: 查 devices.user_id)
+            ConnectionType::Device => None,
+        }
+    }
+}
+
+// ─── Stage 4: RBAC 检查 ────────────────────────────────
+
+/// RBAC 检查失败原因.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RbacError {
+    /// 数据库错误 (lock poisoned, SQL 失败, 等).
+    Database(String),
+    /// Project 不存在.
+    ProjectNotFound,
+}
+
+impl std::fmt::Display for RbacError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Database(e) => write!(f, "rbac db error: {e}"),
+            Self::ProjectNotFound => write!(f, "project not found"),
+        }
+    }
+}
+
+impl std::error::Error for RbacError {}
+
+/// Stage 4 RBAC 检查: user 必须是 project 所属 team 的成员, 且 project 显式分配给该 user.
+///
+/// ## 逻辑
+///
+/// 1. 查 `team_projects` 拿 `team_id`. 找不到 → `Err(ProjectNotFound)`.
+/// 2. 查 `team_members` 看 user 是不是 team 成员 (任意 role).
+/// 3. 查 `team_project_assignments` 看 project 是不是分配给了 user.
+/// 4. 两个条件都满足 → `Ok(true)`, 否则 `Ok(false)`.
+///
+/// ## Stage 4 简化
+///
+/// - **同步查 DB** (无缓存). 50 并发用户场景下每次 prompt 多 2 次 query,
+///   不会成为瓶颈 (VPS 是控制面, 不是数据面).
+/// - 不实现 role 矩阵 (owner/admin/developer/viewer) 的细粒度权限.
+///   后续 Stage 5+ 引入 `require_role(team, min_role)` helper.
+///
+/// ## 调用方
+///
+/// 在 `handle_prompt_frame` (mod.rs) 路由 Prompt 帧时调用:
+/// ```ignore
+/// match check_rbac(&hub.team_db, &user_id, &target_project_id).await {
+///     Ok(true) => { /* 允许, 转发到 target_node */ }
+///     Ok(false) => { /* 推 event_error code="forbidden" */ }
+///     Err(e) => { /* 推 event_error code="internal" */ }
+/// }
+/// ```
+pub async fn check_rbac(
+    team_db: &TeamDb,
+    user_id: &str,
+    project_id: &str,
+) -> Result<bool, RbacError> {
+    use rusqlite::OptionalExtension;
+
+    // 1. 查 project → 拿 team_id
+    let team_id: Option<String> = team_db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT team_id FROM team_projects WHERE id = ?1",
+            rusqlite::params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| RbacError::Database(e.to_string()))?;
+    let team_id = team_id.ok_or(RbacError::ProjectNotFound)?;
+
+    // 2. user 是 team 成员?
+    let is_member: bool = team_db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT 1 FROM team_members WHERE team_id = ?1 AND user_id = ?2 LIMIT 1",
+            rusqlite::params![team_id, user_id],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| RbacError::Database(e.to_string()))?
+        .unwrap_or(false);
+    if !is_member {
+        return Ok(false);
+    }
+
+    // 3. project 显式分配给 user?
+    let is_assigned: bool = team_db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT 1 FROM team_project_assignments WHERE project_id = ?1 AND user_id = ?2 LIMIT 1",
+            rusqlite::params![project_id, user_id],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| RbacError::Database(e.to_string()))?
+        .unwrap_or(false);
+
+    Ok(is_assigned)
 }
 
 /// Hub 快照统计.
@@ -847,5 +966,92 @@ mod tests {
         assert!(hub.node_id_for(&conn_id).await.is_none());
         assert!(hub.device_meta_for(&conn_id).await.is_none());
         assert!(hub.last_heartbeat_at(&conn_id).await.is_none());
+    }
+
+    // ──────── Stage 4 测试: check_rbac ────────
+
+    /// 预创建 user / team / project, 灵活配 assignment.
+    fn seed_rbac(
+        hub: &WsHub,
+        user_id: &str,
+        team_id: &str,
+        project_id: &str,
+        is_member: bool,
+        is_assigned: bool,
+    ) {
+        use rusqlite::params;
+        let conn = hub.team_db.conn.lock().unwrap();
+        // user (FK in team_members / team_projects)
+        conn.execute(
+            "INSERT OR IGNORE INTO users (id, username, password_hash, created_at)
+             VALUES (?1, ?2, 'ph', '2026-06-02T00:00:00Z')",
+            params![user_id, format!("user_{user_id}")],
+        )
+        .expect("seed user");
+        // team
+        conn.execute(
+            "INSERT OR IGNORE INTO team_teams (id, name, created_at) VALUES (?1, ?2, '2026-06-02T00:00:00Z')",
+            params![team_id, format!("Team {team_id}")],
+        )
+        .expect("seed team");
+        // membership
+        if is_member {
+            conn.execute(
+                "INSERT OR IGNORE INTO team_members (team_id, user_id, role, joined_at)
+                 VALUES (?1, ?2, 'developer', '2026-06-02T00:00:00Z')",
+                params![team_id, user_id],
+            )
+            .expect("seed member");
+        }
+        // project
+        conn.execute(
+            "INSERT OR IGNORE INTO team_projects (id, team_id, name, path, owner_id, created_at)
+             VALUES (?1, ?2, 'P1', '/work/p1', ?3, '2026-06-02T00:00:00Z')",
+            params![project_id, team_id, user_id],
+        )
+        .expect("seed project");
+        // assignment
+        if is_assigned {
+            conn.execute(
+                "INSERT OR IGNORE INTO team_project_assignments (project_id, user_id, assigned_at)
+                 VALUES (?1, ?2, '2026-06-02T00:00:00Z')",
+                params![project_id, user_id],
+            )
+            .expect("seed assignment");
+        }
+    }
+
+    /// Stage 4 测试 1: user 在 team 且 project assigned → Ok(true).
+    ///
+    /// 完整正路径: 创建 user_alice, 加入 team_eng, 把 proj_x 显式分配给 alice.
+    /// check_rbac(team_db, "user_alice", "proj_x") → Ok(true).
+    #[tokio::test]
+    async fn test_check_rbac_member_and_assigned_returns_true() {
+        let hub = test_hub();
+        seed_rbac(&hub, "user_alice", "team_eng", "proj_x", true, true);
+
+        let allowed = check_rbac(&hub.team_db, "user_alice", "proj_x")
+            .await
+            .expect("rbac should not error");
+        assert!(allowed, "user in team + project assigned should be allowed");
+    }
+
+    /// Stage 4 测试 2: user 在 team 但 project 未分配 → Ok(false).
+    ///
+    /// 反例 1: alice 是 team_eng 成员, 但 proj_y 没分配给她.
+    /// check_rbac → Ok(false) (明确 NOT allow, 但不报 err).
+    #[tokio::test]
+    async fn test_check_rbac_member_but_not_assigned_returns_false() {
+        let hub = test_hub();
+        // alice 是 team 成员, 但 proj_y 不分配给她
+        seed_rbac(&hub, "user_alice", "team_eng", "proj_y", true, false);
+
+        let allowed = check_rbac(&hub.team_db, "user_alice", "proj_y")
+            .await
+            .expect("rbac should not error for valid inputs");
+        assert!(
+            !allowed,
+            "user in team but project NOT assigned should be denied"
+        );
     }
 }

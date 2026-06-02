@@ -1,0 +1,47 @@
+# Cargo build artifacts
+target/
+**/target/
+
+# 第三方依赖 (cargo 自动下载)
+**/Cargo.lock
+
+# Node/Pnpm (Tauri 桌面端, VPS image 不用)
+node_modules/
+**/node_modules/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# 文档
+**/*.md
+docs/
+.mavis/
+.opencode/
+.qianxun/
+qianxun-desktop/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+**/*.log
+debug.log
+test_output.log
+test.log
+
+# 本地脚本与临时文件
+check_completion.py
+check_mode.py
+CLAUDE.md
+LICENSE
+README.md
+rust-toolchain.toml

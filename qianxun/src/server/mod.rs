@@ -21,12 +21,20 @@
 //! - 7 个新 REST endpoints: teams (3) + projects (3) + assign (1)
 //!   见 `02-vps-server.md` §11.2.3 Team/Project 端点 (Stage 3 简化: 不接 admin auth)
 //!
-//! Stage 4 计划:
-//! - JWT 验证 (App 连接用 JWT 不用 device_token)
-//! - prompt / event / event_done / event_error 完整路由
-//! - Outbox 重连缓冲 + NodeStatus 广播
-//! - rate-limit / pending_command 跟踪 + admin auth 检查
+//! Stage 4 范围 (本版本增量):
+//! - **`admin::require_admin` — JWT 解析 + role 检查 guard** (admin/owner 通过)
+//! - **7 个 admin endpoint** (2 已有 + 5 新) 全部加 guard
+//! - **`ws_hub::check_rbac` — Team RBAC helper** (同步查 TeamDb)
+//! - **`handle_prompt_frame` — Prompt 帧路由 + RBAC 检查** (event_error on forbid)
+//! - Dockerfile + docker-compose + .dockerignore (部署)
+//!
+//! Stage 5+ TODO:
+//! - 完整 rate-limit (governor crate)
+//! - Outbox + 完整 PendingCommand 跟踪
+//! - NodeStatus 广播
+//! - 完整 App JWT 验证 + refresh token 轮换
 
+pub mod admin;
 pub mod auth;
 pub mod auth_ws;
 pub mod messages;
@@ -36,7 +44,7 @@ pub mod ws_hub;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -50,7 +58,7 @@ use uuid::Uuid;
 
 use messages::WsFrame;
 use team_db::{Project, Team, TeamDb, TeamMember};
-pub use ws_hub::{ConnectionType, HubStats, WsHub};
+pub use ws_hub::{check_rbac, ConnectionType, HubStats, RbacError, WsHub};
 
 /// VPS Server 共享状态。
 pub struct VpsState {
@@ -83,7 +91,21 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
         .route("/api/device/auth-code", post(auth::auth_code_handler))
         .route("/api/device/authorize", post(auth::authorize_handler))
         .route("/api/device/token", get(auth::token_handler))
-        .route("/api/admin/users", post(auth::create_user_handler).get(auth::list_users_handler))
+        // Stage 4: admin endpoint — 全部加 admin guard
+        .route(
+            "/api/admin/users",
+            post(admin_create_user_handler).get(admin_list_users_handler),
+        )
+        .route("/api/admin/teams", get(admin_list_teams_handler))
+        .route(
+            "/api/admin/teams/:id/members",
+            post(admin_add_team_member_handler).delete(admin_remove_team_member_handler),
+        )
+        .route("/api/admin/projects", get(admin_list_projects_handler))
+        .route(
+            "/api/admin/projects/:id",
+            axum::routing::delete(admin_archive_project_handler),
+        )
         // Stage 2: WS 端点接 auth (token 区分 device vs app).
         .route("/api/ws", get(ws_upgrade))
         // Stage 3: Team/Project REST endpoints (7 个, 不接 admin auth).
@@ -322,6 +344,190 @@ async fn assign_project_handler(
     }))))
 }
 
+// ─── Stage 4: Admin endpoints (7 个, 全部加 admin guard) ────
+//
+// 设计: 7 个 handler 共享一个 `require_admin_or_err` helper — 失败时
+// 直接返回 `(StatusCode, String)`, 成功时把 claims 传给业务逻辑.
+//
+// 5 个新端点 (按 spec 顺序):
+//   1. GET    /api/admin/teams                       — 列出所有 teams
+//   2. POST   /api/admin/teams/:id/members           — 添加成员
+//   3. DELETE /api/admin/teams/:id/members/:user_id  — 移除成员
+//   4. GET    /api/admin/projects                    — 列出所有 team_projects
+//   5. DELETE /api/admin/projects/:id               — 软删 (archived=1)
+//
+// 2 个已有端点 (Stage 1 在 auth.rs, 加 guard):
+//   6. POST   /api/admin/users                       — 创建用户
+//   7. GET    /api/admin/users                       — 列出用户
+
+/// `require_admin` 错误 → HTTP 响应的统一映射.
+fn admin_error_response(e: admin::AdminError) -> (StatusCode, String) {
+    match e {
+        admin::AdminError::Missing | admin::AdminError::Invalid => {
+            (StatusCode::UNAUTHORIZED, "authentication required".to_string())
+        }
+        admin::AdminError::Forbidden => {
+            (StatusCode::FORBIDDEN, "admin role required".to_string())
+        }
+    }
+}
+
+// 1. POST /api/admin/users — admin guard + 调 Stage 1 业务
+async fn admin_create_user_handler(
+    State(state): State<Arc<VpsState>>,
+    headers: HeaderMap,
+    Json(req): Json<auth::CreateUserRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    auth::create_user_handler(State(state), Json(req)).await
+}
+
+// 2. GET /api/admin/users — admin guard
+async fn admin_list_users_handler(
+    State(state): State<Arc<VpsState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    Ok(auth::list_users_handler(State(state)).await)
+}
+
+// 3. GET /api/admin/teams — admin guard
+async fn admin_list_teams_handler(
+    State(state): State<Arc<VpsState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Team>>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    let teams = state
+        .team_db
+        .list_all_teams()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("list_teams: {e}")))?;
+    Ok(Json(teams))
+}
+
+// 4. POST /api/admin/teams/:id/members — admin guard + add member
+async fn admin_add_team_member_handler(
+    State(state): State<Arc<VpsState>>,
+    Path(team_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<AddMemberRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    if req.user_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "user_id is required".to_string()));
+    }
+    state
+        .team_db
+        .add_member(&team_id, &req.user_id, &req.role)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("add_member: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "team_id": team_id,
+        "user_id": req.user_id,
+        "role": req.role,
+        "status": "added",
+    })))
+}
+
+// 5. DELETE /api/admin/teams/:id/members/:user_id — admin guard
+async fn admin_remove_team_member_handler(
+    State(state): State<Arc<VpsState>>,
+    Path((team_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    remove_team_member(&state, &team_id, &user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("remove_member: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "team_id": team_id,
+        "user_id": user_id,
+        "status": "removed",
+    })))
+}
+
+/// 直接走 SQL: 复用 TeamDb 内部锁, 避免再加一个公开方法.
+fn remove_team_member(
+    state: &Arc<VpsState>,
+    team_id: &str,
+    user_id: &str,
+) -> rusqlite::Result<()> {
+    let conn = state.team_db.conn.lock().unwrap();
+    conn.execute(
+        "DELETE FROM team_members WHERE team_id = ?1 AND user_id = ?2",
+        rusqlite::params![team_id, user_id],
+    )?;
+    Ok(())
+}
+
+// 6. GET /api/admin/projects — admin guard
+async fn admin_list_projects_handler(
+    State(state): State<Arc<VpsState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Project>>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    let conn = state.team_db.conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, team_id, name, path, description, owner_id, created_at, archived
+             FROM team_projects ORDER BY created_at DESC",
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prepare: {e}")))?;
+    let projects: Vec<Project> = stmt
+        .query_map([], |row| {
+            let archived_int: i64 = row.get(7)?;
+            Ok(Project {
+                id: row.get(0)?,
+                team_id: row.get(1)?,
+                name: row.get(2)?,
+                path: row.get(3)?,
+                description: row.get(4)?,
+                owner_id: row.get(5)?,
+                created_at: row.get(6)?,
+                archived: archived_int != 0,
+            })
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("query_map: {e}")))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("collect: {e}")))?;
+    Ok(Json(projects))
+}
+
+// 7. DELETE /api/admin/projects/:id — admin guard + 软删 (archived=1)
+async fn admin_archive_project_handler(
+    State(state): State<Arc<VpsState>>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Err(e) = admin::require_admin(&headers) {
+        return Err(admin_error_response(e));
+    }
+    let conn = state.team_db.conn.lock().unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let n = conn
+        .execute(
+            "UPDATE team_projects SET archived = 1, archived_at = ?2 WHERE id = ?1",
+            rusqlite::params![project_id, now],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("archive_project: {e}")))?;
+    if n == 0 {
+        return Err((StatusCode::NOT_FOUND, format!("project {project_id} not found")));
+    }
+    Ok(Json(serde_json::json!({
+        "project_id": project_id,
+        "status": "archived",
+    })))
+}
+
 // ─── WebSocket (Stage 2: 完整事件分发) ─────────────────────────
 
 /// `GET /api/ws` — WS 升级入口.
@@ -493,9 +699,10 @@ async fn handle_text_frame(hub: &Arc<WsHub>, conn_id: &str, text: &str, tx: &mps
         WsFrame::Auth { .. } => Some(handle_auth_frame(hub, conn_id, &frame).await),
         WsFrame::Register { .. } => Some(hub.register_device(conn_id, &frame).await),
         WsFrame::Heartbeat { .. } => Some(hub.handle_heartbeat(conn_id, &frame).await),
+        WsFrame::Prompt { .. } => handle_prompt_frame(hub, conn_id, &frame, tx).await,
         other => {
             // Stage 2 暂不处理: AuthOk/AuthError/RegisterOk/RegisterError (VPS→Device)
-            // / Prompt/Event/EventDone/EventError/HeartbeatAck. 收到就忽略.
+            // / Event/EventDone/EventError/HeartbeatAck. 收到就忽略.
             tracing::debug!(
                 connection_id = %conn_id,
                 frame_type = %other.type_name(),
@@ -519,5 +726,120 @@ async fn handle_auth_frame(hub: &Arc<WsHub>, conn_id: &str, frame: &WsFrame) -> 
     match hub.authenticate(conn_id, frame).await {
         Ok(auth_ok) => auth_ok,
         Err(auth_err) => auth_err,
+    }
+}
+
+// ─── Stage 4: Prompt 帧路由 + Team RBAC ───────────────────
+//
+// 处理来自 App 的 `WsFrame::Prompt`:
+// 1. 从 conn 拿 user_id (App connection 走 `WsHub::user_id_for`).
+// 2. 拿 `target_project_id` (Stage 4 新增字段, 见 `messages.rs`).
+// 3. 调 `check_rbac` 验证权限.
+// 4. 不通过 → 推 `EventError { code: "forbidden" }` 给 client (经 `tx`).
+// 5. 通过 → 当前 Stage 4 是 stub, Stage 5 才会真转发到 target_node 的 Daemon.
+//
+// ## Stage 4 简化
+// - App JWT 验证未接 (Stage 5), 所以 `hub.user_id_for` 现在对所有 conn 返 None
+//   (因为目前只支持 Device connection). 收到 Prompt 帧时, 如果 user_id 是 None,
+//   视为未授权, 推 `EventError { code: "unauthorized" }`.
+// - 不接限流 (governor) / Outbox / Cancel 跟踪 — Stage 5+.
+// - 不接 `event` / `event_done` / `event_error` 反向路由 — Stage 5+.
+
+async fn handle_prompt_frame(
+    hub: &Arc<WsHub>,
+    conn_id: &str,
+    frame: &WsFrame,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Option<WsFrame> {
+    // 1. 解构 Prompt 帧
+    let (request_id, target_project_id, target_node_id) = match frame {
+        WsFrame::Prompt {
+            request_id,
+            target_project_id,
+            target_node_id,
+            ..
+        } => (
+            request_id.clone(),
+            target_project_id.clone(),
+            target_node_id.clone(),
+        ),
+        _ => return None, // 协议错误, 不会触发 (caller 已 match)
+    };
+
+    // 2. 取 user_id (App connection 才有, Device 返 None)
+    let from_user_id = match hub.user_id_for(conn_id).await {
+        Some(uid) => uid,
+        None => {
+            tracing::warn!(
+                connection_id = %conn_id,
+                request_id = %request_id,
+                "Prompt frame from non-app connection (or app not wired in stage 4)"
+            );
+            // 推 unauthorized 错误给 caller
+            let err = WsFrame::EventError {
+                request_id,
+                code: "unauthorized".into(),
+                message: "prompt requires authenticated app connection".into(),
+            };
+            // 直接走 tx.send 不走 response Option, 因为 err 是给 client 的 event_error
+            // (按 WsFrame 协议: event_error 是 VPS→App 方向, 但 Stage 4 在同 conn 回环, OK)
+            if let Some(msg) = WsHub::encode_frame(&err) {
+                let _ = tx.send(msg);
+            }
+            return None;
+        }
+    };
+
+    // 3. RBAC 检查
+    match check_rbac(&hub.team_db, &from_user_id, &target_project_id).await {
+        Ok(true) => {
+            // 4. 通过: 当前 Stage 4 不真转发 (Stage 5 才会 forward 到 target_node 的 Daemon).
+            //    这里只记 trace, 留 hook 给 Stage 5.
+            tracing::info!(
+                connection_id = %conn_id,
+                user_id = %from_user_id,
+                request_id = %request_id,
+                target_project_id = %target_project_id,
+                target_node_id = %target_node_id,
+                "RBAC passed for prompt frame (Stage 4: forwarding stubbed, see 02-vps-server.md §9)"
+            );
+            None
+        }
+        Ok(false) => {
+            tracing::warn!(
+                connection_id = %conn_id,
+                user_id = %from_user_id,
+                request_id = %request_id,
+                target_project_id = %target_project_id,
+                "RBAC denied for prompt frame"
+            );
+            let err = WsFrame::EventError {
+                request_id,
+                code: "forbidden".into(),
+                message: format!(
+                    "user {from_user_id} has no access to project {target_project_id}"
+                ),
+            };
+            if let Some(msg) = WsHub::encode_frame(&err) {
+                let _ = tx.send(msg);
+            }
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                connection_id = %conn_id,
+                error = %e,
+                "RBAC check failed (db error)"
+            );
+            let err = WsFrame::EventError {
+                request_id,
+                code: "internal".into(),
+                message: format!("rbac check error: {e}"),
+            };
+            if let Some(msg) = WsHub::encode_frame(&err) {
+                let _ = tx.send(msg);
+            }
+            None
+        }
     }
 }

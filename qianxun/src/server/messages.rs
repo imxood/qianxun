@@ -73,11 +73,18 @@ pub enum WsFrame {
     // ──────── App → VPS → Device (命令中转) ────────
 
     /// App 发起 prompt, VPS 转发到目标 Device.
+    ///
+    /// **Stage 4 扩展**: 加 `target_project_id` 字段, 让 VPS 端可以做 RBAC 检查
+    /// (`ws_hub::check_rbac`). 客户端 (App) 必须在发起 prompt 时明确指定目标
+    /// project, VPS 不做 project 推断. 与 `_shared-contract.md` §3.3 baseline 的
+    /// 扩展, 详见 `02-vps-server.md` §11.4 扩展清单 (Stage 4 add).
     #[serde(rename = "prompt")]
     Prompt {
         request_id: String,
         session_id: String,
         target_node_id: String,
+        /// Stage 4: 目标 project, 喂给 `check_rbac` 鉴权. App 必填.
+        target_project_id: String,
         messages: Vec<serde_json::Value>,
         model: String,
         max_tokens: u32,
@@ -217,6 +224,7 @@ mod tests {
             request_id: "req_xyz".into(),
             session_id: "sess_abc".into(),
             target_node_id: "node_001".into(),
+            target_project_id: "proj_test".into(), // Stage 4 RBAC 字段 (sibling 已加, 测试 fixture 同步)
             messages: vec![json!({"role": "user", "content": "hello"})],
             model: "deepseek-v4-flash".into(),
             max_tokens: 16384,
@@ -272,6 +280,7 @@ mod tests {
                 request_id: "r".into(),
                 session_id: "s".into(),
                 target_node_id: "t".into(),
+                target_project_id: "p".into(),
                 messages: vec![],
                 model: "m".into(),
                 max_tokens: 0,
