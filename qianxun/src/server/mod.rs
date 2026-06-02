@@ -6,24 +6,50 @@
 //! - WsHub 注册表 — 内存索引, 3 个 API (register / unregister / push_*)
 //! - WsFrame enum — 12 variant, 仅定义 + serde, 暂不派发
 //!
-//! Stage 2-3 计划:
-//! - auth: device_token 验证 + JWT 解析 → 决定 ConnectionType
-//! - handler: WsFrame 派发到具体 action
-//! - heartbeat manager: 30s ping, 90s timeout
-//! - outbox: 重连缓冲
+//! Stage 2 范围 (本版本增量):
+//! - `auth_ws::validate_device_token` — 静态白名单 (Stage 3 换 SQLite)
+//! - `WsHub::authenticate / handle_heartbeat / register_device` — 派发 WsFrame
+//! - `handle_socket` — 完整事件分发: Auth → AuthOk/AuthError, Register → RegisterOk,
+//!   Heartbeat → HeartbeatAck
+//! - 后台 heartbeat monitor (30s tick) — 90s 无心跳 → 关闭连接 + unregister
+//!
+//! Stage 3 范围 (本版本增量):
+//! - `team_db::TeamDb` — 4 张新表 (team_teams / team_members / team_projects /
+//!   team_project_assignments) + devices 表持久化, 11 个 CRUD API
+//! - `auth_ws::validate_device_token` — 改用 `TeamDb::lookup_device` 查 SQLite
+//!   `devices` 表 (替换 Stage 2 静态白名单)
+//! - 7 个新 REST endpoints: teams (3) + projects (3) + assign (1)
+//!   见 `02-vps-server.md` §11.2.3 Team/Project 端点 (Stage 3 简化: 不接 admin auth)
+//!
+//! Stage 4 计划:
+//! - JWT 验证 (App 连接用 JWT 不用 device_token)
+//! - prompt / event / event_done / event_error 完整路由
+//! - Outbox 重连缓冲 + NodeStatus 广播
+//! - rate-limit / pending_command 跟踪 + admin auth 检查
 
 pub mod auth;
+pub mod auth_ws;
 pub mod messages;
+pub mod team_db;
 pub mod ws_hub;
 
 use axum::{
-    extract::ws::{WebSocket, WebSocketUpgrade},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Json},
     routing::{get, post},
-    Json, Router,
+    Router,
 };
-use serde::Serialize;
+use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
+use messages::WsFrame;
+use team_db::{Project, Team, TeamDb, TeamMember};
 pub use ws_hub::{ConnectionType, HubStats, WsHub};
 
 /// VPS Server 共享状态。
@@ -31,16 +57,24 @@ pub struct VpsState {
     pub db: std::sync::Mutex<rusqlite::Connection>,
     /// Stage 1 新增: WebSocket Hub (连接注册表 + 路由).
     pub ws_hub: Arc<WsHub>,
+    /// Stage 3 新增: Team 持久化层 (4 张新表 + devices).
+    pub team_db: Arc<TeamDb>,
 }
 
 /// 启动 VPS Server。
 pub async fn run(port: u16) -> anyhow::Result<()> {
     tracing::info!("VPS Server starting on 0.0.0.0:{port}");
 
-    let db = std::sync::Mutex::new(init_db()?);
+    let db = init_db()?;
+    // Stage 3: 用 init_db 创建的 Connection 构造 TeamDb, 二者共享同一 SQLite 文件.
+    let team_db = Arc::new(TeamDb::from_connection(db)?);
+    let ws_hub = Arc::new(WsHub::new(team_db.clone()));
+    // 把 db 字段保留 (Stage 1+ 旧 handler 还在用), TeamDb 持有独立 Connection.
+    // Stage 4 评估是否合并到一个 Connection.
     let state = Arc::new(VpsState {
-        db,
-        ws_hub: Arc::new(WsHub::new()),
+        db: std::sync::Mutex::new(team_db_open_standalone()?),
+        ws_hub,
+        team_db,
     });
 
     let app = Router::new()
@@ -50,9 +84,13 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
         .route("/api/device/authorize", post(auth::authorize_handler))
         .route("/api/device/token", get(auth::token_handler))
         .route("/api/admin/users", post(auth::create_user_handler).get(auth::list_users_handler))
-        // Stage 1 WS 端点: 接受升级, 立即 close.
-        // Stage 2 接 auth (token 区分 device vs app).
+        // Stage 2: WS 端点接 auth (token 区分 device vs app).
         .route("/api/ws", get(ws_upgrade))
+        // Stage 3: Team/Project REST endpoints (7 个, 不接 admin auth).
+        .route("/api/teams", post(create_team_handler).get(list_teams_handler))
+        .route("/api/teams/:id/members", get(list_members_handler).post(add_member_handler))
+        .route("/api/projects", post(create_project_handler).get(list_projects_handler))
+        .route("/api/projects/:id/assign", post(assign_project_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -60,7 +98,7 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 初始化 VPS 数据库。
+/// 初始化 VPS 数据库 (Stage 1 已有, 维持原行为, Stage 3 扩展 TeamDb 在 from_connection 中).
 fn init_db() -> anyhow::Result<rusqlite::Connection> {
     let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let db_path = data_dir.join("qianxun").join("vps.db");
@@ -98,6 +136,18 @@ fn init_db() -> anyhow::Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+/// 打开一个独立的 in-memory-style SQLite 连接给 VpsState.db (Stage 1 旧 handler 用).
+///
+/// Stage 3 临时做法: 直接复用文件路径打开第二个连接, 与 TeamDb 共享同一文件.
+/// SQLite WAL 模式支持多读单写, 两个连接可共存 (Stage 4 评估合并).
+fn team_db_open_standalone() -> anyhow::Result<rusqlite::Connection> {
+    let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let db_path = data_dir.join("qianxun").join("vps.db");
+    let conn = rusqlite::Connection::open(&db_path)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    Ok(conn)
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -107,32 +157,367 @@ async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-// ─── WebSocket (Stage 1 雏形) ─────────────────────────────────────────
+// ─── Stage 3: Team/Project REST handlers (无 admin auth) ─────
+
+#[derive(Debug, Deserialize)]
+struct CreateTeamRequest {
+    name: String,
+}
+
+/// POST /api/teams — 创建 team. Stage 3 简化: 无 admin auth 检查.
+async fn create_team_handler(
+    State(state): State<Arc<VpsState>>,
+    Json(req): Json<CreateTeamRequest>,
+) -> impl IntoResponse {
+    if req.name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".to_string()));
+    }
+    let team_id = format!("team_{}", Uuid::new_v4());
+    state
+        .team_db
+        .create_team(&team_id, &req.name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create_team: {e}")))?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "id": team_id,
+        "name": req.name,
+        "status": "created",
+    }))))
+}
+
+/// GET /api/teams — 列出 teams. Stage 3 简化: 列出全部.
+async fn list_teams_handler(
+    State(state): State<Arc<VpsState>>,
+) -> Result<Json<Vec<Team>>, (StatusCode, String)> {
+    let teams = state
+        .team_db
+        .list_teams_for_user("anonymous")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("list_teams: {e}")))?;
+    Ok(Json(teams))
+}
+
+#[derive(Debug, Serialize)]
+struct MemberView {
+    user_id: String,
+    role: String,
+    joined_at: String,
+}
+
+impl From<TeamMember> for MemberView {
+    fn from(m: TeamMember) -> Self {
+        Self {
+            user_id: m.user_id,
+            role: m.role,
+            joined_at: m.joined_at,
+        }
+    }
+}
+
+/// GET /api/teams/:id/members — 列出 team 成员.
+async fn list_members_handler(
+    State(state): State<Arc<VpsState>>,
+    Path(team_id): Path<String>,
+) -> Result<Json<Vec<MemberView>>, (StatusCode, String)> {
+    let members = state
+        .team_db
+        .list_members(&team_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("list_members: {e}")))?;
+    Ok(Json(members.into_iter().map(Into::into).collect()))
+}
+
+#[derive(Debug, Deserialize)]
+struct AddMemberRequest {
+    user_id: String,
+    role: String,
+}
+
+/// POST /api/teams/:id/members — 添加成员. Stage 3 简化: 不验 user 存在.
+async fn add_member_handler(
+    State(state): State<Arc<VpsState>>,
+    Path(team_id): Path<String>,
+    Json(req): Json<AddMemberRequest>,
+) -> impl IntoResponse {
+    if req.user_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "user_id is required".to_string()));
+    }
+    state
+        .team_db
+        .add_member(&team_id, &req.user_id, &req.role)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("add_member: {e}")))?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "team_id": team_id,
+        "user_id": req.user_id,
+        "role": req.role,
+        "status": "added",
+    }))))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateProjectRequest {
+    team_id: String,
+    name: String,
+    path: String,
+    /// Stage 3 简化: owner_id 必填, 不验 user 存在. 客户端从 JWT 提取 (Stage 4 接).
+    owner_id: String,
+}
+
+/// POST /api/projects — 创建 project.
+async fn create_project_handler(
+    State(state): State<Arc<VpsState>>,
+    Json(req): Json<CreateProjectRequest>,
+) -> impl IntoResponse {
+    if req.name.is_empty() || req.path.is_empty() || req.team_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "team_id, name, path are required".to_string(),
+        ));
+    }
+    let project_id = format!("proj_{}", Uuid::new_v4());
+    state
+        .team_db
+        .create_project(&project_id, &req.team_id, &req.name, &req.path, &req.owner_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create_project: {e}")))?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "id": project_id,
+        "team_id": req.team_id,
+        "name": req.name,
+        "path": req.path,
+        "owner_id": req.owner_id,
+        "status": "created",
+    }))))
+}
+
+/// GET /api/projects — 列出 projects. Stage 3 简化: 列出全部.
+async fn list_projects_handler(
+    State(state): State<Arc<VpsState>>,
+) -> Result<Json<Vec<Project>>, (StatusCode, String)> {
+    let projects = state
+        .team_db
+        .list_projects_for_user("anonymous")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("list_projects: {e}")))?;
+    Ok(Json(projects))
+}
+
+#[derive(Debug, Deserialize)]
+struct AssignProjectRequest {
+    user_id: String,
+}
+
+/// POST /api/projects/:id/assign — 分配 project 给 user.
+async fn assign_project_handler(
+    State(state): State<Arc<VpsState>>,
+    Path(project_id): Path<String>,
+    Json(req): Json<AssignProjectRequest>,
+) -> impl IntoResponse {
+    if req.user_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "user_id is required".to_string()));
+    }
+    state
+        .team_db
+        .assign_project(&project_id, &req.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("assign_project: {e}")))?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "project_id": project_id,
+        "user_id": req.user_id,
+        "status": "assigned",
+    }))))
+}
+
+// ─── WebSocket (Stage 2: 完整事件分发) ─────────────────────────
 
 /// `GET /api/ws` — WS 升级入口.
 ///
-/// Stage 1 行为: 接受 upgrade, 立刻 `Close(None)`. 验证 token (device_token 或 JWT)
-/// 在 Stage 2 才接, 见 `docs/30_子项目规划/02-vps-server.md` §11.3.
-async fn ws_upgrade(ws: WebSocketUpgrade) -> axum::response::Response {
-    ws.on_upgrade(handle_socket)
+/// Stage 2: 接受 upgrade, 启动 `handle_socket` 完整事件分发 (Auth / Register / Heartbeat).
+/// 真正的 `?token=...` 校验见 `02-vps-server.md` §11.3 (Stage 3 接).
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<VpsState>>,
+) -> axum::response::Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-/// Stage 1 雏形: 接受连接, 立刻关闭.
+/// Stage 2 事件分发主循环 (device-side 视角).
 ///
-/// 真实实现要:
-/// 1. 拿 query `?token=...`, 区分 device vs app
-/// 2. `WsHub::register` 拿到 conn_id, 启动读循环 (把 `WsFrame` 解析后派发)
-/// 3. 启动写循环 (从 `tx` 收 `Message` 写出)
-/// 4. 任何一端 EOF → `WsHub::unregister`
-async fn handle_socket(mut socket: WebSocket) {
-    tracing::info!("ws connection accepted (stage 1: immediate close)");
-    // 接受后立即关闭, 验证 Stage 1 WS 端点可达.
-    // 真实实现见 `02-vps-server.md` §11.3: 拿 query token 区分 device vs app,
-    // 调 `WsHub::register` 拿到 conn_id, 然后跑读循环 + 写循环.
-    if let Err(e) = socket
-        .send(axum::extract::ws::Message::Close(None))
-        .await
-    {
-        tracing::debug!("ws close send failed: {e}");
+/// ## 协议顺序
+/// 1. 客户端发 `WsFrame::Auth { device_token, machine_id }`
+///    - 成功 → 回 `AuthOk { session_token, server_time, server_version, heartbeat_interval_ms }`
+///    - 失败 → 回 `AuthError { code, message }` + 关闭
+/// 2. 客户端发 `WsFrame::Register { device_id, name, host_type, host_id, tags, ... }`
+///    - 成功 → 回 `RegisterOk { node_id }`
+///    - 未认证 → 回 `RegisterError { code: "auth_required", ... }`
+/// 3. 客户端持续发 `WsFrame::Heartbeat { ts }` (建议 30s 一次, 与 `heartbeat_interval_ms` 对齐)
+///    - VPS 回 `HeartbeatAck { ts }`
+///    - VPS 后台 monitor: 90s 没收到 Heartbeat → 主动关闭 + unregister
+///
+/// ## 实现细节
+/// - 写循环: 独立 task, 监听 `rx` (`tx` 在读循环持有), 收到 frame → 发到 socket.
+///   当读循环 drop 它的 `tx` clone 时, `rx.recv()` 返回 `None`, 写循环退出.
+/// - 读循环: 当前 task, `tokio::select!` on `shutdown_rx` (watch) + `ws_rx.next()`.
+/// - 关闭路径: monitor 发 shutdown 信号 → 读循环退出 → drop tx → 写循环退出 → unregister.
+/// - 心跳 monitor: 30s tick, 仅对已认证 conn 生效.
+async fn handle_socket(socket: WebSocket, state: Arc<VpsState>) {
+    let hub = state.ws_hub.clone();
+
+    // 1. 注册 conn, 拿到 conn_id + 写循环用的 tx.
+    //    写循环在另一个 task 持有 rx, 读循环持有 tx clone, 写响应帧.
+    let (tx, rx) = mpsc::unbounded_channel::<Message>();
+    let conn_id = hub
+        .register(ConnectionType::Device, "pending".to_string(), tx.clone())
+        .await;
+    tracing::info!(connection_id = %conn_id, "ws socket accepted");
+
+    // 2. 拆 socket 为 (写半, 读半) — 写半给写循环, 读半在当前 task.
+    let (ws_tx, ws_rx) = socket.split();
+
+    // 3. shutdown 通道: 用 watch 而非 mpsc, 因为 receiver 可以 clone 多份.
+    //    Stage 2 只需要 1 份 receiver (在读循环), 但 watch 留扩展余地.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // 4. 写循环 task — 只看 `rx`, 没人 send 就退出.
+    let write_conn_id = conn_id.clone();
+    let write_task = tokio::spawn(async move {
+        let mut ws_tx = ws_tx;
+        let mut rx = rx;
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = ws_tx.send(msg).await {
+                tracing::debug!(connection_id = %write_conn_id, error = %e, "write loop: send failed");
+                break;
+            }
+        }
+        // 尽力 flush Close
+        let _ = ws_tx.send(Message::Close(None)).await;
+        tracing::debug!(connection_id = %write_conn_id, "write loop exited");
+    });
+
+    // 5. Heartbeat monitor task — 30s tick, 已认证 + 90s 无心跳 → 踢.
+    let monitor_hub = hub.clone();
+    let monitor_conn_id = conn_id.clone();
+    let monitor_shutdown_tx = shutdown_tx.clone();
+    let monitor_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            // 只对已认证的 conn 监控 (auth 前的 conn 还在握手, 不踢)
+            if !monitor_hub.is_authenticated(&monitor_conn_id).await {
+                continue;
+            }
+            let Some(last) = monitor_hub.last_heartbeat_at(&monitor_conn_id).await else {
+                continue;
+            };
+            let elapsed = chrono::Utc::now() - last;
+            if elapsed > chrono::Duration::seconds(90) {
+                tracing::warn!(
+                    connection_id = %monitor_conn_id,
+                    elapsed_secs = elapsed.num_seconds(),
+                    "heartbeat timeout, kicking connection"
+                );
+                let _ = monitor_shutdown_tx.send(true);
+                break;
+            }
+        }
+    });
+
+    // 6. 读循环 (当前 task): 解析 + 派发 frame.
+    let mut ws_rx = ws_rx;
+    loop {
+        tokio::select! {
+            biased;
+            // watch 接收端: `changed()` 在每次值变化时 resolve 一次 (初始值之后).
+            res = shutdown_rx.changed() => {
+                if res.is_err() {
+                    // sender dropped, 不太可能但要兜底
+                    tracing::debug!(connection_id = %conn_id, "shutdown sender dropped");
+                } else {
+                    tracing::info!(connection_id = %conn_id, "read loop: shutdown signal received");
+                }
+                break;
+            }
+            maybe_msg = ws_rx.next() => {
+                let Some(msg_result) = maybe_msg else {
+                    // 客户端断开
+                    tracing::info!(connection_id = %conn_id, "ws socket closed by client");
+                    break;
+                };
+                let msg = match msg_result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::debug!(connection_id = %conn_id, error = %e, "ws recv error");
+                        break;
+                    }
+                };
+                match msg {
+                    Message::Text(text) => {
+                        handle_text_frame(&hub, &conn_id, text.as_str(), &tx).await;
+                    }
+                    Message::Close(_) => {
+                        tracing::info!(connection_id = %conn_id, "client sent Close");
+                        break;
+                    }
+                    Message::Ping(p) => {
+                        // echo Pong (axum 默认会回, 这里冗余一下保险)
+                        let _ = tx.send(Message::Pong(p));
+                    }
+                    Message::Binary(_) | Message::Pong(_) => {
+                        // 忽略 (Stage 2 协议只用 Text 帧)
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. 清理: 关 monitor + 写循环, unregister.
+    //    drop tx 让写循环自然退出 (rx.recv() 返回 None).
+    drop(tx);
+    drop(shutdown_tx);
+    monitor_task.abort();
+    let _ = write_task.await;
+    hub.unregister(&conn_id).await;
+    tracing::info!(connection_id = %conn_id, "ws socket fully closed");
+}
+
+/// 派发一条文本帧: 解析为 `WsFrame`, 调对应 Hub 方法, 把响应写回 `tx`.
+///
+/// 容错: 解析失败 → 静默忽略 (记 warn), 不发响应 (协议层不期望 error 帧有 echo).
+async fn handle_text_frame(hub: &Arc<WsHub>, conn_id: &str, text: &str, tx: &mpsc::UnboundedSender<Message>) {
+    let frame: WsFrame = match serde_json::from_str(text) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(connection_id = %conn_id, error = %e, raw = %text, "invalid WsFrame JSON, ignoring");
+            return;
+        }
+    };
+    let frame_type = frame.type_name();
+    tracing::debug!(connection_id = %conn_id, frame_type = %frame_type, "ws frame received");
+
+    let response: Option<WsFrame> = match frame {
+        WsFrame::Auth { .. } => Some(handle_auth_frame(hub, conn_id, &frame).await),
+        WsFrame::Register { .. } => Some(hub.register_device(conn_id, &frame).await),
+        WsFrame::Heartbeat { .. } => Some(hub.handle_heartbeat(conn_id, &frame).await),
+        other => {
+            // Stage 2 暂不处理: AuthOk/AuthError/RegisterOk/RegisterError (VPS→Device)
+            // / Prompt/Event/EventDone/EventError/HeartbeatAck. 收到就忽略.
+            tracing::debug!(
+                connection_id = %conn_id,
+                frame_type = %other.type_name(),
+                "ignoring frame in stage 2 (handler not implemented yet)"
+            );
+            None
+        }
+    };
+
+    if let Some(resp) = response {
+        if let Some(msg) = WsHub::encode_frame(&resp) {
+            if let Err(e) = tx.send(msg) {
+                tracing::debug!(connection_id = %conn_id, error = %e, "failed to enqueue response (write loop gone)");
+            }
+        }
+    }
+}
+
+/// 调 `hub.authenticate` 并 flatten `Result<WsFrame, WsFrame>` 为单一 `WsFrame`.
+async fn handle_auth_frame(hub: &Arc<WsHub>, conn_id: &str, frame: &WsFrame) -> WsFrame {
+    match hub.authenticate(conn_id, frame).await {
+        Ok(auth_ok) => auth_ok,
+        Err(auth_err) => auth_err,
     }
 }

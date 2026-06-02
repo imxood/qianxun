@@ -58,6 +58,10 @@ pub enum WsFrame {
         heartbeat_interval_ms: u32,
     },
 
+    /// 鉴权失败. 关闭连接. (Stage 2 补齐, 与 `_shared-contract.md` §3.3 对齐.)
+    #[serde(rename = "auth_error")]
+    AuthError { code: String, message: String },
+
     /// 注册成功. 下发分配的 node_id.
     #[serde(rename = "register_ok")]
     RegisterOk { node_id: String },
@@ -126,6 +130,7 @@ impl WsFrame {
             Self::Auth { .. } => "auth",
             Self::Register { .. } => "register",
             Self::AuthOk { .. } => "auth_ok",
+            Self::AuthError { .. } => "auth_error",
             Self::RegisterOk { .. } => "register_ok",
             Self::RegisterError { .. } => "register_error",
             Self::Prompt { .. } => "prompt",
@@ -252,6 +257,10 @@ mod tests {
                 server_version: "v".into(),
                 heartbeat_interval_ms: 30000,
             },
+            WsFrame::AuthError {
+                code: "c".into(),
+                message: "m".into(),
+            },
             WsFrame::RegisterOk {
                 node_id: "n".into(),
             },
@@ -288,10 +297,10 @@ mod tests {
             WsFrame::HeartbeatAck { ts: 0 },
         ];
         let names: Vec<&'static str> = frames.iter().map(|f| f.type_name()).collect();
-        // 11 variants expected; no duplicates.
+        // 12 variants expected (Stage 2 补 AuthError); no duplicates.
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 11, "expected 11 unique type names, got: {:?}", names);
+        assert_eq!(sorted.len(), 12, "expected 12 unique type names, got: {:?}", names);
     }
 }
