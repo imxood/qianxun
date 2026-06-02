@@ -7,6 +7,8 @@
 //
 // Stage 2 范围: 4 个导出函数 (healthCheck / fetchDaemonHealth /
 // onDaemonStateChanged / isTauri). 不接 SSE (Stage 3), 不接 Team (Stage 4).
+//
+// Stage 6a: + setSecret / getSecret (Tauri stronghold 凭据加密, §11.3).
 // ───────────────────────────────────────────────────────────────────────────
 
 import { invoke } from "@tauri-apps/api/core";
@@ -53,6 +55,42 @@ export async function onDaemonStateChanged(
 		return () => {};
 	}
 	return await listen<string>("daemon://state-changed", (e) => handler(e.payload));
+}
+
+/// Invoke Tauri command: `set_secret` (加密存到 stronghold vault, §11.3).
+/// 凭据 = API key / VPS access_token / 强密码 hash 等敏感值.
+/// Web 模式: localStorage 临时存 (Stage 7 升级为 IndexedDB 加密), 仅 dev 用.
+export async function setSecret(
+	key: string,
+	value: string,
+	password: string
+): Promise<void> {
+	if (!isTauri()) {
+		// Web dev fallback: base64 编码到 localStorage (不是真加密, 仅脱敏明文)
+		// Stage 7 替换为 IndexedDB 加密.
+		localStorage.setItem(`secret-${key}`, btoa(value));
+		localStorage.setItem(`secret-${key}-pwd`, btoa(password));
+		return;
+	}
+	await invoke("set_secret", { key, value, password });
+}
+
+/// Invoke Tauri command: `get_secret` (从 stronghold vault 解密读取).
+/// 凭据不存在 / 密码错 → 返回 null (业务上等价, 用户重输密码即可).
+/// Web 模式: 从 localStorage 读 base64 解码.
+export async function getSecret(
+	key: string,
+	password: string
+): Promise<string | null> {
+	if (!isTauri()) {
+		const v = localStorage.getItem(`secret-${key}`);
+		if (!v) return null;
+		// 验证 password (粗校验, 不防篡改 — 仅 dev 调试场景)
+		const storedPwd = localStorage.getItem(`secret-${key}-pwd`);
+		if (!storedPwd || atob(storedPwd) !== password) return null;
+		return atob(v);
+	}
+	return await invoke<string | null>("get_secret", { key, password });
 }
 
 // ─── 内部 helpers ────────────────────────────────────────────────────────

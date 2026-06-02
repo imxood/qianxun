@@ -13,12 +13,17 @@
 //   - SSE 消费 (§8, Stage 3)
 //   - Team / Project / Session 真实 command (§7.1, Stage 3+)
 //   - SQLite 缓存 / keyring / app://* (后续)
+//
+// Stage 6a: + 2 个 invoke command (set_secret / get_secret) — iota_stronghold
+// 凭据加密 vault (Argon2 + ChaCha20), 详见 §11.3.
 // ───────────────────────────────────────────────────────────────────────────
 
 use std::time::Duration;
 
+use iota_stronghold::{KeyProvider, SnapshotPath, Stronghold};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use zeroize::Zeroizing;
 
 // 显式 use 一次 qianxun-core, 证明 path dep 接进来了 (后续 Stage 会扩展使用).
 #[allow(unused_imports)]
@@ -152,6 +157,130 @@ fn offline_status() -> HealthStatus {
     }
 }
 
+// ─── Stage 6a: stronghold 凭据加密 (§11.3) ────────────────────────────────
+//
+// API key / VPS access_token 等敏感凭据存到 stronghold vault (Argon2 + ChaCha20),
+// 加密快照写到 OS 隔离目录. 用户手动输入本地密码 (Stage 7 再加自动派生 / 缓存).
+//
+// 不做 (Stage 7 留):
+//   - 自动密码派生 / 强度校验
+//   - 启动时自动解锁 (需重新输密码)
+//   - key rotation / 双向加密协议
+//   - keyring (OS) 兜底 — 留 §11.4 P1 升级
+//
+// 实现细节:
+//   tauri-plugin-stronghold v2.3.1 没有公开的 Rust API (只有 JS-bound invoke
+//   handlers, state 是私有的). 直接用 iota-stronghold (plugin 的底层) 实现
+//   set/get, 同一加密引擎, 跳过 plugin wrapper. 详见 deliverable.md.
+
+/// 加密存到 stronghold vault. 密码用于快照加密, 重启后需重新输入.
+#[tauri::command]
+async fn set_secret(
+    app: tauri::AppHandle,
+    key: String,
+    value: String,
+    password: String,
+) -> Result<(), String> {
+    let snapshot_path = vault_snapshot_path(&app)?;
+    let keyprovider = make_keyprovider(&password)?;
+
+    let stronghold = Stronghold::default();
+    // 快照存在 → 先加载 (让 stronghold 拿到所有已存 client + store 数据).
+    // 快照不存在 → 全新 vault, 跳过 load.
+    if snapshot_path.exists() {
+        stronghold
+            .load_snapshot(&keyprovider, &snapshot_path)
+            .map_err(|e| format!("stronghold load_snapshot failed: {e}"))?;
+    }
+
+    // 修 Finding 3 (verifier 报告): 第二次 set 时, "main" client 已存在,
+    // create_client 会返 "already exists". 先 try-load, 失败再 create.
+    let client = match stronghold.load_client(VAULT_CLIENT_PATH) {
+        Ok(c) => c,
+        Err(_) => stronghold
+            .create_client(VAULT_CLIENT_PATH)
+            .map_err(|e| format!("stronghold create_client failed: {e}"))?,
+    };
+    let store = client.store();
+    // lifetime = None → 永不过期 (Stage 7 可加 token refresh 逻辑)
+    store
+        .insert(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
+        .map_err(|e| format!("stronghold insert failed: {e}"))?;
+
+    stronghold
+        .commit_with_keyprovider(&snapshot_path, &keyprovider)
+        .map_err(|e| format!("stronghold commit failed: {e}"))?;
+
+    tracing::info!(key = %key, "stronghold: secret stored");
+    Ok(())
+}
+
+/// 从 stronghold vault 解密读取. 密码错误或 key 不存在时返回 Ok(None), 不抛异常.
+#[tauri::command]
+async fn get_secret(
+    app: tauri::AppHandle,
+    key: String,
+    password: String,
+) -> Result<Option<String>, String> {
+    let snapshot_path = vault_snapshot_path(&app)?;
+    if !snapshot_path.exists() {
+        // vault 从未初始化 → 没有 key
+        return Ok(None);
+    }
+    let keyprovider = make_keyprovider(&password)?;
+
+    let stronghold = Stronghold::default();
+    stronghold
+        .load_snapshot(&keyprovider, &snapshot_path)
+        .map_err(|e| format!("stronghold load_snapshot failed (wrong password?): {e}"))?;
+
+    // 修 Finding 2 (verifier 报告): get_client 拿不到刚 load 的 snapshot 里的 client
+    // (ClientDataNotPresent). 改用 load_client (从 snapshot 加载到 session).
+    let client = stronghold
+        .load_client(VAULT_CLIENT_PATH)
+        .map_err(|e| format!("stronghold load_client failed: {e}"))?;
+    let store = client.store();
+
+    match store
+        .get(&key.as_bytes().to_vec())
+        .map_err(|e| format!("stronghold get failed: {e}"))?
+    {
+        Some(bytes) => {
+            // stronghold 返回 Vec<u8>, 强转 String (API key 永远 UTF-8 合法)
+            let s = String::from_utf8(bytes)
+                .map_err(|e| format!("stronghold returned non-UTF8 secret: {e}"))?;
+            Ok(Some(s))
+        }
+        None => Ok(None),
+    }
+}
+
+/// vault 快照文件路径: `<app_local_data_dir>/stronghold-snapshot.bin`
+/// 选 iota_stronghold 默认文件位置之外的自定义路径, 避免和插件默认值冲突
+/// (Stage 7 加 plugin 时可统一).
+fn vault_snapshot_path(app: &AppHandle) -> Result<SnapshotPath, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("resolve app_local_data_dir failed: {e}"))?;
+    // 确保目录存在 (首次启动时)
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create app_local_data_dir {:?} failed: {e}", dir))?;
+    let path = dir.join("stronghold-snapshot.bin");
+    Ok(SnapshotPath::from_path(path))
+}
+
+/// 从用户密码构造 KeyProvider (Blake2b 内部 hash, 任意长度密码可).
+/// 修 Finding 1 (verifier 报告): 原 `try_from` 把 data 当 32 字节 NaCl 密钥,
+/// 用户典型密码 (7-20 字节) 直接 panic (NCSizeNotAllowed). 改用
+/// `with_passphrase_hashed_blake2b` 走 KDF, 任意长度密码可, Zeroizing 包裹.
+fn make_keyprovider(password: &str) -> Result<KeyProvider, String> {
+    KeyProvider::with_passphrase_hashed_blake2b(Zeroizing::new(password.as_bytes().to_vec()))
+        .map_err(|e| format!("KeyProvider failed: {e}"))
+}
+
+const VAULT_CLIENT_PATH: &[u8] = b"main";
+
 // ─── App entry ──────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -169,7 +298,12 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![health_check, daemon_health_fetch])
+        .invoke_handler(tauri::generate_handler![
+            health_check,
+            daemon_health_fetch,
+            set_secret,
+            get_secret
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

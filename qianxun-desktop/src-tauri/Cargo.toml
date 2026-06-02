@@ -26,6 +26,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2" }
 tauri-plugin-shell = "2"
 tauri-plugin-http = "2"
+# Stage 6a (§11.3): 凭据加密 vault.
+# 计划: 走 tauri-plugin-stronghold, 但 v2.3.1 没有公开的 Rust API
+# (只有 JS-bound invoke handlers). 直接用 iota_stronghold (plugin 的底层)
+# 实现 set_secret / get_secret — 同一加密引擎, 跳过 plugin wrapper.
+# Stage 7+ 可重加 plugin 用于 keyring (OS) 兜底 + JS API.
+iota_stronghold = "2.1"
+# 包裹密码, drop 时清零内存 (set_secret / get_secret 都要)
+zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
