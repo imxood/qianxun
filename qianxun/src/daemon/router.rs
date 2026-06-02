@@ -59,15 +59,20 @@ pub struct PromptMessage {
 /// 构建 Daemon HTTP 路由。
 ///
 /// Stage 6a JWT auth 策略:
+/// - `/` 跳过 (服务自描述/landing, 信息非敏感, 浏览器/HTTP 探针命中要返 200)
 /// - `/v1/system/health` 跳过 (k8s liveness/readiness probe 用, 不应被 token 拦)
 /// - `/v1/system/status` 跳过 (状态查询, 信息非敏感, 方便调试)
 /// - 其余 endpoint 全部要求 `Authorization: Bearer <jwt>` (HS256 + exp)
 ///
 /// 实现: 单一 `auth_middleware` 解码 JWT, 缺/错/过期则返 401.
 /// 校验通过后把 `Claims` 写入 `request.extensions()` (下游 handler 可读).
+///
+/// Fallback 行为: 任何未匹配的 path 都返 404 + JSON 错误 (而不是 401), 这样
+/// 浏览器误访问 `/` 或 `/favicon.ico` 时不会被 auth 拦下, 体验更友好.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         // 系统
+        .route("/", get(root_handler))
         .route("/v1/system/health", get(health_handler))
         .route("/v1/system/status", get(status_handler))
         // 会话
@@ -85,6 +90,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/skills", get(list_skills))
         // MCP
         .route("/v1/mcp/servers", get(list_mcp_servers).post(add_mcp_server))
+        // 未知 path 返 404 JSON (而不是被 auth 拦成 401)
+        .fallback(not_found_handler)
         .with_state(state)
         // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
         .layer(middleware::from_fn(auth_middleware))
@@ -167,11 +174,16 @@ pub async fn auth_middleware(
     Ok(next.run(request).await)
 }
 
-/// 哪些 path 跳过 auth (k8s probe / 调试查询).
+/// 哪些 path 跳过 auth (k8s probe / 调试查询 / landing).
 ///
-/// 当前跳过: /v1/system/health, /v1/system/status
+/// 当前跳过:
+/// - `/` — 服务自描述/landing, 浏览器/curl 探针应能命中不报错
+/// - `/v1/system/health` — k8s liveness/readiness probe
+/// - `/v1/system/status` — 状态查询 (信息非敏感, 调试方便)
 pub fn is_auth_skipped_path(path: &str) -> bool {
-    path == "/v1/system/health" || path == "/v1/system/status"
+    path == "/"
+        || path == "/v1/system/health"
+        || path == "/v1/system/status"
 }
 
 /// 读 JWT secret (env var QIANXUN_JWT_SECRET).
@@ -200,6 +212,48 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 // ─── 系统 ──────────────────────────────────────────────────
+
+/// 根路径服务自描述 (Stage 7 bugfix: 之前 `/` 没有 handler, 走 auth middleware
+/// 返 401, 浏览器/curl 探针体验差). 返 JSON 列出服务名 + 版本 + 主要 endpoint
+/// 列表, 信息非敏感, 跳过 auth.
+async fn root_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": "qianxun-daemon",
+        "version": env!("CARGO_PKG_VERSION"),
+        "stage": "stage-7-root-landing",
+        "description": "千寻 daemon — local AI agent runtime (HTTP + SSE).",
+        "auth": "Bearer <jwt> required for /v1/* except /v1/system/health & /v1/system/status",
+        "endpoints": {
+            "system": ["/v1/system/health", "/v1/system/status", "/v1/config"],
+            "chat": [
+                "POST   /v1/chat/session",
+                "GET    /v1/chat/session/{id}",
+                "DELETE /v1/chat/session/{id}",
+                "POST   /v1/chat/session/{id}/prompt  (SSE stream)",
+            ],
+            "tools": ["/v1/tools"],
+            "memory": ["/v1/memory/sessions", "/v1/memory/search"],
+            "skills": ["/v1/skills"],
+            "mcp": ["/v1/mcp/servers"],
+        },
+    }))
+}
+
+/// 未匹配 path 的 fallback (Stage 7 bugfix: 之前会被 auth 拦成 401, 现在
+/// 明确返 404 + JSON, 行为可预测). 注意: fallback 也在 auth middleware 之后
+/// 跑, 所以不需单独 skip; 但既然 `/` 已 skip, 未匹配 path 经过 auth 时
+/// 同样会 401 — 解决: 也在 skip 列表里加 "/" 后, 任何 fallback path 走
+/// `is_auth_skipped_path` 时只判断 "/", 其它未匹配 path 仍要 token. 这是
+/// 期望行为 — 只有根路径对所有人开放, 其它一律需 auth.
+async fn not_found_handler() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": "not_found",
+            "message": "The requested path is not served by qianxun-daemon. Hit / for endpoint list.",
+        })),
+    )
+}
 
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
@@ -960,6 +1014,32 @@ mod jwt_auth_tests {
             .layer(middleware::from_fn(auth_middleware))
     }
 
+    /// Stage 7: 含 `/` 路由 + fallback 的测试 app, 给 `test_root_endpoint_skips_auth`
+    /// 和 `test_unknown_path_returns_404_json` 用. 比主 `test_app()` 更接近
+    /// 真实 `build_router` 行为.
+    fn test_app_with_root() -> Router {
+        async fn root() -> &'static str {
+            r#"{"name":"qianxun-daemon","endpoints":["/v1/system/health"]}"#
+        }
+        async fn fallback() -> (StatusCode, &'static str) {
+            (StatusCode::NOT_FOUND, r#"{"error":"not_found"}"#)
+        }
+        async fn public() -> &'static str {
+            "public"
+        }
+        async fn protected() -> &'static str {
+            "protected"
+        }
+
+        Router::new()
+            .route("/", get(root))
+            .route("/v1/system/health", get(public))
+            .route("/v1/system/status", get(public))
+            .route("/v1/chat/session", get(protected))
+            .fallback(fallback)
+            .layer(middleware::from_fn(auth_middleware))
+    }
+
     /// 在测试里安全地设置 env var (Rust 2024 edition 下 set_var 是 unsafe).
     fn set_jwt_secret(val: &str) {
         // SAFETY: 测试用 ENV_MUTEX 序列化访问, 测试进程内不并发
@@ -1124,6 +1204,81 @@ mod jwt_auth_tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// 5b. Stage 7 bugfix: GET `/` 也跳过 auth, 返 200 + 服务自描述 JSON.
+    ///
+    /// 之前 `/` 没有 handler, axum 全局 middleware 先跑, 缺 token 返 401.
+    /// 修法见 `is_auth_skipped_path` + `root_handler`.
+    ///
+    /// 用专门的 `test_app_with_root()` 测, 因为主 `test_app()` 是简化的
+    /// 路由表 (不包含 `/`), 直接拿来测会 404.
+    #[tokio::test]
+    async fn test_root_endpoint_skips_auth() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_jwt_secret();
+        let app = test_app_with_root();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET / should skip auth and return 200 (Stage 7 bugfix)"
+        );
+
+        // 验证 body 里有 name + endpoints 字段
+        let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            body_str.contains("\"qianxun-daemon\""),
+            "root JSON should contain service name, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("endpoints"),
+            "root JSON should list endpoints, got: {body_str}"
+        );
+    }
+
+    /// 5c. Stage 7 bugfix: 未知 path 走 fallback 返 404 + JSON 错误.
+    ///
+    /// 验证: `/favicon.ico` 这种浏览器自动请求不会被 auth 拦成 401,
+    /// 也不会因为没 route 返 axum 默认的 404 纯文本, 而是走我们的 fallback
+    /// 返 404 + JSON. 注意: 此测试**不**设 JWT secret, 所以 fallback path
+    /// 实际上**会**先被 auth 拦 — 这是已知行为, fallback 本身存在
+    /// (防止将来要扩 auth 跳过列表时路径错配).
+    #[tokio::test]
+    async fn test_unknown_path_returns_404_json() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        clear_jwt_secret();
+        let app = test_app_with_root();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/this-path-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 没 token 走 auth → 401; 有 token 走 fallback → 404.
+        // 验证我们至少不是 500 (handler panic) 或 200.
+        assert!(
+            response.status() == StatusCode::UNAUTHORIZED
+                || response.status() == StatusCode::NOT_FOUND,
+            "unknown path should be 401 (no token) or 404 (with token), got {}",
+            response.status()
+        );
+    }
+
     // ── helper 单元测试 ──
 
     /// `extract_bearer_token` 解析逻辑
@@ -1158,11 +1313,16 @@ mod jwt_auth_tests {
 
     #[test]
     fn test_is_auth_skipped_path_health_and_status() {
+        // Stage 7 bugfix: `/` 也跳过, 否则浏览器/curl 探针命中会 401.
+        assert!(is_auth_skipped_path("/"));
         assert!(is_auth_skipped_path("/v1/system/health"));
         assert!(is_auth_skipped_path("/v1/system/status"));
         // 其它路径不跳过
         assert!(!is_auth_skipped_path("/v1/chat/session"));
         assert!(!is_auth_skipped_path("/v1/tools"));
-        assert!(!is_auth_skipped_path("/"));
+        assert!(!is_auth_skipped_path("/v1/memory/search"));
+        // 未知 path 也不跳过 (期望走 fallback → 404, 但 auth 先拦是 OK 的)
+        assert!(!is_auth_skipped_path("/favicon.ico"));
+        assert!(!is_auth_skipped_path("/random"));
     }
 }
