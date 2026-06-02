@@ -25,6 +25,7 @@
 
 	"nav.management": "管理",
 	"nav.operations": "运维",
+	"nav.system": "系统",
 	"nav.chat": "Chat",
 	"nav.llm": "LLM Providers",
 	"nav.skills": "Skills",

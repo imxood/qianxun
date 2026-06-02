@@ -25,6 +25,7 @@
 
 	"nav.management": "Management",
 	"nav.operations": "Operations",
+	"nav.system": "System",
 	"nav.chat": "Chat",
 	"nav.llm": "LLM Providers",
 	"nav.skills": "Skills",
