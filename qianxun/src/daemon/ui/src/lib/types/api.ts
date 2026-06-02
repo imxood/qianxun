@@ -267,3 +267,17 @@ export interface SystemLogsResponse {
 	lines: string[];
 	total: number;
 }
+
+// ── Stage 9c ── Settings (token rotate) ─────────────────────────────
+
+/** POST /v1/system/admin/rotate-token 响应 */
+export interface TokenRotateResponse {
+	/** 新签发的 admin JWT (HS256, sub="admin", exp=now+24h) */
+	token: string;
+	/** 过期 unix 时间戳 (秒) */
+	exp: number;
+	/** 用户名 (sub) */
+	sub: string;
+	/** 有效时长 (秒) — 给前端展示用, 等于 exp - now */
+	expires_in: number;
+}

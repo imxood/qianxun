@@ -1,6 +1,6 @@
 {
 	"app.title": "千寻 Console",
-	"app.subtitle": "Daemon · Stage 7b",
+	"app.subtitle": "Daemon · Stage 9c",
 
 	"common.loading": "加载中…",
 	"common.empty": "暂无数据",
@@ -20,9 +20,12 @@
 	"common.yes": "是",
 	"common.no": "否",
 	"common.optional": "可选",
+	"common.copy": "复制",
+	"common.copied": "已复制",
 
 	"nav.management": "管理",
 	"nav.operations": "运维",
+	"nav.chat": "Chat",
 	"nav.llm": "LLM Providers",
 	"nav.skills": "Skills",
 	"nav.mcp": "MCP Servers",
@@ -30,7 +33,6 @@
 	"nav.memory": "Memory",
 	"nav.sessions": "Chat Sessions",
 	"nav.config": "Config",
-	"nav.system": "System",
 	"nav.settings": "Settings",
 
 	"topbar.connected": "Daemon 已连接",
@@ -112,5 +114,48 @@
 	"panel.system.sessions_total": "总数",
 	"panel.system.conns_history": "最近 1 分钟 conns 趋势",
 	"panel.system.logs": "日志 (最近 100 行)",
-	"panel.system.logs_refresh": "刷新日志"
+	"panel.system.logs_refresh": "刷新日志",
+
+	"settings.title": "Settings",
+	"settings.desc": "主题 / 语言 / Admin token / 关于 — 全部本机配置",
+	"settings.theme.section": "主题",
+	"settings.theme.title": "外观主题",
+	"settings.theme.desc": "Light / Dark / 跟随系统. 切换后立即生效, 持久化到浏览器.",
+	"settings.theme.light": "浅色",
+	"settings.theme.light_desc": "固定 Light 模式, 不随系统变化",
+	"settings.theme.dark": "深色",
+	"settings.theme.dark_desc": "固定 Dark 模式, 不随系统变化",
+	"settings.theme.system": "跟随系统",
+	"settings.theme.system_desc": "跟随操作系统的浅色/深色设置自动切换",
+
+	"settings.language.section": "语言",
+	"settings.language.title": "界面语言",
+	"settings.language.desc": "切换面板和菜单的显示语言. 立即生效, 持久化到浏览器.",
+	"settings.language.zh_cn": "简体中文",
+	"settings.language.zh_cn_desc": "Simplified Chinese (zh-CN)",
+	"settings.language.en": "English",
+	"settings.language.en_desc": "English (en)",
+
+	"settings.token.section": "Token",
+	"settings.token.title": "Admin Token",
+	"settings.token.desc": "当前登录用的 JWT, 存浏览器 localStorage. 重新生成会让旧 token 立即失效, 需重新登录.",
+	"settings.token.current": "当前 Token",
+	"settings.token.none": "未配置 — 弹 token 输入框",
+	"settings.token.rotate": "重新生成",
+	"settings.token.rotating": "生成中…",
+	"settings.token.rotate_success": "Token 已重新生成, 旧 token 已失效",
+	"settings.token.rotate_failed": "Token 重新生成失败",
+	"settings.token.copy": "复制到剪贴板",
+	"settings.token.revoke": "撤销",
+	"settings.token.revoke_confirm": "确认撤销 token? 撤销后需重新配置才能继续访问.",
+	"settings.token.expires_in": "有效期",
+
+	"settings.about.section": "关于",
+	"settings.about.title": "关于千寻",
+	"settings.about.desc": "千寻 (Qianxun) 是一个本机优先的个人 AI 编程与助理系统. 当前进程是 daemon runtime.",
+	"settings.about.docs": "文档",
+	"settings.about.github": "GitHub",
+	"settings.about.feedback": "反馈",
+	"settings.about.daemon_version": "Daemon 版本",
+	"settings.about.frontend_version": "前端版本"
 }

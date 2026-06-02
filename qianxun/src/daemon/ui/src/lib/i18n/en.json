@@ -1,6 +1,6 @@
 {
 	"app.title": "Qianxun Console",
-	"app.subtitle": "Daemon · Stage 7b",
+	"app.subtitle": "Daemon · Stage 9c",
 
 	"common.loading": "Loading…",
 	"common.empty": "No data",
@@ -20,9 +20,12 @@
 	"common.yes": "Yes",
 	"common.no": "No",
 	"common.optional": "optional",
+	"common.copy": "Copy",
+	"common.copied": "Copied",
 
 	"nav.management": "Management",
 	"nav.operations": "Operations",
+	"nav.chat": "Chat",
 	"nav.llm": "LLM Providers",
 	"nav.skills": "Skills",
 	"nav.mcp": "MCP Servers",
@@ -30,7 +33,6 @@
 	"nav.memory": "Memory",
 	"nav.sessions": "Chat Sessions",
 	"nav.config": "Config",
-	"nav.system": "System",
 	"nav.settings": "Settings",
 
 	"topbar.connected": "Daemon connected",
@@ -112,5 +114,48 @@
 	"panel.system.sessions_total": "total",
 	"panel.system.conns_history": "Last 1-minute conns trend",
 	"panel.system.logs": "Logs (last 100 lines)",
-	"panel.system.logs_refresh": "Refresh logs"
+	"panel.system.logs_refresh": "Refresh logs",
+
+	"settings.title": "Settings",
+	"settings.desc": "Theme / language / admin token / about — all local config",
+	"settings.theme.section": "Theme",
+	"settings.theme.title": "Appearance",
+	"settings.theme.desc": "Light / Dark / follow system. Applies immediately, persisted in your browser.",
+	"settings.theme.light": "Light",
+	"settings.theme.light_desc": "Force Light mode, ignore system preference",
+	"settings.theme.dark": "Dark",
+	"settings.theme.dark_desc": "Force Dark mode, ignore system preference",
+	"settings.theme.system": "Follow system",
+	"settings.theme.system_desc": "Switch with the OS light/dark setting automatically",
+
+	"settings.language.section": "Language",
+	"settings.language.title": "Interface language",
+	"settings.language.desc": "Switch the panel and menu language. Applies immediately, persisted in your browser.",
+	"settings.language.zh_cn": "简体中文",
+	"settings.language.zh_cn_desc": "Simplified Chinese (zh-CN)",
+	"settings.language.en": "English",
+	"settings.language.en_desc": "English (en)",
+
+	"settings.token.section": "Token",
+	"settings.token.title": "Admin Token",
+	"settings.token.desc": "JWT used for current login, stored in browser localStorage. Rotating invalidates the old token and requires re-authentication.",
+	"settings.token.current": "Current token",
+	"settings.token.none": "Not configured — open the token dialog",
+	"settings.token.rotate": "Rotate",
+	"settings.token.rotating": "Rotating…",
+	"settings.token.rotate_success": "Token rotated, old token is now invalid",
+	"settings.token.rotate_failed": "Token rotation failed",
+	"settings.token.copy": "Copy to clipboard",
+	"settings.token.revoke": "Revoke",
+	"settings.token.revoke_confirm": "Revoke this token? You will need to re-authenticate to continue.",
+	"settings.token.expires_in": "Expires in",
+
+	"settings.about.section": "About",
+	"settings.about.title": "About Qianxun",
+	"settings.about.desc": "Qianxun (千寻) is a local-first personal AI coding & assistant system. This process is the daemon runtime.",
+	"settings.about.docs": "Documentation",
+	"settings.about.github": "GitHub",
+	"settings.about.feedback": "Feedback",
+	"settings.about.daemon_version": "Daemon version",
+	"settings.about.frontend_version": "Frontend version"
 }

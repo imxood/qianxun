@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{sse::Event, IntoResponse, Json, Response, Sse},
     routing::{delete, get, post},
@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio_stream::iter;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::message::ContentBlock;
@@ -132,6 +133,11 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         // Stage 7b: System 指标 + 日志
         .route("/v1/system/metrics", get(system_metrics))
         .route("/v1/system/logs", get(system_logs))
+        // Stage 9c: 重新生成 admin token (Settings 面板用)
+        .route(
+            "/v1/system/admin/rotate-token",
+            post(admin_rotate_token),
+        )
         // 未知 path 返 404 JSON (而不是被 auth 拦成 401)
         .fallback(not_found_handler)
         .with_state(state);
@@ -161,7 +167,29 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
     };
 
     // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
-    router.layer(middleware::from_fn(auth_middleware))
+    router = router.layer(middleware::from_fn(auth_middleware));
+
+    // Stage 9c: CSP header (Content-Security-Policy)
+    // 策略跟 01b-daemon-web-console.md §6.3 一致:
+    //   - default-src 'self' (不引外部 CDN)
+    //   - script-src 'self' (无 inline script)
+    //   - style-src 'self' 'unsafe-inline' (Tailwind 需要)
+    //   - connect-src 'self' (API 同源)
+    //   - img-src 'self' data: (允许内联 favicon)
+    let csp = "default-src 'self'; \
+               script-src 'self'; \
+               style-src 'self' 'unsafe-inline'; \
+               connect-src 'self'; \
+               img-src 'self' data:; \
+               font-src 'self' data:; \
+               object-src 'none'; \
+               base-uri 'self'; \
+               form-action 'self'";
+    let csp_header: HeaderName = "content-security-policy".parse().expect("valid header name");
+    let csp_value: HeaderValue = csp.replace([' ', '\n', '\t'], "").parse().expect("valid header value");
+    router = router.layer(SetResponseHeaderLayer::overriding(csp_header, csp_value));
+
+    router
 }
 
 /// 当 `ui_dist` 路径不存在或未配置时, 兜底返 503.
@@ -1039,6 +1067,68 @@ async fn system_logs(
 struct LogsQuery {
     #[serde(default)]
     pub lines: Option<u64>,
+}
+
+/// Stage 9c — 重新生成 admin token.
+///
+/// `POST /v1/system/admin/rotate-token` — 用 daemon 的 HS256 secret 签发
+/// 一个新的 admin JWT, exp = now + 24h, sub = "admin", 返回.
+///
+/// 简化 (Stage 9c 临时方案):
+/// - **不**换 JWT secret. 旧 token 仍能在 daemon 校验通过 (因为 secret 没换).
+/// - 真正的"secret rotation"是切 secret + 让所有 client 失效, 留 Stage 10+.
+/// - 前端会立刻用新 token 替换 localStorage, 旧 token 在浏览器侧被"作废" (UX).
+///
+/// 安全性:
+/// - 走 auth_middleware, 任何已登录的 admin 都能调 (跟 VPS auth 兼容).
+/// - 旧 secret 没换 = 不会强制登出其他 client, 这是 trade-off.
+///
+/// Response:
+/// ```json
+/// {
+///   "token": "eyJ...",
+///   "exp": 1750000000,
+///   "sub": "admin",
+///   "expires_in": 86400
+/// }
+/// ```
+async fn admin_rotate_token() -> Result<Json<serde_json::Value>, StatusCode> {
+    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+
+    let secret = jwt_secret().ok_or_else(|| {
+        tracing::error!("[admin_rotate_token] QIANXUN_JWT_SECRET not set");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let now = chrono::Utc::now().timestamp();
+    let exp = now + 24 * 60 * 60; // 24h
+
+    let claims = Claims {
+        sub: "admin".to_string(),
+        exp,
+        iat: now,
+    };
+
+    let token = encode(
+        &JwtHeader::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| {
+        tracing::error!("[admin_rotate_token] JWT encode failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(
+        "[admin_rotate_token] rotated admin token (sub=admin, exp={exp}, ttl=24h)"
+    );
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "exp": exp,
+        "sub": "admin",
+        "expires_in": 24 * 60 * 60,
+    })))
 }
 
 // ─── Prompt (SSE 流式) ────────────────────────────────────
@@ -3223,6 +3313,108 @@ mod stage7a_endpoint_tests {
             // 由于 串行执行, after 应该等于 i=0 之前的值 (取决于测试执行顺序)
             let _ = after; // 主要验证 status 是 200
         }
+
+        clear_jwt_secret();
+    }
+
+    // ── Stage 9c — admin token rotate ──
+
+    /// POST /v1/system/admin/rotate-token 返新 JWT (HS256, sub=admin, exp=now+24h)
+    #[tokio::test]
+    async fn test_admin_rotate_token_returns_new_jwt() {
+        use jsonwebtoken::{decode as jwt_decode, Algorithm, DecodingKey, Validation};
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let app = test_router_with_ui(None);
+
+        let old_token = make_jwt(TEST_SECRET, "user_initial", 3600);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/system/admin/rotate-token")
+                    .header("authorization", format!("Bearer {old_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // 返字段都齐
+        let new_token = body["token"].as_str().expect("token field");
+        assert!(new_token.starts_with("eyJ"), "JWT header 应以 eyJ 开头");
+        assert_eq!(body["sub"].as_str(), Some("admin"));
+        assert_eq!(body["expires_in"].as_i64(), Some(24 * 60 * 60));
+        let exp = body["exp"].as_i64().expect("exp field");
+        // exp 应在 (now+23h, now+25h) 区间 (允许 1 小时 clock skew)
+        let now = chrono::Utc::now().timestamp();
+        assert!(exp > now + 23 * 3600, "exp should be ~24h from now, got {exp}");
+        assert!(exp < now + 25 * 3600, "exp should be ~24h from now, got {exp}");
+
+        // 解码验证: 新 token 用 TEST_SECRET 签, sub=admin, exp 跟 body 一致
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_required_spec_claims(&["exp"]);
+        let decoded = jwt_decode::<Claims>(
+            new_token,
+            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
+            &validation,
+        )
+        .expect("新 token 应能用 TEST_SECRET 解码");
+        assert_eq!(decoded.claims.sub, "admin");
+        assert_eq!(decoded.claims.exp, exp);
+
+        // 新 token 跟旧 token 字符串不相等
+        assert_ne!(new_token, old_token);
+
+        clear_jwt_secret();
+    }
+
+    /// 未带 token → 401
+    #[tokio::test]
+    async fn test_admin_rotate_token_requires_auth() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let app = test_router_with_ui(None);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/system/admin/rotate-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        clear_jwt_secret();
+    }
+
+    /// 缺 JWT secret (env 没配) → 500 (auth_middleware 兜底分支)
+    #[tokio::test]
+    async fn test_admin_rotate_token_missing_secret_returns_500() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // 故意不 set_jwt_secret — auth_middleware 走到 step 3 (读 secret) 时返 500
+        clear_jwt_secret();
+        let app = test_router_with_ui(None);
+
+        let bogus = make_jwt("some-other-secret", "admin", 3600);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/system/admin/rotate-token")
+                    .header("authorization", format!("Bearer {bogus}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         clear_jwt_secret();
     }
