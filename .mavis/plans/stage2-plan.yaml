@@ -1,0 +1,463 @@
+version: 1
+plan:
+  name: '三子项目 Stage 2 实施 (Daemon SSE 流 + VPS auth/heartbeat + Tauri 2.0 集成)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage2-sse-stream
+    title: 'Daemon Stage 2: prompt SSE 流式响应 (12 个事件)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/01-daemon.md` 实施 Daemon Stage 2 — 把 `/v1/chat/session/:id/prompt` 真正接通 processing_loop, 通过 SSE 发送 12 种事件.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §3.2 SSE 事件 schema 12 个)
+      - `docs/30_子项目规划/01-daemon.md` (§5 SSE 流式实现, §9 错误处理)
+      - `qianxun-core/src/agent/engine.rs` (processing_loop::handle_user_message + AgentLoop)
+      - `qianxun-core/src/agent/conversation.rs` (Conversation::add_message 等)
+      - `qianxun-core/src/provider/mod.rs` (LlmProvider.stream_completion 返回 BoxStream)
+      - `qianxun-core/src/provider/anthropic_compat.rs` (LlmStreamEvent 类型)
+      - `qianxun/src/daemon/{mod.rs, agent_host.rs, session_runtime.rs, router.rs}` (Stage 1 产出)
+      - `qianxun/src/daemon/deliverable.md` (Stage 1 的 deliverable, 知道 Stage 1 怎么写的)
+
+      ## 实施内容 (Stage 2 最小集, 30 分钟内可完成)
+
+      ### 1. 新建 `qianxun/src/daemon/sse.rs` (~150 行)
+
+      定义 SSE 事件序列化辅助:
+      ```rust
+      use crate::daemon::sse::SseEvent;
+      use qianxun_core::provider::LlmStreamEvent;
+      use serde::Serialize;
+
+      /// SSE 事件 (与 shared-contract §3.2 严格一致, 12 种类型).
+      #[derive(Debug, Clone, Serialize)]
+      #[serde(tag = "type")]
+      pub enum SseEvent {
+          #[serde(rename = "message_start")]
+          MessageStart { session_id: String, model: String, max_tokens: u32 },
+          #[serde(rename = "content_block_start")]
+          ContentBlockStart { index: u32, block_type: String },
+          #[serde(rename = "text_delta")]
+          TextDelta { index: u32, text: String },
+          #[serde(rename = "thinking_delta")]
+          ThinkingDelta { index: u32, text: String },
+          #[serde(rename = "tool_use_delta")]
+          ToolUseDelta { index: u32, id: String, name: String, arguments_json: String },
+          #[serde(rename = "tool_use_complete")]
+          ToolUseComplete { index: u32, id: String, name: String, arguments: serde_json::Value },
+          #[serde(rename = "tool_result")]
+          ToolResult { tool_use_id: String, content: String, is_error: bool, elapsed_ms: u64 },
+          #[serde(rename = "content_block_stop")]
+          ContentBlockStop { index: u32 },
+          #[serde(rename = "usage")]
+          Usage { input_tokens: u64, output_tokens: u64, cache_creation_input_tokens: u64, cache_read_input_tokens: u64 },
+          #[serde(rename = "message_delta")]
+          MessageDelta { stop_reason: String },
+          #[serde(rename = "message_stop")]
+          MessageStop,
+          #[serde(rename = "error")]
+          Error { code: String, message: String },
+      }
+
+      impl SseEvent {
+          /// LlmStreamEvent → SseEvent 转换 (核心: 把 LLM 流式事件转成 12 种契约事件).
+          pub fn from_llm_event(event: &LlmStreamEvent, block_index: u32) -> Vec<SseEvent> { ... }
+      }
+      ```
+
+      实现时: `Text` → `TextDelta`, `Thinking` → `ThinkingDelta`, `ToolCall` → `ToolUseDelta` (pre-emit ContentBlockStart) + 后续的 ToolUseComplete 单独 (Stage 2 可选), `UsageUpdate` → `Usage`, `Stop` → `MessageDelta` (带 stop_reason) + 后续 MessageStop.
+
+      ### 2. `qianxun/src/daemon/router.rs` — 改写 `prompt_handler`
+
+      ```rust
+      async fn prompt_handler(
+          State(state): State<Arc<AppState>>,
+          Path(id): Path<String>,
+          Json(req): Json<PromptRequest>,    // { messages: [...], model: Option<String> }
+      ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+          // 1. 验证 session 存在
+          // 2. 取 session_runtime (Arc<SessionRuntime>)
+          // 3. 把 user message 加进 conversation
+          // 4. 调 provider.stream_completion(...) → BoxStream<LlmStreamEvent>
+          // 5. 在 spawn 任务里: 把 LlmStreamEvent 逐个映射成 SseEvent
+          //    (用 SseEvent::from_llm_event), 通过 channel 推给 SSE stream
+          // 6. Stream 推完发 message_stop + 完成
+          // 7. 客户端断开时 (StreamExt drop) → 自动 abort 任务
+      }
+      ```
+
+      **关键**: 客户端断开处理用 `tokio::select!` + 监控 channel closed 状态, 不要无限循环.
+
+      ### 3. `qianxun/src/daemon/mod.rs` — AppState 加 `processing_loop_enabled` 字段
+
+      Stage 2 暂不接 `processing_loop::handle_user_message` 全套(避免 30 分钟超), 直接调 `provider.stream_completion` 即可. `processing_loop` 集成留 Stage 3.
+
+      ### 4. 单测 `qianxun/src/daemon/sse.rs` 末尾
+
+      - `test_text_event_roundtrip`: SseEvent::TextDelta { ... } → 序列化 → JSON 字符串含 `"type":"text_delta"` 字段
+      - `test_message_start_includes_session_id`: SseEvent::MessageStart { session_id: "sess_xxx", ... } → 序列化 → 含 session_id
+      - `test_all_12_variants_serialize`: 12 种 enum variant 各序列化一次, 验证 tag 名与契约一致
+
+      ### 5. 端到端测试 (Stage 2 必做)
+
+      启动 daemon (或 mock), `curl` SSE endpoint, 验证 event stream 格式. 或写 `#[tokio::test]` 用 mock provider 跑.
+
+      ## 关键约束
+
+      - **不接 processing_loop 完整流程** (Stage 3 才是)
+      - **不接 session 持久化** (Stage 3 才是)
+      - **不接 ToolPolicy 审批** (Stage 4 才是)
+      - **不接 TUI/ACP thin client** (Stage 4 才是)
+      - **不修改 shared-contract** (§3.2 字段严格遵守)
+      - **不引入新 crate**
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - SseEvent 实际定义 (贴 enum)
+      - from_llm_event 映射表
+      - 3 个单测输出
+      - `cargo build -p qianxun` 通过
+      - 1 个端到端测试输出 (用 mock provider 跑 SSE)
+      - 已知 TODO (Stage 3 接入 processing_loop)
+    verify_prompt: |
+      独立验证, 不要只读 worker diff.
+
+      ## 必读
+      - `docs/30_子项目规划/01-daemon.md` (§5)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.2 严格)
+      - `qianxun/src/daemon/sse.rs` (新建)
+      - `qianxun/src/daemon/router.rs` (改写 prompt_handler)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] SseEvent 12 个 variant 字段与 shared-contract §3.2 完全一致
+      - [ ] from_llm_event 覆盖所有 LlmStreamEvent 类型 (Text / Thinking / ToolCall / UsageUpdate / Stop)
+      - [ ] prompt_handler 调用 provider.stream_completion (确认从 engine.rs 抽样)
+      - [ ] 客户端断开有处理 (StreamExt drop / select 模式)
+      - [ ] 3 个单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 1 个端到端 SSE 测试通过 (用 mock provider)
+      - [ ] 没引入新 crate
+      - [ ] 没修改 _shared-contract.md
+      - [ ] 没改 TUI / ACP / VPS
+
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: vps-stage2-auth-heartbeat
+    title: 'VPS Server Stage 2: auth 流程 + heartbeat'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/02-vps-server.md` 实施 VPS Server Stage 2 — auth 验证 (device_token) + heartbeat 周期 + 自动清理.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §3.3 WebSocket 消息, auth/heartbeat 帧)
+      - `docs/30_子项目规划/02-vps-server.md` (§6 WebSocket Hub + §11 扩展清单)
+      - `qianxun/src/server/{mod.rs, ws_hub.rs, messages.rs, auth.rs}` (Stage 1 产出)
+      - `qianxun/src/server/messages.rs` (WsFrame::Auth / AuthOk / AuthError / Heartbeat / HeartbeatAck)
+
+      ## 实施内容 (Stage 2 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun/src/server/auth_ws.rs` (~200 行)
+
+      设备 token 验证 (实际先用 hash 比较, 真实 device_token DB 查表留 Stage 3):
+
+      ```rust
+      /// 验证 device_token 格式 + 计算 hash 用于比较.
+      /// Stage 2: 用静态白名单 ([("test_token_dt_xxx", "machine_1")])
+      ///          Stage 3: 改用 SQLite 查 devices 表
+      pub fn validate_device_token(token: &str) -> Result<DeviceInfo, AuthError>;
+
+      pub struct DeviceInfo {
+          pub machine_id: String,
+          pub registered_at: chrono::DateTime<chrono::Utc>,
+      }
+
+      pub enum AuthError {
+          InvalidToken,
+          Expired,
+          InternalError,
+      }
+      ```
+
+      ### 2. 改 `qianxun/src/server/ws_hub.rs`
+
+      - 新增 `WsHub::authenticate(connection_id, frame: WsFrame::Auth) -> Result<WsFrame, WsFrame>` 方法
+        - 调 `auth_ws::validate_device_token`
+        - 成功: 返回 `WsFrame::AuthOk { session_token, server_time, server_version, heartbeat_interval_ms: 30000 }`
+        - 失败: 返回 `WsFrame::AuthError { code, message }`
+      - 新增 `WsHub::handle_heartbeat(connection_id, frame: WsFrame::Heartbeat) -> WsFrame::HeartbeatAck` 方法
+      - 新增 `WsHub::last_heartbeat_at(connection_id) -> Option<DateTime>` 字段 + getter
+
+      ### 3. 改 `qianxun/src/server/mod.rs`
+
+      在 `handle_socket` 函数里:
+      - 收 `WsFrame::Auth` → 调 `WsHub::authenticate` → 推 `AuthOk` 或 `AuthError`
+      - 收 `WsFrame::Heartbeat` → 调 `handle_heartbeat` → 推 `HeartbeatAck`
+      - 收 `WsFrame::Register` → 暂存 connection 元信息 (machine_id, name, tags) 到 WsHub, 推 `RegisterOk`
+      - 启动 30s 周期 heartbeat 监控 (后台 task), 90s 没收到 Heartbeat → 自动 unregister + 关闭 socket
+
+      ### 4. 单测 `auth_ws.rs` 末尾
+
+      - `test_valid_token_returns_device_info`: "test_token_dt_xxx" → Ok
+      - `test_invalid_token_returns_auth_error`: "wrong_token" → Err(InvalidToken)
+      - `test_empty_token_returns_auth_error`: "" → Err(InvalidToken)
+
+      ### 5. 单测 `ws_hub.rs` 末尾
+
+      - `test_authenticate_valid_token_emits_auth_ok`: Hub.authenticate(id, Auth) → 返回 AuthOk 帧
+      - `test_authenticate_invalid_token_emits_auth_error`: 返回 AuthError 帧
+      - `test_heartbeat_updates_last_heartbeat_at`: handle_heartbeat 后 last_heartbeat_at > 之前
+
+      ## 关键约束
+
+      - **device_token 用静态白名单** (Stage 2 够用, Stage 3 换 SQLite)
+      - **不接 Team 表 / projects 路由** (Stage 3 才是)
+      - **不接 device code OAuth** (Stage 3 才是)
+      - **不接 rate-limit / outbox** (后续)
+      - **不修改 shared-contract** (§3.3 字段严格)
+      - **不引入新 crate** (用 axum / tokio / chrono 已有)
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - validate_device_token 实际白名单内容
+      - Hub::authenticate / handle_heartbeat 实际签名
+      - handle_socket 完整事件分发逻辑
+      - 5 个单测输出 (3 auth + 2 hub)
+      - `cargo build -p qianxun` 通过
+      - `cargo test -p qianxun --bin qx server::` 通过
+      - 已知 TODO (Stage 3 接 SQLite device 表)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/02-vps-server.md` (§6 §11)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.3 严格)
+      - `qianxun/src/server/{auth_ws.rs, ws_hub.rs, mod.rs, messages.rs}`
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] validate_device_token 接受合法 token 返回 Ok
+      - [ ] Auth 帧处理: 成功发 AuthOk (含 session_token + server_time + heartbeat_interval_ms=30000), 失败发 AuthError
+      - [ ] AuthOk 字段与 §3.3 + 02-vps §11.3 完全一致 (注意 session_token 不是 node_id)
+      - [ ] Heartbeat 帧处理: 推 HeartbeatAck
+      - [ ] 30s 周期 + 90s 超时 (后台 task 或 schedule)
+      - [ ] last_heartbeat_at 字段在 Connection struct 中
+      - [ ] 5 个单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate
+      - [ ] 没修改 _shared-contract.md
+      - [ ] 没改 Stage 1 已写的 messages.rs 字段 (只增不改)
+
+      ## 输出
+      verification report.
+
+  - id: tauri-stage2-tauri-integration
+    title: 'Tauri Stage 2: Tauri 2.0 集成 + 真实 IPC 桥接骨架'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/03-tauri-desktop.md` 实施 Tauri Stage 2 — Tauri 2.0 集成 (Rust 端 src-tauri/) + 真实 IPC 桥接骨架.
+
+      ## 必读输入
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§7 IPC 契约, §10 离线/降级, §12 构建发布)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.1 REST endpoints, §3.2 SSE 事件)
+      - `qianxun-desktop/` (Stage 1 产出)
+      - `qianxun-desktop/src/lib/types/ipc.ts` (Stage 1 类型, 不要动)
+      - `qianxun-desktop/src/lib/stores/connection.svelte.ts` (Stage 1 store, 这次要用)
+
+      ## 实施内容 (Stage 2 最小集, 30 分钟内)
+
+      ### 1. 在 `qianxun-desktop/src-tauri/` 新建 Rust 端
+
+      **不要用 `create-tauri-app` 网络初始化**, 手动建文件:
+
+      ```
+      src-tauri/
+      ├── Cargo.toml
+      ├── tauri.conf.json
+      ├── build.rs
+      ├── icons/icon.png          (16x16 透明 placeholder, 1 像素 PNG 也行)
+      └── src/
+          ├── main.rs
+          └── lib.rs
+      ```
+
+      **Cargo.toml**:
+      - deps: `tauri = { version = "2", features = ["protocol-asset"] }`
+      - deps: `tauri-plugin-shell = "2"`, `tauri-plugin-http = "2"`
+      - deps: `serde = { version = "1", features = ["derive"] }`
+      - deps: `serde_json = "1"`
+      - deps: `tokio = { version = "1", features = ["full"] }`
+      - deps: `qianxun-core = { path = "../../qianxun-core" }`  ← 直接复用主项目核心库
+
+      **tauri.conf.json** (最小可用):
+      ```json
+      {
+        "$schema": "https://schema.tauri.app/config/2.0.0",
+        "productName": "qianxun-desktop",
+        "version": "0.1.0",
+        "identifier": "com.minimax.qianxun-desktop",
+        "build": {
+          "beforeDevCommand": "pnpm dev",
+          "beforeBuildCommand": "pnpm build",
+          "devUrl": "http://localhost:5173",
+          "frontendDist": "../build"
+        },
+        "app": {
+          "windows": [{ "title": "千寻 TUI", "width": 1280, "height": 800 }],
+          "security": {
+            "csp": null
+          }
+        },
+        "bundle": {
+          "active": true,
+          "targets": "all",
+          "icon": ["icons/icon.png"]
+        }
+      }
+      ```
+
+      **src/main.rs**:
+      ```rust
+      fn main() {
+          qianxun_desktop_lib::run();
+      }
+      ```
+
+      **src/lib.rs** (~150 行):
+      - `tauri::Builder::default().setup(...).invoke_handler(tauri::generate_handler![health_check, daemon_health_fetch]).run(tauri::generate_context!()).expect("error");`
+      - 2 个 invoke command:
+        - `health_check() -> HealthStatus` (mock 返回 connected)
+        - `daemon_health_fetch(url: String) -> Result<HealthStatus, String>` (用 reqwest::Client GET `url/v1/system/health`, 3s 超时)
+      - `setup` 里 emit `daemon://state-changed` 事件 (Stage 2: 立即发 'connected', 真实 health check 留 Stage 3)
+
+      ### 2. 改 `qianxun-desktop/package.json`
+
+      - 加 `"@tauri-apps/api": "^2"` 到 devDependencies
+      - 加 `"@tauri-apps/cli": "^2"` 到 devDependencies
+      - 加 scripts: `"tauri": "tauri"`, `"dev:tauri": "tauri dev"`, `"build:tauri": "tauri build"`
+      - 跑 `pnpm install` 同步 pnpm-lock
+
+      ### 3. 新建 `qianxun-desktop/src/lib/ipc/bridge.ts` (~80 行)
+
+      ```typescript
+      import { invoke } from '@tauri-apps/api/core';
+      import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+      import type { HealthStatus } from '$lib/types/ipc';
+
+      /// 检查是否在 Tauri 容器内 (Stage 1 直接返回 true, mock 模式).
+      export function isTauri(): boolean {
+          if (typeof window === 'undefined') return false;
+          return '__TAURI_INTERNALS__' in window;
+      }
+
+      /// Invoke Tauri command: health_check (本地 mock).
+      export async function healthCheck(): Promise<HealthStatus> {
+          if (!isTauri()) return mockHealth();
+          return await invoke<HealthStatus>('health_check');
+      }
+
+      /// Invoke Tauri command: 实际 fetch daemon /v1/system/health.
+      export async function fetchDaemonHealth(daemonUrl: string): Promise<HealthStatus> {
+          if (!isTauri()) {
+              // Web 版 fallback: 浏览器 fetch (受 CORS 限制, 失败时返回 offline)
+              try {
+                  const r = await fetch(`${daemonUrl}/v1/system/health`, { signal: AbortSignal.timeout(3000) });
+                  if (!r.ok) return mockOffline();
+                  return { status: 'connected', version: 'web', uptime_sec: 0, session_count: 0, mcp_online: 0 };
+              } catch {
+                  return mockOffline();
+              }
+          }
+          return await invoke<HealthStatus>('daemon_health_fetch', { url: daemonUrl });
+      }
+
+      /// Listen Tauri event: daemon://state-changed.
+      export async function onDaemonStateChanged(handler: (state: string) => void): Promise<UnlistenFn> {
+          if (!isTauri()) return () => {};
+          return await listen<string>('daemon://state-changed', (e) => handler(e.payload));
+      }
+
+      function mockHealth(): HealthStatus { return { status: 'offline', version: 'mock', uptime_sec: 0, session_count: 0, mcp_online: 0 }; }
+      function mockOffline(): HealthStatus { return { status: 'offline', version: 'unknown', uptime_sec: 0, session_count: 0, mcp_online: 0 }; }
+      ```
+
+      ### 4. 改 `qianxun-desktop/src/lib/stores/connection.svelte.ts`
+
+      - 替换 `startHealthCheck()` 内部硬编码的 `fetch` 为 `fetchDaemonHealth(this.daemonUrl)` (通过 bridge.ts)
+      - 这样 web 跑也能 fetch, Tauri 跑走 invoke 真实后端
+
+      ### 5. 改 `qianxun-desktop/src/routes/+page.svelte`
+
+      - 加 `+page.svelte` 顶层 `onMount` 里调 `healthCheck()` 验证 IPC 桥接通, console.log 输出
+      - 不要改 mock 数据 (mock 业务数据保留, 只 health 通道用 IPC)
+
+      ### 6. 单测 / 集成验证
+
+      - `pnpm run check` → 0/0
+      - `pnpm run build` → 成功
+      - `cargo build` 在 src-tauri/ 目录 → 成功 (验证 Rust 端可编译)
+      - **不要** 跑 `pnpm tauri dev` (会启动 native window, 沙盒/Windows 上可能失败, 浪费时间). 编译过即可.
+
+      ## 关键约束
+
+      - **不要跑 `pnpm tauri dev` / `tauri dev`** (浪费时间, 可能失败)
+      - **不要用 create-tauri-app** (手写 src-tauri/)
+      - **不要碰 Stage 1 已写的 ipc.ts / connection.svelte.ts 字段** (只改 startHealthCheck 实现)
+      - **不要接 SSE 消费** (Stage 3 才是)
+      - **不要接 Team 管理 UI** (Stage 4 才是)
+      - **不要接 i18n** (后续)
+      - **不要接 SQLite 缓存** (后续)
+      - **不修改 _shared-contract.md**
+
+      完成后写 `deliverable.md`:
+      - 新建/改了哪些文件
+      - `src-tauri/Cargo.toml` 完整依赖列表
+      - `tauri.conf.json` 完整
+      - 2 个 invoke commands 实际签名
+      - bridge.ts 4 个导出函数
+      - pnpm run check 输出
+      - pnpm run build 输出
+      - `cd src-tauri && cargo check` 输出
+      - 已知 TODO (Stage 3 SSE 消费 + Stage 4 Team UI)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§7 §12)
+      - `docs/30_子项目规划/_shared-contract.md`
+      - `qianxun-desktop/src-tauri/` (新建)
+      - `qianxun-desktop/src/lib/ipc/bridge.ts` (新建)
+      - `qianxun-desktop/src/lib/stores/connection.svelte.ts` (改)
+      - `qianxun-desktop/package.json` (改)
+      - `qianxun-desktop/src/routes/+page.svelte` (改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] src-tauri/Cargo.toml 含 tauri 2.x + tauri-plugin-shell/http + qianxun-core 路径依赖
+      - [ ] tauri.conf.json 是合法 Tauri 2.0 schema (含 build.beforeDevCommand, devUrl, frontendDist)
+      - [ ] src-tauri/src/lib.rs 至少 2 个 invoke command: health_check + daemon_health_fetch
+      - [ ] src/lib/ipc/bridge.ts 4 个导出: isTauri, healthCheck, fetchDaemonHealth, onDaemonStateChanged
+      - [ ] bridge.ts 区分 isTauri() (走 invoke) vs web 模式 (走 fetch)
+      - [ ] package.json 含 @tauri-apps/api ^2 + @tauri-apps/cli ^2
+      - [ ] connection.svelte.ts startHealthCheck 用 bridge.fetchDaemonHealth
+      - [ ] pnpm run check → 0/0
+      - [ ] pnpm run build → 成功
+      - [ ] cd src-tauri && cargo check → 成功 (Rust 编译过)
+      - [ ] 没跑 tauri dev (应该没 devUrl 实际启动的痕迹)
+      - [ ] 没接 SSE 消费 (grep src/lib/sse/ 不存在)
+      - [ ] 没改 ipc.ts 字段 (字段数应保持 Stage 1 一致)
+
+      ## 输出
+      verification report.

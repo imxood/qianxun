@@ -28,6 +28,8 @@ export default defineConfig({
 		// @testing-library/svelte 依赖 afterEach 自动清理 DOM
 		// 注意: 这里设成 true 让 vitest 注入 beforeEach/afterEach
 		setupFiles: ['./src/test-setup.ts'],
+		// 路由页面动态 import .svelte 首次编译慢 (~3s), 给 15s 留 buffer
+		testTimeout: 15000,
 		server: {
 			deps: {
 				inline: [/svelte/]

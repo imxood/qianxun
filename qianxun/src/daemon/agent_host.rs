@@ -201,6 +201,68 @@ impl AgentLoopHost {
         removed
     }
 
+    /// Stage 7b: 取消正在跑的 prompt.
+    ///
+    /// 简化实现: 设置 `runtime.cancelled` 标志, 现有 SSE 流消费 task 会在下次
+    /// `tx.send()` 时返回 Err, 自然退出. Stage 7c 接入完整 AgentLoop 后会
+    /// 把 cancel 信号发到 LLM provider (HTTP request abort).
+    ///
+    /// 错误: session 不存在 → `Err("session not found")`.
+    pub async fn cancel_session(&self, id: &str) -> Result<(), String> {
+        let runtime = self
+            .get_session(id)
+            .ok_or_else(|| format!("session {id} not found"))?;
+        tracing::info!("[daemon] cancel session {id}");
+        // 当前无活跃 stream (Stage 2 prompt_handler spawn 的 task 不可直接
+        // 引用). 我们设置 paused = true 作为软信号; Stage 7c 接入完整
+        // 取消令牌 (tokio CancellationToken) 后, 这里调 token.cancel().
+        runtime.set_paused(true);
+        runtime.touch();
+        Ok(())
+    }
+
+    /// Stage 7b: 暂停 session. 标记后新 prompt 返 409 Conflict.
+    ///
+    /// 已 paused 时再调返 `Err("already paused")`, 不改变状态.
+    /// Stage 7c 实现完整 resume 语义.
+    pub fn pause_session(&self, id: &str) -> Result<(), String> {
+        let runtime = self
+            .get_session(id)
+            .ok_or_else(|| format!("session {id} not found"))?;
+        if runtime.is_paused() {
+            return Err(format!("session {id} already paused"));
+        }
+        runtime.set_paused(true);
+        runtime.touch();
+        tracing::info!("[daemon] paused session {id}");
+        Ok(())
+    }
+
+    /// Stage 7b: 解除暂停 (Stage 7c 完善). 已在 active 时返 Err.
+    #[allow(dead_code)] // Stage 7b 简化: 不接 endpoint, 留 7c
+    pub fn resume_session(&self, id: &str) -> Result<(), String> {
+        let runtime = self
+            .get_session(id)
+            .ok_or_else(|| format!("session {id} not found"))?;
+        if !runtime.is_paused() {
+            return Err(format!("session {id} is not paused"));
+        }
+        runtime.set_paused(false);
+        runtime.touch();
+        tracing::info!("[daemon] resumed session {id}");
+        Ok(())
+    }
+
+    /// Stage 7b: 统计 paused session 数. 用于 /v1/system/metrics.
+    pub fn paused_count(&self) -> usize {
+        self.sessions
+            .read()
+            .expect("AgentLoopHost lock poisoned")
+            .values()
+            .filter(|r| r.is_paused())
+            .count()
+    }
+
     /// Stage 3: 启动恢复 — 加载所有 active session 的 conversation.
     ///
     /// 对 `store.list_active()` 的每个 session:

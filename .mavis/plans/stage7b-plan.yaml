@@ -1,0 +1,323 @@
+version: 1
+plan:
+  name: '千寻 Stage 7b — 4 次要管理面板 (Memory/Sessions/Config/System) + 主题 + i18n'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  timeout_ms: 1800000
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+
+tasks:
+  # ────────────────────────────────────────────────────────────
+  # Task A: Daemon Rust 端 — Sessions/Config/Memory/System 8 个新 endpoint
+  # ────────────────────────────────────────────────────────────
+  - id: daemon-stage7b-secondary-endpoints
+    title: 'Daemon Rust: 8 个次要 endpoint (list sessions / cancel / pause / put config / delete memory / metrics / logs)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 给 qianxun daemon 加 **Stage 7b** 的 8 个次要管理 endpoint,
+      让 Web Console 的 Memory / Sessions / Config / System 4 个面板有数据可看.
+
+      ## 输入资料(必读)
+
+      1. **主规划**: `docs/30_子项目规划/01b-daemon-web-console.md` (§4.2 endpoint 表 §4.2 全部 ☆ 项)
+      2. **共享契约**: `docs/30_子项目规划/_shared-contract.md` §3.1.1
+      3. **Stage 7a daemon 端代码** (前一个 plan 落地, 已加 `/_ui/*` serve + 8 LLM endpoint + Skills/MCP/Tools endpoint)
+      4. **现有代码**:
+         - `qianxun/src/daemon/router.rs` (现有 18+ endpoint, JWT auth)
+         - `qianxun/src/daemon/agent_host.rs` (AgentLoopHost, session_count / get_session)
+         - `qianxun/src/daemon/persistence.rs` (SessionStore, list_active / load_events / delete)
+         - `qianxun/src/daemon/session_runtime.rs` (SessionRuntime, last_active)
+         - `qianxun-core/src/config.rs` (ResolvedConfig, 含 active_provider)
+         - `qianxun-core/src/memory/` (MemoryCore, search / sessions)
+         - `qianxun/src/daemon/sse.rs` (SSE 流)
+         - `qianxun/src/buf_writer.rs` (日志缓冲)
+      5. **CLAUDE.md**: HTTP 客户端 `reqwest` 已用; 新增 crate 需评估传递依赖 (< 30)
+
+      ## 必须落地的改动
+
+      ### A.1 Sessions 管理 (3 个 endpoint)
+
+      ```
+      GET    /v1/chat/sessions                            # 列出所有 session (含 status filter: active/paused/all)
+      POST   /v1/chat/session/{id}/cancel                 # 取消正在跑的 prompt (SSE 流的 Sender 发 StopReason)
+      POST   /v1/chat/session/{id}/pause                  # 暂停 (Stage 7b 留接口, 实现简化为: 标记 paused, 后续再扩展)
+      ```
+
+      - `GET /v1/chat/sessions`:
+        - query: `?status=active|paused|all` (默认 all)
+        - 返 `{sessions: [{id, model, created_at, last_active, message_count, status, token_usage}], total: N}`
+        - 从 `SessionStore::list_active()` 拿 meta, 从 `agent_host.session_count()` 拿活跃
+      - `POST /v1/chat/session/{id}/cancel`:
+        - 调 `agent_host.cancel_session(id)`, 触发 SSE 流的 `StopReason::Cancelled` 事件
+        - AgentLoopHost 加 `pub async fn cancel_session(&self, id: &str) -> Result<(), String>` 方法
+      - `POST /v1/chat/session/{id}/pause`:
+        - 调 `agent_host.pause_session(id)`, 设置 `runtime.paused = true`
+        - **Stage 7b 简化**: 标记 paused 后不让新 prompt 进来 (返 409 Conflict), 后续 Stage 7c/8 实现完整 resume 语义
+        - AgentLoopHost 加 `pub fn pause_session(&self, id: &str) -> Result<(), String>`
+
+      ### A.2 Config 管理 (1 个 endpoint)
+
+      ```
+      PUT    /v1/config                                   # 写 config (覆盖部分字段), 自动 persist
+      ```
+
+      - body: 完整 `ResolvedConfig` JSON (可只写部分字段, 缺失的保持不变)
+      - 行为:
+        1. 校验 JSON 合法 + 必填字段
+        2. merge 到现有 `Arc<ResolvedConfig>` (用 `Arc::make_mut` 模式)
+        3. 写回 `~/.qianxun/config.json`
+        4. 返 `{status: "updated", requires_reload: bool, changed_fields: [...]}`
+      - 触发 hot-reload: 监听 `provider` 字段变化, 若变 → 重建 `Arc<dyn LlmProvider>`
+      - `requires_reload: true` 表示**当前无法 hot-reload** (如 skills 目录变化), 需用户重启 daemon
+
+      ### A.3 Memory 管理 (2 个 endpoint)
+
+      ```
+      DELETE /v1/memory/observations/{id}                 # 删单个观察
+      DELETE /v1/memory/sessions/{id}                     # 删整个 memory session
+      ```
+
+      - 复用 `qianxun-memory` 的现有 API (查 `qianxun-memory/src/lib.rs` 跟 `db.rs`)
+      - 如果 `qianxun-memory` 还没 delete 方法, 加 `pub fn delete_observation(&self, id: &str) -> Result<(), String>` 跟 `pub fn delete_session(&self, id: &str) -> Result<(), String>`
+
+      ### A.4 System 指标 + 日志 (2 个 endpoint)
+
+      ```
+      GET    /v1/system/metrics                           # {cpu, mem_mb, conns, uptime_s, sessions: {active, paused, total}}
+      GET    /v1/system/logs?lines=N                      # 返最近 N 行日志 (默认 100, 上限 1000)
+      ```
+
+      - `/v1/system/metrics`:
+        - CPU: **评估 `sysinfo` crate 传递依赖**, 如果 > 30 fallback 到 `std::process::id()` + `psutil`-like 手读 `/proc/self/status` (Linux) / `GetProcessMemoryInfo` (Windows)
+        - mem_mb: 用 `sysinfo` (推荐) 或 fallback `std::process::id()` + `ps` 命令
+        - conns: 跟踪活跃 SSE 连接数 (用 `Arc<AtomicUsize>`, 在 auth_middleware 进出时 +1/-1)
+        - uptime_s: daemon 启动时间戳, 现在 - 启动时间
+        - sessions: 调 `agent_host.session_count()` + paused 计数
+      - `/v1/system/logs`:
+        - 复用 `qianxun/src/buf_writer.rs` 的 ring buffer
+        - 加 `pub fn tail(&self, n: usize) -> Vec<String>` 方法
+        - 返 `{lines: ["...", "..."], total: N}`
+        - 默认 lines=100, 上限 lines=1000
+
+      ### A.5 AppState 扩展
+
+      - `qianxun/src/daemon/mod.rs::AppState`:
+        - 加 `pub started_at: Instant` (启动时间戳)
+        - 加 `pub active_conns: Arc<AtomicUsize>` (活跃 SSE 连接计数)
+        - 现有 `buf_writer` 加 wrapper 或直接 expose
+      - `auth_middleware` 进时 `active_conns.fetch_add(1)`, 出时 `fetch_sub(1)` (注意: drop guard)
+
+      ### A.6 测试
+
+      - 至少 14 个新单测:
+        - Sessions 3 (list / cancel / pause 各 2-3 case)
+        - Config 3 (PUT 合法 / PUT 非法 / hot-reload trigger)
+        - Memory 2 (delete observation / delete session)
+        - System 4 (metrics 字段存在 / logs 默认 100 行 / logs 上限 1000 / conns counter 准确)
+        - 共 12-14 个, 全过
+      - 验证: `cargo test -p qianxun --bin qx daemon::` 至少 42 个 pass (28 旧 + 14 新)
+
+      ### A.7 编译 & 警告
+
+      - `cargo build -p qianxun --bin qx` 0 错误
+      - 新代码 0 警告
+      - sysinfo 评估: 如果决定用, 在 `qianxun/Cargo.toml` 加, 注释 `// 评估通过: 传递依赖 X < 30`; 如果不用, 在 `mod.rs` 注释 `// sysinfo 评估: 传递依赖过大, 用 /proc + Win32 API 手读`
+
+      ## 不做什么
+
+      - **不**做 Admin 密码登录 (Stage 7a 用 token, 7c 再加)
+      - **不**做 Chat 视图 (Stage 7c)
+      - **不**做 E2E 跑通真 LLM (Stage 8+)
+      - **不**做 Web UI 端 (Task B)
+
+      ## 验证清单 (worker 跑完后自己 check)
+
+      ```
+      [ ] cargo build -p qianxun --bin qx               0 errors
+      [ ] cargo test -p qianqun --bin qx daemon::       ≥ 42 pass
+      [ ] curl http://127.0.0.1:23900/v1/chat/sessions -H "Authorization: Bearer <token>" 返 200 + JSON
+      [ ] curl -X POST http://127.0.0.1:23900/v1/chat/session/{id}/cancel -H "Authorization: Bearer <token>" 返 200
+      [ ] curl -X PUT http://127.0.0.1:23900/v1/config -H "Authorization: Bearer <token>" -d '{"log_level": "debug"}' 返 200
+      [ ] curl http://127.0.0.1:23900/v1/system/metrics -H "Authorization: Bearer <token>" 返 200 + 6 字段
+      [ ] curl "http://127.0.0.1:23900/v1/system/logs?lines=10" -H "Authorization: Bearer <token>" 返 200
+      ```
+
+      ## 关键: 早期写 deliverable.md
+
+      写代码每 5 分钟 commit 一次 git, 超时前 5 分钟必须写 deliverable.md
+      (放 `qianxun/src/daemon/deliverable-7b-daemon.md`). deliverable 必须含:
+      - 8 个新 endpoint 列表 + curl 验证命令 + 输出样例
+      - sysinfo 评估结论 (用 / 不用 / 限制)
+      - 已知问题 / TODO 留给 7c
+      - "我 commit 了 X 个 commit" 列表
+
+    verify_prompt: |
+      独立验证.
+
+      ## 验证步骤
+
+      1. 读 `qianxun/src/daemon/deliverable-7b-daemon.md`
+      2. `cd E:/git/maxu/qianxun && cargo build -p qianxun --bin qx` 0 错误
+      3. `cd E:/git/maxu/qianxun && cargo test -p qianxun --bin qx daemon::` ≥ 42 pass
+      4. grep 验证 8 个新 endpoint 都注册 (list sessions / cancel / pause / put config / 2 delete memory / metrics / logs)
+      5. grep 验证 AppState 有 started_at + active_conns 字段
+      6. grep 验证 AgentLoopHost 有 cancel_session / pause_session 方法
+      7. 实际 daemon 启动测试:
+         - `cd E:/git/maxu/qianxun && QIANXUN_JWT_SECRET=test ANTHROPIC_AUTH_TOKEN=test ./target/debug/qx --daemon --port 23903 &`
+         - 生成测试 token, 跑 8 个 curl 全部返 200/4xx (期望)
+         - kill daemon
+      8. 验证 deliverable.md 含 sysinfo 评估结论
+
+      ## 输出
+
+      verification report, 末尾 **VERDICT: PASS** 或 **VERDICT: FAIL**.
+
+  # ────────────────────────────────────────────────────────────
+  # Task B: Web UI 端 — 4 次要面板 + 主题 + i18n 起步
+  # ────────────────────────────────────────────────────────────
+  - id: webui-stage7b-secondary-panels
+    title: 'Web UI: 4 次要面板 (Memory/Sessions/Config/System) + 主题 (light/dark/system) + i18n (zh-CN + en)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 在 Stage 7a 的 SvelteKit 基础上加 **Stage 7b** 的 4 个次要管理面板
+      (Memory / Sessions / Config / System), 加主题系统 (light/dark/system), 加
+      i18n 起步 (zh-CN + en).
+
+      ## 输入资料(必读)
+
+      1. **主规划**: `docs/30_子项目规划/01b-daemon-web-console.md` (§3 模块清单 §5-§8 + §6.1 鉴权)
+      2. **Stage 7a Web UI 代码** (前一个 plan 落地, 已有 `/llm` `/skills` `/mcp` `/tools` 4 路由)
+      3. **参考实现**:
+         - `qianxun-desktop/src/lib/components/` (shadcn-svelte 组件)
+         - `qianxun-desktop/src/lib/i18n/` (svelte-i18n 用法)
+         - `qianxun-desktop/src/lib/stores/theme.ts` (mode-watcher 集成)
+      4. **Stage 7b daemon 端代码** (前一个 task 落地, 已加 8 个新 endpoint)
+
+      ## 必须落地的改动
+
+      ### B.1 4 个次要面板路由 (src/routes/)
+
+      - `memory/+page.svelte`: Memory 管理
+        - 顶部: 搜索框 (调 `/v1/memory/search`)
+        - 左栏: session 列表 (调 `/v1/memory/sessions`)
+        - 右栏: 选中 session 的观察列表 + 详情 (id / content / tags / created_at / delete 按钮)
+        - 删观察: 调 `DELETE /v1/memory/observations/{id}` + 刷新
+      - `sessions/+page.svelte`: Chat sessions 管理
+        - 顶部: filter (active / paused / all)
+        - 列表: session 表格 (id / model / created_at / last_active / message_count / status / token_usage)
+        - 行操作: 查看详情 (弹 Dialog 显示完整 event log) / pause / cancel / delete
+        - 调: GET /v1/chat/sessions, POST /v1/chat/session/{id}/cancel, POST /v1/chat/session/{id}/pause, DELETE /v1/chat/session/{id}
+      - `config/+page.svelte`: Config 管理
+        - 表单: 完整 ResolvedConfig 字段 (active_provider / log_level / max_sessions / providers / skills_dirs / 等)
+        - 用 zod 校验 (复制 qianxun-desktop 的 schema)
+        - 提交: 调 PUT /v1/config, 显示 `requires_reload` 警告
+        - 当前只读视图 (read-only) 也行, Stage 7c 再做 edit
+      - `system/+page.svelte`: System 状态
+        - Dashboard 卡片: CPU / mem_mb / uptime_s / active_conns / sessions {active, paused, total}
+        - 折线图: 最近 1 分钟 conns (前端用 svg 手画, 不引 chart 库避免传递依赖)
+        - 日志查看: textarea 显示最近 100 行, refresh 按钮 调 /v1/system/logs?lines=100
+        - 调: GET /v1/system/metrics + /v1/system/logs
+
+      ### B.2 主题系统 (light/dark/system)
+
+      - `src/lib/stores/theme.ts`:
+        - 用 `mode-watcher` 提供的 `setMode` / `mode` (mode-watcher 在 stage 7a 已装)
+        - 状态: 'light' | 'dark' | 'system'
+        - localStorage 存 `qianxun_theme`, 启动时读
+        - `toggleMode()` 在三态间循环
+      - `tailwind.config.js`: `darkMode: 'class'` (mode-watcher 自动给 html 加 `class="dark"`)
+      - 所有组件用 `dark:` 前缀适配 (e.g. `bg-white dark:bg-zinc-900`)
+      - TopBar 加主题切换按钮 (Sun/Moon/Monitor icons from lucide)
+
+      ### B.3 i18n 起步 (zh-CN + en)
+
+      - `src/lib/i18n/index.ts`:
+        - 引入 svelte-i18n (stage 7a 已装 devDep)
+        - 默认 zh-CN, 可切 en
+        - 启动时读 localStorage `qianxun_lang`
+      - `src/lib/i18n/zh-CN.json`: 至少 50 个 key (4 旧面板 + 4 新面板的核心 UI 文案)
+      - `src/lib/i18n/en.json`: 同 key
+      - TopBar 加语言切换按钮 (Languages icon)
+      - 关键 UI 文本全用 `{$t('panel.llm.title')}` 包裹 (sidebar, button labels, table headers, ...)
+
+      ### B.4 Sidebar 更新
+
+      - 加 4 个新链接: Memory / Sessions / Config / System
+      - 加分隔线: "管理" 区 (LLM/Skills/MCP/Tools) + "运维" 区 (Memory/Sessions/Config/System)
+      - 顺序: LLM → Skills → MCP → Tools → --- → Memory → Sessions → Config → System
+
+      ### B.5 测试
+
+      - vitest + @testing-library/svelte 至少 16 个新测试:
+        - 4 面板各 3 个 (列表渲染 / API 调用 mock / 错误处理)
+        - 主题切换 2 个 (toggle 循环 / 持久化)
+        - i18n 切换 2 个 (语言切换 / 翻译回退)
+        - 共 16
+      - 全过
+      - `pnpm run check` 0/0
+      - `pnpm run build` 成功
+
+      ### B.6 集成
+
+      - vite.config.ts: 跟 7a 一致, 不改
+      - 鉴权: 跟 7a 一致 (admin token 存 localStorage)
+      - API 客户端: 加 8 个新方法 (跟 7a 同模式)
+
+      ## 不做什么
+
+      - **不**做 Settings 面板 (Stage 7c)
+      - **不**做 Chat 视图 (Stage 7c)
+      - **不**做移动端响应式 (Stage 7c)
+      - **不**引 chart 库 (e2e 手画 svg)
+      - **不**引 zod (跟 qianxun-desktop 共用, 但 Stage 7b 简化用 TS type 校验)
+
+      ## 验证清单 (worker 跑完后自己 check)
+
+      ```
+      [ ] pnpm --dir qianxun/src/daemon/ui install       0 errors
+      [ ] pnpm --dir qianxun/src/daemon/ui run check     0 errors / 0 warnings
+      [ ] pnpm --dir qianxun/src/daemon/ui run build     成功
+      [ ] pnpm --dir qianxun/src/daemon/ui test          ≥ 28 pass (12 旧 + 16 新)
+      [ ] 4 个新路由 (memory/sessions/config/system) 都有 +page.svelte
+      [ ] 主题切换按钮在 TopBar
+      [ ] 语言切换按钮在 TopBar
+      [ ] zh-CN.json + en.json 各 ≥ 50 key
+      [ ] 8 个新 API 客户端方法在 lib/api/{memory,sessions,config,system}.ts
+      ```
+
+      ## 关键: 早期写 deliverable.md
+
+      写代码每 5 分钟 commit 一次 git, 超时前 5 分钟必须写 deliverable.md
+      (放 `qianxun/src/daemon/ui/deliverable-7b-webui.md`). deliverable 必须含:
+      - 4 个新面板的截图 (headless playwright 跑 dev server 截屏)
+      - 主题切换动图 (3 张截图: light / dark / system)
+      - i18n 切换截图 (zh-CN / en)
+      - vitest 16 个新测试 pass 截图
+      - "我 commit 了 X 个 commit" 列表
+
+    verify_prompt: |
+      独立验证.
+
+      ## 验证步骤
+
+      1. 读 `qianxun/src/daemon/ui/deliverable-7b-webui.md`
+      2. `cd E:/git/maxu/qianxun/qianxun/src/daemon/ui && pnpm install --silent` 0 错误
+      3. `pnpm run check` 0 errors / 0 warnings
+      4. `pnpm run build` 成功
+      5. `pnpm test` ≥ 28 pass
+      6. grep 验证 4 个新路由存在: `ls qianxun/src/daemon/ui/src/routes/{memory,sessions,config,system}/+page.svelte`
+      7. grep 验证 lib/stores/theme.ts 有 light/dark/system 三态
+      8. grep 验证 lib/i18n/{zh-CN,en}.json 各 ≥ 50 key
+      9. grep 验证 lib/api/{memory,sessions,config,system}.ts 8 个方法
+      10. 启动 dev server, 用 playwright 验证 4 个新路由返 200 HTML + 主题切换 + 语言切换
+
+      ## 输出
+
+      verification report, 末尾 **VERDICT: PASS** 或 **VERDICT: FAIL**.

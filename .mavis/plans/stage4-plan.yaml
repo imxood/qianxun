@@ -1,0 +1,503 @@
+version: 1
+plan:
+  name: '三子项目 Stage 4 收尾 (Daemon thin client + VPS Docker/admin + Tauri 降级 UI/离线队列/i18n/VPS 接入)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage4-thin-client
+    title: 'Daemon Stage 4: TUI/ACP 改 thin client (连本地 Daemon HTTP+SSE)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/01-daemon.md` 实施 Daemon Stage 4 — TUI/ACP 改 thin client, 启动时检测 daemon URL, 有 daemon 走 HTTP+SSE 远程调用, 无 daemon fallback standalone (旧行为, 用 `--standalone` flag 强制).
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (§3.1 REST endpoints, §3.2 SSE 事件)
+      - `docs/30_子项目规划/01-daemon.md` (§7 Thin Client 改造, §13 迁移路径 阶段 4)
+      - `qianxun/src/tui/mod.rs` (1730 行, 当前是独立 AgentLoop)
+      - `qianxun/src/acp/` (8 个文件, 当前是独立进程)
+      - `qianxun/src/main.rs` (clap 入口)
+      - `qianxun/src/daemon/{router.rs, mod.rs}` (Stage 3 产出, Daemon HTTP/SSE 端)
+      - `qianxun/src/cli/run.rs` (CLI REPL 入口)
+
+      ## 实施内容 (Stage 4 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun/src/client/mod.rs` (~150 行)
+
+      跨 binary 共享的 thin client (HTTP + SSE):
+      ```rust
+      use std::time::Duration;
+
+      pub struct DaemonClient {
+          base_url: String,        // http://127.0.0.1:23900
+          http: reqwest::Client,
+      }
+
+      impl DaemonClient {
+          pub fn new(base_url: String) -> Self;
+
+          /// 健康检查, 3s 超时
+          pub async fn health(&self) -> Result<HealthStatus, ClientError>;
+
+          /// 创建 session
+          pub async fn create_session(&self) -> Result<String, ClientError>;
+
+          /// 列出 sessions
+          pub async fn list_sessions(&self) -> Result<Vec<Session>, ClientError>;
+
+          /// Prompt 走 SSE 流, 返回 BoxStream<LlmStreamEvent>
+          pub async fn stream_prompt(
+              &self, session_id: &str, messages: Vec<ContentBlock>,
+          ) -> Result<BoxStream<'static, Result<LlmStreamEvent, ClientError>>, ClientError>;
+      }
+      ```
+
+      SSE 解析用 `reqwest` 的 `bytes_stream()` + 自己写 SSE parser (类似 `provider/anthropic_compat.rs::SseParser`, 但更简单, 只解析 data: 行, 不分 event 类型 — 12 种类型全在一个流上)。
+
+      ### 2. 改 `qianxun/src/main.rs`
+
+      加 `--standalone` flag (默认 false):
+      ```rust
+      #[arg(long)]
+      standalone: bool,  // true = 用本地 AgentLoop, false (默认) = 走 daemon
+      ```
+
+      CLI REPL 入口:
+      - `--standalone` 或 `--daemon-url <url>` 显式: 走 thin client
+      - 默认: 探测 `http://127.0.0.1:23900/v1/system/health`, 3s 内 daemon up → thin client, 否则 standalone (兼容旧行为)
+
+      ### 3. 改 `qianxun/src/tui/mod.rs`
+
+      - 加 `mode: ThinClientMode` enum (Standalone / ThinClient(DaemonClient))
+      - `new()` 接受 mode 参数
+      - 如果 ThinClient, prompt 不调 processing_loop, 改调 `client.stream_prompt()` 收 SSE 流
+      - 保留 Standalone 路径完全不变 (向后兼容)
+
+      ### 4. 改 `qianxun/src/acp/server.rs` (或 main.rs)
+
+      - 同上: thin client 路径调 DaemonClient
+      - 保留 standalone 路径
+
+      ### 5. 单测 `qianxun/src/client/mod.rs` 末尾
+
+      - `test_health_returns_health_status`: 用 mock HTTP server 返 JSON, client.health() 解析
+      - `test_create_session_returns_session_id`: 同上
+      - `test_stream_prompt_parses_sse_events`: mock server 返 SSE 流, client.stream_prompt 解析出 12 种 event (mock 几个关键的: message_start / text_delta / message_stop)
+
+      ## 关键约束
+
+      - **保留 Standalone 路径完全不变** (向后兼容, `--standalone` flag 或 daemon down 时)
+      - **不修改 Daemon 端 (server/)** (Stage 3 已完)
+      - **不接自动重连** (Stage 5 才是, Stage 4 简化: daemon 挂了让用户重启)
+      - **不接认证 / token** (Stage 5 才是)
+      - **不引入新 crate** (reqwest / tokio 已有)
+      - **不修改 shared-contract**
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - DaemonClient 4 方法签名
+      - thin client 改造: 哪些 binary 受影响 (TUI/ACP/CLI 3 个)
+      - `--standalone` flag + 默认探测逻辑
+      - 3 个单测输出
+      - `cargo build -p qianxun` 通过
+      - `cargo test -p qianxun --bin qx client::` 通过
+      - 已知 TODO (Stage 5: 自动重连 + auth)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/01-daemon.md` (§7)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.1, §3.2)
+      - `qianxun/src/client/mod.rs` (新建)
+      - `qianxun/src/main.rs` (改)
+      - `qianxun/src/tui/mod.rs` (改)
+      - `qianxun/src/acp/server.rs` (改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] DaemonClient 4 方法 (health / create_session / list_sessions / stream_prompt) 实现
+      - [ ] stream_prompt 用 reqwest bytes_stream + SSE parser 解析 data: 行
+      - [ ] main.rs 加 --standalone flag + 默认探测 daemon (3s 超时)
+      - [ ] tui/mod.rs 区分 Standalone vs ThinClient 两种 mode
+      - [ ] acp/server.rs 同样区分
+      - [ ] Standalone 路径完全不变 (用 grep 验证, processing_loop 调用还在)
+      - [ ] 3 单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] cargo test -p qianxun --bin qx client:: 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 Daemon 端 (qianxun/src/daemon/)
+      - [ ] 没改 VPS 端 (qianxun/src/server/)
+      - [ ] 没修改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: vps-stage4-docker-admin
+    title: 'VPS Server Stage 4: Dockerfile + docker-compose + admin auth + WS Team RBAC'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/02-vps-server.md` 实施 VPS Server Stage 4 — Docker 部署 + admin auth + WS Hub 集成 Team RBAC.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (§6 Team / Member / ProjectAssignment)
+      - `docs/30_子项目规划/02-vps-server.md` (§9 部署, §6 WebSocket Hub, §7 Team 模型)
+      - `qianxun/src/server/{mod.rs, team_db.rs, ws_hub.rs, auth.rs, auth_ws.rs, messages.rs}` (Stage 1-3 产出)
+      - `qianxun/Cargo.toml` (静态二进制名 `qx`)
+
+      ## 实施内容 (Stage 4 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun/Dockerfile` (~30 行, 多阶段构建)
+
+      ```dockerfile
+      # Stage 1: builder
+      FROM rust:1.85-slim AS builder
+      WORKDIR /app
+      COPY Cargo.lock Cargo.toml ./
+      COPY qianxun-core/ ./qianxun-core/
+      COPY qianxun-memory/ ./qianxun-memory/
+      COPY qianxun/ ./qianxun/
+      RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+          cargo build --release --bin qx
+
+      # Stage 2: runtime
+      FROM debian:bookworm-slim
+      RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+          rm -rf /var/lib/apt/lists/*
+      RUN useradd -m -u 1000 qxvps
+      USER qxvps
+      WORKDIR /home/qxvps
+      COPY --from=builder /app/target/release/qx /usr/local/bin/qx
+      EXPOSE 23901
+      VOLUME ["/home/qxvps/.qxvps"]
+      ENTRYPOINT ["/usr/local/bin/qx", "--server", "--port", "23901"]
+      ```
+
+      ### 2. 新建 `qianxun/.dockerignore`
+
+      标准忽略 (`target/` / `node_modules/` / `.git/` / `**/target/` 等).
+
+      ### 3. 新建 `docker-compose.yml` (项目根)
+
+      ```yaml
+      services:
+        qxvps:
+          build: ./qianxun
+          image: qxvps:stage4
+          container_name: qxvps
+          restart: unless-stopped
+          ports:
+            - "23901:23901"
+          volumes:
+            - qxvps-data:/home/qxvps/.qxvps
+          environment:
+            - QXVPS_LOG_LEVEL=info
+          deploy:
+            resources:
+              limits:
+                cpus: '1.0'
+                memory: 512M
+      volumes:
+        qxvps-data:
+      ```
+
+      ### 4. 新建 `qianxun/src/server/admin.rs` (~80 行)
+
+      Admin auth guard:
+      ```rust
+      /// Stage 4 简化: admin auth = JWT 中 role 字段是 "admin" 或 "owner".
+      /// 从 Authorization header 提取 JWT, 解析 claims, 检查 role.
+      pub fn require_admin(headers: &axum::http::HeaderMap) -> Result<String, AdminError>;
+
+      pub enum AdminError {
+          Missing,
+          Invalid,
+          Forbidden,  // 角色不够
+      }
+      ```
+
+      复用 Stage 1 `qianxun/src/server/auth.rs::Claims` 结构.
+
+      ### 5. 改 `qianxun/src/server/mod.rs`
+
+      7 个 admin endpoint 加 auth guard:
+      - POST /api/admin/users (Stage 1 已有) → 加 admin guard
+      - GET /api/admin/users → 加 admin guard
+      - 新增 5 个:
+        * `GET /api/admin/teams` → 列出所有 teams (admin only)
+        * `POST /api/admin/teams/:id/members { user_id, role }` → 添加成员
+        * `DELETE /api/admin/teams/:id/members/:user_id` → 移除成员
+        * `GET /api/admin/projects` → 列出所有 team_projects
+        * `DELETE /api/admin/projects/:id` → 归档 (软删, archived=1)
+
+      ### 6. 改 `qianxun/src/server/ws_hub.rs`
+
+      加 RBAC 检查 helper:
+      ```rust
+      /// 检查 user 是否在 team 中, 且 project 已分配给 user.
+      /// Stage 4 简化: 同步查 TeamDb (无缓存).
+      pub async fn check_rbac(
+          team_db: &TeamDb, user_id: &str, project_id: &str,
+      ) -> Result<bool, RbacError>;
+      ```
+
+      在 `handle_prompt_frame` 路由时 (mod.rs 里), 调 `check_rbac(...)` 验证 user 对 target_project 有访问权. 不通过 → 推 `event_error` 帧 code="forbidden".
+
+      ### 7. 单测
+
+      - `qianxun/src/server/admin.rs` 末尾 2 单测: 合法 admin JWT → Ok, 普通 user → Err(Forbidden)
+      - `qianxun/src/server/ws_hub.rs` 末尾 1 单测: check_rbac user 在 team 且 project assigned → Ok(true), 未分配 → Ok(false)
+
+      ## 关键约束
+
+      - **Docker 多阶段构建** (Stage 1 builder ~1.5GB, Stage 2 runtime <100MB)
+      - **资源限制** 1 CPU + 512MB (符合 02-vps §1.4 极简部署目标)
+      - **JWT 解析复用** Stage 1 auth.rs::Claims
+      - **RBAC 同步查 TeamDb** (Stage 4 简化, Stage 5 加缓存)
+      - **不接 Web UI** (后续)
+      - **不接 rate-limit / outbox** (后续)
+      - **不引入新 crate** (docker 多阶段只需要 rust + debian base)
+      - **不修改 shared-contract**
+
+      完成后写 `deliverable.md`:
+      - Dockerfile 完整
+      - docker-compose.yml 完整
+      - admin.rs 4 个方法签名
+      - 7 个 admin endpoint 列表 (含 guard)
+      - check_rbac 实现 + 在 handle_prompt_frame 的接入
+      - 3 单测输出
+      - `cargo build -p qianxun` 通过
+      - 已知 TODO (Stage 5: rate-limit + outbox + 缓存)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/02-vps-server.md` (§9 §6 §7)
+      - `docs/30_子项目规划/_shared-contract.md` (§6)
+      - `qianxun/Dockerfile` (新建)
+      - `qianxun/.dockerignore` (新建)
+      - `docker-compose.yml` (新建)
+      - `qianxun/src/server/{admin.rs, mod.rs, ws_hub.rs}` (改动)
+      - `qianxun/src/server/auth.rs` (复用 Claims, 不改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] Dockerfile 多阶段 (rust:1.85-slim builder + debian:bookworm-slim runtime)
+      - [ ] ENTRYPOINT ["/usr/local/bin/qx", "--server", "--port", "23901"]
+      - [ ] .dockerignore 排除 target/ + node_modules/ + .git/
+      - [ ] docker-compose.yml 端口映射 23901:23901 + 资源限制 1 CPU + 512M
+      - [ ] admin.rs require_admin 实现 (Authorization header → JWT → role 检查)
+      - [ ] 7 个 admin endpoint 都加 guard (含 Stage 1 已有的 2 个)
+      - [ ] ws_hub.rs check_rbac 实现 + 在 handle_prompt_frame 接入
+      - [ ] 3 单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: tauri-stage4-polish-bundle
+    title: 'Tauri Stage 4: ConnectionBanner + 离线队列 + i18n + VPS 接入骨架'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/03-tauri-desktop.md` 实施 Tauri Stage 4 — ConnectionBanner + 离线消息队列 + i18n 起步 + VPS 接入骨架 (不做生产打包, 留 Stage 5).
+
+      ## 必读输入
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§10 离线/降级, §11 配置/存储, §9 Team 管理 UI 基础, §12 构建/发布)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.1 REST, §3.2 SSE, §3.3 WS)
+      - `qianxun-desktop/src/lib/stores/session.svelte.ts` (Stage 3)
+      - `qianxun-desktop/src/lib/components/layout/ThreeColumnLayout.svelte` (Stage 1, 顶栏状态点)
+      - `qianxun-desktop/src/routes/+page.svelte` (Stage 3)
+      - `qianxun-desktop/src/lib/components/chat/InputBox.svelte` (Stage 3)
+
+      ## 实施内容 (Stage 4 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun-desktop/src/lib/components/chat/ConnectionBanner.svelte` (~80 行)
+
+      完整降级 UI (§10.1), 不只是顶栏状态点:
+      ```svelte
+      <script lang="ts">
+          import { connectionStore } from '$lib/stores/connection.svelte';
+          let { onRetry }: { onRetry?: () => void } = $props();
+      </script>
+
+      {#if connectionStore.isDegraded}
+          <div role="alert" class="bg-yellow-50 dark:bg-yellow-950 border-l-4 border-yellow-500 p-3 my-2">
+              <div class="flex items-center justify-between">
+                  <div>
+                      <p class="font-semibold">Daemon {connectionStore.daemonState}</p>
+                      <p class="text-sm text-muted-foreground">
+                          {connectionStore.lastErrorDisplay ?? '正在连接...'}
+                      </p>
+                  </div>
+                  <button onclick={() => { connectionStore.retry(); onRetry?.(); }} class="px-3 py-1 border rounded">
+                      立即重试
+                  </button>
+              </div>
+          </div>
+      {/if}
+      ```
+
+      接入 `qianxun-desktop/src/routes/+page.svelte` (在 ChatView 之上).
+
+      ### 2. 改 `qianxun-desktop/src/lib/stores/session.svelte.ts` — 加 offlineQueue
+
+      ```typescript
+      interface OfflineMessage {
+          id: string;  // crypto.randomUUID()
+          sessionId: string;
+          text: string;
+          createdAt: string;
+          attempts: number;
+      }
+
+      class SessionStore {
+          private offlineQueue = $state<OfflineMessage[]>([]);
+
+          get offlineQueueSize() { return this.offlineQueue.length; }
+
+          /// send() 时, 如果 isDegraded, 推入 offlineQueue 而不发 prompt
+          async send(text: string, model: string): Promise<void> {
+              if (connectionStore.isDegraded) {
+                  this.offlineQueue.push({
+                      id: crypto.randomUUID(),
+                      sessionId: this.runtime?.sessionId ?? '',
+                      text,
+                      createdAt: new Date().toISOString(),
+                      attempts: 0,
+                  });
+                  this.persistOfflineQueue();
+                  toast.info('消息已加入队列, 重连后自动发送');
+                  return;
+              }
+              // ... 原有 send 流程
+          }
+
+          /// daemon reconnect 后自动 flush
+          private async flushOfflineQueue(): Promise<void> {
+              const queue = [...this.offlineQueue];
+              this.offlineQueue = [];
+              for (const msg of queue) {
+                  await this.send(msg.text, this.runtime?.model ?? 'MiniMax-M3');
+              }
+          }
+
+          private persistOfflineQueue(): void {
+              localStorage.setItem('qianxun-offline-queue', JSON.stringify(this.offlineQueue));
+          }
+
+          private loadOfflineQueue(): void {
+              const raw = localStorage.getItem('qianxun-offline-queue');
+              if (raw) this.offlineQueue = JSON.parse(raw);
+          }
+      }
+      ```
+
+      ### 3. 新建 `qianxun-desktop/src/lib/i18n/{zh-CN,en}.ts` + `index.ts` (~120 行)
+
+      起步 i18n (10 个 key):
+      ```typescript
+      // index.ts
+      import { writable, type Writable } from 'svelte/store';
+
+      type Locale = 'zh-CN' | 'en';
+      const messages = { 'zh-CN': zhCN, 'en': en };
+      export const currentLocale: Writable<Locale> = writable('zh-CN');
+      export function t(key: keyof typeof zhCN): string {
+          let loc: Locale = 'zh-CN';
+          currentLocale.subscribe(l => loc = l)();
+          return messages[loc][key] ?? key;
+      }
+      ```
+
+      10 个 key: app.title / connection.connected / connection.degraded / connection.reconnecting / connection.offline / input.placeholder / input.send / message.thinking / retry / error.network
+
+      zh-CN + en 各 10 个翻译.
+
+      接入: 改 `InputBox.svelte` `placeholder` 用 `t('input.placeholder')`,改 `ConnectionBanner.svelte` 文本用 `t()`.
+
+      ### 4. 新建 `qianxun-desktop/src/lib/stores/vps.svelte.ts` (~80 行)
+
+      VPS 接入骨架 (WebSocket 客户端, 不接 team 业务, 只验证连接):
+      ```typescript
+      import { writable } from 'svelte/store';
+      import { onDaemonStateChanged } from '$lib/ipc/bridge';
+
+      class VpsStore {
+          vpsUrl = $state<string>('');  // 默认空
+          connectionState = $state<'offline' | 'connected' | 'connecting'>('offline');
+          // 接入: 启动时如果有 vpsUrl, WS 连接; 否则保持 offline
+          // Stage 4 简化: 只 emit 状态, 不接 team 业务
+      }
+      export const vpsStore = new VpsStore();
+      ```
+
+      Stage 4 简化: VPS URL 在 settings 里手动配, 启动时尝试连接. 失败不报错 (VPS 是可选的, 只连本地 Daemon 也行).
+
+      ### 5. 单测
+
+      - `connection.svelte.ts` 加 1 测试: isDegraded 时 send 进 offlineQueue, not Degraded 时正常发
+      - `i18n/index.ts` 加 1 测试: t('app.title') 返回 '千寻' (zh-CN) / 'Qianxun' (en)
+      - `vps.svelte.ts` 加 1 测试: 默认 connectionState='offline'
+
+      ## 关键约束
+
+      - **不接生产打包** (@sveltejs/adapter-static + tauri build, 留 Stage 5)
+      - **不接主题切换** (mode-watcher 已装, 留 Stage 5)
+      - **不接 SQLite 缓存** (tauri-plugin-sql, 留 Stage 5)
+      - **不接 WebSocket 真实 team 消息路由** (VPS Store 只验证连接)
+      - **不接 Tauri stronghold 凭据加密** (Stage 5 才是)
+      - **i18n 只放 10 个 key** (起步, Stage 5 扩)
+      - **不修改 _shared-contract.md**
+      - **不修改 Stage 1-3 已写的 ipc.ts / bridge.ts / connection.svelte.ts 字段**
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - ConnectionBanner 4 态条件渲染
+      - offlineQueue 流程图 (isDegraded 进队 / reconnect flush)
+      - i18n 10 个 key + 中英对照
+      - VpsStore 3 态
+      - 3 单测输出
+      - pnpm run check 0/0
+      - pnpm run build 成功
+      - 已知 TODO (Stage 5: 主题/SQLite/打包/WebSocket team 路由)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§10 §11 §9)
+      - `docs/30_子项目规划/_shared-contract.md`
+      - `qianxun-desktop/src/lib/components/chat/ConnectionBanner.svelte` (新建)
+      - `qianxun-desktop/src/lib/stores/session.svelte.ts` (改, 加 offlineQueue)
+      - `qianxun-desktop/src/lib/i18n/{zh-CN,en,index}.ts` (新建)
+      - `qianxun-desktop/src/lib/stores/vps.svelte.ts` (新建)
+      - `qianxun-desktop/src/routes/+page.svelte` (改, 接 ConnectionBanner)
+      - `qianxun-desktop/src/lib/components/chat/InputBox.svelte` (改, 用 i18n)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] ConnectionBanner 4 态条件渲染 (isDegraded 显示, else 不显示)
+      - [ ] ConnectionBanner 含 retry 按钮 + 错误信息 + 立即重试 onClick
+      - [ ] offlineQueue: isDegraded 时 send 进队, not Degraded 时正常发, reconnect 后 flush
+      - [ ] persistOfflineQueue 用 localStorage, loadOfflineQueue 启动恢复
+      - [ ] i18n 10 个 key + 中英对照, t() 函数正确切换
+      - [ ] VpsStore 3 态 (offline/connected/connecting) + 启动尝试连接
+      - [ ] InputBox placeholder 用 t('input.placeholder')
+      - [ ] ConnectionBanner 文本用 t()
+      - [ ] 3 单测都过
+      - [ ] pnpm run check 0/0
+      - [ ] pnpm run build 成功
+      - [ ] 没接生产打包 (svelte.config.js 还是 adapter-auto)
+      - [ ] 没接主题切换
+      - [ ] 没接 SQLite 缓存
+      - [ ] 没修改 _shared-contract.md
+      - [ ] 没改 ipc.ts / bridge.ts / connection.svelte.ts 字段
+      ## 输出
+      verification report (PASS/FAIL).

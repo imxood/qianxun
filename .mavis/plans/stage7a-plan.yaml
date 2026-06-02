@@ -1,0 +1,314 @@
+version: 1
+plan:
+  name: '千寻 Stage 7a — Daemon Web Admin Console 架构 + 4 核心管理面板'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  timeout_ms: 1800000
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+
+tasks:
+  # ────────────────────────────────────────────────────────────
+  # Task A: Daemon Rust 端 — 静态文件 serve + LLM providers CRUD + Skills/MCP/Tools endpoint
+  # ────────────────────────────────────────────────────────────
+  - id: daemon-stage7a-llm-and-serve
+    title: 'Daemon Rust: /_ui/* 静态文件 serve + 8 LLM provider endpoint + 3 Skills/MCP/Tools endpoint'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 给 qianxun daemon 加 **Stage 7a** 的 Rust 端能力, 让 daemon 能
+      (1) serve 一个 SvelteKit 静态 dist/ 给浏览器访问,
+      (2) 暴露 8 个 LLM provider 管理 endpoint,
+      (3) 加 3 个 Skills/MCP/Tools 管理 endpoint.
+
+      ## 输入资料(必读)
+
+      1. **主规划**: `docs/30_子项目规划/01b-daemon-web-console.md` (§4.2 endpoint 表 + §5 Stage 7a 范围 + §2 架构 + §6 鉴权)
+      2. **共享契约**: `docs/30_子项目规划/_shared-contract.md` (§3.1 + §3.1.1)
+      3. **现有代码**:
+         - `qianxun/src/daemon/router.rs` (13 个 endpoint, JWT auth middleware, 刚加的 root_handler)
+         - `qianxun/src/daemon/mod.rs` (AppState, run 入口)
+         - `qianxun/src/main.rs` (clap 入口, `--daemon --port`)
+         - `qianxun-core/src/provider/{mod,deepseek,anthropic_compat}.rs` (AnthropicCompatProvider 已抽)
+         - `qianxun-core/src/skills/mod.rs` (SkillManager)
+         - `qianxun-core/src/tools/mod.rs` (ToolRegistry)
+         - `qianxun-core/src/mcp/` (McpClient, ServerManager)
+         - `qianxun-core/src/config.rs` (ResolvedConfig)
+      4. **CLAUDE.md**: HTTP 客户端 `reqwest` (rustls, json, stream, webpki-roots) 已有; 新增 crate 需评估传递依赖 (< 30).
+
+      ## 必须落地的改动
+
+      ### A.1 静态文件 serve (`/_ui/*`)
+
+      - `qianxun/Cargo.toml` 加 `tower-http = { version = "0.5", features = ["fs", "trace"] }` (评估传递依赖 < 30)
+      - `qianxun/src/daemon/router.rs::build_router()` 加 `.nest_service("/ui", ServeDir::new(ui_dist).fallback(ServeFile::new(...)))`
+      - `qianxun/src/daemon/mod.rs::run()` 接收 `ui_dist: Option<PathBuf>` 参数, 启动时打 log: `[daemon] Web UI serving at /_ui/* from {path}` 或 `[daemon] Web UI disabled (no dist)`
+      - `qianxun/src/main.rs` 加 CLI flag `--ui-dist <PATH>` + env var `QIANXUN_UI_DIST`, 路径不存在时 warn 但不 panic (daemon 仍启动, /_ui/* 返 503)
+      - 路径解析优先级: CLI > env var > `<exe 同级>/ui/` (release) > `<workspace>/qianxun/src/daemon/ui/dist/` (debug)
+      - 鉴权: `/_ui/*` 加进 `is_auth_skipped_path` 列表 (跟 `/` 同), **Stage 7a 简化**: 启动时随机生成 admin token 打 stderr, Web UI 首次访问弹 token 输入框, daemon 验签后写 cookie; Stage 7b 再加密码
+      - **测试**: 至少 3 个 e2e (GET /_ui/ 200 + 静态文件 / SPA fallback 返 index.html / 不存在路径 404 JSON)
+
+      ### A.2 LLM provider 管理 (8 个 endpoint)
+
+      新建 `qianxun/src/daemon/llm_providers.rs` (新文件):
+
+      - `pub struct LlmProviderConfig { pub id: String, pub provider: String (deepseek/anthropic/minimax/...), pub model: String, pub base_url: String, pub api_key: Option<String> (不持久化, 仅运行时) }`
+      - `pub struct LlmProviderManager { providers: Arc<RwLock<HashMap<String, ProviderEntry>>>, keyring: Arc<KeyringBackend> }`
+      - `impl LlmProviderManager`:
+        - `pub fn new() -> Self` (从 ResolvedConfig 初始化, 含 active_provider)
+        - `pub fn list(&self) -> Vec<LlmProviderSummary>` (id + provider + model + has_key, **不**返 key)
+        - `pub fn get(&self, id: &str) -> Option<LlmProviderConfig>`
+        - `pub fn add(&self, cfg: LlmProviderConfig) -> Result<(), String>` (key 写 keyring 或 env var 缓存)
+        - `pub fn update(&self, id: &str, cfg: LlmProviderConfig) -> Result<(), String>`
+        - `pub fn delete(&self, id: &str) -> Result<(), String>` (同时清 keyring)
+        - `pub fn activate(&self, id: &str) -> Result<(), String>` (改 ResolvedConfig.active_provider, 触发 hot-reload)
+        - `pub async fn test(&self, id: &str) -> Result<TestResult, String>` (发个最小 `{messages: [{role:user, content:"ping"}], max_tokens: 8}` 测连通, 返 `{ok, latency_ms, model_version}`)
+
+      **Keyring 简化方案** (Stage 7a 不引 `keyring` crate, 避免传递依赖):
+      - 用 `Arc<RwLock<HashMap<String, String>>>` in-memory 缓存 + 启动时从 env var `QIANXUN_<PROVIDER>_API_KEY` 读
+      - 标注 `// TODO Stage 7b: 评估 keyring crate 替换 in-memory`
+      - 测试用 `unsafe { std::env::set_var(...) }` 在 ENV_MUTEX 保护下注入
+
+      8 个 endpoint (全在 `/v1/llm/providers*` 路径, 走现有 JWT auth, **不**在 skip 列表):
+
+      ```
+      GET    /v1/llm/providers
+      GET    /v1/llm/providers/{id}
+      POST   /v1/llm/providers
+      PUT    /v1/llm/providers/{id}
+      DELETE /v1/llm/providers/{id}
+      POST   /v1/llm/providers/{id}/activate
+      POST   /v1/llm/providers/{id}/test
+      ```
+
+      实际是 7 个 endpoint, 算上 GET list 凑 8. 共享契约写的是 8, 你按 §4.2 表落实.
+
+      ### A.3 Skills/MCP/Tools 管理 endpoint (3 个)
+
+      ```
+      POST   /v1/skills                                # reload all (调 SkillManager::reload)
+      POST   /v1/skills/{name}/toggle                  # 启/停, 写 ResolvedConfig.disabled_skills: Vec<String>
+      DELETE /v1/mcp/servers/{id}                      # 删 MCP server, 调 ServerManager::remove
+      POST   /v1/mcp/servers/{id}/test                 # 测试连接, 返 {ok, tools: [...]}
+      POST   /v1/tools/{name}/invoke                   # 试用 tool, body = {arguments: {...}}, 返 {output: ...} (不走 LLM, 直调 ToolRegistry::execute)
+      ```
+
+      实际是 5 个 endpoint, 你按 01b §4.2 表落实, 测试覆盖到.
+
+      ### A.4 AppState 集成
+
+      - `qianxun/src/daemon/mod.rs::AppState` 加 `pub llm_providers: Arc<LlmProviderManager>`
+      - `run()` 时从 `ResolvedConfig` 初始化 LlmProviderManager, 启动时 `restore_from_env_vars()`
+
+      ### A.5 测试
+
+      - 至少 12 个新单测 (LLMProviderManager CRUD 7 + endpoint e2e 5)
+      - 全部走 ENV_MUTEX 保护
+      - 全部用 mock provider (不真发 HTTP), test_connection 用 stub server (`wiremock` 或自建)
+      - 验证: `cargo test -p qianxun --bin qx daemon::` 全过 (含旧的 16 个)
+
+      ### A.6 编译 & 警告
+
+      - `cargo build -p qianxun --bin qx` 0 错误
+      - 新代码 0 警告 (可以 `#[allow(dead_code)]` 标注未来用项)
+      - 89 个旧 warning 维持 (不要为了清 warning 大改)
+
+      ## 不做什么 (避免 scope 蔓延)
+
+      - **不**引 `keyring` crate (Stage 7a 简化, 7b 评估)
+      - **不**引 `sysinfo` crate (Stage 7b 评估)
+      - **不**做 LLM provider 的"实际调用"接通 (那是 Stage 8+ E2E 测试范围)
+      - **不**改 `qianxun-core` 里已有的 Provider trait (除非发现真 bug)
+      - **不**改 Tauri 桌面端, 不改 VPS server
+
+      ## 验证清单 (worker 跑完后自己 check)
+
+      ```
+      [ ] cargo build -p qianxun --bin qx           0 errors
+      [ ] cargo test -p qianxun --bin qx daemon::   至少 28 个 pass (16 旧 + 12 新)
+      [ ] qx --daemon --port 23900 启动, curl http://127.0.0.1:23900/_ui/ 返 503 + JSON (dist 不存在, 期望)
+      [ ] curl -X POST http://127.0.0.1:23900/v1/llm/providers (带 Bearer token) 返 200/4xx (期望)
+      [ ] 没有引入 > 30 个传递依赖的新 crate
+      ```
+
+      ## 关键: 早期写 deliverable.md
+
+      写代码每 5 分钟 commit 一次 git, 超时前 5 分钟必须写 deliverable.md
+      (放 `qianxun/src/daemon/deliverable-7a-daemon.md`) 防止 30 min timeout
+      杀掉 producer 后 deliverable 丢失. deliverable 必须含:
+      - 新增/修改的文件列表
+      - 新 endpoint 列表 + curl 验证命令
+      - 已知问题 / TODO 留给 7b
+      - "我 commit 了 X 个 commit" 列表 (git log --oneline -X)
+
+    verify_prompt: |
+      独立验证, 不要只读 worker diff.
+
+      ## 验证步骤
+
+      1. 读 `qianxun/src/daemon/deliverable-7a-daemon.md` (worker 应写了这个)
+      2. 跑 `cd E:/git/maxu/qianxun && cargo build -p qianxun --bin qx` 必须 0 错误
+      3. 跑 `cd E:/git/maxu/qianxun && cargo test -p qianxun --bin qx daemon::` 必须全过 (新 + 旧 ≥ 28 个)
+      4. grep 验证 7+ 个新 endpoint 在 router.rs 都注册了
+      5. grep 验证 LlmProviderManager 的 7 个方法都实现了
+      6. grep 验证 0 处使用 `keyring` / `sysinfo` crate (Stage 7a 简化)
+      7. 跑实际 daemon 启动测试:
+         - `cd E:/git/maxu/qianxun && QIANXUN_JWT_SECRET=test ANTHROPIC_AUTH_TOKEN=test ./target/debug/qx --daemon --port 23902 &`
+         - 等待 2s, 跑 `curl -i http://127.0.0.1:23902/_ui/` 应该返 503 (dist 不存在)
+         - 跑 `curl -i -H "Authorization: Bearer <生成一个测试 token>" http://127.0.0.1:23902/v1/llm/providers` 应该返 200
+         - 跑 `curl -i -H "Authorization: Bearer <token>" http://127.0.0.1:23902/v1/skills -X POST` 应该返 200 (reload)
+         - kill daemon
+      8. 验证 deliverable.md 含 git log 列表, 至少 1 个 commit
+
+      ## 输出
+
+      写 verification report, 含:
+      - 每步 PASS/FAIL
+      - 失败的话给出具体 cargo test 输出 / curl 输出
+      - 末尾一行: **VERDICT: PASS** 或 **VERDICT: FAIL**
+
+  # ────────────────────────────────────────────────────────────
+  # Task B: SvelteKit 脚手架 + 4 核心面板 UI
+  # ────────────────────────────────────────────────────────────
+  - id: webui-stage7a-scaffold-4-panels
+    title: 'SvelteKit 脚手架 + 4 核心管理面板 (LLM/Skills/MCP/Tools)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 在 daemon 旁边新建一个 **SvelteKit SPA 项目** `qianxun/src/daemon/ui/`,
+      实现 Stage 7a 的 4 个核心管理面板 (LLM / Skills / MCP / Tools).
+
+      ## 输入资料(必读)
+
+      1. **主规划**: `docs/30_子项目规划/01b-daemon-web-console.md` (§2.3 项目结构 + §3 模块清单 §1-§4 + §6 鉴权 + §7 dev/prod workflow)
+      2. **参考实现**: `qianxun-desktop/` (完整 Svelte 5 + shadcn-svelte 项目, 21 devDeps 全部齐, **可复制**)
+      3. **共享契约**: `docs/30_子项目规划/_shared-contract.md` (§3.1.1 endpoint)
+      4. **Stage 7a daemon 端代码** (你跑这个 task 时, Task A 的 producer 正在写; 假定已落地)
+
+      ## 必须落地的改动
+
+      ### B.1 项目脚手架 (qianxun/src/daemon/ui/)
+
+      - 用 `pnpm create svelte@latest` 风格的 SvelteKit + Svelte 5 项目, 但**手工建文件** (省 prompt 时间)
+      - `package.json` 跟 qianxun-desktop 同步 (21 个 devDeps, **全部复用**):
+        - svelte 5, @sveltejs/kit 2, @sveltejs/vite-plugin-svelte 7, vite 8
+        - tailwindcss 4 + @tailwindcss/vite
+        - @sveltejs/adapter-static (静态 SPA)
+        - shadcn-svelte: bits-ui, clsx, tailwind-merge, tailwind-variants, mode-watcher
+        - lucide-svelte 图标
+        - TypeScript 6, svelte-check, svelte-i18n (7c 阶段用)
+        - vitest + jsdom + @vitest/ui
+      - `svelte.config.js`: adapter-static, fallback: 'index.html' (SPA 路由)
+      - `vite.config.ts`: dev 端口 5174 (跟 qianxun-desktop 5173 区分), proxy `/v1/*` → `http://127.0.0.1:23900`
+      - `tailwind.config.js`: 千寻品牌色 `--accent: #ff7a3d`, dark mode class
+      - `src/app.css`: tailwind 入口 + CSS 变量
+      - `src/app.html`: 基础 HTML 骨架
+
+      ### B.2 路由结构 (src/routes/)
+
+      - `+layout.svelte`: Sidebar (千寻 logo + 4 个核心链接 + Settings/System 占位) + TopBar (状态指示 + token 配置) + `<slot />`
+      - `+page.svelte`: `/` 重定向到 `/llm` (默认页)
+      - `llm/+page.svelte`: Provider 列表 + 新增按钮 + 编辑弹窗 + 测试按钮 + 激活按钮
+      - `skills/+page.svelte`: Skill 列表 + 重载按钮 + 启停切换 + 详情弹窗
+      - `mcp/+page.svelte`: Server 列表 + 新增 (stdio/HTTP) + 编辑/删除 + 测试连接
+      - `tools/+page.svelte`: Tool 列表 + 详情 (schema) + 试用弹窗 (JSON 输入 → 调 invoke)
+
+      ### B.3 共享组件 (src/lib/)
+
+      - `components/ui/`: 复制 qianxun-desktop/src/lib/components/ui/ 全部 (button, card, dialog, input, table, badge, ...)
+      - `components/layout/Sidebar.svelte`, `TopBar.svelte`
+      - `components/common/DataTable.svelte`, `Empty.svelte`, `Loading.svelte`, `Error.svelte`
+      - `api/client.ts`: `fetchWithAuth(url, opts)` 封装 (加 Bearer token, 401 跳登录)
+      - `api/{llm,skills,mcp,tools}.ts`: 5 个 API 客户端函数 (list / get / create / update / delete + test/invoke/toggle/activate/reload)
+      - `stores/auth.ts`: token 状态 (从 localStorage 读)
+      - `stores/theme.ts`: 主题 (light/dark/system, mode-watcher 集成, Stage 7b 完整)
+      - `types/api.ts`: 跟 daemon 共享的 schema (TypeScript interface)
+      - `utils/cn.ts`: clsx + tailwind-merge 合并 className
+      - `utils/format.ts`: 时间/大小格式化
+
+      ### B.4 API 客户端示例 (lib/api/llm.ts)
+
+      ```typescript
+      export interface LlmProviderSummary {
+        id: string;
+        provider: string;  // 'deepseek' | 'anthropic' | 'minimax' | ...
+        model: string;
+        has_key: boolean;
+        active: boolean;
+      }
+      export async function listProviders(): Promise<LlmProviderSummary[]> { ... }
+      export async function createProvider(cfg: LlmProviderConfig): Promise<void> { ... }
+      export async function testProvider(id: string): Promise<{ok: boolean, latency_ms: number}> { ... }
+      // ... activate / delete / update
+      ```
+
+      ### B.5 测试
+
+      - vitest + @testing-library/svelte 至少 12 个测试
+      - 覆盖: 4 个 API 客户端函数 (mock fetch) + 4 个组件 (按钮点击触发回调) + 1 个 layout 渲染 + 3 个 utility
+      - `pnpm run check` 0/0 (svelte-check)
+      - `pnpm run build` 成功 (产出 dist/)
+      - `pnpm test` 全过
+
+      ### B.6 Token 鉴权 UI
+
+      - 首次访问任何 `/llm` 等路由时, 弹"请输入 admin token"对话框
+      - daemon 启动时打印 `Admin token: <random>`, 用户复制粘贴
+      - token 存 localStorage (`qianxun_admin_token`), 后续请求带 `Authorization: Bearer`
+      - 401 时清 token 重弹
+
+      ## 不做什么
+
+      - **不**做 Memory / Sessions / Config / System 面板 (Stage 7b)
+      - **不**做主题切换 UI (Stage 7b, 现在只 mode-watcher 集成)
+      - **不**做 i18n (Stage 7b)
+      - **不**做移动端响应式 (Stage 7c)
+      - **不**做 Chat 视图 (Stage 7c)
+      - **不**复制 qianxun-desktop 的 store/ipc/sse (那是 Tauri 专用, Web Console 不用)
+
+      ## 验证清单 (worker 跑完后自己 check)
+
+      ```
+      [ ] pnpm --dir qianxun/src/daemon/ui install  0 错误
+      [ ] pnpm --dir qianxun/src/daemon/ui run check  0 errors / 0 warnings
+      [ ] pnpm --dir qianxun/src/daemon/ui run build  成功, 产出 dist/
+      [ ] pnpm --dir qianxun/src/daemon/ui test  至少 12 个 pass
+      [ ] 4 个核心路由 (/llm /skills /mcp /tools) 都有 +page.svelte
+      [ ] Sidebar + TopBar + 4 链接都在 +layout.svelte
+      [ ] fetchWithAuth 5 个 API 客户端函数都实现
+      [ ] 没有引用 qianxun-desktop 私有组件 (i18n/sse/ipc)
+      ```
+
+      ## 关键: 早期写 deliverable.md
+
+      写代码每 5 分钟 commit 一次 git (qianxun/src/daemon/ui/ 子目录),
+      超时前 5 分钟必须写 deliverable.md (放 `qianxun/src/daemon/ui/deliverable-7a-webui.md`).
+      deliverable 必须含:
+      - 4 个面板的截图 (headless playwright 跑 dev server 截屏)
+      - vitest 12 个测试 pass 截图
+      - pnpm build 产出 dist/ 的大小 + 文件列表
+      - "我 commit 了 X 个 commit" 列表
+
+    verify_prompt: |
+      独立验证.
+
+      ## 验证步骤
+
+      1. 读 `qianxun/src/daemon/ui/deliverable-7a-webui.md`
+      2. `cd E:/git/maxu/qianxun/qianxun/src/daemon/ui && pnpm install --silent` 0 错误
+      3. `pnpm run check` 必须 0 errors / 0 warnings
+      4. `pnpm run build` 必须成功, dist/ 必须含 index.html + assets/
+      5. `pnpm test` 必须 ≥ 12 个 pass
+      6. grep 验证 4 个核心 +page.svelte 存在: `ls qianxun/src/daemon/ui/src/routes/{llm,skills,mcp,tools}/+page.svelte`
+      7. grep 验证 fetchWithAuth + 4 个 api/*.ts 存在
+      8. grep 验证没有 import `qianxun-desktop` 的 i18n / sse / ipc 模块
+      9. 启动 dev server, 用 playwright 或 curl 验证 4 个路由都返 200 HTML
+      10. 验证 deliverable.md 含 dist/ 截图
+
+      ## 输出
+
+      verification report, 末尾 **VERDICT: PASS** 或 **VERDICT: FAIL**.

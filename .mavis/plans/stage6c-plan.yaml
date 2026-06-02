@@ -1,0 +1,324 @@
+version: 1
+plan:
+  name: '三子项目 Stage 6c (Daemon 客户端 token 集成 / VPS 完整 Web UI 聊天 / Tauri 写操作真接 fetch)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 3
+  timeout_ms: 1800000
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage6c-token-integration
+    title: 'Daemon Stage 6c: 客户端 token 集成 (main.rs + TUI/ACP 走 thin client 带 token)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 让 main.rs 的 CLI REPL / TUI / ACP 三个 binary 在连 daemon 时自动用 `--client-token` flag 注入 token, 调 DaemonClient::with_token 而非 new.
+
+      ## 必读
+      - `qianxun/src/main.rs` (clap 入口 + CLI REPL 分支)
+      - `qianxun/src/tui/mod.rs` (Stage 1-4, 当前是 standalone mode)
+      - `qianxun/src/acp/server.rs` (Stage 1-4)
+      - `qianxun/src/client/mod.rs` (Stage 4 DaemonClient + Stage 6b with_token)
+      - `qianxun/src/daemon/router.rs` (auth_middleware)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun/src/main.rs` — CLI REPL 分支用 with_token
+
+      现有:
+      ```rust
+      if cli.daemon_url.is_some() {
+          // 走 thin client (用 DaemonClient::new)
+      }
+      ```
+
+      改成:
+      ```rust
+      if let Some(ref daemon_url) = cli.daemon_url {
+          let client = if let Some(ref token) = cli.client_token {
+              DaemonClient::with_token(daemon_url.clone(), token.clone())
+          } else {
+              DaemonClient::new(daemon_url.clone())
+          };
+          // 传给 cli::run::run_repl(resolved, project_root, global_instructions, client)
+      }
+      ```
+
+      ### 2. 改 `qianxun/src/tui/mod.rs` — 走 thin client 时带 token
+
+      找到 TUI 接受 DaemonClient 的位置 (Stage 4 thin client 改造), 加 token 字段:
+      ```rust
+      pub struct TuiApp {
+          daemon_client: Option<DaemonClient>,
+          // 启动时按 cli.client_token 构造 DaemonClient::with_token
+      }
+      ```
+
+      ### 3. 改 `qianxun/src/acp/server.rs` — 同上
+
+      ACP server 接受 client_token 注入.
+
+      ### 4. 单测
+
+      `qianxun/src/main.rs` 末尾 `#[cfg(test)]` (新增) 或在 `qianxun/src/client/mod.rs` 末尾加:
+      - `test_daemon_client_with_token_stores_token`: 验证构造带 token
+      - `test_daemon_client_new_token_is_none`: 验证 new() 默认 None
+      - `test_daemon_url_with_trailing_slash_normalizes`: base_url 带/不带 `/` 都 OK (trim_end_matches)
+
+      ## 关键约束
+
+      - **不接 token 自动刷新** (Stage 7 跟 VPS 集成 login_handler 时再加)
+      - **不接 Tauri 自动启动** (Tauri 端走自己的 IPC, 这次只动 Rust binary)
+      - **不修改 shared-contract**
+      - **不引入新 crate**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要改 TUI/ACP 内部逻辑 (只改构造 DaemonClient 的那一行)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun/src/main.rs` (改)
+      - `qianxun/src/tui/mod.rs` (改, 1-2 行)
+      - `qianxun/src/acp/server.rs` (改, 1-2 行)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] main.rs CLI REPL 分支检测 cli.daemon_url + cli.client_token, 用 DaemonClient::with_token 或 ::new
+      - [ ] tui/mod.rs 走 thin client 时也带 token
+      - [ ] acp/server.rs 走 thin client 时也带 token
+      - [ ] 3 单测都过 (with_token 存 token / new 存 None / URL 末尾 `/` 归一)
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: vps-stage6c-webui-chat
+    title: 'VPS Server Stage 6c: 完整 Web UI 聊天 (登录 + 3 栏 + 项目列表 + 聊天流)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 在 Stage 5 登录页基础上加完整 Web UI: 项目列表 + 聊天流. 用 vanilla JS (无框架) + fetch.
+
+      ## 必读
+      - `qianxun/src/server/static_ui/{index.html,login.js}` (Stage 5)
+      - `qianxun/src/server/{mod.rs, auth.rs, team_db.rs}` (Stage 1-6b)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.1 REST, §6 Team/Project/Session)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun/src/server/static_ui/index.html` — 三栏 SPA 框架
+
+      Stage 5 登录后, 切换到三栏 (侧栏项目 / 中栏会话 / 右栏消息):
+      ```html
+      <div class="app">
+          <aside id="sidebar"> <!-- 项目列表 --> </aside>
+          <aside id="sessions"> <!-- 会话列表 --> </aside>
+          <main id="chat"> <!-- 消息流 + 输入框 --> </main>
+      </div>
+      <script src="app.js"></script>
+      ```
+
+      ### 2. 新建 `qianxun/src/server/static_ui/app.js` (~150 行, vanilla JS)
+
+      模块拆分:
+      ```javascript
+      // 1. fetchWithAuth(url, opts) — 统一加 Authorization: Bearer <token> 头
+      // 2. 登录 → 存 localStorage.qxvps_token
+      // 3. 拉 GET /api/projects → 渲染侧栏
+      // 4. 点项目 → 拉 GET /api/chat/sessions?project_id=... → 渲染中栏
+      // 5. 点会话 → 拉 SSE /v1/chat/session/:id/prompt 流 (复用 daemon SSE 协议, 不重写)
+      // 6. 输入框 + send 按钮 → POST /v1/chat/session/:id/prompt with body
+      // 7. 消息块用 markdown-it (CDN) 渲染 (Stage 7 接编辑器)
+      ```
+
+      ### 3. 新建 `qianxun/src/server/static_ui/style.css` (~80 行)
+
+      基础样式:
+      - 200/280/自适应 grid (与 Tauri 同布局)
+      - 消息气泡: user 蓝底右对齐, assistant 灰底左对齐
+      - 输入框: 底部 fixed, Enter 发送 / Shift+Enter 换行
+      - 暗色主题: 用 CSS 变量 + prefers-color-scheme
+
+      ### 4. 改 `qianxun/src/server/static_ui/login.js` — 登录后跳到 app.html
+
+      Stage 5 登录成功后 location.href = '/app.html' (新文件). 但 Stage 6c 简化: 全部塞 index.html, 登录 + app 都在一个文件, 用 localStorage.qxvps_token 区分状态.
+
+      ### 5. 单测 (前端)
+
+      `qianxun/src/server/static_ui/app.test.js` (新建, 1 个, 纯函数):
+      - `test_fetchWithAuth_adds_bearer_header`: mock fetch, 验证 Authorization header 包含 token
+      - 跑用 vitest (在项目根或 VPS 子目录配 vitest)
+
+      ## 关键约束
+
+      - **vanilla JS, 不用 React/Vue** (Stage 5 决策)
+      - **SSE 流式聊天消费** 用浏览器 EventSource (GET) 或 fetch + ReadableStream (POST)
+        Stage 6c 简化: 用 fetch + ReadableStream 直接读, 跟 Tauri 端 SSE 客户端同模式
+      - **不动 server 端** (server/auth.rs + team_db.rs + mod.rs 已就绪, 这次只前端)
+      - **不引入新 crate** (纯 HTML/CSS/JS)
+      - **不修改 shared-contract** (前端消费的 endpoint 已 §3.1 锁)
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要做完整 markdown 渲染 (Stage 7 加编辑器)
+      - 不要做项目创建/编辑 UI (Stage 7)
+      - 不要做消息持久化 (Daemon 端有 event_log, web 端刷新即丢)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun/src/server/static_ui/{index.html, login.js, app.js, style.css}` (新建/改)
+      - `qianxun/src/server/static_ui/app.test.js` (新建)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] index.html 三栏结构 (sidebar / sessions / chat)
+      - [ ] app.js: fetchWithAuth 加 Bearer header (读 localStorage.qxvps_token)
+      - [ ] app.js: 拉 /api/projects 渲染侧栏
+      - [ ] app.js: 拉 /api/chat/sessions 渲染中栏
+      - [ ] app.js: 点会话 → fetch + ReadableStream 读 SSE 事件
+      - [ ] app.js: 输入框 Enter/Shift+Enter, POST 发送
+      - [ ] app.js: 消息按 role 渲染 (user 蓝 / assistant 灰)
+      - [ ] style.css: 200/280/自适应 grid + 暗色主题
+      - [ ] 1 单测过 (fetchWithAuth 加 header)
+      - [ ] cargo build -p qianxun 通过 (server 端不变, 只是加静态资源)
+      - [ ] cargo test server:: 全过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: tauri-stage6c-writefetch-routing
+    title: 'Tauri Stage 6c: 写操作真接 fetch (vpsStore 3 方法连 VPS) + TeamSwitcher 完整路由'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 把 Stage 6b vpsStore 3 方法 (inviteMember/changeRole/assignProject) 从 mock 改为真接 fetch VPS. 改 Sidebar 集成 TeamSwitcher → MemberEditor → ProjectAssignPanel 完整路由.
+
+      ## 必读
+      - `qianxun-desktop/src/lib/stores/vps.svelte.ts` (Stage 6b mock 3 方法)
+      - `qianxun-desktop/src/lib/components/team/{TeamSwitcher, MemberList, MemberEditor, ProjectAssignPanel}.svelte` (Stage 5-6b)
+      - `qianxun-desktop/src/lib/components/layout/Sidebar.svelte` (Stage 5)
+      - `qianxun-desktop/src/lib/stores/settings.svelte.ts` (vpsUrl 字段)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun-desktop/src/lib/stores/vps.svelte.ts` — 3 方法真接 fetch
+
+      ```typescript
+      /// 通用 fetch wrapper, 自动带 Bearer token
+      async function vpsFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+          const token = localStorage.getItem('qxvps_token') ?? '';
+          return fetch(`${settingsStore.vpsUrl}${path}`, {
+              ...opts,
+              headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                  ...(opts.headers ?? {}),
+              },
+          });
+      }
+
+      class VpsStore {
+          async inviteMember(teamId: string, userId: string, role: string): Promise<void> {
+              const r = await vpsFetch(`/api/teams/${teamId}/members`, {
+                  method: 'POST', body: JSON.stringify({ user_id: userId, role }),
+              });
+              if (!r.ok) throw new Error(`inviteMember failed: ${r.status}`);
+              this.refreshMembers(teamId);
+          }
+          // changeRole / assignProject 类似
+      }
+      ```
+
+      ### 2. 改 `qianxun-desktop/src/lib/components/layout/Sidebar.svelte` — 完整路由
+
+      ```svelte
+      <script lang="ts">
+          import TeamSwitcher from '$lib/components/team/TeamSwitcher.svelte';
+          import MemberList from '$lib/components/team/MemberList.svelte';
+          import MemberEditor from '$lib/components/team/MemberEditor.svelte';
+          import ProjectAssignPanel from '$lib/components/team/ProjectAssignPanel.svelte';
+          import { teamStore } from '$lib/stores/team.svelte';  // 新建
+      </script>
+
+      <TeamSwitcher teams={teamStore.teams} activeTeamId={teamStore.activeTeamId}
+                    onSelect={(id) => teamStore.activeTeamId = id} />
+      {#if teamStore.activeTeam}
+          <MemberList team={teamStore.activeTeam} members={teamStore.members} />
+          <MemberEditor team={teamStore.activeTeam} members={teamStore.members}
+                       onChanged={() => teamStore.refresh()} />
+      {/if}
+      <ProjectAssignPanel projects={teamStore.projects} members={teamStore.members} />
+      ```
+
+      ### 3. 新建 `qianxun-desktop/src/lib/stores/team.svelte.ts` (~80 行)
+
+      Team state (Stage 6c 新建):
+      ```typescript
+      class TeamStore {
+          teams = $state<Team[]>([]);
+          activeTeamId = $state<string | null>(null);
+          members = $state<TeamMember[]>([]);
+          projects = $state<Project[]>([]);
+
+          async refresh(): Promise<void>;          // 拉 teams / members / projects
+          get activeTeam(): Team | null;
+      }
+      export const teamStore = new TeamStore();
+      ```
+
+      ### 4. 单测
+
+      `qianxun-desktop/src/lib/stores/vps.svelte.test.ts` 改: 把 Stage 6b mock 测改真 fetch 测 (用 vi.spyOn(global, 'fetch'))
+      - `test_inviteMember_real_fetch_sends_POST`: spy fetch, 验证 vpsStore.inviteMember 真发了 POST + 带 Authorization Bearer
+      - `test_inviteMember_token_missing_throws`: localStorage 没 qxvps_token → throw
+
+      ## 关键约束
+
+      - **不接错误重试** (Stage 7 加)
+      - **不接实时 WS 同步** (Stage 7, 这次 refresh only)
+      - **不接项目创建 UI** (Stage 7)
+      - **不引入新前端 crate**
+      - **不修改 _shared-contract.md**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要做完整 E2E (单测用 fetch mock 即可)
+      - 不要做多团队切换动画
+      - 不要做权限检查 (Stage 7 加 role-based UI)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun-desktop/src/lib/stores/vps.svelte.ts` (改, 3 方法真接 fetch)
+      - `qianxun-desktop/src/lib/stores/team.svelte.ts` (新建)
+      - `qianxun-desktop/src/lib/components/layout/Sidebar.svelte` (改, 完整路由)
+      - `qianxun-desktop/src/lib/stores/vps.svelte.test.ts` (改, fetch spy 测)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] vpsFetch wrapper 加 Authorization Bearer (读 localStorage.qxvps_token)
+      - [ ] vpsStore 3 方法 (inviteMember/changeRole/assignProject) 真接 fetch POST/PATCH
+      - [ ] 错误处理: !r.ok 时 throw
+      - [ ] team.svelte.ts 新建: teams / activeTeamId / members / projects 4 state + refresh 方法
+      - [ ] Sidebar 集成 TeamSwitcher + MemberList + MemberEditor + ProjectAssignPanel
+      - [ ] 选团队 → 拉该团队 members + projects
+      - [ ] 2 单测过 (real fetch 测 + token missing 测)
+      - [ ] pnpm run check 0/0
+      - [ ] pnpm run build 成功
+      - [ ] 没引入新前端 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).

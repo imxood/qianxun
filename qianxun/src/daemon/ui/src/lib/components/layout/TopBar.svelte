@@ -1,9 +1,11 @@
 <script lang="ts">
-	// Stage 7a TopBar — daemon 状态指示 + token 配置
-	// token 配置: 显示当前已配置, 点击编辑
+	// Stage 7b TopBar — daemon 状态指示 + 主题切换 (light/dark/system) + 语言切换 (zh/en) + token 配置
+	// 主题走 themeStore (mode-watcher); 语言走 i18n/locale store
 
-	import { Circle, KeyRound, LogOut, RefreshCw } from '@lucide/svelte';
+	import { Circle, KeyRound, LogOut, RefreshCw, Sun, Moon, Monitor, Languages } from '@lucide/svelte';
 	import { authStore } from '$lib/stores/auth.svelte';
+	import { themeStore } from '$lib/stores/theme.svelte';
+	import { setLocale, locale, t } from '$lib/i18n';
 	import { onMount } from 'svelte';
 
 	type Props = {
@@ -13,7 +15,7 @@
 	let { onConfigureToken }: Props = $props();
 
 	type DaemonState = 'connected' | 'unknown' | 'offline';
-	let daemonState: DaemonState = $state<DaemonState>('unknown');
+	let daemonState = $state<DaemonState>('unknown');
 	let version = $state<string>('');
 
 	async function refresh() {
@@ -46,6 +48,15 @@
 		authStore.clear();
 	}
 
+	function toggleTheme() {
+		themeStore.toggle();
+	}
+
+	function toggleLang() {
+		const cur = $locale;
+		setLocale(cur === 'zh-CN' ? 'en' : 'zh-CN');
+	}
+
 	onMount(() => {
 		void refresh();
 		const t = setInterval(refresh, 10_000);
@@ -54,18 +65,25 @@
 
 	const stateLabel = $derived(
 		daemonState === 'connected'
-			? 'Daemon 已连接'
+			? t('topbar.connected')
 			: daemonState === 'offline'
-				? 'Daemon 离线'
-				: '未鉴权'
+				? t('topbar.offline')
+				: t('topbar.unauth')
 	);
 	const stateColor = $derived(
 		daemonState === 'connected' ? '#22c55e' : daemonState === 'offline' ? '#ef4444' : '#a3a3a3'
 	);
 	const tokenMask = $derived(
-		authStore.token
-			? authStore.token.slice(0, 6) + '…' + authStore.token.slice(-4)
-			: '未配置'
+		authStore.token ? authStore.token.slice(0, 6) + '…' + authStore.token.slice(-4) : t('topbar.set_token')
+	);
+
+	const ThemeIcon = $derived(themeStore.mode === 'light' ? Sun : themeStore.mode === 'dark' ? Moon : Monitor);
+	const themeTitle = $derived(
+		themeStore.mode === 'light'
+			? t('topbar.theme_light')
+			: themeStore.mode === 'dark'
+				? t('topbar.theme_dark')
+				: t('topbar.theme_system')
 	);
 </script>
 
@@ -91,6 +109,31 @@
 	</div>
 
 	<div class="flex items-center gap-2 text-sm">
+		<!-- 主题切换 -->
+		<button
+			type="button"
+			class="border-input hover:bg-accent rounded-md border px-2 py-1"
+			title="theme: {themeTitle}"
+			aria-label="切换主题"
+			onclick={toggleTheme}
+			data-testid="topbar-theme-toggle"
+		>
+			<ThemeIcon class="h-3.5 w-3.5" />
+		</button>
+
+		<!-- 语言切换 -->
+		<button
+			type="button"
+			class="border-input hover:bg-accent flex items-center gap-1 rounded-md border px-2 py-1 text-xs"
+			title="language: {$locale}"
+			aria-label="切换语言"
+			onclick={toggleLang}
+			data-testid="topbar-lang-toggle"
+		>
+			<Languages class="h-3.5 w-3.5" />
+			{$locale === 'zh-CN' ? '中' : 'EN'}
+		</button>
+
 		<div class="text-muted-foreground flex items-center gap-1.5">
 			<KeyRound class="h-3.5 w-3.5" />
 			<code class="bg-muted rounded px-1.5 py-0.5 text-xs">{tokenMask}</code>
@@ -101,14 +144,14 @@
 			onclick={onConfigureToken}
 			data-testid="topbar-configure-token"
 		>
-			{authStore.token ? '更换' : '设置'}
+			{authStore.token ? t('topbar.change_token') : t('topbar.set_token')}
 		</button>
 		{#if authStore.token}
 			<button
 				type="button"
 				class="text-muted-foreground hover:text-foreground"
-				title="登出"
-				aria-label="登出"
+				title={t('topbar.logout')}
+				aria-label={t('topbar.logout')}
 				onclick={logout}
 			>
 				<LogOut class="h-3.5 w-3.5" />

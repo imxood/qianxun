@@ -1,0 +1,348 @@
+version: 1
+plan:
+  name: '三子项目 Stage 6b (Daemon 客户端 token 传递 / VPS rate-limit 文件持久化 / Tauri 写操作 UI)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 3
+  timeout_ms: 1800000
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage6b-client-token
+    title: 'Daemon Stage 6b: 客户端 token 传递 (X-Qianxun-Token header)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 让 Daemon HTTP client (qianxun/src/client/mod.rs, Stage 4 新建) 在每个请求里自动带 `Authorization: Bearer <jwt>` 或 `X-Qianxun-Token: <jwt>` header.
+
+      ## 必读
+      - `qianxun/src/client/mod.rs` (Stage 4 DaemonClient, 4 方法)
+      - `qianxun/src/main.rs` (clap 入口)
+      - `qianxun/src/daemon/router.rs` (auth_middleware, Stage 6a JWT 校验)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.1)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun/src/client/mod.rs` — DaemonClient 加 token 字段
+
+      ```rust
+      pub struct DaemonClient {
+          base_url: String,
+          http: reqwest::Client,
+          /// 客户端 token (Stage 6a JWT, 来源: env var QIANXUN_CLIENT_TOKEN 或 main.rs 注入).
+          /// None = 不带 token (Stage 5 旧行为, 兼容 X-Api-Key 测试).
+          token: Option<String>,
+      }
+      impl DaemonClient {
+          pub fn new(base_url: String) -> Self { /* token: None */ }
+          /// 构造时直接带 token (生产路径)
+          pub fn with_token(base_url: String, token: String) -> Self;
+      }
+      ```
+
+      4 个方法 (health / create_session / list_sessions / stream_prompt) 在 build request 时, 若 token.is_some() 就 add header:
+      ```rust
+      .bearer_auth(token)  // 自动加 "Authorization: Bearer <token>"
+      ```
+
+      ### 2. 改 `qianxun/src/main.rs` — clap 加 `--client-token <token>` + env var
+
+      ```rust
+      #[arg(long, env = "QIANXUN_CLIENT_TOKEN")]
+      client_token: Option<String>,
+      ```
+
+      CLI REPL 分支检测 daemon_url 时, 用 `DaemonClient::with_token(daemon_url, token)` 而非 `DaemonClient::new(daemon_url)`.
+
+      TUI/ACP 同样接 client_token (传 thin client 路径).
+
+      ### 3. 改 `qianxun/src/daemon/router.rs` — auth_middleware 读 `Authorization` header (Stage 6a 已加)
+
+      Stage 6a 已实现 Bearer auth, 这次只确认:
+      - claims 写入 request.extensions
+      - daemon (自家 Rust binary) 调自己时: `--client-token` flag → env var QIANXUN_CLIENT_TOKEN → DaemonClient.with_token → 请求带 Authorization header → server auth_middleware 验证 → 200
+
+      ### 4. 单测
+
+      `qianxun/src/client/mod.rs` 末尾 `#[cfg(test)] mod tests`:
+      - `test_request_includes_bearer_header`: 用 mock server, 验证收到 `Authorization: Bearer <token>`
+      - `test_request_without_token_omits_header`: None 时不带 header
+      - `test_with_token_constructor_stores_token`: `DaemonClient::with_token(url, "tok")` 内部 token 字段是 Some
+
+      ## 关键约束
+
+      - **不动 auth_middleware 本身** (Stage 6a 已实现)
+      - **不接 token 自动刷新** (Stage 7 跟 VPS 集成 login_handler 时再加)
+      - **不接 token 加密存储** (Stage 6a stronghold 已有, 但启动时用 token 注入, 不读 stronghold)
+      - **不引入新 crate** (reqwest 0.13 已有)
+      - **不修改 shared-contract**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要加 token 刷新/重试/限流
+      - 不要写完整 e2e (mock 单测即可)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun/src/client/mod.rs` (改)
+      - `qianxun/src/main.rs` (改, --client-token flag)
+      - `qianxun/src/daemon/router.rs` (改, 确认 auth_middleware 读 Authorization)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] DaemonClient 加 token: Option<String> 字段
+      - [ ] DaemonClient::new 默认 token=None
+      - [ ] DaemonClient::with_token(url, token) 构造带 token
+      - [ ] 4 方法 (health/create_session/list_sessions/stream_prompt) 在 request builder 上加 .bearer_auth(token)
+      - [ ] None token 时**不**加 header (兼容旧 mock)
+      - [ ] main.rs 加 --client-token <token> + env var QIANXUN_CLIENT_TOKEN
+      - [ ] 3 单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: vps-stage6b-ratelimit-file
+    title: 'VPS Server Stage 6b: rate-limit 文件持久化 (per-user 限流跨重启)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 把 `qianxun/src/server/rate_limit.rs` (Stage 5 in-memory) 的 token bucket 状态持久化到 JSON 文件, 跨重启保留限流状态.
+
+      ## 必读
+      - `qianxun/src/server/rate_limit.rs` (Stage 5 实现)
+      - `qianxun/src/server/mod.rs` (RateLimiter 接入位置)
+      - `qianxun/Cargo.toml` (serde + serde_json 已有)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun/src/server/rate_limit.rs` — RateLimiter 加持久化
+
+      ```rust
+      pub struct RateLimiter {
+          buckets: Arc<RwLock<HashMap<String, Bucket>>>,
+          /// 持久化文件路径 (默认 ~/.qianxun/rate-limit.json)
+          persist_path: PathBuf,
+      }
+      impl RateLimiter {
+          pub fn new() -> Self { /* 不持久化, 兼容测试 */ }
+          pub fn with_persist(persist_path: PathBuf) -> Result<Self>;
+          /// check 时, 若 last_refill 距 now > 5s, 调 persist() (节流写盘)
+          pub fn check(&self, user_id: &str) -> Result<(), RateError>;
+          /// 显式 flush (供 shutdown 时调)
+          pub fn persist(&self) -> Result<(), RateError>;
+          /// 启动加载 (调 from_persist)
+          pub fn load(&self) -> Result<(), RateError>;
+      }
+      ```
+
+      文件格式 (serde JSON):
+      ```json
+      {
+        "version": 1,
+        "users": {
+          "user_xxx": { "tokens": 8.5, "last_refill_unix": 1700000000 }
+        }
+      }
+      ```
+
+      ### 2. 改 `qianxun/src/server/mod.rs` — VpsState 加 persist 字段, run() 调 load
+
+      ```rust
+      let rate_limiter = RateLimiter::with_persist(rate_limit_path)?;
+      rate_limiter.load()?;  // 启动加载上次状态
+      let state = VpsState { rate_limiter, .. };
+      // shutdown 时: state.rate_limiter.persist()
+      ```
+
+      ### 3. 单测
+
+      `qianxun/src/server/rate_limit.rs` 末尾:
+      - `test_persist_and_load_roundtrip`: 创建 limiter, 改 bucket, persist, 重建 limiter, load, 验证状态恢复
+      - `test_persist_throttled_to_5s_interval`: 连续 10 次 check 改 bucket, 但 persist 只写一次 (节流)
+      - `test_load_missing_file_creates_empty`: load 文件不存在 → 不报错, 返空 map
+
+      ## 关键约束
+
+      - **文件持久化简单, 不用 SQLite** (Stage 5 选 HashMap 简化, 这里升级 JSON 足够)
+      - **节流写盘** (每 5s 最多一次, 避免每次 check 都 IO)
+      - **不接 Redis / 跨进程** (Stage 7 才是)
+      - **不引入新 crate** (serde + serde_json + std::fs 已有)
+      - **不修改 shared-contract**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要做 atomic rename (写盘是 best-effort, 进程崩溃接受)
+      - 不要做后台定时 flush 线程 (5s 节流 + shutdown 显式 flush 足够)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun/src/server/rate_limit.rs` (改)
+      - `qianxun/src/server/mod.rs` (改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] RateLimiter 加 persist_path: PathBuf 字段
+      - [ ] with_persist(path) 构造 + load() + persist() 3 方法
+      - [ ] check() 内部 5s 节流持久化
+      - [ ] JSON 格式 { version, users: { user_id: { tokens, last_refill_unix } } }
+      - [ ] VpsState 加 rate_limiter 字段 + run() 调 load
+      - [ ] shutdown 信号触发 rate_limiter.persist() (可选, 显式调用即可)
+      - [ ] 3 单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] cargo test -p qianxun --bin qx server::rate_limit 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: tauri-stage6b-write-ui
+    title: 'Tauri Stage 6b: 写操作 UI (加成员/改角色/分配项目) + stronghold 自动加载'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 在 Stage 5 TeamSwitcher + MemberList 基础上加写操作 UI (加成员 / 改角色 / 分配项目), 用 stronghold (Stage 6a) 存 VPS 凭据.
+
+      ## 必读
+      - `qianxun-desktop/src/lib/components/team/{TeamSwitcher,MemberList}.svelte` (Stage 5 只读)
+      - `qianxun-desktop/src/lib/stores/vps.svelte.ts` (Stage 4 3 态)
+      - `qianxun-desktop/src/lib/ipc/bridge.ts` (Stage 6a setSecret/getSecret)
+      - `qianxun-desktop/src/lib/types/ipc.ts` (Project / TeamMember 类型)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 新建 `qianxun-desktop/src/lib/components/team/MemberEditor.svelte` (~120 行)
+
+      加成员 / 改角色 UI:
+      ```svelte
+      <script lang="ts">
+          import type { TeamMember, Team } from '$lib/types/ipc';
+          import { setSecret, getSecret } from '$lib/ipc/bridge';
+          import { vpsStore } from '$lib/stores/vps.svelte';
+          import { settingsStore } from '$lib/stores/settings.svelte';
+
+          let { team, members, onChanged }: {
+              team: Team;
+              members: TeamMember[];
+              onChanged: () => void;
+          } = $props();
+
+          let adding = $state(false);
+          let newUserId = $state('');
+          let newRole = $state<'member' | 'admin'>('member');
+
+          async function add() {
+              // 调 vpsStore.inviteMember(team.id, newUserId, newRole)
+              // (vpsStore 还没 inviteMember, 本次新增)
+              await vpsStore.inviteMember(team.id, newUserId, newRole);
+              adding = false;
+              onChanged();
+          }
+      </script>
+
+      <div>
+          {#each members as m}
+              <div class="flex items-center gap-2 py-1">
+                  <span>{m.displayName}</span>
+                  <select value={m.role} onchange={...} class="text-xs">
+                      <option value="owner">owner</option>
+                      <option value="admin">admin</option>
+                      <option value="member">member</option>
+                  </select>
+              </div>
+          {/each}
+          <button onclick={() => adding = true}>+ 加成员</button>
+          {#if adding}
+              <input bind:value={newUserId} placeholder="user_id" />
+              <select bind:value={newRole}>...</select>
+              <button onclick={add}>确认</button>
+          {/if}
+      </div>
+      ```
+
+      ### 2. 改 `qianxun-desktop/src/lib/stores/vps.svelte.ts` — 加 3 方法
+
+      ```typescript
+      class VpsStore {
+          /// 调 VPS REST: POST /api/teams/:id/members { user_id, role }
+          async inviteMember(teamId: string, userId: string, role: string): Promise<void>;
+
+          /// 调 VPS REST: PATCH /api/teams/:id/members/:user_id { role }
+          async changeRole(teamId: string, userId: string, role: string): Promise<void>;
+
+          /// 调 VPS REST: POST /api/projects/:id/assign { user_id }
+          async assignProject(projectId: string, userId: string): Promise<void>;
+      }
+      ```
+
+      这 3 方法都 fetch VPS base URL, 带 Authorization Bearer header (从 stronghold 取 vpsToken).
+      **Stage 6b 简化**: 不真调, 只 mock (返回 Ok, UI 看到调用成功). Stage 6c 才接真 fetch.
+
+      ### 3. 改 `qianxun-desktop/src/lib/stores/settings.svelte.ts` — 启动时从 stronghold 读 vpsToken
+
+      ```typescript
+      // onMount 时, 若 settingsStore.vpsUrl 非空:
+      //   const vpsToken = await getSecret('vps-token', userInputPassword)
+      //   (Stage 6b 简化: 跳过密码弹窗, 直接用 localStorage fallback)
+      ```
+
+      实际 Stage 6b 简化: 跳过 stronghold 读, 直接读 `localStorage.getItem('vps-token')`. Stage 7 加密码弹窗.
+
+      ### 4. 改 `qianxun-desktop/src/lib/components/team/ProjectAssignPanel.svelte` (~80 行, 新建)
+
+      分配项目成员 UI:
+      - 显示所有 team 成员
+      - 选成员 + 调 vpsStore.assignProject(projectId, userId)
+
+      ### 5. 单测
+
+      `qianxun-desktop/src/lib/stores/vps.svelte.test.ts` 加 1 单测:
+      - `test_inviteMember_member_stores_role_change`: 调 inviteMember → mock 验证本地成员列表 role 更新
+
+      ## 关键约束
+
+      - **写操作 mock 不真发请求** (Stage 6b 简化, Stage 6c 真接 fetch)
+      - **stronghold 跳过, 用 localStorage fallback** (Stage 6b 简化, Stage 7 加)
+      - **不接 TeamSwitcher → MemberEditor → ProjectAssignPanel 完整路由** (Stage 6c)
+      - **不引入新前端 crate**
+      - **不修改 _shared-contract.md**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要写完整 fetch 客户端 (Stage 6c)
+      - 不要做密码弹窗 (Stage 7)
+      - 不要做成员邀请邮件 (留 Stage 7 跟 VPS auth 集成时再加)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun-desktop/src/lib/components/team/MemberEditor.svelte` (新建)
+      - `qianxun-desktop/src/lib/components/team/ProjectAssignPanel.svelte` (新建)
+      - `qianxun-desktop/src/lib/stores/vps.svelte.ts` (改, +3 方法)
+      - `qianxun-desktop/src/lib/stores/settings.svelte.ts` (改, stronghold 跳过)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] MemberEditor 显示每个成员的 role select (owner/admin/member)
+      - [ ] MemberEditor "加成员" 按钮 → 输入 user_id + 选 role → 调 vpsStore.inviteMember
+      - [ ] ProjectAssignPanel 显示团队成员, 选成员 → 调 vpsStore.assignProject
+      - [ ] vpsStore 新增 3 方法: inviteMember / changeRole / assignProject
+      - [ ] 3 方法 mock 不真发 fetch (Stage 6b 简化, Stage 6c 真接)
+      - [ ] settings.svelte.ts 启动读 localStorage 'vps-token' (跳过 stronghold 密码弹窗)
+      - [ ] 1 单测过
+      - [ ] pnpm run check 0/0
+      - [ ] pnpm run build 成功
+      - [ ] 没引入新前端 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).

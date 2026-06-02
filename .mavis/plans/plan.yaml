@@ -1,0 +1,250 @@
+version: 1
+plan:
+  name: 'hermes-agent 架构分析 + qianxun 多 Agent 架构设计'
+  max_concurrency: 3
+  max_consecutive_failures: 2
+  max_cycles: 8
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: hermes-analysis
+    title: '深度分析 hermes-agent 的 kanban/team/multi-agents 架构'
+    assigned_to: general
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      请深度分析 E:/git/ai/hermes-agent 项目的 kanban / team / multi-agents 架构。这是一个 Python 实现的 AI Agent 平台, 用户希望基于它的架构思想来设计 qianxun 项目 (Rust) 的多 Agent 架构。
+
+      ## 分析范围
+      聚焦:
+      1. Kanban 系统 (看板/任务编排) — 数据模型、状态机、API、持久化
+      2. Team 系统 (多 Agent 协作) — agent 角色、调度、消息传递
+      3. Multi-agents (子 Agent/委派) — 任务分发、并发、结果回收
+      4. 这三者的协作关系
+      5. UI 层 (TUI / Web) 如何呈现这些功能
+
+      ## 必读源 (按优先级)
+      - E:/git/ai/hermes-agent/AGENTS.md (50KB 项目总览, 必读)
+      - E:/git/ai/hermes-agent/agent/ (核心 agent 代码, 先列子目录, 找到 kanban/team/相关文件)
+      - E:/git/ai/hermes-agent/gateway/ (orchestration gateway)
+      - E:/git/ai/hermes-agent/tui_gateway/ (TUI gateway)
+      - E:/git/ai/hermes-agent/ui-tui/ (TUI 实现)
+      - E:/git/ai/hermes-agent/web/, website/ (Web 端)
+      - E:/git/ai/hermes-agent/plugins/, skills/, plans/, optional-skills/
+      - E:/git/ai/hermes-agent/providers/
+      - E:/git/ai/hermes-agent/tools/
+      - E:/git/ai/hermes-agent/cron/
+      - E:/git/ai/hermes-agent/cli-config.yaml.example (配置文件 schema)
+      - E:/git/ai/hermes-agent/batch_runner.py (批量任务运行)
+
+      ## 重点回答
+      1. Kanban 的数据模型 (task / board / column / swimlane?)?
+      2. Kanban 与 agent execution 如何挂钩? task 上挂载 agent run?
+      3. Team 是固定多 agent 还是动态生成? agent 之间如何通信?
+      4. Multi-agents 的子 agent 调度是树形 / DAG / 其他?
+      5. 是否支持 plan/reflect/workflow 模式? 哪类适合长任务?
+      6. UI 层 (TUI + Web) 怎样呈现这些状态?
+      7. 数据持久化怎么组织?
+      8. 配置系统如何支持 role/agent 模板?
+      9. 有没有 session/workspace 概念? 如何跟 task 关联?
+      10. 关键代码路径: 新 task 从用户输入 → agent 执行 → UI 更新的完整流转
+
+      ## 输出要求
+      写入 E:/git/maxu/qianxun/.mavis/plans/hermes-analysis.md, 中文, 必须包含:
+
+      1. 执行摘要 (核心架构, 一段话)
+      2. 项目快照 (技术栈, 规模, 关键模块)
+      3. Kanban 系统 — 数据模型, API, 状态机, 持久化, 代码引用 (file:line)
+      4. Team 系统 — agent 角色, 调度, 通信, 代码引用
+      5. Multi-agents — 子 agent 模式, 任务分发, 关键路径
+      6. UI 集成 — TUI/Web 怎么呈现
+      7. 关键设计模式 — 提炼 3-7 个值得借鉴的模式 (每个含: 模式名 / 适用场景 / 在 hermes-agent 中的实现 / 可移植性评估)
+      8. 不推荐照搬的部分 — 过度复杂、与 Rust/私有部署不兼容的地方
+      9. 数据流 — 端到端流转图 (文字 + ASCII)
+      10. 证据索引 — 所有结论标注 file_path:line_number
+
+      要求:
+      - 严格基于代码, 不要凭印象. 不确定的地方明确标注 [待确认]
+      - 代码引用必须 file_path:line_number 格式
+      - 长度 4000-8000 字, 内容质量优先
+      - 完成后只输出报告完整路径和 1-2 句总结
+
+    verify_prompt: |
+      请独立验证 E:/git/maxu/qianxun/.mavis/plans/hermes-analysis.md 的事实正确性, 不要仅复述内容.
+
+      ## 验证方法
+      1. 随机抽取报告中的 8-10 处代码引用 (file_path:line_number), 实际打开 hermes-agent 对应文件, 确认内容与报告描述一致
+      2. 验证 3-5 个"关键设计模式"的提炼是否符合实际代码
+      3. 验证报告对 Kanban / Team / Multi-agents 三个子系统的描述是否覆盖了核心 (至少能找到对应的入口文件/类)
+      4. 验证"不推荐照搬的部分"是否真的在 hermes-agent 中存在
+
+      ## 输出
+      - PASS / FAIL 判定
+      - 如果 FAIL, 列出具体不准确引用 (报告位置 + 实际代码 + 差异)
+      - 如果 PASS, 简短说明抽样的覆盖率
+
+  - id: qianxun-analysis
+    title: '盘点 qianxun 当前架构状态、约束与缺口'
+    assigned_to: general
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      请盘点 E:/git/maxu/qianxun 项目当前的多 Agent / 协作 / 任务编排 相关架构状态。这是我们自己的项目, 你需要摸清现状、约束、缺口, 为后续借鉴 hermes-agent 架构做准备。
+
+      ## 必读源 (按优先级)
+      1. E:/git/maxu/qianxun/CLAUDE.md (项目规则, 必读)
+      2. E:/git/maxu/qianxun/docs/README.md (docs 总览)
+      3. E:/git/maxu/qianxun/docs/architecture.md (整体架构)
+      4. E:/git/maxu/qianxun/docs/daemon-design.md (Daemon 模式设计)
+      5. E:/git/maxu/qianxun/docs/agent-pattern-design.md (Agent 模式设计)
+      6. E:/git/maxu/qianxun/docs/mcp-design.md (MCP 设计)
+      7. E:/git/maxu/qianxun/docs/skills-design.md (Skills 设计)
+      8. E:/git/maxu/qianxun/docs/memory-design.md (Memory 设计)
+      9. E:/git/maxu/qianxun/docs/vps-server-design.md (VPS Server 设计)
+      10. E:/git/maxu/qianxun/docs/10_事实源/ (子系统状态文件)
+      11. E:/git/maxu/qianxun/docs/20_工作项/2026-06-01_TUI性能与Agent开发工具优化/阶段路线.md (A-G 路线)
+      12. E:/git/maxu/qianxun/docs/30_决策/ (历史决策)
+      13. E:/git/maxu/qianxun/qianxun-core/src/agent/ (核心 agent 代码)
+      14. E:/git/maxu/qianxun/qianxun-core/src/daemon/ (daemon 代码)
+      15. E:/git/maxu/qianxun/qianxun/src/main.rs (入口, 路由)
+
+      ## 重点回答
+      1. 现状: 哪些 Phase 1-3 已完成, 哪些 3a-3d 🟡, 哪些 4a/4b 📋 待办?
+      2. 现有 Agent 模型: qianxun-core/src/agent/ 有哪些类型? Conversation / Message / AgentLoop / plan / reflect / workflow 各自状态?
+      3. 现有 Daemon 形态: 已有哪些 HTTP 路由? session CRUD? 是否已接 AgentLoop? 瓶颈在哪?
+      4. TUI 现状: qianxun/src/tui/ 单文件 ~1730 行, 哪些功能齐全, 哪些是骨架?
+      5. ACP 协议: 已实现到哪一步?
+      6. Memory 引擎: 是否已可用? 接入 agent loop 了没?
+      7. MCP: ServerManager 跑起来了吗? Transport 完整吗?
+      8. Skills 加载: frontmatter 解析和加载闭环了吗?
+      9. 当前缺口: 距离"多 Agent 协作"还差什么? (工具层 / 调度层 / 状态层 / 持久化层 / 通信层)
+      10. 约束: 哪些是硬约束 (Rust 2024 / MSRV / 依赖策略 / 私有部署)?
+
+      ## 输出要求
+      写入 E:/git/maxu/qianxun/.mavis/plans/qianxun-analysis.md, 中文, 必须包含:
+
+      1. 项目快照 — workspace 三个 crate, 当前阶段
+      2. 子系统矩阵 — 表格: 子系统 / 当前状态 (✅/🟡/📋) / 关键文件 / 缺失
+      3. Agent 核心结构 — types/conversation/loop/workflow 各自状态, 代码引用
+      4. Daemon 形态 — 已实现路由表, 是否接 AgentLoop, 关键 gap
+      5. 前端/客户端矩阵 — TUI / ACP / Daemon thin client / VPS Web 四种入口当前完成度
+      6. 当前缺口 — 实现多 Agent 协作需要补的 5-10 个具体模块
+      7. 硬约束清单 — Rust 2024 / 依赖策略 / 私有部署 / 同步 API 等
+      8. 借鉴适配性 — qianxun 哪些地方天然适合借鉴 hermes-agent, 哪些地方需要绕开
+      9. 证据索引 — file_path:line_number 引用所有结论
+
+      要求:
+      - 严格基于代码和文档, 不清楚的标注 [待确认]
+      - 长度 3000-6000 字
+      - 完成后只输出报告完整路径和 1-2 句总结
+
+    verify_prompt: |
+      请独立验证 E:/git/maxu/qianxun/.mavis/plans/qianxun-analysis.md 的事实正确性和完整性, 不要仅复述内容.
+
+      ## 验证方法
+      1. 随机抽取 8-10 处文件引用 (file_path:line_number), 实际打开 qianxun 对应文件, 确认内容一致
+      2. 验证 CLAUDE.md 列出的 Phase 状态 (1✅/2✅/3a-3d🟡/4a-4b📋) 与报告描述一致
+      3. 验证"当前缺口"中列出的 5-10 个模块是否真的是 qianxun 还缺的能力 (通过 grep/ls 反查)
+      4. 验证"硬约束清单"是否覆盖了 CLAUDE.md 里的核心约束 (Rust 2024 / MSRV / 依赖策略 / 私有部署)
+      5. 验证 daemon 当前路由数量是否准确 (对照 qianxun-core/src/daemon/router.rs)
+
+      ## 输出
+      - PASS / FAIL 判定
+      - 如果 FAIL, 列出具体不准确引用
+      - 如果 PASS, 简短说明抽样的覆盖率
+
+  - id: synthesis-report
+    title: '综合设计: qianxun 多 Agent 架构 + 详细分析报告'
+    assigned_to: general
+    depends_on: [hermes-analysis, qianxun-analysis]
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      请综合 hermes-analysis 和 qianxun-analysis 的产出, 为 qianxun 项目设计一套"多 Agent / Kanban / Team 协作"架构, 并输出一份详细的最终分析报告 (deep-engineering-handbook 深度).
+
+      ## 输入文件 (必读)
+      - E:/git/maxu/qianxun/.mavis/plans/hermes-analysis.md
+      - E:/git/maxu/qianxun/.mavis/plans/qianxun-analysis.md
+
+      ## 任务
+      1. 重新读两份分析报告, 提炼 hermes-agent 可借鉴模式 + qianxun 现状缺口
+      2. 为 qianxun 设计一套完整的多 Agent 协作架构, 覆盖: 数据模型 / 调度 / 通信 / 持久化 / UI 呈现 / 配置 / 边界
+      3. 输出最终详细分析报告
+
+      ## 设计原则 (硬性)
+      - 基于 qianxun 现有分层: 必须能跟 qianxun-core (lib) + qianxun (bin) 的分层共存, 不破坏现有架构
+      - 基于 Phase 4a 路径: "Daemon 升级为唯一 Agent runtime, TUI/ACP 改 thin client" 是已定方向, 设计要顺这个方向走
+      - Rust 2024 + MSRV 1.85, 严格控制传递依赖
+      - 私有部署优先: 不假设公网服务
+      - 避免巨型单体: Kanban / Team / Multi-agents 各成独立模块, 通过 trait 解耦
+      - 沿用现有约定: qianxun-core 的 AgentTool / LlmProvider / ContextProvider / MemoryObserver trait 风格
+
+      ## 设计必须覆盖
+      1. 数据模型 — KanbanBoard / Task / AgentRun / Team / Role / Skill / Session 等核心类型, 字段定义
+      2. Kanban 子系统 — 状态机, API, 持久化 (SQLite? 复用 Memory? 独立 schema?), 跟 AgentLoop 挂钩
+      3. Team / Multi-agent 调度 — supervisor 模式 vs DAG 模式, 委派/委托, 消息传递 (in-process channel vs HTTP vs event bus)
+      4. Task Lifecycle — 新建 → 调度 → 执行 → 完成 → 验收 → 归档, 端到端流转
+      5. UI 集成 — TUI 怎么呈现 Kanban 视图 + 实时进度; Web/VPS Server 怎么暴露
+      6. 配置与角色模板 — 角色怎么注册, agent 模板, skill 挂载
+      7. 错误处理 / 重试 / 取消 — 长任务中用户怎么介入
+      8. 可观测性 — token 用量 / 任务统计 / 失败日志
+      9. 演进路线 — MVP / v2 / v3 三个阶段
+      10. 不引入的部分 — 显式说明从 hermes-agent 抛弃的过度设计
+
+      ## 输出要求
+      输出到 E:/git/maxu/qianxun/.mavis/plans/qianxun-multi-agent-architecture.md, 中文, deep-engineering-handbook 深度, 8000-15000 字.
+
+      报告结构 (强制):
+      1. 执行摘要 (300-500 字, 一段话讲清楚方案)
+      2. 设计目标与非目标 (明确)
+      3. 现状综合 (从 A/B 提炼, 不复述)
+      4. 借鉴的 hermes-agent 模式 (3-7 个, 含可移植性)
+      5. 核心架构图 (ASCII 描述模块关系)
+      6. 数据模型定义 (每个核心类型: 字段 / 含义 / 持久化方式)
+      7. Kanban 子系统 (状态机 / API / 持久化)
+      8. Team / Multi-agent 调度 (调度策略 / 通信机制 / 委派协议)
+      9. Task Lifecycle (端到端状态流转)
+      10. UI 集成 (TUI / Web)
+      11. 配置与角色系统
+      12. 错误处理 / 重试 / 取消
+      13. 可观测性
+      14. 演进路线 (MVP / v2 / v3 三个阶段, 对齐 Phase 4a/4b)
+      15. 不引入的部分 (从 hermes-agent 主动抛弃的)
+      16. 覆盖矩阵 (A/B 各自的关键发现对应到哪些最终设计点)
+      17. 证据索引 (A/B 引用 + qianxun docs 引用)
+      18. 开放问题 (待用户决策 / 待验证的)
+
+      ## Deliverable Contract (deep-engineering-handbook)
+      - 覆盖矩阵: A/B 各自的关键发现必须显式映射到报告章节
+      - 证据链: 每个核心设计决策必须有 (a) 借鉴来源 (b) qianxun 现状 (c) 理由 (d) 风险
+      - 不确定性: 显式标注 [A] 分析判断 vs [F] 事实, 不确定的标 [待确认]
+      - 端到端: 至少一个完整 task 流转示例 (从用户输入到 UI 反馈), 含具体文件路径
+
+      完成后, 只输出:
+      - 报告完整路径
+      - 报告执行摘要 (300-500 字)
+      - 3 个最关键的设计决策 (一句话+理由)
+
+    verify_prompt: |
+      请独立验证 E:/git/maxu/qianxun/.mavis/plans/qianxun-multi-agent-architecture.md 的设计质量, 不要仅复述内容.
+
+      ## 验证方法
+      1. **事实正确性** — 随机抽查 8-10 处文件引用, 实际打开 hermes-agent / qianxun 对应文件, 确认引用准确
+      2. **设计落地性** — 设计是否与 qianxun 现有架构 (CLAUDE.md / docs/architecture.md / Phase 4a 路线) 兼容? 是否违反 Rust 2024 / 依赖策略 / 私有部署硬约束?
+      3. **可借鉴模式是否真正适用** — 抽查 3 个"借鉴的 hermes-agent 模式", 判断在 Rust + 私有部署场景下是否合理, 是否有更简单的替代
+      4. **覆盖完整性** — 报告是否覆盖了任务要求的所有 10 个点? 是否有重要遗漏?
+      5. **演进路线合理性** — MVP / v2 / v3 的分阶段是否符合现有 4a/4b 路线?
+      6. **开放问题诚实度** — 是否把不确定的点明确暴露, 还是偷偷做了假设?
+      7. **覆盖矩阵** — A/B 各自的关键发现是否都映射到了最终设计点 (没有重要遗漏)
+      8. **不引入部分** — 显式声明从 hermes-agent 抛弃的部分是否合理
+
+      ## 验证深度 (deep-engineering-handbook 标准)
+      - 不能仅看报告本身, 必须回到原始代码抽查
+      - 对每个核心设计点, 判断"如果 reviewer 评审, 会接受吗?"
+      - 报告的代码引用要能 grep 到
+
+      ## 输出
+      - PASS / FAIL 判定
+      - 如果 FAIL, 列出 3-5 个具体可改进点 (报告位置 + 实际代码 + 建议)
+      - 如果 PASS, 给出整体评价 (字数 / 深度 / 落地性) 和 2-3 个可优化方向

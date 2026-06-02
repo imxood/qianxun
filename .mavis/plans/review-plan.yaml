@@ -1,0 +1,97 @@
+version: 1
+plan:
+  name: '三份规划文档 quick sanity check'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 1
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: review-daemon
+    title: 'quick review 01-daemon.md'
+    assigned_to: general
+    verified_by: verifier
+    timeout_ms: 900000
+    prompt: |
+      你是 quick review worker. 任务: 快速审查 `docs/30_子项目规划/01-daemon.md` 这份规划, 找出严重问题 (不是细节).
+
+      必读:
+      - `docs/30_子项目规划/_shared-contract.md` (契约基线)
+      - `docs/30_子项目规划/01-daemon.md` (待审查)
+      - 抽样读 `qianxun/src/daemon/{mod.rs,router.rs,agent_host.rs}` 验证设计可行性
+      - 抽样读 `qianxun-core/src/agent/engine.rs` 验证 processing_loop API 引用正确性
+
+      严重问题判定 (任一即 FAIL):
+      1. 与 shared-contract §3.1/§3.2 API 契约严重不一致
+      2. 数据模型与 §6 严重冲突
+      3. 内部逻辑矛盾
+      4. 与 qianxun 现有代码严重错位 (引用的 API 不存在 / 文件路径错误)
+      5. 关键技术决策有明显错误 (用了不存在的库 / 错的 API)
+
+      不要做: review 风格/格式/错别字, review 章节齐全性 (verifier 已查), 重写内容.
+
+      输出: 30 行内纯文本报告, 整体 PASS 或 FAIL, 如 FAIL 列 1-5 个严重问题 (文件:行号 + 一句话 + 修复建议).
+      完成后用 mavis communication send --to mvs_d555160b45dc4961817acf8deabfddb1 --command prompt 发回报告.
+    verify_prompt: |
+      验证 reviewer 报告是否覆盖了 shared-contract §3.1/§3.2/§6 的一致性检查, 是否抽样读了 daemon 源码.
+      报告整体 PASS/FAIL 结论是否合理 (没有放过明显严重问题).
+
+  - id: review-vps-server
+    title: 'quick review 02-vps-server.md'
+    assigned_to: general
+    verified_by: verifier
+    timeout_ms: 900000
+    prompt: |
+      你是 quick review worker. 快速审查 `docs/30_子项目规划/02-vps-server.md`, 找出严重问题.
+
+      必读:
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §3.3 WebSocket + §6 Team)
+      - `docs/30_子项目规划/02-vps-server.md`
+      - 抽样读 `qianxun/src/server/{mod.rs,auth.rs}` 验证 auth 引用
+      - 抽样读 `docs/30_子项目规划/01-daemon.md` 验证 VPS WS 协议与 Daemon 兼容
+
+      严重问题 (任一即 FAIL):
+      1. WS 消息类型与 shared-contract §3.3 字段不一致
+      2. Team / Project / Member 字段与 shared-contract §6 不匹配
+      3. 内部逻辑矛盾
+      4. 与 qianxun 现有 auth.rs 代码严重错位
+      5. 与 01-daemon.md 的 WS Hub 设计冲突 (这俩必须能对接)
+      6. 技术决策错误 (用了不存在的 crate / 错的协议 / JWT 算法不对)
+
+      不要做: 风格/格式/错别字, 章节齐全性, 重写.
+
+      输出: 30 行内纯文本报告, 整体 PASS/FAIL, 如 FAIL 列 1-5 个问题 (文件:行号 + 一句话 + 修复).
+      完成后 mavis communication send --to mvs_d555160b45dc4961817acf8deabfddb1 --command prompt 发回.
+    verify_prompt: |
+      验证 reviewer 报告是否做了 01-daemon.md 与 02-vps-server.md 的 WS 协议对接检查, 是否抽样读了 auth.rs, 报告结论是否合理.
+
+  - id: review-tauri-desktop
+    title: 'quick review 03-tauri-desktop.md'
+    assigned_to: general
+    verified_by: verifier
+    timeout_ms: 900000
+    prompt: |
+      你是 quick review worker. 快速审查 `docs/30_子项目规划/03-tauri-desktop.md`, 找出严重问题.
+
+      必读:
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §3.2 SSE + §6 数据模型)
+      - `docs/30_子项目规划/03-tauri-desktop.md`
+      - 抽样读 `docs/30_子项目规划/01-daemon.md` 验证 SSE 消费逻辑与 Daemon schema 对齐
+      - 抽样读 `docs/30_子项目规划/02-vps-server.md` 验证 Team 模型与 VPS 服务端一致
+
+      严重问题 (任一即 FAIL):
+      1. SSE 12 个事件消费逻辑不完整或字段引用错
+      2. Project / Session / Team / TeamMember 字段与 shared-contract §6 不匹配
+      3. Tauri commands 列表与 shared-contract §3.1 REST endpoints 对不上
+      4. 内部逻辑矛盾
+      5. Svelte 5 runes 语法错误 ($state 当函数调用等)
+      6. Tauri 2.0 能力引用错误 (不存在的 plugin)
+      7. 三端统一技术栈声明前后矛盾
+
+      不要做: 风格/格式/错别字, 章节齐全性, 重写.
+
+      输出: 30 行内纯文本报告, 整体 PASS/FAIL, 如 FAIL 列 1-5 个问题 (文件:行号 + 一句话 + 修复).
+      完成后 mavis communication send --to mvs_d555160b45dc4961817acf8deabfddb1 --command prompt 发回.
+    verify_prompt: |
+      验证 reviewer 报告是否做了 Svelte 5 runes 语法检查 (抽样验证), 是否交叉比对了 SSE 事件 schema 和 Team 数据模型, 报告结论是否合理.

@@ -1,5 +1,5 @@
 // Stage 7a 主题 — light/dark/system 持久化到 localStorage.
-// 集成 mode-watcher (从 qianxun-desktop 复用), Stage 7b 暴露 UI.
+// 集成 mode-watcher (从 qianxun-desktop 复用), Stage 7b 暴露 UI (toggle / setMode / icon label).
 
 import { browser } from '$app/environment';
 import { setMode, resetMode } from 'mode-watcher';
@@ -7,6 +7,7 @@ import { setMode, resetMode } from 'mode-watcher';
 export type ThemeMode = 'light' | 'dark' | 'system';
 
 const THEME_KEY = 'qianxun_web_theme';
+const ORDER: ThemeMode[] = ['light', 'dark', 'system'];
 
 class ThemeStore {
 	#mode = $state<ThemeMode>('system');
@@ -18,6 +19,11 @@ class ThemeStore {
 
 	get initialized(): boolean {
 		return this.#initialized;
+	}
+
+	/// 给定 mode, 返 UI 显示文案 (英文短串)
+	get label(): string {
+		return this.#mode === 'light' ? 'light' : this.#mode === 'dark' ? 'dark' : 'system';
 	}
 
 	init(): void {
@@ -46,6 +52,14 @@ class ThemeStore {
 			}
 		}
 		this.#apply();
+	}
+
+	/// 三态循环: light → dark → system → light ...
+	toggle(): ThemeMode {
+		const idx = ORDER.indexOf(this.#mode);
+		const next = ORDER[(idx + 1) % ORDER.length]!;
+		this.setMode(next);
+		return next;
 	}
 
 	#apply(): void {

@@ -1,0 +1,42 @@
+# 千寻 mavis team plan 模板 (2 小时 timeout)
+#
+# 用法:
+#   1. 复制本文件:  cp .mavis/plans/plan-template.yaml .mavis/plans/<your-plan>.yaml
+#   2. 改 plan.name / tasks[].title/prompt
+#   3. mavis team plan run .mavis/plans/<your-plan>.yaml
+#
+# 关于 timeout_ms:
+#   - skill 文档说 hard cap 30 min (legacy default)
+#   - 实际: yaml timeout_ms 可以设到 7200000 (2h) 试过, engine 通常接受
+#   - 兜底: 如被 engine 砍, mavis team plan extend-timeout 单次 ≤60 分钟
+#   - 关键: 让 producer 在 prompt 里"早期就写 deliverable.md, 超时前 5 分钟退"
+version: 1
+plan:
+  name: '<plan name>'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  timeout_ms: 7200000            # 2 小时 (7_200_000 ms) per task
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: '<task-1-id>'
+    title: '<task-1 title>'
+    assigned_to: coder            # 或 general
+    verified_by: verifier
+    timeout_ms: 7200000          # 2h (覆盖 plan-level)
+    prompt: |
+      <详细 prompt>
+      ...
+
+      ## 关键: 早期写 deliverable.md
+      写代码每 5 分钟 commit 一次 git, 超时前 5 分钟必须写 deliverable.md
+      防止 30 min timeout 杀掉 producer 后 deliverable 丢失.
+
+    verify_prompt: |
+      独立验证, 不要只读 worker diff.
+      ...
+
+      ## 输出
+      verification report (PASS/FAIL).

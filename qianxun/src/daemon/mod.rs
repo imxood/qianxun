@@ -7,7 +7,9 @@ pub mod session_runtime;
 pub mod sse;
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::Instant;
 
 use qianxun_core::config::ResolvedConfig;
 use qianxun_core::provider::{create_provider, LlmProvider};
@@ -17,6 +19,7 @@ use tokio::sync::watch;
 
 use qianxun_memory::MemoryCore;
 
+use crate::buf_writer::LogRing;
 use crate::daemon::agent_host::{AgentLoopHost, SharedState};
 use crate::daemon::llm_providers::LlmProviderManager;
 use crate::daemon::persistence::SessionStore;
@@ -54,6 +57,15 @@ pub struct AppState {
     /// Stage 2 留 false: 直接调 `provider.stream_completion` 走 SSE 流;
     /// Stage 3 切 true: 接入 `processing_loop::handle_user_message` + 工具执行.
     pub processing_loop_enabled: bool,
+    /// Stage 7b: daemon 启动时间戳. `/v1/system/metrics` 计算 uptime.
+    pub started_at: Instant,
+    /// Stage 7b: 当前活跃 HTTP 请求数. auth_middleware 进时 +1, 出时 -1
+    /// (drop guard 实现). `/v1/system/metrics` 报告.
+    pub active_conns: Arc<AtomicUsize>,
+    /// Stage 7b: 内存环形日志缓冲. `/v1/system/logs` endpoint 的数据源.
+    /// 暂未接 tracing-subscriber make_writer, 留给 Stage 7c 集成; 当前
+    /// 主要是给 endpoint 一个可测试的 ring buffer 抽象.
+    pub log_ring: Arc<LogRing>,
 }
 
 /// 启动 Daemon HTTP 服务.
@@ -157,6 +169,12 @@ pub async fn run(
         llm_providers,
         shutdown_tx,
         processing_loop_enabled: false,
+        // sysinfo 评估: 传递依赖过大 (~80+ 包含 windows-sys, objc2-*, ntapi),
+        // 超出 CLAUDE.md "< 30" 约束. 改用 stdlib + /proc/self/status (Linux) +
+        // tasklist (Windows) 手读. 这里不用 sysinfo.
+        started_at: Instant::now(),
+        active_conns: Arc::new(AtomicUsize::new(0)),
+        log_ring: Arc::new(LogRing::new()),
     });
 
     // 启动 reap_stale 后台任务 (Stage 1 暂不 await, 实际不退出)

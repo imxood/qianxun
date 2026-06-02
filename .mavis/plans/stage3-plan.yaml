@@ -1,0 +1,559 @@
+version: 1
+plan:
+  name: '三子项目 Stage 3 实施 (Daemon 持久化 + VPS Team 表 + Tauri SSE 消费)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage3-persistence
+    title: 'Daemon Stage 3: session 持久化 (3 表 schema + 启动恢复)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/01-daemon.md` 实施 Daemon Stage 3 — session 持久化到 SQLite.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (注意 §3.1 REST endpoints, §6 Project/Session/Team)
+      - `docs/30_子项目规划/01-daemon.md` (§6 Session 持久化)
+      - `qianxun-core/src/agent/conversation.rs` (Conversation 序列化字段)
+      - `qianxun-core/src/agent/engine.rs` (AgentLoop 状态)
+      - `qianxun-memory/src/lib.rs` + `qianxun-memory/src/db.rs` (SQLite + FTS5 schema 参考, 注意不要与 qianxun-memory 现有 sessions 表冲突)
+      - `qianxun/src/daemon/{mod.rs, agent_host.rs, session_runtime.rs, router.rs, sse.rs}` (Stage 1+2 产出)
+
+      ## 实施内容 (Stage 3 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun/src/daemon/persistence.rs` (~250 行)
+
+      3 张新表 schema (与 `qianxun-memory` 的 `sessions` / `observations` 不冲突, 用新表名前缀 `daemon_`):
+      ```sql
+      -- daemon_sessions: 会话元数据 + 状态机
+      CREATE TABLE IF NOT EXISTS daemon_sessions (
+          id              TEXT PRIMARY KEY,
+          project_root    TEXT,
+          config_json     TEXT NOT NULL,    -- ResolvedProviderConfig
+          status          TEXT NOT NULL DEFAULT 'active',  -- active | idle | archived
+          created_at      TEXT NOT NULL,
+          last_active_at  TEXT NOT NULL,
+          message_count   INTEGER NOT NULL DEFAULT 0
+      );
+
+      -- daemon_conversation_snapshots: 增量 conversation 快照
+      CREATE TABLE IF NOT EXISTS daemon_conversation_snapshots (
+          session_id      TEXT NOT NULL REFERENCES daemon_sessions(id) ON DELETE CASCADE,
+          ordinal         INTEGER NOT NULL,    -- 递增序号
+          data_json       TEXT NOT NULL,        -- serde_json::to_string(&conversation)
+          created_at      TEXT NOT NULL,
+          PRIMARY KEY (session_id, ordinal)
+      );
+
+      -- daemon_event_log: 事件流 (transcript)
+      CREATE TABLE IF NOT EXISTS daemon_event_log (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id      TEXT NOT NULL REFERENCES daemon_sessions(id) ON DELETE CASCADE,
+          seq             INTEGER NOT NULL,    -- 会话内事件序号
+          event_type      TEXT NOT NULL,        -- 12 种 SSE 事件类型
+          event_json      TEXT NOT NULL,
+          created_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_log_session_seq ON daemon_event_log(session_id, seq);
+      ```
+
+      API:
+      ```rust
+      pub struct SessionStore {
+          db: Arc<Mutex<Connection>>,
+      }
+      impl SessionStore {
+          pub fn new(path: &Path) -> Result<Self>;
+          /// 创建 session + 写空 snapshot
+          pub fn create(&self, id: &str, project_root: Option<&str>, config_json: &str) -> Result<()>;
+          /// 增量 snapshot (每 5 个 message 或 60s 一次)
+          pub fn save_snapshot(&self, session_id: &str, ordinal: u32, conversation_json: &str) -> Result<()>;
+          /// 追加事件 (SSE 流式增量 log)
+          pub fn append_event(&self, session_id: &str, seq: u32, event_type: &str, event_json: &str) -> Result<()>;
+          /// 列出所有 active session
+          pub fn list_active(&self) -> Result<Vec<SessionMeta>>;
+          /// 启动恢复: 加载最新 snapshot
+          pub fn load_latest_snapshot(&self, session_id: &str) -> Result<Option<(u32, String)>>;
+          /// 启动恢复: 加载事件流
+          pub fn load_events(&self, session_id: &str, from_seq: u32) -> Result<Vec<EventEntry>>;
+      }
+      pub struct SessionMeta { pub id: String, pub project_root: Option<String>, pub status: String, pub created_at: String, pub last_active_at: String, pub message_count: u32 }
+      pub struct EventEntry { pub seq: u32, pub event_type: String, pub event_json: String }
+      ```
+
+      ### 2. 改 `qianxun/src/daemon/agent_host.rs`
+
+      - `create_session` 末尾调 `self.store.create(&id, project_root, &config_json)`
+      - 启动时 `reap_stale` 之前, 调 `self.restore_from_disk()`:
+        - 遍历 `store.list_active()` 的所有 session
+        - 对每个 session, 调 `store.load_latest_snapshot()` 拿到 conversation_json
+        - 反序列化, 装进 `Arc<SessionRuntime>` (注意: 不调 AgentLoop, 只装 conversation 状态)
+      - 新增 `pub store: Arc<SessionStore>` 字段
+
+      ### 3. 改 `qianxun/src/daemon/sse.rs` / `router.rs::prompt_handler`
+
+      - 在 `prompt_handler` 的 provider.stream_completion 调用前后, 把每个 LlmStreamEvent 通过 `store.append_event()` 落盘
+      - **Stage 3 简化**: 每 5 个 message 写一次 snapshot, 60s 写一次 (Stage 4 优化增量)
+
+      ### 4. 改 `qianxun/src/daemon/mod.rs`
+
+      - AppState 加 `pub store: Arc<SessionStore>` 字段
+      - `pub async fn run(port: u16, config: ResolvedConfig)` 初始化 SessionStore (默认路径: `~/.qianxun/daemon.db`)
+      - 初始化顺序: provider → tools → memory → store → AgentLoopHost (store 要在 host 之前)
+
+      ### 5. 单测 `qianxun/src/daemon/persistence.rs` 末尾
+
+      - `test_create_and_list_session`: create 3 个, list_active 长度 = 3
+      - `test_save_and_load_snapshot`: save 2 个 snapshot, load_latest_snapshot 返回 ordinal=2 那个
+      - `test_append_and_load_events`: append 5 个 event, load_events 拿全部, 序对
+      - `test_session_delete_cascades`: 删 session, snapshots + events 也都没了
+
+      ## 关键约束
+
+      - **3 张新表都加 `daemon_` 前缀**, 不与 `qianxun-memory` 的 `sessions`/`observations` 冲突
+      - **不接 SQLite 加密** (Stage 4 才是)
+      - **不接 compaction / 压缩** (后续)
+      - **不接 VPS 同步** (Stage 4 才是)
+      - **不引入新 crate** (rusqlite 已经在 qianxun/Cargo.toml)
+      - **不修改 shared-contract**
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - 3 张表完整 DDL
+      - SessionStore 7 个方法签名
+      - 4 个单测输出
+      - `cargo build -p qianxun` 通过
+      - `cargo test -p qianxun --bin qx daemon::` 通过
+      - 已知 TODO (Stage 4: 增量 snapshot + VPS 同步)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/01-daemon.md` (§6)
+      - `docs/30_子项目规划/_shared-contract.md`
+      - `qianxun/src/daemon/{persistence.rs, agent_host.rs, mod.rs}` (改动)
+      - `qianxun/src/daemon/sse.rs` (改动, 验证事件落盘)
+      - `qianxun-memory/src/db.rs` (确认新表不冲突)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] 3 张表用 daemon_ 前缀 (daemon_sessions / daemon_conversation_snapshots / daemon_event_log)
+      - [ ] SessionStore 7 个方法实现 (create/save_snapshot/append_event/list_active/load_latest_snapshot/load_events + new)
+      - [ ] daemon_sessions 不与 qianxun-memory sessions 冲突 (表名不同, 字段也明显不同)
+      - [ ] agent_host restore_from_disk 在启动 reap_stale 之前调用
+      - [ ] sse.rs / router.rs 把 LlmStreamEvent 通过 store.append_event 落盘 (grep 验证)
+      - [ ] mod.rs AppState 加 store 字段, run() 初始化顺序 store → AgentLoopHost
+      - [ ] 4 个单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] cargo test -p qianxun --bin qx daemon:: 通过
+      - [ ] 没引入新 crate (rusqlite 已在)
+      - [ ] 没修改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: vps-stage3-team-tables
+    title: 'VPS Server Stage 3: Team 4 表 DDL + CRUD endpoints + device_token 持久化'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/02-vps-server.md` 实施 VPS Server Stage 3 — Team 4 表 + CRUD + device_token SQLite 持久化.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §6 Team / Project / Member / ProjectAssignment)
+      - `docs/30_子项目规划/02-vps-server.md` (§7 Team 模型 + §9 部署 + §11.4 扩展清单)
+      - `qianxun/src/server/{mod.rs, auth.rs, auth_ws.rs, ws_hub.rs, messages.rs}` (Stage 1+2 产出)
+      - `qianxun/Cargo.toml` (rusqlite 已有)
+
+      ## 实施内容 (Stage 3 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun/src/server/team_db.rs` (~250 行)
+
+      4 张表的 SQLite DDL + CRUD API (与 02-vps §7.1 一致):
+
+      ```sql
+      -- users: 已存在 (Stage 1 之前), 加 status 字段
+      -- teams
+      CREATE TABLE IF NOT EXISTS teams (
+          id              TEXT PRIMARY KEY,
+          name            TEXT NOT NULL,
+          created_at      TEXT NOT NULL
+      );
+      -- team_members
+      CREATE TABLE IF NOT EXISTS team_members (
+          team_id         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+          user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role            TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member
+          joined_at       TEXT NOT NULL,
+          PRIMARY KEY (team_id, user_id)
+      );
+      -- projects (与 daemon_sessions 不同: 这是 team 维度)
+      CREATE TABLE IF NOT EXISTS team_projects (
+          id              TEXT PRIMARY KEY,
+          team_id         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+          name            TEXT NOT NULL,
+          path            TEXT NOT NULL,
+          description     TEXT,
+          owner_id        TEXT NOT NULL REFERENCES users(id),
+          created_at      TEXT NOT NULL,
+          archived        INTEGER NOT NULL DEFAULT 0
+      );
+      -- project_assignments
+      CREATE TABLE IF NOT EXISTS project_assignments (
+          project_id      TEXT NOT NULL REFERENCES team_projects(id) ON DELETE CASCADE,
+          user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          assigned_at     TEXT NOT NULL,
+          PRIMARY KEY (project_id, user_id)
+      );
+      -- devices (从 Stage 2 静态白名单迁过来)
+      CREATE TABLE IF NOT EXISTS devices (
+          token_hash      TEXT PRIMARY KEY,    -- SHA256(device_token)
+          machine_id      TEXT NOT NULL,
+          name            TEXT,
+          host_type       TEXT,
+          created_at      TEXT NOT NULL,
+          last_active_at  TEXT,
+          status          TEXT NOT NULL DEFAULT 'active'  -- active | disabled
+      );
+      ```
+
+      API:
+      ```rust
+      pub struct TeamDb {
+          conn: Arc<Mutex<Connection>>,
+      }
+      impl TeamDb {
+          pub fn new(path: &Path) -> Result<Self>;
+          // teams
+          pub fn create_team(&self, id: &str, name: &str) -> Result<()>;
+          pub fn list_teams_for_user(&self, user_id: &str) -> Result<Vec<Team>>;
+          pub fn add_member(&self, team_id: &str, user_id: &str, role: &str) -> Result<()>;
+          pub fn list_members(&self, team_id: &str) -> Result<Vec<TeamMember>>;
+          // projects
+          pub fn create_project(&self, id: &str, team_id: &str, name: &str, path: &str, owner_id: &str) -> Result<()>;
+          pub fn list_projects_for_user(&self, user_id: &str) -> Result<Vec<Project>>;
+          pub fn list_projects_for_team(&self, team_id: &str) -> Result<Vec<Project>>;
+          pub fn assign_project(&self, project_id: &str, user_id: &str) -> Result<()>;
+          // devices
+          pub fn register_device(&self, token: &str, machine_id: &str, name: &str) -> Result<()>;
+          pub fn lookup_device(&self, token: &str) -> Result<Option<DeviceRecord>>;
+      }
+      pub struct Team { pub id: String, pub name: String, pub created_at: String }
+      pub struct TeamMember { pub user_id: String, pub role: String, pub joined_at: String }
+      pub struct Project { pub id: String, pub team_id: String, pub name: String, pub path: String, pub description: Option<String>, pub owner_id: String, pub created_at: String, pub archived: bool }
+      pub struct DeviceRecord { pub machine_id: String, pub name: Option<String>, pub status: String }
+      ```
+
+      ### 2. 改 `qianxun/src/server/auth_ws.rs`
+
+      - `validate_device_token` 不再用静态白名单, 改用 `TeamDb::lookup_device` 查 SQLite
+      - 找到 device → 计算 token SHA256, 查表 → 命中返回 Ok(DeviceInfo), 未命中返回 Err(InvalidToken)
+      - **Stage 3 简化**: auth 流程本身不动, 只换底层 lookup 实现
+
+      ### 3. 改 `qianxun/src/server/mod.rs`
+
+      - 加 `pub mod team_db;`
+      - VpsState 加 `pub team_db: Arc<TeamDb>` 字段
+      - 加 4 个 REST endpoints (与 02-vps §7.1 一致):
+        - `POST /api/teams { name }` → 201, 创建 team (需要 admin auth, Stage 3 简化: 不检查 auth)
+        - `GET /api/teams` → 200, 列出 caller 的 teams (Stage 3 简化: 列出所有)
+        - `GET /api/teams/:id/members` → 200, [{user_id, role, joined_at}]
+        - `POST /api/teams/:id/members { user_id, role }` → 201
+        - `POST /api/projects { team_id, name, path }` → 201
+        - `GET /api/projects` → 200, [{id, team_id, name, path, ...}]
+        - `POST /api/projects/:id/assign { user_id }` → 201
+      - `run()` 初始化 TeamDb (默认路径: `~/.qianxun/vps.db`)
+
+      ### 4. 单测 `qianxun/src/server/team_db.rs` 末尾
+
+      - `test_create_and_list_team`: create 2 teams, list_teams_for_user 返回 2
+      - `test_add_and_list_members`: add 2 members, list_members 长度 = 2
+      - `test_create_and_list_project`: create 2 projects, list_projects_for_team 长度 = 2
+      - `test_assign_project`: assign 1 user, list_projects_for_user 长度 = 1
+      - `test_device_register_and_lookup`: register device with token, lookup_device 命中
+
+      ## 关键约束
+
+      - **4 张新表都用 `team_` 前缀** (与现有 `users` 表区别), `devices` 不带前缀因为它是设备维度
+      - **device_token 验证底层换 SQLite, 但 API 签名不变** (validate_device_token 仍返回 Result<DeviceInfo, AuthError>)
+      - **不接 admin auth 检查** (Stage 3 简化, Stage 4 加)
+      - **不接 VPS WS Hub 集成 Team** (Stage 4)
+      - **不接 Web UI** (Stage 4)
+      - **不引入新 crate** (rusqlite 已有, sha2 不需要 — token_hash 可用简单 hash 函数)
+      - **不修改 shared-contract** (Team 字段在 §6 已锁)
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - 4 张表完整 DDL
+      - TeamDb 11 个方法签名
+      - 7 个新 REST endpoints
+      - 5 个单测输出
+      - `cargo build -p qianxun` 通过
+      - `cargo test -p qianxun --bin qx server::team_db` 通过
+      - 已知 TODO (Stage 4: admin auth + WS Hub 集成)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/02-vps-server.md` (§7)
+      - `docs/30_子项目规划/_shared-contract.md` (§6)
+      - `qianxun/src/server/{team_db.rs, auth_ws.rs, mod.rs}` (改动)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] 4 张新表存在 (teams / team_members / team_projects / project_assignments / devices)
+      - [ ] team_projects 含 path 字段 (与 shared-contract §6 Project.path 对齐)
+      - [ ] TeamDb 11 个方法实现
+      - [ ] validate_device_token 改用 TeamDb::lookup_device (不再用静态白名单)
+      - [ ] 7 个新 REST endpoints 注册到 Router
+      - [ ] 5 个单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] cargo test -p qianxun --bin qx server::team_db 通过
+      - [ ] 没引入新 crate
+      - [ ] 没修改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: tauri-stage3-sse-consume
+    title: 'Tauri Stage 3: SSE 消费 + MessageBubble + InputBox 骨架'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/03-tauri-desktop.md` 实施 Tauri Stage 3 — SSE 客户端 + MessageBubble + InputBox 骨架.
+
+      ## 必读输入
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§7 IPC commands 完整列表, §8 SSE 客户端, §10 离线/降级)
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §3.2 SSE 12 个事件 schema)
+      - `qianxun-desktop/src/lib/types/ipc.ts` (Stage 1 类型, ContentBlock / Message)
+      - `qianxun-desktop/src/lib/stores/connection.svelte.ts` (Stage 1 store)
+      - `qianxun-desktop/src/lib/components/layout/ThreeColumnLayout.svelte` (Stage 1, 含 onMount 修)
+      - `qianxun-desktop/src/routes/+page.svelte` (Stage 1 mock 数据)
+      - `qianxun-desktop/src/lib/ipc/bridge.ts` (Stage 2 invoke wrappers)
+
+      ## 实施内容 (Stage 3 最小集, 30 分钟内)
+
+      ### 1. 新建 `qianxun-desktop/src/lib/sse/client.ts` (~180 行)
+
+      SSE POST 客户端 (EventSource 只支持 GET, 我们需要 POST):
+      ```typescript
+      import type { ContentBlock, Message, SseEvent, TokenUsage, StopReason } from '$lib/types/ipc';
+
+      export interface SsePromptOptions {
+          daemonUrl: string;
+          sessionId: string;
+          messages: ContentBlock[];
+          model?: string;
+          maxTokens?: number;
+          temperature?: number;
+          onEvent: (event: SseEvent) => void;
+          signal?: AbortSignal;  // 用户取消
+      }
+
+      export class SseError extends Error {
+          constructor(public code: 'network'|'parse'|'api'|'cancelled', message: string) { super(message); }
+      }
+
+      /// POST /v1/chat/session/:id/prompt, 流式读 SSE 事件.
+      /// - 3s → 6s → 12s → 30s 退避重连 (取消时不重连)
+      /// - AbortSignal 触发立即停止
+      /// - onEvent 回调: 每来一个 SSE 事件触发一次
+      export async function streamPrompt(opts: SsePromptOptions): Promise<void>;
+      ```
+
+      内部实现:
+      - `fetch(daemonUrl + /v1/chat/session/:id/prompt, { method: 'POST', body: JSON.stringify({ messages, model, max_tokens, temperature }), signal })`
+      - 读 response.body.getReader(), 解析 SSE 格式 (event: xxx / data: yyy)
+      - 每解析到一个完整事件, 调 onEvent 推
+      - signal abort 时: reader.cancel() + reject SseError('cancelled')
+      - 网络错误: 3-6-12-30s 退避 (但 signal 已 abort 立即退出)
+
+      ### 2. 新建 `qianxun-desktop/src/lib/stores/session.svelte.ts` (~150 行)
+
+      会话状态 + 消息流:
+      ```typescript
+      import type { ContentBlock, Message, SseEvent } from '$lib/types/ipc';
+      import { streamPrompt, SseError } from '$lib/sse/client';
+      import { connectionStore } from './connection.svelte';
+
+      interface SessionRuntimeState {
+          sessionId: string;
+          title: string;
+          model: string;
+          messages: ContentBlock[];  // 累积
+          isStreaming: boolean;
+          currentAbort: AbortController | null;
+          usage: { input: number; output: number } | null;
+      }
+
+      class SessionStore {
+          private runtime = $state<SessionRuntimeState | null>(null);
+
+          get messages() { return this.runtime?.messages ?? []; }
+          get isStreaming() { return this.runtime?.isStreaming ?? false; }
+          get currentAbort() { return this.runtime?.currentAbort ?? null; }
+
+          /// 启动新会话 + 发送 user message
+          async send(text: string, model: string): Promise<void> { ... }
+
+          /// 取消当前 streaming
+          cancel(): void { ... }
+
+          /// 处理 SSE 事件 (private)
+          private handleEvent(event: SseEvent): void { ... }
+      }
+      export const sessionStore = new SessionStore();
+      ```
+
+      `send()` 流程:
+      1. 创建 AbortController, 存到 `runtime.currentAbort`
+      2. 推 user message 到 `runtime.messages`
+      3. `streamPrompt({ ..., signal: abortController.signal, onEvent: e => this.handleEvent(e) })`
+      4. handleEvent 区分 12 种类型:
+         - `text_delta` → 追加到当前 assistant message 的 text content
+         - `tool_use_complete` → 创建 tool_use 块
+         - `tool_result` → 创建 tool_result 块
+         - `thinking_delta` → 累积到 thinking 块
+         - `usage` → 存到 runtime.usage
+         - `message_delta` → 设 stop_reason
+         - `message_stop` → 清空 currentAbort
+         - `error` → 抛出 SseError, 客户端显示
+      5. 异常路径: 捕获 SseError, 设 runtime.isStreaming = false, 清 abort
+
+      ### 3. 新建 `qianxun-desktop/src/lib/components/chat/MessageBubble.svelte` (~80 行)
+
+      ```svelte
+      <script lang="ts">
+          import type { ContentBlock } from '$lib/types/ipc';
+          let { block, role }: { block: ContentBlock; role: 'user' | 'assistant' } = $props();
+      </script>
+
+      <div class="rounded-lg p-3 my-2 {role === 'user' ? 'bg-blue-50 dark:bg-blue-950 ml-12' : 'bg-muted mr-12'}">
+          {#if block.type === 'text'}
+              <p class="whitespace-pre-wrap">{block.text}</p>
+          {:else if block.type === 'thinking'}
+              <details class="text-xs opacity-70">
+                  <summary>思考过程</summary>
+                  <pre class="whitespace-pre-wrap mt-1">{block.text}</pre>
+              </details>
+          {:else if block.type === 'tool_use'}
+              <div class="border rounded p-2 bg-background">
+                  <span class="text-xs font-mono opacity-60">工具调用</span>
+                  <code class="block text-sm">{block.toolName}({JSON.stringify(block.input)})</code>
+              </div>
+          {:else if block.type === 'tool_result'}
+              <div class="border rounded p-2 bg-background text-sm">
+                  <span class="text-xs font-mono opacity-60">结果</span>
+                  <pre class="whitespace-pre-wrap mt-1">{block.content}</pre>
+              </div>
+          {/if}
+      </div>
+      ```
+
+      ### 4. 新建 `qianxun-desktop/src/lib/components/chat/InputBox.svelte` (~80 行)
+
+      ```svelte
+      <script lang="ts">
+          import { sessionStore } from '$lib/stores/session.svelte';
+          let { model = 'MiniMax-M3' }: { model?: string } = $props();
+          let text = $state('');
+          async function submit() {
+              if (!text.trim()) return;
+              const msg = text; text = '';
+              await sessionStore.send(msg, model);
+          }
+          function onKeydown(e: KeyboardEvent) {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+              }
+          }
+      </script>
+
+      <div class="flex gap-2 p-3 border-t">
+          <textarea
+              bind:value={text}
+              onkeydown={onKeydown}
+              placeholder="输入消息, Enter 发送, Shift+Enter 换行"
+              disabled={sessionStore.isStreaming}
+              class="flex-1 resize-none border rounded p-2 min-h-12 max-h-48"
+          ></textarea>
+          <button onclick={submit} disabled={!text.trim() || sessionStore.isStreaming} class="px-4 py-2 bg-primary text-primary-foreground rounded">
+              {sessionStore.isStreaming ? '生成中...' : '发送'}
+          </button>
+      </div>
+      ```
+
+      ### 5. 改 `qianxun-desktop/src/lib/components/layout/ChatView.svelte`
+
+      替换原 mock 内容, 接 sessionStore:
+      ```svelte
+      <script lang="ts">
+          import { sessionStore } from '$lib/stores/session.svelte';
+          import MessageBubble from '$lib/components/chat/MessageBubble.svelte';
+          import InputBox from '$lib/components/chat/InputBox.svelte';
+      </script>
+
+      <div class="flex flex-col h-full">
+          <div class="flex-1 overflow-y-auto p-3">
+              {#if !sessionStore.runtime}
+                  <p class="text-muted-foreground text-center mt-12">选择会话开始对话</p>
+              {:else}
+                  {#each sessionStore.messages as block, i}
+                      <MessageBubble {block} role={i % 2 === 0 ? 'user' : 'assistant'} />
+                  {/each}
+              {/if}
+          </div>
+          <InputBox />
+      </div>
+      ```
+
+      ## 关键约束
+
+      - **不接 Tauri-side IPC 完整路径** (Stage 2 已建 bridge, 本次 sse/client.ts 直接调 fetch, 不用 invoke; Tauri 端用 fetch 也行因为 webview 支持)
+      - **不接 ConnectionBanner 完整降级 UI** (Stage 4 才是)
+      - **不接离线消息队列** (Stage 4 才是)
+      - **不接 i18n** (后续)
+      - **不接 SQLite 缓存** (后续)
+      - **不修改 _shared-contract.md / Stage 1-2 已写的 ipc.ts / connection.svelte.ts 字段**
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - streamPrompt 实际签名 + 退避策略
+      - SessionStore send/cancel/handleEvent 流程图
+      - MessageBubble 4 种 block 渲染
+      - InputBox keydown 处理 (Enter vs Shift+Enter)
+      - `pnpm run check` 通过
+      - `pnpm run build` 通过
+      - 已知 TODO (Stage 4 ConnectionBanner + 离线队列)
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§8)
+      - `docs/30_子项目规划/_shared-contract.md` (§3.2)
+      - `qianxun-desktop/src/lib/sse/client.ts` (新建)
+      - `qianxun-desktop/src/lib/stores/session.svelte.ts` (新建)
+      - `qianxun-desktop/src/lib/components/chat/{MessageBubble,InputBox}.svelte` (新建)
+      - `qianxun-desktop/src/lib/components/layout/ChatView.svelte` (改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] streamPrompt 用 fetch POST + ReadableStream 解析 SSE 格式
+      - [ ] 退避策略 3-6-12-30s (abort 时立即退出)
+      - [ ] AbortSignal 触发立即取消
+      - [ ] SessionStore 12 种事件 handleEvent 覆盖
+      - [ ] MessageBubble 4 种 block (text/thinking/tool_use/tool_result) 渲染
+      - [ ] InputBox Enter 发送, Shift+Enter 换行
+      - [ ] ChatView 接 sessionStore 渲染消息
+      - [ ] pnpm run check → 0/0
+      - [ ] pnpm run build → 成功
+      - [ ] 没接 ConnectionBanner / 离线队列 / i18n
+      - [ ] 没修改 ipc.ts / connection.svelte.ts / bridge.ts
+      ## 输出
+      verification report (PASS/FAIL).

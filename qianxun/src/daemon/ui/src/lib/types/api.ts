@@ -115,3 +115,155 @@ export interface SystemStatus {
 export interface SystemHealth {
 	status: 'ok' | 'degraded' | 'down';
 }
+
+// ─── Stage 7b ─── Memory / Sessions / Config / System Metrics ───────
+
+// ── Memory ──
+
+/** 单个 memory session 摘要 (在列表里展示) */
+export interface MemorySessionSummary {
+	id: string;
+	created_at?: string;
+	last_active?: string;
+	observation_count: number;
+	preview?: string;
+}
+
+/** 单条 observation (memory 引擎里的"观察"记录) */
+export interface MemoryObservation {
+	id: string;
+	session_id: string;
+	content: string;
+	tags?: string[];
+	created_at?: string;
+	kind?: string;
+}
+
+/** 搜索请求 body */
+export interface MemorySearchRequest {
+	query: string;
+	limit?: number;
+	tags?: string[];
+}
+
+/** 搜索结果 */
+export interface MemorySearchResult {
+	id: string;
+	session_id: string;
+	content: string;
+	tags?: string[];
+	score?: number;
+	created_at?: string;
+}
+
+/** 搜索响应 */
+export interface MemorySearchResponse {
+	results: MemorySearchResult[];
+	total?: number;
+}
+
+/** session 列表响应 */
+export interface MemorySessionsResponse {
+	sessions: MemorySessionSummary[];
+}
+
+// ── Sessions (chat) ──
+
+export type SessionStatus = 'active' | 'paused' | 'completed' | 'cancelled';
+
+export interface ChatSessionSummary {
+	id: string;
+	model: string;
+	created_at: string;
+	last_active: string;
+	message_count: number;
+	status: SessionStatus;
+	token_usage: {
+		input: number;
+		output: number;
+		total: number;
+	};
+}
+
+export interface ChatSessionsResponse {
+	sessions: ChatSessionSummary[];
+	total: number;
+}
+
+export interface ChatSessionEvent {
+	ts: string;
+	kind: string;
+	role?: string;
+	content?: string;
+	tokens?: number;
+}
+
+export interface ChatSessionDetail {
+	id: string;
+	model: string;
+	created_at: string;
+	last_active: string;
+	status: SessionStatus;
+	messages: ChatSessionEvent[];
+	token_usage: ChatSessionSummary['token_usage'];
+}
+
+export interface ChatSessionActionResponse {
+	status: 'cancelled' | 'paused' | 'deleted' | 'ok';
+	id: string;
+}
+
+// ── Config ──
+
+/** ResolvedConfig 单个 provider 项 (跟 daemon 端 ResolvedProviderConfig 兼容) */
+export interface ConfigProvider {
+	id: string;
+	provider: string;
+	model: string;
+	base_url?: string;
+	has_key: boolean;
+	active: boolean;
+}
+
+/** ResolvedConfig 视图 (Web UI 看的子集) */
+export interface ResolvedConfigView {
+	active_provider: string;
+	log_level: string;
+	max_sessions: number;
+	providers: ConfigProvider[];
+	skills_dirs: string[];
+	memory_dir?: string;
+	disabled_skills?: string[];
+	[key: string]: unknown; // 额外字段保留
+}
+
+/** PUT /v1/config 响应 */
+export interface ConfigUpdateResponse {
+	status: 'updated';
+	requires_reload: boolean;
+	changed_fields: string[];
+}
+
+// ── System Metrics ──
+
+/** GET /v1/system/metrics 响应 */
+export interface SystemMetrics {
+	cpu_percent: number;
+	mem_mb: number;
+	uptime_s: number;
+	active_conns: number;
+	sessions: {
+		active: number;
+		paused: number;
+		total: number;
+	};
+	/** 最近 1 分钟每秒的 conns 数 (用于折线图) */
+	conns_history?: number[];
+	ts: string;
+}
+
+/** GET /v1/system/logs?lines=100 响应 */
+export interface SystemLogsResponse {
+	lines: string[];
+	total: number;
+}

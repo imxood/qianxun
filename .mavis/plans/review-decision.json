@@ -1,0 +1,10 @@
+{
+  "last_cycle": [
+    {"task_id": "review-daemon", "verdict": "accept", "reason": "reviewer 报告质量 OK (verifier PASS), 5 严重问题已识别, 接下来 owner 修文档"},
+    {"task_id": "review-vps-server", "verdict": "accept", "reason": "reviewer 报告质量 OK, 3 严重问题已识别"},
+    {"task_id": "review-tauri-desktop", "verdict": "accept", "reason": "reviewer 报告质量 OK, 3 严重问题已识别"}
+  ],
+  "next_cycle": [],
+  "plan_complete": true,
+  "message_to_user": "3 份 review 报告 verifier PASS 接收. 汇总 11 个严重问题, owner 接下来直接修 3 个文档 (无需再派 worker, 修改是单文件小改动)."
+}

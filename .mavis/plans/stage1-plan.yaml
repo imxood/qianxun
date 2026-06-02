@@ -1,0 +1,619 @@
+version: 1
+plan:
+  name: '三子项目 Stage 1 实施 (Daemon AgentLoopHost + VPS WS Hub + Tauri 前端脚手架)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 4
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage1-agentloop-host
+    title: 'Daemon Stage 1: AgentLoopHost 重构 + SessionRuntime 骨架'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/01-daemon.md` 实施 Daemon Stage 1 骨架.
+      **重要**: 30 分钟内完成, 只做骨架, 不做完整实施. 目标是 Stage 2 (SSE 流式) 之前的基础.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (契约)
+      - `docs/30_子项目规划/01-daemon.md` (§2 §3 §4 §5 章节, 不要全读)
+      - `qianxun-core/src/agent/engine.rs` (AgentLoop 真实结构)
+      - `qianxun-core/src/agent/conversation.rs` (Conversation 真实结构)
+      - `qianxun-core/src/provider/mod.rs` (LlmProvider trait)
+      - `qianxun-core/src/tools/mod.rs` (ToolRegistry)
+      - `qianxun-memory/src/lib.rs` (MemoryCore 公开 API)
+      - 当前 `qianxun/src/daemon/{mod.rs, agent_host.rs, router.rs}` (要知道现状)
+
+      ## 实施内容 (Stage 1 最小集)
+
+      ### 1. `qianxun/src/daemon/session_runtime.rs` (新建)
+
+      定义 `SessionRuntime` 结构体, 持有 AgentLoop 实际运行所需的所有依赖:
+
+      ```rust
+      use std::sync::Arc;
+      use qianxun_core::agent::engine::AgentLoop;
+      use qianxun_core::agent::conversation::Conversation;
+      use qianxun_core::config::ResolvedProviderConfig;
+      use qianxun_core::provider::LlmProvider;
+      use qianxun_core::tools::ToolRegistry;
+      use qianxun_memory::MemoryCore;
+      use qianxun_core::skills::SkillManager;
+
+      pub struct SessionRuntime {
+          pub session_id: String,
+          pub project_root: Option<String>,
+          pub config: ResolvedProviderConfig,
+          pub agent_loop: AgentLoop,
+          pub conversation: Conversation,
+          pub provider: Arc<dyn LlmProvider>,
+          pub tools: Arc<ToolRegistry>,
+          pub memory: Arc<MemoryCore>,
+          pub skills: SkillManager,
+          pub created_at: chrono::DateTime<chrono::Utc>,
+          pub last_active_at: std::sync::RwLock<chrono::DateTime<chrono::Utc>>,
+      }
+      ```
+
+      > 注: 如果实际 API 签名与上述有差异, 以 qianxun-core 真实 API 为准. AgentLoop 可能没有 `new(config)` 这种简单构造, 看 engine.rs 第 30-100 行附近找构造方法.
+
+      ### 2. `qianxun/src/daemon/agent_host.rs` (改写)
+
+      把现有 `SessionHandle` 替换为 `Arc<SessionRuntime>`, 但**AgentLoop 实际不启动**, 只持有引用:
+
+      ```rust
+      pub struct AgentLoopHost {
+          sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionRuntime>>>>,
+          max_sessions: usize,
+      }
+      ```
+
+      `create_session` 改为: 实例化 SessionRuntime (provider 来自传入的 `Arc<dyn LlmProvider>`, config 来自 `ResolvedConfig` 等), 插入 HashMap. **不要**调用 `processing_loop` 启动 AgentLoop (Stage 2 才是).
+
+      `delete_session` 保留.
+
+      `reap_stale` 保留.
+
+      ### 3. `qianxun/src/daemon/mod.rs` (小幅调整)
+
+      AppState 加字段 (Stage 1 用最小集):
+      ```rust
+      pub struct AppState {
+          pub agent_host: Arc<AgentLoopHost>,
+          pub config: Arc<ResolvedConfig>,
+          pub provider: Arc<dyn LlmProvider>,    // 新: 共享 provider 句柄
+          pub tools: Arc<ToolRegistry>,         // 新: 共享 tool registry
+          pub memory: Arc<MemoryCore>,           // 新: 共享 memory
+      }
+      ```
+
+      `pub async fn run(port: u16)` 初始化这些共享依赖. 工具/记忆的初始化**可以用空 in-memory**, 真实加载留 Stage 3.
+
+      ### 4. `qianxun/src/daemon/router.rs` (小幅调整)
+
+      `create_session` handler 暂时不接 prompt, 保留 "创建 session" 端点. 验证 AgentLoopHost 真的能 create 一个 SessionRuntime.
+
+      ### 5. 单测
+
+      在 `qianxun/src/daemon/agent_host.rs` 末尾 `#[cfg(test)] mod tests`:
+      - `test_create_session_yields_runtime`: create_session 成功, HashMap 里有 1 个 Arc<SessionRuntime>, 字段正确.
+      - `test_delete_session_removes_runtime`: create + delete, HashMap 长度为 0.
+
+      ## 关键约束
+
+      - **不修改 shared-contract** (§3 API 契约)
+      - **不修改 qianxun-core, qianxun-memory** (除非缺 import 时微调, 标 # TODO)
+      - **不接 Tauri/ACP 改造** (Stage 4 才是)
+      - **不接 prompt SSE** (Stage 2 才是)
+      - **不接 systemd/Service** (后续)
+      - **不接 session 持久化** (Stage 3 才是)
+
+      完成后写 `deliverable.md` 包含:
+      - 改了哪些文件 (file_path:line_number)
+      - SessionRuntime 实际结构 (贴 struct 定义)
+      - 1 个单测输出
+      - `cargo build -p qianxun` 输出末尾 5 行
+      - 已知 TODO (Stage 2-4 还没做的)
+
+      ## 不要做
+      - 不要改 TUI/ACP 模块
+      - 不要写完整 SSE 流
+      - 不要重新设计 API 契约
+      - 不要引入新 crate
+    verify_prompt: |
+      独立验证 worker 的 deliverable, **不要只读 worker 的 diff**.
+
+      ## 必读
+      - `docs/30_子项目规划/01-daemon.md` (规划)
+      - `docs/30_子项目规划/_shared-contract.md` (契约)
+      - `qianxun/src/daemon/{session_runtime.rs, agent_host.rs, mod.rs, router.rs}` (改动)
+      - `qianxun-core/src/agent/engine.rs` (AgentLoop 真实 API)
+      - `deliverable.md` (worker 输出)
+
+      ## 验证清单
+      - [ ] `SessionRuntime` 字段齐全: agent_loop / conversation / provider / tools / memory / skills
+      - [ ] `AgentLoopHost.sessions` 是 `HashMap<SessionId, Arc<SessionRuntime>>`
+      - [ ] `create_session` 真的实例化 SessionRuntime (不是空 SessionHandle)
+      - [ ] `qianxun-memory` crate import 路径正确 (qianxun_memory::MemoryCore)
+      - [ ] `qianxun-core` 各模块 import 路径正确
+      - [ ] `cargo build -p qianxun` 实际通过 (worker 应提供输出)
+      - [ ] 单测 2 个都过
+      - [ ] 没破坏现有 qianxun-core / qianxun-memory 编译
+      - [ ] AppState 加了 provider / tools / memory 字段
+      - [ ] 没改 TUI / ACP
+
+      ## 输出
+      verification report (PASS/FAIL) + 关键证据.
+
+  - id: vps-stage1-ws-hub
+    title: 'VPS Server Stage 1: WebSocket Hub 骨架 + Connection 抽象'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/02-vps-server.md` 实施 VPS Server Stage 1 骨架.
+      **重要**: 30 分钟内完成, 只做 WS Hub 骨架, 不做完整 auth/team.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md` (重点 §3.3 WebSocket)
+      - `docs/30_子项目规划/02-vps-server.md` (重点 §6 §7 §8 §9, 不要全读)
+      - 当前 `qianxun/src/server/{mod.rs, auth.rs}` (要知道现状)
+      - `Cargo.toml` workspace 依赖 (tower / tokio-tungstenite / axum 已有)
+
+      ## 实施内容 (Stage 1 最小集)
+
+      ### 1. `qianxun/src/server/ws_hub.rs` (新建)
+
+      ```rust
+      use axum::extract::ws::Message;
+      use std::collections::HashMap;
+      use std::sync::Arc;
+      use tokio::sync::RwLock;
+      use uuid::Uuid;
+
+      /// 连接到 VPS 的客户端类型.
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+      pub enum ConnectionType {
+          /// 来自 dev 机的 daemon
+          Device,
+          /// 来自 user 的 app (Web / Mobile)
+          App,
+      }
+
+      /// 单个 WebSocket 连接的元信息.
+      pub struct Connection {
+          pub id: String,                          // 内部 id
+          pub connection_type: ConnectionType,
+          /// Device: machine_id; App: user_id
+          pub principal_id: String,
+          pub tx: tokio::sync::mpsc::UnboundedSender<Message>,
+          pub connected_at: chrono::DateTime<chrono::Utc>,
+      }
+
+      /// WebSocket Hub — 维护所有活跃连接 + 消息路由.
+      pub struct WsHub {
+          /// 内部 id → Connection
+          connections: Arc<RwLock<HashMap<String, Arc<Connection>>>>,
+          /// 索引: device → internal id (一对多, 因为 dev 机可能多 connection)
+          by_device: Arc<RwLock<HashMap<String, Vec<String>>>>,
+          /// 索引: app user → internal id (一对多, 因为 user 可能多端登录)
+          by_user: Arc<RwLock<HashMap<String, Vec<String>>>>,
+      }
+
+      impl WsHub {
+          pub fn new() -> Self { /* ... */ }
+
+          /// 注册新连接. 返回 connection_id.
+          pub async fn register(
+              &self, connection_type: ConnectionType,
+              principal_id: String, tx: tokio::sync::mpsc::UnboundedSender<Message>,
+          ) -> String { /* ... */ }
+
+          /// 注销连接.
+          pub async fn unregister(&self, connection_id: &str) { /* ... */ }
+
+          /// 路由消息: 给指定 user 的所有 App 推.
+          pub async fn push_to_user(
+              &self, user_id: &str, msg: Message,
+          ) -> usize { /* returns count of recipients */ }
+
+          /// 路由消息: 给指定 device 推.
+          pub async fn push_to_device(
+              &self, machine_id: &str, msg: Message,
+          ) -> usize { /* returns count of recipients */ }
+
+          /// 当前连接数 (调试用).
+          pub async fn stats(&self) -> HubStats { /* ... */ }
+      }
+
+      pub struct HubStats {
+          pub total: usize,
+          pub devices: usize,
+          pub apps: usize,
+      }
+      ```
+
+      ### 2. `qianxun/src/server/messages.rs` (新建)
+
+      定义消息类型 enum (与 shared-contract §3.3 + 02-vps §11.3 对齐, Stage 1 不实现 handler, 只定义 enum):
+
+      ```rust
+      use serde::{Deserialize, Serialize};
+
+      /// WebSocket 帧.
+      #[derive(Debug, Clone, Serialize, Deserialize)]
+      #[serde(tag = "type")]
+      pub enum WsFrame {
+          // Device → VPS
+          #[serde(rename = "auth")]
+          Auth { device_token: String, machine_id: String },
+          #[serde(rename = "register")]
+          Register {
+              device_id: String, name: String,
+              host_type: String, host_id: String,
+              tags: Vec<String>, capabilities: Vec<String>,
+              daemon_version: String, os: String,
+              cpu_cores: u32, memory_mb: u32,
+          },
+
+          // VPS → Device
+          #[serde(rename = "auth_ok")]
+          AuthOk {
+              session_token: String,
+              server_time: String,
+              server_version: String,
+              heartbeat_interval_ms: u32,
+          },
+          #[serde(rename = "register_ok")]
+          RegisterOk { node_id: String },
+          #[serde(rename = "register_error")]
+          RegisterError { code: String, message: String },
+
+          // App → VPS → Device
+          #[serde(rename = "prompt")]
+          Prompt {
+              request_id: String, session_id: String,
+              target_node_id: String, messages: Vec<serde_json::Value>,
+              model: String, max_tokens: u32, temperature: f32,
+              stream_to_vps: bool, tools_enabled: bool, attachments: Vec<serde_json::Value>,
+          },
+
+          // Device → VPS → App
+          #[serde(rename = "event")]
+          Event { request_id: String, event: serde_json::Value },
+          #[serde(rename = "event_done")]
+          EventDone { request_id: String, usage: serde_json::Value },
+          #[serde(rename = "event_error")]
+          EventError { request_id: String, code: String, message: String },
+
+          // Heartbeat
+          #[serde(rename = "heartbeat")]
+          Heartbeat { ts: i64 },
+          #[serde(rename = "heartbeat_ack")]
+          HeartbeatAck { ts: i64 },
+      }
+      ```
+
+      ### 3. `qianxun/src/server/mod.rs` (调整)
+
+      加 WS endpoint 雏形 (不接完整逻辑, 只接受 connection, 立刻 close):
+
+      ```rust
+      use axum::extract::ws::{WebSocket, WebSocketUpgrade};
+
+      async fn ws_upgrade(
+          ws: WebSocketUpgrade,
+      ) -> axum::response::Response {
+          ws.on_upgrade(handle_socket)
+      }
+
+      async fn handle_socket(mut socket: WebSocket) {
+          // Stage 1 雏形: 接受连接, 立刻关闭. Stage 2 接 auth flow.
+          let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
+      }
+      ```
+
+      把 `pub async fn run(port: u16)` 的 axum Router 加上 `ws_hub` 共享 state + `/api/ws` route.
+
+      ### 4. 单测
+
+      `qianxun/src/server/ws_hub.rs` 末尾 `#[cfg(test)] mod tests`:
+      - `test_register_and_unregister`: register 1 个 device, stats().devices == 1, unregister 后 == 0
+      - `test_push_to_user_routes_to_all_user_connections`: register 2 个 app (同 user), push 1 条消息, 2 个 connection 都收到 (用 mock mpsc::channel)
+      - `test_push_to_device_routes_correctly`: register 2 个 device, push 给其中 1 个 machine_id, 只 1 个收到
+
+      ## 关键约束
+
+      - **不接完整 auth / Team / device code** (Stage 2-3 才是)
+      - **不修改 shared-contract** (§3.3 字段严格遵守)
+      - **不引入新 crate** (用现有 axum / tokio)
+      - **不接 axum Router 复杂路由** (Stage 1 只加一个 `/api/ws` 端点)
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - WsHub 实际定义
+      - WsFrame enum 字段数 (应该 ~12 个 variant)
+      - 3 个单测输出
+      - `cargo build -p qianxun` 输出末尾 5 行
+      - 已知 TODO (Stage 2-3 待做)
+    verify_prompt: |
+      独立验证, 不要只读 worker diff.
+
+      ## 必读
+      - `docs/30_子项目规划/02-vps-server.md`
+      - `docs/30_子项目规划/_shared-contract.md` (§3.3 严格)
+      - `qianxun/src/server/{ws_hub.rs, messages.rs, mod.rs}`
+      - `qianxun/Cargo.toml` (确认无新 crate 引入)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] WsFrame 12 个 variant 字段与 §3.3 + 02-vps §11.3 完全一致
+      - [ ] WsHub 4 个方法签名 (register / unregister / push_to_user / push_to_device) 实现
+      - [ ] stats() 返回 total/devices/apps 计数正确
+      - [ ] 3 个单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate (diff Cargo.toml)
+      - [ ] 没修改 _shared-contract.md
+      - [ ] /api/ws 端点注册到 Router
+
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: tauri-stage1-frontend-scaffold
+    title: 'Tauri Stage 1: 前端脚手架 (SvelteKit + Svelte 5 + Tailwind + shadcn-svelte)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 按 `docs/30_子项目规划/03-tauri-desktop.md` 实施 Tauri 桌面版 Stage 1 脚手架.
+      **重要**: 30 分钟内完成, **只做前端 SvelteKit 部分, 不接 Tauri 2.0** (Stage 2 再接). 这是 SvelteKit web 版能独立跑起来, 为后续 Tauri 集成打基础.
+
+      ## 必读输入
+      - `docs/30_子项目规划/_shared-contract.md`
+      - `docs/30_子项目规划/03-tauri-desktop.md` (重点 §4 §6 §7 §10.1)
+      - `qianxun/src/tui/mod.rs` (借鉴 UI 布局思路)
+
+      ## 实施内容 (Stage 1 最小集)
+
+      ### 1. 在 `E:\git\maxu\qianxun\qianxun-desktop\` 新建 SvelteKit 项目
+
+      ```bash
+      # 用 pnpm (如果系统没装, 用 npm)
+      cd E:/git/maxu/qianxun
+      mkdir -p qianxun-desktop
+      cd qianxun-desktop
+
+      # 用 sv create (SvelteKit 官方脚手架, 选 minimal, TypeScript, Tailwind, no playwright/vitest 选项)
+      # 如果 sv 不可用, 手动创建 package.json + 必要文件
+      ```
+
+      **关键**: 不要用 create-turbo / create-vite, 选 `sv create` (SvelteKit 官方, 最新).
+
+      ### 2. 项目结构 (Stage 1)
+
+      ```
+      qianxun-desktop/
+      ├── package.json
+      ├── svelte.config.js
+      ├── vite.config.ts
+      ├── tsconfig.json
+      ├── tailwind.config.ts
+      ├── postcss.config.js
+      ├── src/
+      │   ├── app.html
+      │   ├── app.css                  # Tailwind directives
+      │   ├── lib/
+      │   │   ├── types/
+      │   │   │   └── ipc.ts          # HealthStatus, Session, Project, Team 等
+      │   │   ├── stores/
+      │   │   │   └── connection.svelte.ts  # ConnectionStore 4 态 (offline/reconnecting/degraded/connected)
+      │   │   └── components/
+      │   │       ├── layout/
+      │   │       │   ├── ThreeColumnLayout.svelte
+      │   │       │   ├── Sidebar.svelte        # 团队切换 + 项目列表
+      │   │       │   ├── SessionList.svelte    # 中栏
+      │   │       │   └── ChatView.svelte       # 右栏
+      │   │       └── ui/                         # shadcn-svelte 组件
+      │   │           ├── Button.svelte
+      │   │           └── Card.svelte
+      │   └── routes/
+      │       ├── +layout.svelte       # 用 ThreeColumnLayout
+      │       └── +page.svelte          # 占首页: "千寻 TUI" 标题 + mock 三栏
+      └── components.json              # shadcn-svelte config
+      ```
+
+      ### 3. 关键技术决策 (锁定)
+
+      - **Svelte 5** (runes: `$state` / `$derived` / `$effect`)
+      - **SvelteKit** + **Vite**
+      - **Tailwind CSS** v3.x (稳定版)
+      - **shadcn-svelte** (按 components.json 装 Button + Card 两个基础组件, 不要全装)
+      - **TypeScript** strict mode
+      - **Node ≥ 18**
+
+      ### 4. IPC 类型文件 (Stage 1 mock 实现, 不接真实 Daemon)
+
+      `src/lib/types/ipc.ts`:
+
+      ```typescript
+      // 与 03-tauri-desktop.md §4.1.2 / §7.1 / §7.2 完全一致
+      export interface HealthStatus {
+        status: 'offline' | 'reconnecting' | 'degraded' | 'connected';
+        version: string;
+        uptime_sec: number;
+        session_count: number;
+        mcp_online: number;
+      }
+
+      export interface Project {
+        id: string;
+        name: string;
+        path: string;
+        description?: string;
+        team_id?: string;
+        owner_id: string;
+        created_at: string;
+      }
+
+      export interface Session {
+        id: string;
+        project_id: string;
+        title: string;
+        model: string;
+        status: string;
+        created_at: string;
+        last_active_at: string;
+        message_count: number;
+        owner_id: string;
+      }
+
+      export interface Team {
+        id: string;
+        name: string;
+        members: TeamMember[];
+        created_at: string;
+      }
+
+      export interface TeamMember {
+        user_id: string;
+        display_name: string;
+        email?: string;
+        avatar_url?: string;
+        role: string;
+        joined_at: string;
+      }
+      ```
+
+      ### 5. ConnectionStore (与 03-tauri §4.1.2 完全一致)
+
+      `src/lib/stores/connection.svelte.ts`:
+
+      ```typescript
+      class ConnectionStore {
+        daemonUrl = $state<string>('http://127.0.0.1:23900');
+        lastHealthCheck = $state<number>(0);
+        daemonState = $state<'offline' | 'reconnecting' | 'degraded' | 'connected'>('offline');
+        attempt = $state<number>(0);
+        lastError = $state<{ ts: number; message: string } | null>(null);
+
+        isDegraded = $derived(this.daemonState === 'degraded' || this.daemonState === 'offline');
+
+        async startHealthCheck(): Promise<void> {
+          // Stage 1: 简单 ping '/health' 端点 (实际 Daemon 上线后接)
+          // 现在可以 mock: 5s 后切到 'offline' (因为 daemon URL 不存在)
+        }
+
+        retry(): void { /* 立即重试 */ }
+      }
+      export const connectionStore = new ConnectionStore();
+      ```
+
+      ### 6. 三栏布局 (用 Tailwind grid 实现)
+
+      `src/lib/components/layout/ThreeColumnLayout.svelte`:
+
+      ```svelte
+      <script lang="ts">
+        import { connectionStore } from '$lib/stores/connection.svelte';
+        let { children } = $props();
+      </script>
+
+      <div class="grid grid-cols-[200px_280px_1fr] h-screen">
+        <aside class="border-r p-3">
+          <slot name="sidebar" />
+        </aside>
+        <aside class="border-r p-3">
+          <slot name="sessions" />
+        </aside>
+        <main class="p-3">
+          <slot />
+        </main>
+      </div>
+
+      <div class="fixed top-2 right-2 text-xs text-muted-foreground">
+        Daemon: <span class:font-bold={!connectionStore.isDegraded} class="text-red-500">{connectionStore.daemonState}</span>
+      </div>
+      ```
+
+      ### 7. 占位首页 (mock 数据)
+
+      `src/routes/+page.svelte`:
+
+      ```svelte
+      <script lang="ts">
+        import ThreeColumnLayout from '$lib/components/layout/ThreeColumnLayout.svelte';
+        // mock 数据, Stage 2 接真实 IPC 后替换
+        const mockProjects = [
+          { id: 'proj_1', name: 'qianxun', path: 'E:/git/maxu/qianxun', owner_id: 'u_1' },
+        ];
+        const mockSessions = [
+          { id: 'sess_1', project_id: 'proj_1', title: 'Daemon 真实化设计', model: 'MiniMax-M3', status: 'active', message_count: 12, owner_id: 'u_1' },
+        ];
+      </script>
+
+      <ThreeColumnLayout>
+        {#snippet sidebar()}
+          <h2 class="text-sm font-semibold mb-2">项目</h2>
+          {#each mockProjects as p}
+            <div class="text-sm py-1 px-2 hover:bg-accent rounded">{p.name}</div>
+          {/each}
+        {/snippet}
+        {#snippet sessions()}
+          <h2 class="text-sm font-semibold mb-2">会话</h2>
+          {#each mockSessions as s}
+            <div class="text-sm py-1 px-2 hover:bg-accent rounded">{s.title}</div>
+          {/each}
+        {/snippet}
+        <h1 class="text-2xl font-bold">千寻 TUI</h1>
+        <p class="text-muted-foreground mt-2">选择会话开始对话</p>
+      </ThreeColumnLayout>
+      ```
+
+      ## 关键约束
+
+      - **不接 Tauri 2.0** (Stage 2 再加)
+      - **不接真实 Daemon** (Stage 2 用 `pnpm tauri dev` 时再接)
+      - **不写完整 SSE 消费** (Stage 2 才是)
+      - **不写 Team 管理 UI** (Stage 2 才是)
+      - **不写离线/降级** (Stage 2)
+      - **不写国际化** (Stage 2 引入 svelte-i18n)
+
+      完成后写 `deliverable.md`:
+      - 改了哪些文件
+      - 完整文件树 (qianxun-desktop/ 下)
+      - package.json dependencies 列表
+      - `pnpm dev` (或 npm run dev) 能启动, 截图端口或简单描述
+      - 浏览器打开显示三栏布局 + 2 个 mock 项目 + 1 个 mock 会话
+      - 已知 TODO (Stage 2 待做: Tauri 集成 + 真实 IPC + SSE 消费)
+    verify_prompt: |
+      独立验证, 不要只读 worker diff.
+
+      ## 必读
+      - `docs/30_子项目规划/03-tauri-desktop.md`
+      - `docs/30_子项目规划/_shared-contract.md`
+      - `qianxun-desktop/` 整个项目结构
+      - `qianxun-desktop/package.json` (依赖列表)
+      - `qianxun-desktop/src/lib/types/ipc.ts` (类型定义)
+      - `qianxun-desktop/src/lib/stores/connection.svelte.ts` (4 态)
+      - `qianxun-desktop/src/lib/components/layout/ThreeColumnLayout.svelte` (布局)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] SvelteKit 项目结构 (src/routes, src/lib, app.html)
+      - [ ] package.json 含 @sveltejs/kit + svelte ^5 + tailwindcss + bits-ui (shadcn-svelte 依赖)
+      - [ ] Svelte 5 runes 用法正确 ($state / $derived / $effect / $props)
+      - [ ] HealthStatus 4 态: 'offline' | 'reconnecting' | 'degraded' | 'connected'
+      - [ ] Project/Session/Team 类型字段与 shared-contract §6 + 03-tauri §5.1 完全一致
+      - [ ] ThreeColumnLayout 用 Tailwind grid 实现 (200px + 280px + 1fr)
+      - [ ] shadcn-svelte 至少 2 个组件 (Button + Card)
+      - [ ] ConnectionStore 4 态 + isDegraded 派生
+      - [ ] 没接 Tauri 2.0 (没装 @tauri-apps/api 或类似)
+      - [ ] 没接真实 Daemon (没 fetch 127.0.0.1:23900)
+      - [ ] TypeScript strict mode (tsconfig.json strict: true)
+      - [ ] 占位首页有 mock 数据渲染
+
+      ## 输出
+      verification report (PASS/FAIL) + 关键文件路径.

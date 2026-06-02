@@ -1,0 +1,339 @@
+version: 1
+plan:
+  name: '三子项目 Stage 6a (Daemon JWT + VPS outbox SQLite + Tauri stronghold 加密)'
+  max_concurrency: 3
+  max_consecutive_failures: 1
+  max_cycles: 3
+  timeout_ms: 1800000            # 30 min (engine hard cap, 实际只能用 30 min)
+  verifier_config:
+    default_verifiers: [verifier]
+    audit_sample_rate: 0.0
+tasks:
+  - id: daemon-stage6a-jwt
+    title: 'Daemon Stage 6a: X-Api-Key 替换 JWT Bearer auth'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 替换 `qianxun/src/daemon/router.rs` 的 `auth_middleware` (Stage 5 加的 X-Api-Key), 改为接受 `Authorization: Bearer <jwt>` + 用 `jsonwebtoken` crate 验证签名 + 过期检查.
+
+      ## 必读
+      - `qianxun/src/daemon/router.rs` (Stage 5 加的 auth_middleware)
+      - `qianxun/Cargo.toml` (确认 jsonwebtoken 已在 workspace 依赖, 来自 Stage 1)
+      - `docs/30_子项目规划/_shared-contract.md`
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun/src/daemon/router.rs` 的 `auth_middleware`
+
+      ```rust
+      /// Stage 6a: 接受 Authorization: Bearer <jwt>
+      /// 校验: HS256 签名 + exp 过期 + 拒 401
+      /// Stage 5 的 X-Api-Key 完全移除
+      use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+
+      #[derive(Debug, Serialize, Deserialize)]
+      struct Claims {
+          sub: String,         // user_id
+          exp: i64,            // 过期 unix 时间戳
+          iat: i64,            // 签发 unix 时间戳
+      }
+
+      pub async fn auth_middleware(
+          headers: axum::http::HeaderMap,
+          request: axum::extract::Request,
+          next: axum::middleware::Next,
+      ) -> Result<axum::response::Response, axum::http::StatusCode> {
+          // 1. 提取 Authorization header
+          // 2. 解析 Bearer token
+          // 3. 用 env var QIANXUN_JWT_SECRET 解码 + 验证
+          // 4. 把 claims.sub 写到 request.extensions (下游 handler 可读)
+          // 5. 失败返 401, 成功调 next.run(request)
+      }
+      ```
+
+      ### 2. main.rs 加 `QIANXUN_JWT_SECRET` env var 读取
+
+      启动时 log "JWT secret configured: <set|missing>". 缺 secret → 启动失败 (panic 友好提示).
+
+      ### 3. 单测
+
+      `qianxun/src/daemon/router.rs` 末尾 `#[cfg(test)] mod tests`:
+      - `test_jwt_valid_token_passes_auth`: 合法 HS256 token + secret → middleware.next.run() 被调
+      - `test_jwt_expired_token_rejected`: exp=过去 → 401
+      - `test_jwt_invalid_signature_rejected`: 不同 secret 签的 → 401
+      - `test_jwt_missing_header_rejected`: 缺 Authorization → 401
+      - `test_health_endpoint_skips_auth`: GET /v1/system/health 仍 200 (用 mock server 测)
+
+      ## 关键约束
+
+      - **不接 JWT 签发端点** (只做 verify, 签发留给 Stage 7 跟 VPS auth 集成)
+      - **不接 refresh token** (单 token, 过期就 401)
+      - **不接 claims 含 roles 字段** (Stage 7 加, 现在 sub=user_id 即可)
+      - **不引入新 crate** (jsonwebtoken 已在 qianxun/Cargo.toml, 来自 Stage 1)
+      - **不修改 shared-contract**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要拓展到 claims 解析 / 业务权限 / 多算法
+      - 不要重写 auth_middleware 之外的代码
+      - 不要写完整 integration test (mock 单元测试即可)
+      - 写完代码 5 分钟前 commit 一次 + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun/src/daemon/router.rs` (改)
+      - `qianxun/src/main.rs` (改, QIANXUN_JWT_SECRET 读取)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] auth_middleware 接受 "Authorization: Bearer <jwt>" 格式
+      - [ ] 用 jsonwebtoken::decode + HS256 验证签名
+      - [ ] 验证 exp 过期检查
+      - [ ] 缺 / 错 / 过期 token → 401
+      - [ ] /v1/system/health 跳过 auth
+      - [ ] claims.sub 写到 request.extensions (下游可读)
+      - [ ] 5 单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: vps-stage6a-outbox-sqlite
+    title: 'VPS Server Stage 6a: outbox 持久化 (HashMap → SQLite)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 把 `qianxun/src/server/outbox.rs` 从 in-memory `HashMap<node_id, Vec<PendingEvent>>` 改为 SQLite 持久化.
+
+      ## 必读
+      - `qianxun/src/server/outbox.rs` (Stage 5 in-memory 实现)
+      - `qianxun/src/server/team_db.rs` (SQLite 接入示例, 仿这个风格)
+      - `qianxun/src/server/mod.rs` (outbox 接入位置)
+      - `qianxun/Cargo.toml` (rusqlite + chrono 已在)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun/src/server/outbox.rs` — outbox 表 + Outbox 改持 DB
+
+      ```sql
+      CREATE TABLE IF NOT EXISTS outbox (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          node_id     TEXT NOT NULL,
+          request_id  TEXT NOT NULL,
+          event_json  TEXT NOT NULL,
+          created_at  TEXT NOT NULL,
+          delivered   INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbox_node_undelivered ON outbox(node_id, delivered);
+      ```
+
+      ```rust
+      pub struct Outbox {
+          conn: Arc<Mutex<Connection>>,
+      }
+      impl Outbox {
+          pub fn new(db_path: &Path) -> Result<Self>;
+          /// enqueue: 插一行, delivered=0
+          pub fn enqueue(&self, node_id: &str, request_id: &str, event: &serde_json::Value) -> Result<()>;
+          /// drain: 拿该 node_id 所有 delivered=0 的事件, 标 delivered=1
+          pub fn drain(&self, node_id: &str) -> Result<Vec<serde_json::Value>>;
+          /// list_undelivered_count: 调试用
+          pub fn list_undelivered_count(&self, node_id: &str) -> Result<u32>;
+      }
+      ```
+
+      ### 2. 改 `qianxun/src/server/mod.rs`
+
+      - VpsState 加 `pub outbox: Arc<Outbox>` 字段
+      - `run()` 初始化 Outbox (默认路径: `~/.qianxun/vps.db` — 与 team_db 同 db, 不同表)
+      - handle_prompt_frame 推 prompt 给 target_node 时调 `outbox.enqueue(node_id, request_id, &event)` (节点离线时事件落盘, 重连后 drain)
+      - handle_socket 检测到 device auth_ok 时调 `outbox.drain(machine_id)` 拿到所有未送达事件, 推给设备 (实际: 由 ws_hub 处理, 改 ws_hub.rs 的 register 方法)
+
+      ### 3. 改 `qianxun/src/server/ws_hub.rs`
+
+      - WsHub `register` 方法末尾: 拿到 connection_id + machine_id, 调 `outbox.drain(machine_id)`, 通过 channel 推给新连接
+
+      ### 4. 单测 (3 个, 关键路径)
+
+      - `qianxun/src/server/outbox.rs` 末尾 `#[cfg(test)] mod tests`:
+        - `test_enqueue_and_drain`: enqueue 3 个 event 给 node_a, drain(node_a) 拿 3 个, 顺序保持
+        - `test_drain_only_for_specific_node`: enqueue 2 个给 node_a + 1 个给 node_b, drain(node_a) 拿 2 个, node_b 的还在
+        - `test_drain_marks_delivered`: drain 后, 再次 drain 同一 node_id 拿空
+
+      ## 关键约束
+
+      - **跟 team_db 共用 vps.db** (新增 outbox 表, 不另开 db)
+      - **不要引入新 crate** (rusqlite + chrono 已有)
+      - **不修改 shared-contract**
+      - **不接 WS 客户端实际消息路由** (Stage 6c 才是, 这次只持久化 + drain)
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要加消息确认机制 (delivered=0/1 简单标记即可)
+      - 不要加 TTL / 过期清理 (Stage 7 才是)
+      - 不要做跨进程同步 (单 db 锁即可)
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun/src/server/outbox.rs` (改)
+      - `qianxun/src/server/{mod.rs, ws_hub.rs}` (改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] outbox 表 5 字段 (id/node_id/request_id/event_json/created_at/delivered)
+      - [ ] 索引 idx_outbox_node_undelivered (node_id, delivered)
+      - [ ] Outbox::new 接受 db_path
+      - [ ] enqueue 插行 + delivered=0
+      - [ ] drain 拿该 node_id delivered=0 + 标 delivered=1
+      - [ ] list_undelivered_count 调试接口
+      - [ ] VpsState 加 outbox 字段, run() 初始化
+      - [ ] handle_prompt_frame 调 enqueue
+      - [ ] WsHub register 调 drain 推新连接
+      - [ ] 3 单测都过
+      - [ ] cargo build -p qianxun 通过
+      - [ ] 没引入新 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).
+
+  - id: tauri-stage6a-stronghold
+    title: 'Tauri Stage 6a: stronghold 凭据加密 (API key 存到 OS keyring)'
+    assigned_to: coder
+    verified_by: verifier
+    timeout_ms: 1800000
+    prompt: |
+      你的任务: 改 Tauri Rust 端 `src-tauri/src/lib.rs` 加 2 个 invoke command: `set_secret` / `get_secret`, 用 tauri-plugin-stronghold 把 API key 等敏感凭据加密存到本地 vault. 改 `qianxun-desktop/src/lib/ipc/bridge.ts` 暴露对应 TypeScript 函数.
+
+      ## 必读
+      - `qianxun-desktop/src-tauri/src/lib.rs` (Stage 2 health_check + daemon_health_fetch)
+      - `qianxun-desktop/src-tauri/Cargo.toml` (Stage 2 加了 tauri-plugin-shell/http, 没加 stronghold)
+      - `qianxun-desktop/src/lib/ipc/bridge.ts` (Stage 2 4 个函数)
+      - `docs/30_子项目规划/03-tauri-desktop.md` (§11.3 凭据)
+
+      ## 实施 (30 min 严格上限)
+
+      ### 1. 改 `qianxun-desktop/src-tauri/Cargo.toml` — 加 stronghold
+
+      ```toml
+      [dependencies]
+      tauri-plugin-stronghold = "2"
+      ```
+
+      ### 2. 改 `qianxun-desktop/src-tauri/tauri.conf.json` — 启用 plugin
+
+      `plugins` 字段加 `"stronghold": {}`
+
+      ### 3. 改 `qianxun-desktop/src-tauri/src/lib.rs` — 加 2 个 invoke + plugin 注册
+
+      ```rust
+      use tauri::Manager;
+
+      #[tauri::command]
+      async fn set_secret(
+          app: tauri::AppHandle,
+          key: String,
+          value: String,
+          password: String,
+      ) -> Result<(), String> {
+          // tauri 2.x: stronghold.create_client (Stage 2 已确认)
+          let stronghold = app.stronghold();
+          let client = stronghold.create_client("main").map_err(|e| e.to_string())?;
+          let store = client.store();
+          store.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec(), Some(password.as_bytes().to_vec()))
+              .map_err(|e| e.to_string())?;
+          client.save().map_err(|e| e.to_string())?;
+          Ok(())
+      }
+
+      #[tauri::command]
+      async fn get_secret(
+          app: tauri::AppHandle,
+          key: String,
+          password: String,
+      ) -> Result<Option<String>, String> {
+          let stronghold = app.stronghold();
+          let client = stronghold.create_client("main").map_err(|e| e.to_string())?;
+          let store = client.store();
+          match store.get(&key.as_bytes().to_vec(), Some(password.as_bytes().to_vec())) {
+              Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
+              Err(_) => Ok(None),
+          }
+      }
+      ```
+
+      `tauri::Builder::default().plugin(tauri_plugin_stronghold::Builder::new().build()).invoke_handler(generate_handler![health_check, daemon_health_fetch, set_secret, get_secret])`
+
+      ### 4. 改 `qianxun-desktop/src/lib/ipc/bridge.ts` — 加 2 个函数
+
+      ```typescript
+      /// Tauri: 加密存到 stronghold. Web 模式: localStorage 临时存 (Stage 7 加 IndexedDB 加密)
+      export async function setSecret(key: string, value: string, password: string): Promise<void> {
+          if (!isTauri()) {
+              localStorage.setItem(`secret-${key}`, btoa(value));
+              localStorage.setItem(`secret-${key}-pwd`, btoa(password));
+              return;
+          }
+          await invoke('set_secret', { key, value, password });
+      }
+
+      export async function getSecret(key: string, password: string): Promise<string | null> {
+          if (!isTauri()) {
+              const v = localStorage.getItem(`secret-${key}`);
+              if (!v) return null;
+              return atob(v);
+          }
+          return await invoke<string | null>('get_secret', { key, password });
+      }
+      ```
+
+      ### 5. 单测
+
+      `qianxun-desktop/src/lib/ipc/bridge.test.ts` (新建, 1 个单测):
+      - `test_setSecret_web_mode_uses_localStorage`: 非 Tauri 模式下, setSecret → localStorage 含 base64 value
+
+      ## 关键约束
+
+      - **不接自动密码派生** (用户手动输 password, 留 Stage 7)
+      - **不接 key rotation** (留 Stage 7)
+      - **不接 secure storage 自动启动** (Tauri 启动时自动 load vault 留 Stage 7)
+      - **不引入新前端 crate** (TypeScript 纯逻辑)
+      - **不修改 _shared-contract.md**
+
+      ## 重要 — 30 min 严格上限
+
+      - 不要加 2 个以上的 invoke command (set/get 即可)
+      - 不要写完整 E2E 测试 (单元即可)
+      - 不要做密码 strength check
+      - 写完代码 5 分钟前 commit + 写 deliverable.md
+    verify_prompt: |
+      独立验证.
+
+      ## 必读
+      - `qianxun-desktop/src-tauri/Cargo.toml` (改)
+      - `qianxun-desktop/src-tauri/tauri.conf.json` (改)
+      - `qianxun-desktop/src-tauri/src/lib.rs` (改)
+      - `qianxun-desktop/src/lib/ipc/bridge.ts` (改)
+      - `deliverable.md`
+
+      ## 验证清单
+      - [ ] Cargo.toml 加 tauri-plugin-stronghold = "2"
+      - [ ] tauri.conf.json plugins 加 stronghold
+      - [ ] lib.rs 2 个 invoke: set_secret (key, value, password) / get_secret (key, password) -> Option<String>
+      - [ ] 调 stronghold.create_client (Tauri 2 API, 不是 get_client)
+      - [ ] Builder 注册 stronghold plugin
+      - [ ] invoke_handler 加 2 个新 command (共 4 个)
+      - [ ] bridge.ts 加 2 函数: setSecret / getSecret
+      - [ ] Web 模式用 localStorage (Tauri 模式用 invoke)
+      - [ ] 1 单测过
+      - [ ] cd src-tauri && cargo check 通过
+      - [ ] pnpm run check 0/0
+      - [ ] 没引入新前端 crate
+      - [ ] 没改 _shared-contract.md
+      ## 输出
+      verification report (PASS/FAIL).

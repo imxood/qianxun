@@ -14,22 +14,25 @@ describe('Sidebar 路由导航', () => {
 		authStore.clear();
 	});
 
-	it('6 个导航链接都在 (4 核心 + 2 占位)', () => {
+	it('8 个导航链接都在 (4 核心管理 + 4 运维)', () => {
 		const { getByTestId } = render(Sidebar);
+		// 管理区
 		expect(getByTestId('nav-llm').getAttribute('href')).toBe('/llm');
 		expect(getByTestId('nav-skills').getAttribute('href')).toBe('/skills');
 		expect(getByTestId('nav-mcp').getAttribute('href')).toBe('/mcp');
 		expect(getByTestId('nav-tools').getAttribute('href')).toBe('/tools');
-		// Settings + System 占位 (Stage 7b)
-		expect(getByTestId('nav-settings').getAttribute('href')).toBe('/settings');
+		// 运维区 (Stage 7b)
+		expect(getByTestId('nav-memory').getAttribute('href')).toBe('/memory');
+		expect(getByTestId('nav-sessions').getAttribute('href')).toBe('/sessions');
+		expect(getByTestId('nav-config').getAttribute('href')).toBe('/config');
 		expect(getByTestId('nav-system').getAttribute('href')).toBe('/system');
 	});
 
-	it('Settings/System 链接渲染 "7b" 阶段标签', () => {
+	it('Sidebar 渲染 "管理" / "运维" 两个分区标签', () => {
 		const { container } = render(Sidebar);
-		// Stage 7b 占位带 dashed border 标签
-		const labels = container.querySelectorAll('span.border-dashed');
-		expect(labels.length).toBeGreaterThanOrEqual(2);
+		// 找 group/section 文字
+		expect(container.textContent).toContain('管理');
+		expect(container.textContent).toContain('运维');
 	});
 });
 

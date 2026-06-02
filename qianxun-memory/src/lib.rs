@@ -56,6 +56,55 @@ impl MemoryCore {
             current_session: Arc::new(Mutex::new(None)),
         })
     }
+
+    /// Stage 7b: 同步删除单个 observation (供 `DELETE /v1/memory/observations/{id}`).
+    ///
+    /// 走 `spawn_blocking` 避免持 `std::sync::Mutex` 锁阻塞 tokio reactor.
+    /// 触发器 `obs_ad_fts` 自动同步 FTS5 索引.
+    pub async fn delete_observation(&self, id: &str) -> anyhow::Result<bool> {
+        let db = self.db.clone();
+        let id = id.to_string();
+        let affected = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            conn.execute("DELETE FROM observations WHERE id = ?1", params![id])
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("delete_observation join: {e}"))??;
+        Ok(affected > 0)
+    }
+
+    /// Stage 7b: 同步删除整个 memory session 及其级联 observations (供
+    /// `DELETE /v1/memory/sessions/{id}`). 走 `spawn_blocking`.
+    ///
+    /// 返回删除的 session 数 (0 或 1).
+    /// 注: observations / session_summaries 表的 FK 没有 CASCADE 声明, 需
+    /// 手动先删观测再删 session.
+    pub async fn delete_session(&self, id: &str) -> anyhow::Result<usize> {
+        let db = self.db.clone();
+        let id = id.to_string();
+        let n = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            // 先删依赖 (observations, session_summaries, raw_observations)
+            // 注: PRAGMA foreign_keys 在 db::open 已 ON, 手动删避免 FK NO ACTION 报错
+            conn.execute(
+                "DELETE FROM observations WHERE session_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
+                "DELETE FROM session_summaries WHERE session_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
+                "DELETE FROM raw_observations WHERE session_id = ?1",
+                rusqlite::params![id],
+            )?;
+            // 最后删 session 行
+            conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("delete_session join: {e}"))??;
+        Ok(n)
+    }
 }
 
 /// 在 char 边界安全地按"字符预算"截取字符串。

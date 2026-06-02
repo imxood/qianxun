@@ -6,6 +6,7 @@
 //! 字段遵循 docs/30_子项目规划/01-daemon.md §3.2 / §4.2 契约, 但 Stage 1
 //! 实际只需要把核心依赖聚合在一起, 一些锁/取消/状态字段暂用简化版.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
@@ -73,6 +74,10 @@ pub struct SessionRuntime {
 
     /// 最后活跃时间. `RwLock` 是为 Stage 2 异步更新 last_active 准备.
     pub last_active_at: RwLock<DateTime<Utc>>,
+
+    /// Stage 7b: 暂停标志. `pause_session` 调后切 true, 后续 prompt 拒绝
+    /// 接收 (返 409). 完整 resume 语义留给 Stage 7c/8.
+    pub paused: AtomicBool,
 }
 
 impl SessionRuntime {
@@ -108,6 +113,7 @@ impl SessionRuntime {
             skills,
             created_at: now,
             last_active_at: RwLock::new(now),
+            paused: AtomicBool::new(false),
         }
     }
 
@@ -120,5 +126,16 @@ impl SessionRuntime {
     pub fn touch(&self) {
         let now = Utc::now();
         *self.last_active_at.write().expect("SessionRuntime last_active lock poisoned") = now;
+    }
+
+    /// Stage 7b: 检查 session 是否被暂停.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Stage 7b: 切换暂停状态. 返切换后状态 (true = paused).
+    pub fn set_paused(&self, paused: bool) -> bool {
+        self.paused.store(paused, Ordering::Relaxed);
+        paused
     }
 }
