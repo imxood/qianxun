@@ -64,6 +64,45 @@ GET    /v1/projects                               → { projects: [...] }
 GET    /v1/teams                                  → { teams: [...] }
 ```
 
+### 3.1.1 Web Admin Console 路径 (Stage 7 新增, 2026-06-02)
+
+详细见 `01b-daemon-web-console.md`. 摘要:
+
+```
+GET    /_ui/*                                     → Svelte 5 SPA 静态文件 (含 fallback to index.html)
+
+GET    /v1/llm/providers                          → { providers: [...] }
+GET    /v1/llm/providers/{id}                     → { provider: {...} }  (key 不返)
+POST   /v1/llm/providers                          → { status: "added" }    (key 写 keyring)
+PUT    /v1/llm/providers/{id}                     → { status: "updated" } (含 key 替换)
+DELETE /v1/llm/providers/{id}                     → { status: "deleted" }
+POST   /v1/llm/providers/{id}/activate            → { status: "active" }
+POST   /v1/llm/providers/{id}/test                → { ok: true, latency_ms: 234 } | { ok: false, error: "..." }
+
+POST   /v1/skills                                 → { status: "reloaded", count: N }
+POST   /v1/skills/{name}/toggle                   → { status: "enabled" | "disabled" }
+
+DELETE /v1/mcp/servers/{id}                       → { status: "deleted" }
+POST   /v1/mcp/servers/{id}/test                  → { ok: true, tools: [...] } | { ok: false, error: "..." }
+
+POST   /v1/tools/{name}/invoke                    → { output: ... } | { error: "..." }   (不走 LLM, 直调)
+
+GET    /v1/chat/sessions                          → { sessions: [...] }                  (Stage 7b)
+POST   /v1/chat/session/{id}/cancel               → { status: "cancelled" }              (Stage 7b)
+POST   /v1/chat/session/{id}/pause                → { status: "paused" }                 (Stage 7b, 接口预留)
+
+PUT    /v1/config                                 → { status: "updated", requires_reload: bool }  (Stage 7b)
+
+DELETE /v1/memory/observations/{id}               → { status: "deleted" }                (Stage 7b)
+DELETE /v1/memory/sessions/{id}                   → { status: "deleted" }                (Stage 7b)
+
+GET    /v1/system/metrics                         → { cpu, mem_mb, conns, uptime_s, ... } (Stage 7b)
+GET    /v1/system/logs?lines=N                    → { lines: [...] }                     (Stage 7b)
+```
+
+**鉴权**: 全部要求 `Authorization: Bearer <jwt>`, role=`admin` (Stage 7b 起). 
+Stage 7a 简化: 启动时生成 token 打印到 stderr, 跟现有 Tauri 桌面端共用.
+
 ### 3.2 SSE 事件 schema (POST /v1/chat/session/:id/prompt)
 
 所有事件 JSON 格式: `data: <json>\n\n`, 可选 `event: <name>\n` 标识类型.
