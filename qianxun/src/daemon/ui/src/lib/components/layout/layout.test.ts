@@ -14,9 +14,10 @@ describe('Sidebar 路由导航', () => {
 		authStore.clear();
 	});
 
-	it('8 个导航链接都在 (4 核心管理 + 4 运维)', () => {
+	it('9 个导航链接都在 (5 管理 [chat+llm+skills+mcp+tools] + 4 运维)', () => {
 		const { getByTestId } = render(Sidebar);
-		// 管理区
+		// 管理区 (Stage 9c 加 /chat 第 1 个)
+		expect(getByTestId('nav-chat').getAttribute('href')).toBe('/chat');
 		expect(getByTestId('nav-llm').getAttribute('href')).toBe('/llm');
 		expect(getByTestId('nav-skills').getAttribute('href')).toBe('/skills');
 		expect(getByTestId('nav-mcp').getAttribute('href')).toBe('/mcp');
