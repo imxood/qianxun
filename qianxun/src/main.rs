@@ -102,6 +102,13 @@ struct Cli {
     /// (与 `--config` 走 env 的处理方式一致).
     #[arg(long)]
     client_token: Option<String>,
+
+    /// Stage 7a: Web Admin Console 静态文件 dist 路径 (SvelteKit 产物).
+    /// 优先级: CLI > env `QIANXUN_UI_DIST` > 默认 (`<exe 同级>/ui/` release
+    /// 或 `<workspace>/qianxun/src/daemon/ui/dist/` debug). 路径不存在时
+    /// daemon 仍启动, 但 `/_ui/*` 返 503 + 提示 `pnpm build`.
+    #[arg(long)]
+    ui_dist: Option<String>,
 }
 
 #[tokio::main]
@@ -117,6 +124,15 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // 解析 --ui-dist 路径: CLI > env > 默认
+    // (跟 `--client-token` 走 env 的处理方式一致)
+    let ui_dist: Option<std::path::PathBuf> = cli
+        .ui_dist
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("QIANXUN_UI_DIST").ok().map(std::path::PathBuf::from))
+        .or_else(default_ui_dist_path);
 
     let filter = if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::EnvFilter::from_default_env()
@@ -251,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        daemon::run(cli.port, resolved).await?;
+        daemon::run(cli.port, resolved, ui_dist).await?;
         return Ok(());
     }
 
@@ -320,5 +336,79 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Stage 7a: 默认 UI dist 路径查找.
+///
+/// 优先级:
+/// 1. `<exe 同级>/ui/` (release 打包时)
+/// 2. `<workspace>/qianxun/src/daemon/ui/dist/` (dev)
+/// 3. 都没有 → None (daemon 启动时打 "Web UI disabled")
+fn default_ui_dist_path() -> Option<std::path::PathBuf> {
+    // 1. exe 同级
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("ui");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 2. workspace dev 路径
+    if let Ok(cwd) = std::env::current_dir() {
+        // 从 cwd 向上找 qianxun-core 标志 (workspace root), 然后用 qianxun/src/daemon/ui/dist
+        if let Some(root) = find_workspace_root(&cwd) {
+            let candidate = root
+                .join("qianxun")
+                .join("src")
+                .join("daemon")
+                .join("ui")
+                .join("dist");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// 从 start_dir 向上找 Cargo.toml 含 `[workspace]` 的目录 (workspace root).
+fn find_workspace_root(start_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur: Option<&std::path::Path> = Some(start_dir);
+    while let Some(dir) = cur {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.is_file() {
+            if let Ok(s) = std::fs::read_to_string(&manifest) {
+                if s.contains("[workspace]") {
+                    return Some(dir.to_path_buf());
+                }
+            }
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_workspace_root_finds_workspace_marker() {
+        // cargo test 跑在 workspace 根 (qianxun/Cargo.toml 含 [workspace])
+        let cwd = std::env::current_dir().unwrap();
+        let root = find_workspace_root(&cwd);
+        assert!(root.is_some(), "should find a workspace root from cwd");
+        let root = root.unwrap();
+        assert!(root.join("Cargo.toml").is_file());
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(manifest.contains("[workspace]"));
+    }
+
+    #[test]
+    fn test_default_ui_dist_path_does_not_panic() {
+        // 不论是否存在, 都不应 panic; 返回 Option.
+        let _ = default_ui_dist_path();
+    }
 }
 

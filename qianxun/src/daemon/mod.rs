@@ -1,10 +1,12 @@
 pub mod agent_host;
+pub mod llm_providers;
 pub mod persistence;
 pub mod router;
 pub mod service;
 pub mod session_runtime;
 pub mod sse;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use qianxun_core::config::ResolvedConfig;
@@ -16,6 +18,7 @@ use tokio::sync::watch;
 use qianxun_memory::MemoryCore;
 
 use crate::daemon::agent_host::{AgentLoopHost, SharedState};
+use crate::daemon::llm_providers::LlmProviderManager;
 use crate::daemon::persistence::SessionStore;
 
 /// Daemon 共享状态 (Stage 1 最小集).
@@ -44,6 +47,8 @@ pub struct AppState {
     pub shared: Arc<SharedState>,
     /// Session 持久化 (Stage 3 新增, 3 张 daemon_ 表).
     pub store: Arc<SessionStore>,
+    /// Stage 7a: LLM provider 管理器 (CRUD + test, 走 in-memory cache).
+    pub llm_providers: Arc<LlmProviderManager>,
     /// 关闭信号.
     pub shutdown_tx: watch::Sender<()>,
     /// Stage 2 留 false: 直接调 `provider.stream_completion` 走 SSE 流;
@@ -55,8 +60,32 @@ pub struct AppState {
 ///
 /// Stage 1 接受外部传入的 `ResolvedConfig` (在 main.rs 中已解析好, 见
 /// `Config::from_file` → `resolve` 链路), 构造共享子系统并组装 AppState.
-pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
+///
+/// Stage 7a 新增 `ui_dist: Option<PathBuf>` 参数, 控制是否 serve SvelteKit
+/// 静态 dist (路径不存在时不 panic, 启动时 warn 即可).
+pub async fn run(
+    port: u16,
+    resolved: ResolvedConfig,
+    ui_dist: Option<PathBuf>,
+) -> anyhow::Result<()> {
     tracing::info!("Daemon starting on 127.0.0.1:{port}");
+
+    // Stage 7a: Web UI dist 路径决策 + 启动时日志.
+    match &ui_dist {
+        Some(p) if p.is_dir() => {
+            tracing::info!("[daemon] Web UI serving at /_ui/* from {}", p.display());
+        }
+        Some(p) => {
+            tracing::warn!(
+                "[daemon] Web UI dist path does not exist: {} (/_ui/* will return 503). \
+                 Build with: pnpm --dir qianxun/src/daemon/ui build",
+                p.display()
+            );
+        }
+        None => {
+            tracing::info!("[daemon] Web UI disabled (no --ui-dist / QIANXUN_UI_DIST)");
+        }
+    }
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
@@ -108,6 +137,14 @@ pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
     }
 
     let config = Arc::new(resolved);
+    // Stage 7a: 从 config 初始化 LLM provider 管理器.
+    let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
+    tracing::info!(
+        "[daemon] LLM provider manager initialized: {} providers, active={}",
+        llm_providers.list().len(),
+        llm_providers.active_id()
+    );
+
     let state = Arc::new(AppState {
         agent_host,
         config,
@@ -117,6 +154,7 @@ pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
         skills,
         shared,
         store,
+        llm_providers,
         shutdown_tx,
         processing_loop_enabled: false,
     });
@@ -127,7 +165,7 @@ pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
         reap_host.reap_stale().await;
     });
 
-    let app = router::build_router(state);
+    let app = router::build_router(state, ui_dist);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 

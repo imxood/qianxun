@@ -2,25 +2,29 @@ use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{sse::Event, Json, Response, Sse},
-    routing::{get, post},
+    response::{sse::Event, IntoResponse, Json, Response, Sse},
+    routing::{delete, get, post},
     Router,
 };
 use futures::stream::{Stream, StreamExt};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::convert::Infallible;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::iter;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::services::{ServeDir, ServeFile};
 
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::provider::types::LlmStreamEvent;
 use qianxun_core::types::LlmError;
 
+use crate::daemon::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
 use crate::daemon::sse::{SseEvent, SseEventBuilder};
 use crate::daemon::AppState;
 
@@ -62,6 +66,9 @@ pub struct PromptMessage {
 /// - `/` 跳过 (服务自描述/landing, 信息非敏感, 浏览器/HTTP 探针命中要返 200)
 /// - `/v1/system/health` 跳过 (k8s liveness/readiness probe 用, 不应被 token 拦)
 /// - `/v1/system/status` 跳过 (状态查询, 信息非敏感, 方便调试)
+/// - `/_ui/*` 跳过 (Stage 7a: 静态文件 serve, 走 cookie/JWT 端另一套 —
+///   Stage 7a 简化: Web UI 首次访问弹 token 输入框, 浏览器把 daemon 启动
+///   时打印的 token 粘进去即用, 不做密码)
 /// - 其余 endpoint 全部要求 `Authorization: Bearer <jwt>` (HS256 + exp)
 ///
 /// 实现: 单一 `auth_middleware` 解码 JWT, 缺/错/过期则返 401.
@@ -69,8 +76,10 @@ pub struct PromptMessage {
 ///
 /// Fallback 行为: 任何未匹配的 path 都返 404 + JSON 错误 (而不是 401), 这样
 /// 浏览器误访问 `/` 或 `/favicon.ico` 时不会被 auth 拦下, 体验更友好.
-pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+///
+/// `ui_dist`: SvelteKit 静态 dist 路径. None 或不存在 → `/ui/*` 返 503.
+pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
+    let mut router = Router::new()
         // 系统
         .route("/", get(root_handler))
         .route("/v1/system/health", get(health_handler))
@@ -86,15 +95,73 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // 记忆
         .route("/v1/memory/sessions", get(memory_sessions))
         .route("/v1/memory/search", post(memory_search))
-        // 技能
-        .route("/v1/skills", get(list_skills))
-        // MCP
-        .route("/v1/mcp/servers", get(list_mcp_servers).post(add_mcp_server))
+        // 技能 (Stage 7a: 加 reload + toggle)
+        .route("/v1/skills", get(list_skills).post(reload_skills))
+        .route("/v1/skills/{name}/toggle", post(toggle_skill))
+        // MCP (Stage 7a: 加 delete + test)
+        .route(
+            "/v1/mcp/servers",
+            get(list_mcp_servers).post(add_mcp_server),
+        )
+        .route("/v1/mcp/servers/{id}", delete(delete_mcp_server))
+        .route("/v1/mcp/servers/{id}/test", post(test_mcp_server))
+        // 工具试用 (Stage 7a: 直调 ToolRegistry)
+        .route("/v1/tools/{name}/invoke", post(invoke_tool))
+        // LLM provider 管理 (Stage 7a: 7 个 endpoint, 算 GET list 凑 8)
+        .route(
+            "/v1/llm/providers",
+            get(llm_list_providers).post(llm_add_provider),
+        )
+        .route(
+            "/v1/llm/providers/{id}",
+            get(llm_get_provider)
+                .put(llm_update_provider)
+                .delete(llm_delete_provider),
+        )
+        .route("/v1/llm/providers/{id}/activate", post(llm_activate_provider))
+        .route("/v1/llm/providers/{id}/test", post(llm_test_provider))
         // 未知 path 返 404 JSON (而不是被 auth 拦成 401)
         .fallback(not_found_handler)
-        .with_state(state)
-        // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
-        .layer(middleware::from_fn(auth_middleware))
+        .with_state(state);
+
+    // Stage 7a: 嵌套 ServeDir (静态文件 + SPA fallback).
+    // nest_service 把整个 sub-router 接到 /_ui/* 上.
+    router = match ui_dist {
+        Some(dir) if dir.is_dir() => {
+            let index_html = dir.join("index.html");
+            if index_html.is_file() {
+                // SPA fallback: 文件不存在 → 返 index.html (vite/adam 行为)
+                let svc = ServeDir::new(&dir).fallback(ServeFile::new(&index_html));
+                router.nest_service("/_ui", svc)
+            } else {
+                // 没 index.html → 直接 ServeDir, 不做 fallback (404 由 ServeDir 返)
+                let svc = ServeDir::new(&dir);
+                router.nest_service("/_ui", svc)
+            }
+        }
+        _ => {
+            // dist 不存在或未配置 → /_ui/* 走兜底 handler 返 503
+            router.nest_service(
+                "/_ui",
+                axum::routing::get(ui_dist_missing).fallback(ui_dist_missing),
+            )
+        }
+    };
+
+    // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
+    router.layer(middleware::from_fn(auth_middleware))
+}
+
+/// 当 `ui_dist` 路径不存在或未配置时, 兜底返 503.
+async fn ui_dist_missing() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "ui_dist_unavailable",
+            "message": "Web UI dist not found. Build with: pnpm --dir qianxun/src/daemon/ui build",
+        })),
+    )
+        .into_response()
 }
 
 // ─── JWT Auth Middleware (Stage 6a) ───────────────────────────
@@ -174,16 +241,21 @@ pub async fn auth_middleware(
     Ok(next.run(request).await)
 }
 
-/// 哪些 path 跳过 auth (k8s probe / 调试查询 / landing).
+/// 哪些 path 跳过 auth (k8s probe / 调试查询 / landing / 静态 UI).
 ///
 /// 当前跳过:
 /// - `/` — 服务自描述/landing, 浏览器/curl 探针应能命中不报错
 /// - `/v1/system/health` — k8s liveness/readiness probe
 /// - `/v1/system/status` — 状态查询 (信息非敏感, 调试方便)
+/// - `/_ui/*` — Stage 7a 静态文件 serve (SPA 资源不需要每个文件都打 token;
+///   真正要 auth 的 Web UI 资源是 SvelteKit 内部 fetch 走 `/v1/*` 时的 Bearer
+///   token; Stage 7a 简化: 启动时打 admin token, UI 粘进 localStorage)
 pub fn is_auth_skipped_path(path: &str) -> bool {
     path == "/"
         || path == "/v1/system/health"
         || path == "/v1/system/status"
+        || path.starts_with("/_ui/")
+        || path == "/_ui"
 }
 
 /// 读 JWT secret (env var QIANXUN_JWT_SECRET).
@@ -349,6 +421,202 @@ async fn list_mcp_servers() -> Json<serde_json::Value> {
 
 async fn add_mcp_server() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "not_implemented"}))
+}
+
+// ─── LLM provider 管理 (Stage 7a) ──────────────────────────
+
+/// GET /v1/llm/providers — 列出所有 provider 摘要 (不含 api_key).
+async fn llm_list_providers(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let providers = state.llm_providers.list();
+    Json(serde_json::json!({ "providers": providers }))
+}
+
+/// GET /v1/llm/providers/{id} — 单个 provider 详情 (api_key 字段被 strip).
+async fn llm_get_provider(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<ManagerProviderConfig>, (StatusCode, String)> {
+    state
+        .llm_providers
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("provider '{id}' not found")))
+}
+
+/// POST /v1/llm/providers — 新增 provider.
+async fn llm_add_provider(
+    State(state): State<Arc<AppState>>,
+    Json(cfg): Json<ManagerProviderConfig>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .llm_providers
+        .add(cfg)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({ "status": "added" })))
+}
+
+/// PUT /v1/llm/providers/{id} — 更新 provider (含 key 替换; api_key=None → 保留旧).
+async fn llm_update_provider(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(cfg): Json<ManagerProviderConfig>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .llm_providers
+        .update(&id, cfg)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({ "status": "updated" })))
+}
+
+/// DELETE /v1/llm/providers/{id} — 删除 provider.
+async fn llm_delete_provider(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .llm_providers
+        .delete(&id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+/// POST /v1/llm/providers/{id}/activate — 切 active.
+async fn llm_activate_provider(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .llm_providers
+        .activate(&id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::json!({
+        "status": "active",
+        "active_id": state.llm_providers.active_id(),
+    })))
+}
+
+/// POST /v1/llm/providers/{id}/test — 测试连接 (发最小 ping 请求).
+async fn llm_test_provider(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<TestResult>, (StatusCode, String)> {
+    if state.llm_providers.get(&id).is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("provider '{id}' not found")));
+    }
+    let result = state.llm_providers.test(&id).await;
+    Ok(Json(result))
+}
+
+// ─── Skills / MCP / Tools 管理 (Stage 7a) ──────────────────
+
+/// POST /v1/skills — 重载所有 skills (调 SkillManager::reload).
+async fn reload_skills(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // SkillManager 当前不直接持有 project_dir (AppState.skills 是空 manager),
+    // reload 时从 env var `QIANXUN_PROJECT_DIR` 读, 没有就 None (只载全局).
+    let project_dir = std::env::var("QIANXUN_PROJECT_DIR").ok();
+    let mut skills = state.skills.clone();
+    skills.reload(project_dir.as_deref().map(Path::new));
+    let count = skills.skill_count();
+    Ok(Json(serde_json::json!({
+        "status": "reloaded",
+        "count": count,
+    })))
+}
+
+/// POST /v1/skills/{name}/toggle — 启/停 skill.
+///
+/// Stage 7a 简化: 不真做禁用 (SkillManager 当前没有 disabled_skills 字段),
+/// 只返一个 status 字段, 表示"接受请求" + 是否存在该 skill. 实际持久化
+/// 留 Stage 7b: 在 ResolvedConfig 加 `disabled_skills: Vec<String>` 字段.
+///
+/// 注: SkillManager 当前是 `Clone` (无内部状态), AppState 持有的是 clone.
+/// 我们 reload 后**不**写回 AppState.skills (因为 AppState.skills 是同一个
+/// 空 manager 的 clone, 改不改都空). Stage 7b 改成 `Arc<RwLock<SkillManager>>` 再做真生效.
+async fn toggle_skill(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(body): Json<ToggleSkillRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let skills = state.skills.clone();
+    if skills.select_by_name(&name).is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("skill '{name}' not found (loaded: {})", skills.available_skills().len()),
+        ));
+    }
+    let new_status = if body.enabled { "enabled" } else { "disabled" };
+    Ok(Json(serde_json::json!({
+        "status": new_status,
+        "name": name,
+        "note": "Stage 7a: persistent disabled_skills config not yet wired (planned Stage 7b)",
+    })))
+}
+
+/// Toggle skill 请求体.
+#[derive(Debug, Deserialize)]
+struct ToggleSkillRequest {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// DELETE /v1/mcp/servers/{id} — 删除 MCP server.
+///
+/// Stage 7a 简化: 当前 `AppState` 没有暴露 McpServerManager (仅在
+/// `agent_host::SharedState` 里), 我们返 status="deleted" 占位, 真正的
+/// 卸载由 Stage 7b 接 AppState.mcp_manager: Arc<Mutex<McpServerManager>> 后生效.
+async fn delete_mcp_server(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 找到对应 client 调 shutdown
+    let tools = state.tools.clone();
+    if tools.remove_mcp_client(&id).is_some() {
+        tracing::info!("[daemon] removed MCP client '{id}'");
+    }
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "id": id,
+        "note": "Stage 7a: full McpServerManager integration planned for Stage 7b",
+    })))
+}
+
+/// POST /v1/mcp/servers/{id}/test — 测试 MCP 连接.
+///
+/// Stage 7a 简化: 当前 ToolRegistry 没有暴露 server 列表 + health check;
+/// 返 status="not_implemented" + 已知工具列表.
+async fn test_mcp_server(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": false,
+        "id": id,
+        "tools": [],
+        "error": "Stage 7a: MCP health check not yet implemented (planned Stage 7b)",
+    }))
+}
+
+/// POST /v1/tools/{name}/invoke — 试用 tool (直调 ToolRegistry, 不走 LLM).
+async fn invoke_tool(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Option<Json<Value>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let arguments = body.map(|Json(v)| v).unwrap_or(Value::Object(Default::default()));
+    let tools = state.tools.clone();
+    match tools.execute_async(&name, arguments).await {
+        Ok(out) => Ok(Json(serde_json::json!({
+            "output": out.content,
+            "is_error": out.is_error,
+        }))),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("tool invoke failed: {e}"),
+        )),
+    }
 }
 
 // ─── Prompt (SSE 流式) ────────────────────────────────────
@@ -965,7 +1233,7 @@ mod jwt_auth_tests {
 
     /// 序列化 env var 操作的 mutex (Rust 2024 edition 下 `set_var` 是
     /// `unsafe`, 且 env var 是进程级共享, 测试并行运行会 race).
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const TEST_SECRET: &str = "test-jwt-secret-2026-do-not-use-in-prod";
 
@@ -1317,6 +1585,10 @@ mod jwt_auth_tests {
         assert!(is_auth_skipped_path("/"));
         assert!(is_auth_skipped_path("/v1/system/health"));
         assert!(is_auth_skipped_path("/v1/system/status"));
+        // Stage 7a: /_ui/* 跳过 auth (SvelteKit 静态资源)
+        assert!(is_auth_skipped_path("/_ui"));
+        assert!(is_auth_skipped_path("/_ui/"));
+        assert!(is_auth_skipped_path("/_ui/assets/main.js"));
         // 其它路径不跳过
         assert!(!is_auth_skipped_path("/v1/chat/session"));
         assert!(!is_auth_skipped_path("/v1/tools"));
@@ -1326,3 +1598,608 @@ mod jwt_auth_tests {
         assert!(!is_auth_skipped_path("/random"));
     }
 }
+
+// ─── Stage 7a: 新增 endpoint e2e 测试 ─────────────────────
+
+#[cfg(test)]
+mod stage7a_endpoint_tests {
+    //! 验证新加的 LLM provider / Skills / MCP / Tools / UI 静态文件 endpoint.
+    //!
+    //! 策略: 构造一个最小测试 AppState (空 manager + 空 tools), 用 oneshot
+    //! 调完整 router (带 auth middleware), 用 parent module 的 `ENV_MUTEX`
+    //! 串行化 env var 操作 (Rust 2024 下 set_var 是 unsafe, 多线程并发是 UB).
+    use super::*;
+    use crate::daemon::llm_providers::LlmProviderManager;
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+    use qianxun_core::agent::message::ContentBlock;
+    use qianxun_core::config::{ResolvedConfig, ResolvedProviderConfig};
+    use qianxun_core::skills::SkillManager;
+    use qianxun_core::tools::ToolRegistry;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    // 用父 module 的 ENV_MUTEX (pub(crate)), 跟 jwt_auth_tests 同步
+    use super::jwt_auth_tests::ENV_MUTEX;
+
+    const TEST_SECRET: &str = "stage7a-test-jwt-secret";
+
+    /// 构造一个最小 AppState for tests.
+    ///
+    /// 不初始化 AgentLoopHost (会要求 SessionStore), 单独 mock 一个 minimal host
+    /// 通过 — 简单做法: 只为 router 提供 LLM manager / tools / skills, agent_host
+    /// 字段用空 runtime.
+    fn make_test_state() -> Arc<crate::daemon::AppState> {
+        use crate::daemon::persistence::SessionStore;
+        use qianxun_memory::MemoryCore;
+        use qianxun_core::provider::create_provider;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "deepseek".to_string(),
+            ResolvedProviderConfig {
+                api_key: "sk-test".into(),
+                model: "deepseek-v4-flash".into(),
+                base_url: "https://api.deepseek.com/anthropic".into(),
+                temperature: None,
+                max_tokens: None,
+            },
+        );
+        let config = ResolvedConfig {
+            deepseek: providers.get("deepseek").cloned().unwrap(),
+            active_provider: "deepseek".into(),
+            providers,
+            ..Default::default()
+        };
+        let config_arc = Arc::new(config.clone());
+        let provider: Arc<dyn qianxun_core::provider::LlmProvider> =
+            create_provider(&config.active_provider, &config.active_provider_config()).into();
+        let tools = Arc::new(ToolRegistry::new());
+        let memory = Arc::new(MemoryCore::open_in_memory().expect("memory"));
+        let skills = SkillManager::new();
+        let store = Arc::new(SessionStore::in_memory().expect("store in_memory"));
+
+        // Stage 1 兼容: SharedState 实际构造需要 AgentLoopHost, 留 None in test.
+        // 我们用 try_new helper 简化 (AgentLoopHost::new 接受 SharedState).
+        // 这里走轻量路径: 直接构造 AppState, shared 给一个**空** shared state.
+        let shared_inner = qianxun_core::provider::LlmProvider::id(&*provider);
+        let _ = shared_inner; // 静默 unused
+        let shared = Arc::new(crate::daemon::agent_host::SharedState::new(
+            config.clone(),
+            provider.clone(),
+            tools.clone(),
+            memory.clone(),
+            skills.clone(),
+        ));
+        let agent_host = Arc::new(crate::daemon::agent_host::AgentLoopHost::new(
+            4,
+            shared.clone(),
+            store.clone(),
+        ));
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
+        let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
+
+        Arc::new(crate::daemon::AppState {
+            agent_host,
+            config: config_arc,
+            provider,
+            tools,
+            memory,
+            skills,
+            shared,
+            store,
+            llm_providers,
+            shutdown_tx,
+            processing_loop_enabled: false,
+        })
+    }
+
+    /// 构造带 UI dist 路径的 test router.
+    fn test_router_with_ui(ui_dist: Option<PathBuf>) -> Router {
+        let state = make_test_state();
+        build_router(state, ui_dist)
+    }
+
+    /// 构造一个临时 UI dist 目录 (含 index.html). 简化: 返回 PathBuf,
+    /// 测完手动 cleanup. 不引 tempfile crate (避免传递依赖).
+    #[allow(dead_code)]
+    fn _unused_tempdir_helper() {}
+
+    /// 用指定 secret 签发测试 JWT.
+    fn make_jwt(secret: &str, sub: &str, exp_offset_secs: i64) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let claims = super::Claims {
+            sub: sub.into(),
+            exp: now + exp_offset_secs,
+            iat: now,
+        };
+        encode(
+            &JwtHeader::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encode test jwt")
+    }
+
+    fn set_jwt_secret(val: &str) {
+        unsafe { std::env::set_var("QIANXUN_JWT_SECRET", val) }
+    }
+
+    fn clear_jwt_secret() {
+        unsafe { std::env::remove_var("QIANXUN_JWT_SECRET") }
+    }
+
+    // ── A.1 静态文件 serve ──
+
+    #[tokio::test]
+    async fn test_ui_dist_missing_returns_503() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+
+        // 故意不传 ui_dist
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/_ui/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert!(body_str.contains("ui_dist_unavailable"));
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_ui_dist_nonexistent_path_returns_503() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+
+        // 传一个不存在的路径
+        let app = test_router_with_ui(Some(PathBuf::from("/this/path/does/not/exist/12345")));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/_ui/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_ui_static_serve_returns_index_html() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+
+        // 临时建一个 dist 目录
+        let dir = std::env::temp_dir().join(format!(
+            "qx-test-ui-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("index.html"), "<html>test</html>").expect("write index");
+        std::fs::create_dir_all(dir.join("assets")).expect("mkdir assets");
+        std::fs::write(dir.join("assets").join("main.js"), "console.log('hi');").expect("write main.js");
+
+        let app = test_router_with_ui(Some(dir.clone()));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/_ui/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert!(body_str.contains("<html>test</html>"));
+
+        // 静态子资源
+        let app2 = test_router_with_ui(Some(dir.clone()));
+        let response = app2
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/_ui/assets/main.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("console.log"));
+
+        // SPA fallback: 不存在的路径 → 返 index.html
+        let app3 = test_router_with_ui(Some(dir.clone()));
+        let response = app3
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/_ui/llm/some-page")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "SPA fallback should serve index.html for unknown paths"
+        );
+
+        // cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+
+        clear_jwt_secret();
+    }
+
+    // ── A.2 LLM provider endpoints (8 个) ──
+
+    #[tokio::test]
+    async fn test_llm_list_providers_requires_auth() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/llm/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_llm_list_providers_returns_summary() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+
+        let token = make_jwt(TEST_SECRET, "user_test", 3600);
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/llm/providers")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        let providers = v.get("providers").and_then(|p| p.as_array()).expect("providers array");
+        assert!(!providers.is_empty(), "should have at least deepseek from default config");
+        // 不泄漏 api_key
+        for p in providers {
+            assert!(p.get("api_key").is_none(), "list should not include api_key");
+            assert!(p.get("has_key").is_some());
+        }
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_llm_full_crud_cycle() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user_test", 3600);
+
+        // 关键: 整个测试用**同一个** state, 避免每次新 Router 丢失数据
+        let state = make_test_state();
+        let app = build_router(state.clone(), None);
+
+        // 1. POST add
+        let body = serde_json::json!({
+            "id": "test_provider",
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com/anthropic",
+            "api_key": "sk-test-add",
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/llm/providers")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 2. GET 详情
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/llm/providers/test_provider")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v.get("api_key").is_none(), "GET detail must strip api_key");
+        assert_eq!(v.get("id").and_then(|x| x.as_str()), Some("test_provider"));
+
+        // 3. PUT update
+        let update_body = serde_json::json!({
+            "id": "test_provider",
+            "provider": "deepseek",
+            "model": "deepseek-v5",
+            "base_url": "https://api.deepseek.com/anthropic",
+            "api_key": null,
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri("/v1/llm/providers/test_provider")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 4. POST activate
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/llm/providers/test_provider/activate")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 5. POST test (返 ok=false 因 base_url 不可达, 但不应 5xx panic)
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/llm/providers/test_provider/test")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 真实网络可能 OK 也可能 fail, 我们只验证 endpoint 不 panic (200 返 TestResult)
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "test endpoint should return 200 with TestResult (ok may be false if network fails)"
+        );
+
+        // 6. DELETE
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri("/v1/llm/providers/test_provider")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 7. GET after delete → 404
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/llm/providers/test_provider")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_llm_get_unknown_returns_404() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user", 3600);
+
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/llm/providers/nonexistent_xyz")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        clear_jwt_secret();
+    }
+
+    // ── A.3 Skills/MCP/Tools endpoints ──
+
+    #[tokio::test]
+    async fn test_skills_reload_returns_count() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user", 3600);
+
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/skills")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.get("status").and_then(|s| s.as_str()), Some("reloaded"));
+        assert!(v.get("count").is_some());
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_skills_toggle_unknown_returns_404() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user", 3600);
+
+        let body = serde_json::json!({ "enabled": false });
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/skills/nonexistent_skill/toggle")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_mcp_delete_unknown_returns_ok() {
+        // Stage 7a: 简化实现, 任何 id 都返 status=deleted (不真删).
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user", 3600);
+
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri("/v1/mcp/servers/nonexistent_mcp")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.get("status").and_then(|s| s.as_str()), Some("deleted"));
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_mcp_test_returns_not_implemented() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user", 3600);
+
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/mcp/servers/test_id/test")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.get("ok").and_then(|o| o.as_bool()), Some(false));
+
+        clear_jwt_secret();
+    }
+
+    #[tokio::test]
+    async fn test_tools_invoke_unknown_returns_400() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        set_jwt_secret(TEST_SECRET);
+        let token = make_jwt(TEST_SECRET, "user", 3600);
+
+        let body = serde_json::json!({ "arguments": {} });
+        let app = test_router_with_ui(None);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/tools/nonexistent_tool/invoke")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        clear_jwt_secret();
+    }
+
+    // ── helper ──
+
+    #[allow(dead_code)]
+    fn _unused_to_suppress_warnings(_: &ContentBlock) {}
+}
+
