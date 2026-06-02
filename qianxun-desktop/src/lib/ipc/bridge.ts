@@ -93,6 +93,26 @@ export async function getSecret(
 	return await invoke<string | null>("get_secret", { key, password });
 }
 
+/// Stage 10b: Invoke Tauri command: `delete_secret` (从 stronghold vault 删除).
+/// 业务用途: 用户换 VPS access_token / 撤权 API key 时, 删 vault 里的旧值.
+/// 凭据不存在 → 静默成功 (idempotent, 跟 stronghold store().delete() 语义对齐).
+/// Web 模式: 从 localStorage 删 base64 项 + password 项.
+export async function deleteSecret(
+	key: string,
+	password: string
+): Promise<boolean> {
+	if (!isTauri()) {
+		// 验证 password (跟 getSecret 一致的安全检查)
+		const storedPwd = localStorage.getItem(`secret-${key}-pwd`);
+		if (!storedPwd || atob(storedPwd) !== password) return false;
+		const existed = localStorage.getItem(`secret-${key}`) !== null;
+		localStorage.removeItem(`secret-${key}`);
+		localStorage.removeItem(`secret-${key}-pwd`);
+		return existed;
+	}
+	return await invoke<boolean>("delete_secret", { key, password });
+}
+
 // ─── 内部 helpers ────────────────────────────────────────────────────────
 
 async function webFetchDaemonHealth(daemonUrl: string): Promise<HealthStatus> {

@@ -143,3 +143,78 @@ fn get_without_load_returns_client_data_not_present() {
     // 修后用 load_client 成功
     let _client = sh.load_client(VAULT_CLIENT).unwrap();
 }
+
+// ─── Stage 10b 新增 (user "我立刻做 Tauri stronghold 真测") ───────────
+
+/// Stage 10b: set → delete → get 返 None
+///
+/// 验证 stronghold `client.store().delete(&[u8])` 端到端: 写一个值, 删它,
+/// 再读返 None. 这是 stage 6a/10b 计划里都漏的最后一个路径. Stage 10b
+/// 加了 Svelte `deleteSecret` 后, Rust 端必须真有对应实现, 此测试是
+/// 防 regression + 给后续 Svelte 调用真接 Rust 端的参考样本.
+#[test]
+fn set_then_delete_then_get_returns_none() {
+    let path = temp_snapshot_path();
+    let pwd = "delete-test-pwd";
+    let kp = make_keyprovider(pwd);
+
+    // 1) set + commit
+    {
+        let sh = Stronghold::default();
+        let client = sh.create_client(VAULT_CLIENT).unwrap();
+        client
+            .store()
+            .insert(b"api_key".to_vec(), b"sk-to-be-deleted".to_vec(), None)
+            .expect("insert");
+        sh.commit_with_keyprovider(&path, &kp).expect("commit");
+    }
+
+    // 2) load + delete + commit
+    {
+        let sh = Stronghold::default();
+        sh.load_snapshot(&kp, &path).expect("load");
+        let client = sh.load_client(VAULT_CLIENT).expect("load_client");
+        let deleted = client
+            .store()
+            .delete(&b"api_key".to_vec())
+            .expect("delete should not fail");
+        // delete 返 Some(old_value), 验证拿到的是写进去的 value
+        assert_eq!(
+            deleted,
+            Some(b"sk-to-be-deleted".to_vec()),
+            "delete should return the old value"
+        );
+        sh.commit_with_keyprovider(&path, &kp).expect("commit after delete");
+    }
+
+    // 3) 重新 load, get 返 None
+    {
+        let sh = Stronghold::default();
+        sh.load_snapshot(&kp, &path).expect("load again");
+        let client = sh.load_client(VAULT_CLIENT).expect("load_client");
+        let result = client
+            .store()
+            .get(&b"api_key".to_vec())
+            .expect("get should not fail");
+        assert!(result.is_none(), "after delete, get should return None");
+    }
+}
+
+/// Stage 10b: delete 不存在的 key 应返 None, 不 panic
+#[test]
+fn delete_nonexistent_key_returns_none() {
+    let path = temp_snapshot_path();
+    let kp = make_keyprovider("pwd");
+    let sh = Stronghold::default();
+    sh.create_client(VAULT_CLIENT).unwrap();
+    sh.commit_with_keyprovider(&path, &kp).unwrap();
+
+    let sh = Stronghold::default();
+    sh.load_snapshot(&kp, &path).unwrap();
+    let client = sh.load_client(VAULT_CLIENT).unwrap();
+    let result = client
+        .store()
+        .delete(&b"never-existed".to_vec())
+        .expect("delete should not fail on missing key");
+    assert!(result.is_none(), "delete of missing key returns None");
+}

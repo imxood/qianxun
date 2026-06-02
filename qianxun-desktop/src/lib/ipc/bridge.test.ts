@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-describe("bridge (Stage 6a §11.3 stronghold secret)", () => {
+describe("bridge (Stage 6a §11.3 stronghold secret + Stage 10b delete)", () => {
 	beforeEach(() => {
 		// 清空 web fallback 用的 secret-* key
 		for (let i = localStorage.length - 1; i >= 0; i--) {
@@ -59,5 +59,39 @@ describe("bridge (Stage 6a §11.3 stronghold secret)", () => {
 
 		const value = await getSecret("never-set-key", "any-pwd");
 		expect(value).toBeNull();
+	});
+
+	// ─── Stage 10b 新增: deleteSecret 端到端 (web fallback 路径) ───
+
+	it("deleteSecret_web_mode_existing_key: set → delete (密码对) → 返 true, get 返 null", async () => {
+		const { setSecret, deleteSecret, getSecret } = await import("$lib/ipc/bridge");
+		await setSecret("anthropic-api-key", "sk-ant-to-delete", "user-pwd");
+		expect(await getSecret("anthropic-api-key", "user-pwd")).toBe("sk-ant-to-delete");
+
+		const existed = await deleteSecret("anthropic-api-key", "user-pwd");
+		expect(existed).toBe(true);
+
+		// 删除后 localStorage 应清干净
+		expect(localStorage.getItem("secret-anthropic-api-key")).toBeNull();
+		expect(localStorage.getItem("secret-anthropic-api-key-pwd")).toBeNull();
+		// get 应返 null
+		expect(await getSecret("anthropic-api-key", "user-pwd")).toBeNull();
+	});
+
+	it("deleteSecret_web_mode_wrong_password: 密码错时返 false, 不删除", async () => {
+		const { setSecret, deleteSecret, getSecret } = await import("$lib/ipc/bridge");
+		await setSecret("vps-token-2", "vps-secret", "right-pwd");
+
+		const existed = await deleteSecret("vps-token-2", "wrong-pwd");
+		expect(existed).toBe(false);
+
+		// 密码错不删除, 仍能正确取
+		expect(await getSecret("vps-token-2", "right-pwd")).toBe("vps-secret");
+	});
+
+	it("deleteSecret_web_mode_nonexistent_key: key 不存在返 false, 不 panic", async () => {
+		const { deleteSecret } = await import("$lib/ipc/bridge");
+		const existed = await deleteSecret("never-existed-key", "any-pwd");
+		expect(existed).toBe(false);
 	});
 });
