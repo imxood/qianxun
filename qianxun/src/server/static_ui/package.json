@@ -1,0 +1,14 @@
+{
+  "name": "qianxun-vps-static-ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "千寻 VPS 静态 Web UI 单测 (vitest, Stage 6c 起步)",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}
