@@ -241,17 +241,24 @@ qianxun/src/daemon/ui/           # SvelteKit SPA
 **预估代码量**: ~800 行 Rust + ~1200 行 TS/Svelte
 **30 min cap**: 宽松, 留 buffer 应对 sysinfo 传递依赖评估.
 
-### Stage 7c — Chat + Settings + 移动端响应式
+### Stage 7c — Chat + Settings + **Web 响应式 (非移动端)**
+
+> **2026-06-02 调整**: 用户决定**移动端 (iOS + Android) 用 Flutter**, 不在
+> Web Console 里做原生移动端. Stage 7c 因此**只做 Web 响应式** (浏览器
+> 在窄屏下能用), 完整 Flutter 移动端留 Stage 8 独立项目.
 
 **Track A' (Web UI)**:
 1. Settings 面板: `/settings` (主题切换 UI + 语言切换 + token 配置 + about)
 2. Chat 视图: `/chat` (项目列表 + 3 栏布局 + 流式聊天) — 复用 `qianxun-desktop/src/lib/components/ui` 组件
-3. Tailwind 响应式 (md/lg 断点) + 移动端导航 (汉堡菜单)
+3. **Web 响应式** (Tailwind md/lg 断点) + 移动端浏览器导航 (汉堡菜单, drawer)
+   - 移动端浏览器 (Chrome/Safari 窄屏) 能用, **不**打包成 app
 4. 错误边界 + 离线检测 (daemon unreachable 时显示)
+5. PWA manifest 起步 (后续 Stage 8 Flutter 完整实现)
 
 **验证**:
-- vitest ≥ 6 (chat 流 + settings 切换 + 移动端断点)
-- 浏览器 (含窄屏) 走通所有 10 路由
+- vitest ≥ 6 (chat 流 + settings 切换 + Web 响应式断点)
+- 浏览器 (含窄屏模拟器) 走通所有 10 路由
+- Lighthouse mobile score ≥ 80
 
 **预估代码量**: ~200 行 Rust (无) + ~1500 行 TS/Svelte
 **30 min cap**: 紧, 可能要拆 7c / 7d (但优先尝试 7c 一气呵成)
@@ -362,18 +369,85 @@ cargo build --release -p qianxun --bin qx
 | 问题 | 决策点 | 建议 |
 |---|---|---|
 | Web Console 默认端口是否跟 daemon 端口分开? | daemon `--ui-port` 单独控制, 还是共用 23900? | **共用 23900** (路径 `/ui/`), 简化部署 |
-| LLM key 注入走 keyring 还是 daemon 进程内加密? | 哪个 Rust 库? 跨平台一致性? | **先用 env var**, Stage 8 评估 keyring |
+| LLM key 注入走 keyring 还是 daemon 进程内加密? | 哪个 Rust 库? 跨平台一致性? | **先用 env var**, Stage 7b 评估 keyring |
 | Chat 视图放 Web Console 是不是冗余 (Tauri 已有)? | Stage 7c 是否做? | **做简化版**, 主要给远程调试 (ssh 端口转发后浏览器看) |
-| Web Console 国际化做不做? | Stage 7c i18n? | **做基础 2 语言** (zh-CN + en), 后续按需加 |
+| Web Console 国际化做不做? | Stage 7b i18n? | **做基础 2 语言** (zh-CN + en), 后续按需加 |
 | System 日志查看是否在 Stage 7b 范围? | `/v1/system/logs` 实现复杂度? | **Stage 7b 做 tail 模式 (最近 N 行)**, 完整搜索留 Stage 8 |
+| **移动端用 Flutter 还是 Tauri 移动?** | 哪个栈? | **Flutter** (2026-06-02 用户决定), 留 Stage 8 独立项目 |
+| **Stage 8 Flutter 移动端从哪起步?** | 项目结构 + 共享 daemon API + 跟 Web 端 UI 一致? | 详见 [未来规划 §11](#11-未来规划-stage-8-flutter-移动端) |
 
-## §11 与现有文档的关系
+## §11 未来规划 (Stage 8 — Flutter 移动端)
+
+> **2026-06-02 新增**: 用户决定移动端用 Flutter, 不在 Web Console 里做
+> 原生移动端. 下面是 Stage 8 的**概要** (不展开, 留给专门的 `08-flutter-mobile.md`).
+
+### 11.1 一句话定位
+
+**千寻 Flutter 移动端** — iOS + Android 一次写, Material 3 设计, 消费
+daemon HTTP API (跟 Web Console / Tauri 桌面端**同一套** backend).
+
+### 11.2 跟三端的角色分工
+
+| 端 | 栈 | 角色 | 部署 |
+|---|---|---|---|
+| **Web Console** | Svelte 5 + Tailwind + shadcn-svelte | 管理面 (daemon 本地) | daemon 进程内 serve |
+| **Tauri 桌面** | Tauri 2.0 + Svelte 5 | 用户面 (桌面聊天) | 装机客户端 |
+| **Flutter 移动** | Flutter + Material 3 | 用户面 (移动聊天) | iOS App Store + APK |
+| **VPS Server** | axum + vanilla JS 控制台 | 控制面 (team/项目) | Docker |
+
+### 11.3 Flutter 项目结构 (Stage 8 规划, 待详化)
+
+```
+qianxun-mobile/                       # Flutter 项目根
+├── pubspec.yaml
+├── lib/
+│   ├── main.dart                     # MaterialApp + 路由
+│   ├── core/
+│   │   ├── api/                      # daemon HTTP client (Dio + interceptor)
+│   │   ├── auth/                     # JWT 存储 (flutter_secure_storage)
+│   │   └── theme/                    # Material 3 主题 (千寻品牌色)
+│   ├── features/
+│   │   ├── chat/                     # 聊天 (复用 Web 端 sse 流式逻辑)
+│   │   ├── projects/                 # 项目列表
+│   │   ├── settings/                 # 设置 (主题/语言/token)
+│   │   └── console/                  # 管理面 (LlmProviders/Skills/MCP/Tools 列表)
+│   └── shared/                       # widgets, utils
+├── ios/                              # iOS Runner
+├── android/                          # Android Runner
+└── tests/                            # widget_test, integration_test
+```
+
+### 11.4 Stage 8 拆分 (预估, 30 min cap 模板)
+
+| Stage | 范围 |
+|---|---|
+| **8a** | Flutter 脚手架 + Material 3 主题 + API client + Auth (JWT 存 secure storage) |
+| **8b** | 聊天功能 (SSE 消费 + MessageBubble + InputBox) + 离线队列 (sqflite) |
+| **8c** | 项目列表 + 设置 + 简易 console (只读) |
+| **8d** | iOS build 配置 + Android build 配置 + 真机/模拟器测试 + 发布脚本 |
+
+### 11.5 跟现有端的关系
+
+- **不复用 Web 组件** (Flutter 不是 web, 重新写) — 但共享 API 契约 (`_shared-contract.md` §3.1/§3.2)
+- **不替换 Tauri 桌面** — Flutter 只移动端, Tauri 只桌面
+- **不引 PWA** (Web 响应式) — Flutter 是 native, 不走 PWA
+- **共享 design tokens** — 千寻品牌色 `--accent: #ff7a3d` 同步到 Flutter ThemeData
+
+### 11.6 详细规划待写
+
+不放在本文件 (`01b-daemon-web-console.md` 是 Web Console 专属), 后续
+单独建 `docs/30_子项目规划/04-flutter-mobile.md` 详细化.
+
+---
+
+## §12 与现有文档的关系
 
 - **01-daemon.md** Phase 4b 一节更新 (从"暂不实施" → "Stage 7 拆 7a/7b/7c 实施")
 - **01-daemon.md** §4.2 架构图 (第 108 行) 加 `/_ui/*` 详细说明
 - **_shared-contract.md** §3.1 加 §4.2 列表的 17 个新 endpoint
 - **00-RUNNING-GUIDE.md** 加 Web Console 启动 + 访问说明
 - **02-vps-server.md** §3 加"两套 UI 不共享代码" 声明
+- **(待写) 04-flutter-mobile.md** Stage 8 详细设计
 
 ---
 
