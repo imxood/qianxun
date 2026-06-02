@@ -1,33 +1,31 @@
 // ───────────────────────────────────────────────────────────────────────────
-// VpsStore — VPS (WebSocket) 接入骨架 (Stage 4)
-// 与 docs/30_子项目规划/03-tauri-desktop.md §10.4 完全一致.
+// VpsStore — VPS 接入 (Stage 4 + Stage 6c 真接 REST fetch)
 //
-// Stage 4 简化:
-//   - 只验证 WS 连接 (不接 team 业务路由, 不接邀请推送)
-//   - VPS URL 从 localStorage 读取 (vpsUrl), 启动时尝试连接
-//   - 失败不报错 (VPS 是可选的, 用户只连本地 Daemon 也行)
-//   - 30s 周期重试 (与 §10.4 文档一致)
+// Stage 4 范围:
+//   - WS 健康检查 (vpsUrl + connectionState 3 态机, 30s 周期重试)
+//   - normalizeUrl / setVpsUrl / startHealthCheck / stopHealthCheck
 //
-// 状态机 (3 态):
-//   'offline'     — vpsUrl 为空 或 上次连接失败
-//   'connecting'  — 正在尝试 WS handshake
-//   'connected'   — WS 握手成功
+// Stage 6b → 6c 演进:
+//   - 6b: 3 个写操作 (inviteMember / changeRole / assignProject) 为本地 mock
+//   - 6c: 替换为真实 VPS REST fetch (POST /api/teams/:id/members 等),
+//          自动带 Authorization: Bearer <vpsToken>. token 取自
+//          settingsStore.getVpsToken() (Stage 6b: localStorage 明文, 7 升
+//          stronghold + 密码弹窗).
+//   - 本地状态 (teamMembers / projectAssignees) 已迁出, 由 teamStore 持有
+//     并通过 refresh() 从 VPS 拉取. vpsStore 仅保留写操作 API.
 //
-// Stage 6b: + 团队/项目写操作 (inviteMember / changeRole / assignProject).
-//   - 当前为本地 mock: 不发真实 fetch, 只更新 `teamMembers` / `projectAssignees`
-//     状态, 让 UI 能验证写操作流程. Stage 6c 替换为真实 VPS REST fetch.
-//   - 真实 fetch 时, 凭据取自 settingsStore.getVpsToken() (Stage 6b 简化: 从
-//     localStorage 读明文, Stage 7 升级为 stronghold + 密码弹窗).
+// 约束:
+//   - 不做错误重试 (Stage 7)
+//   - 不做实时 WS 推送同步 (Stage 7)
+//   - 不做项目创建 UI (Stage 7)
 // ───────────────────────────────────────────────────────────────────────────
 
-import type { TeamMember, TeamRole } from "$lib/types/ipc";
+import type { TeamRole } from "$lib/types/ipc";
+import { settingsStore } from "$lib/stores/settings.svelte";
 
 const STORAGE_KEY = "qianxun.vps.url";
-const VPS_PING_INTERVAL_MS = 30_000; // §10.4
+const VPS_PING_INTERVAL_MS = 30_000;
 const VPS_HANDSHAKE_TIMEOUT_MS = 5_000;
-// Stage 6b: mock 写操作的人为延迟, 让 UI 能看到 "提交中…" 状态. Stage 6c 真发
-// 请求时这个延迟自然来自网络, 不需要模拟.
-const MOCK_WRITE_DELAY_MS = 50;
 
 export type VpsConnectionState = "offline" | "connecting" | "connected";
 
@@ -36,12 +34,6 @@ class VpsStore {
 	connectionState = $state<VpsConnectionState>("offline");
 	lastError = $state<string | null>(null);
 	lastConnectedAt = $state<number | null>(null);
-
-	// Stage 6b: mock 写操作的本地状态. 真实接入后会被 fetch + 缓存策略取代.
-	//  - teamMembers:      per-team 成员列表 (mock 后端 truth)
-	//  - projectAssignees: per-project 已分配成员 id 列表
-	teamMembers = $state<Record<string, TeamMember[]>>({});
-	projectAssignees = $state<Record<string, string[]>>({});
 
 	#timer: ReturnType<typeof setInterval> | null = null;
 	#ws: WebSocket | null = null;
@@ -64,13 +56,11 @@ class VpsStore {
 		} catch {
 			// ignore (private mode)
 		}
-		// 改了 URL 立即试一次 (如果有 timer 在跑会忽略自己)
 		void this.connect();
 	}
 
 	/// 启动周期 ping. 可重复调用 (内部去重).
 	startHealthCheck(): void {
-		// 启动时从 storage 读 URL
 		try {
 			const raw = localStorage.getItem(STORAGE_KEY);
 			if (raw) this.vpsUrl = raw;
@@ -79,7 +69,7 @@ class VpsStore {
 		}
 
 		if (this.#timer) return;
-		void this.connect(); // 立即试一次
+		void this.connect();
 		this.#timer = setInterval(() => void this.connect(), VPS_PING_INTERVAL_MS);
 	}
 
@@ -99,21 +89,17 @@ class VpsStore {
 
 	// ─── 内部: 实际 WS 握手 ──────────────────────────────────────────────────
 
-	/// 试一次 WS 握手. 成功 → 'connected' 5s 后立即关 (健康检查不保持长连接,
-	/// 真实长连接留 Stage 5). 失败 → 'offline' + lastError.
 	async connect(): Promise<void> {
 		if (!this.vpsUrl) {
 			this.connectionState = "offline";
 			return;
 		}
-		// SSR / 非浏览器环境 — 直接退出
 		if (typeof WebSocket === "undefined") {
 			this.connectionState = "offline";
 			this.lastError = "WebSocket API 不可用 (SSR?)";
 			return;
 		}
 
-		// 关掉旧 socket
 		try {
 			this.#ws?.close();
 		} catch {
@@ -146,10 +132,9 @@ class VpsStore {
 				"open",
 				() => {
 					clearTimeout(timeout);
-					if (this.#ws !== ws) return; // 已被新连接替换
+					if (this.#ws !== ws) return;
 					this.connectionState = "connected";
 					this.lastConnectedAt = Date.now();
-					// 健康检查模式: 5s 后主动关. 真实长连接留 Stage 5.
 					setTimeout(() => {
 						try {
 							ws.close();
@@ -186,7 +171,6 @@ class VpsStore {
 						this.connectionState = "offline";
 						this.lastError = this.lastError ?? "连接被关闭";
 					} else if (this.connectionState === "connected") {
-						// 服务端主动关 (我们 5s 后自关也会触发)
 						this.connectionState = "offline";
 					}
 				},
@@ -199,8 +183,6 @@ class VpsStore {
 	}
 
 	/// 'https://vps.example.com' → 'wss://vps.example.com/hub'
-	/// 'http://...' → 'ws://...'
-	/// 已有 ws:// 或 wss:// 直接返回.
 	normalizeUrl(url: string): string {
 		let u = url.trim();
 		if (!u) return u;
@@ -215,73 +197,87 @@ class VpsStore {
 		return u.endsWith("/hub") ? u : `${u.replace(/\/$/, "")}/hub`;
 	}
 
-	// ─── Stage 6b: 团队/项目写操作 (mock) ────────────────────────────────────
+	// ─── Stage 6c: 写操作 (真接 fetch) ──────────────────────────────────────
 	//
-	// 三个方法当前都是本地 mock, 不发网络请求, 仅更新 store 内部状态.
-	// Stage 6c 将替换为真实 VPS REST fetch (POST /api/teams/:id/members 等).
-	// 真实 fetch 时, 凭据 (vpsToken) 取自 settingsStore.getVpsToken().
+	// 三个方法都通过 vpsFetch() 发真实 HTTP 请求, 自动带 Bearer token.
+	// 状态由调用方 (通常是 teamStore.refresh() 或组件 onChanged 回调) 拉新.
+	// 不做错误重试 / 不做 WS 推送同步 (Stage 7 加).
 
 	/// POST /api/teams/:teamId/members { user_id, display_name, role }
-	/// mock: 50ms 延迟后把新成员追加到 teamMembers[teamId].
 	async inviteMember(
 		teamId: string,
 		userId: string,
 		displayName: string,
 		role: TeamRole
 	): Promise<void> {
-		await new Promise((r) => setTimeout(r, MOCK_WRITE_DELAY_MS));
 		if (!teamId || !userId) {
 			throw new Error("inviteMember: teamId/userId 必填");
 		}
-		const list = this.teamMembers[teamId] ?? [];
-		if (list.some((m) => m.user_id === userId)) {
-			throw new Error(`user_id=${userId} 已在团队中`);
-		}
-		this.teamMembers[teamId] = [
-			...list,
-			{
+		const r = await vpsFetch(`/api/teams/${encodeURIComponent(teamId)}/members`, {
+			method: "POST",
+			body: JSON.stringify({
 				user_id: userId,
 				display_name: displayName || userId,
 				role,
-				joined_at: new Date().toISOString(),
-			},
-		];
+			}),
+		});
+		if (!r.ok) {
+			throw new Error(`inviteMember failed: HTTP ${r.status} ${r.statusText}`);
+		}
 	}
 
 	/// PATCH /api/teams/:teamId/members/:userId { role }
-	/// mock: 找到该 user 并改 role.
 	async changeRole(teamId: string, userId: string, role: TeamRole): Promise<void> {
-		await new Promise((r) => setTimeout(r, MOCK_WRITE_DELAY_MS));
-		const list = this.teamMembers[teamId];
-		if (!list) {
-			throw new Error(`changeRole: team=${teamId} 没有成员`);
+		if (!teamId || !userId) {
+			throw new Error("changeRole: teamId/userId 必填");
 		}
-		const idx = list.findIndex((m) => m.user_id === userId);
-		if (idx < 0) {
-			throw new Error(`changeRole: user=${userId} 不在团队中`);
-		}
-		this.teamMembers[teamId] = list.map((m) =>
-			m.user_id === userId ? { ...m, role } : m
+		const r = await vpsFetch(
+			`/api/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+			{
+				method: "PATCH",
+				body: JSON.stringify({ role }),
+			}
 		);
+		if (!r.ok) {
+			throw new Error(`changeRole failed: HTTP ${r.status} ${r.statusText}`);
+		}
 	}
 
 	/// POST /api/projects/:projectId/assign { user_id }
-	/// mock: 把 userId 加入 projectAssignees[projectId] (去重).
 	async assignProject(projectId: string, userId: string): Promise<void> {
-		await new Promise((r) => setTimeout(r, MOCK_WRITE_DELAY_MS));
 		if (!projectId || !userId) {
 			throw new Error("assignProject: projectId/userId 必填");
 		}
-		const list = this.projectAssignees[projectId] ?? [];
-		if (list.includes(userId)) return; // 幂等
-		this.projectAssignees[projectId] = [...list, userId];
+		const r = await vpsFetch(
+			`/api/projects/${encodeURIComponent(projectId)}/assign`,
+			{
+				method: "POST",
+				body: JSON.stringify({ user_id: userId }),
+			}
+		);
+		if (!r.ok) {
+			throw new Error(`assignProject failed: HTTP ${r.status} ${r.statusText}`);
+		}
 	}
+}
 
-	/// Stage 6b 测试钩子: 清空 mock 状态. Stage 6c 删除.
-	__resetMockState(): void {
-		this.teamMembers = {};
-		this.projectAssignees = {};
+/// 通用 fetch wrapper, 自动带 Bearer token + JSON headers.
+/// token 从 settingsStore.getVpsToken() 取 (Stage 6b: localStorage 明文,
+/// Stage 7 替换为 stronghold + 密码弹窗).
+async function vpsFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const base = settingsStore.vpsUrl.trim();
+	if (!base) {
+		throw new Error("vpsFetch: settingsStore.vpsUrl 未配置");
 	}
+	const token = settingsStore.getVpsToken();
+	return fetch(`${base}${path}`, {
+		...opts,
+		headers: {
+			Authorization: token ? `Bearer ${token}` : "",
+			"Content-Type": "application/json",
+			...(opts.headers ?? {}),
+		},
+	});
 }
 
 export const vpsStore = new VpsStore();

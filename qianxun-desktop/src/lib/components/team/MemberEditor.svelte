@@ -178,8 +178,4 @@
 		</div>
 	{/if}
 
-	<!-- Stage 6b 简化 banner -->
-	<div class="mt-1 rounded border border-dashed border-amber-500/40 bg-amber-50/40 px-1.5 py-1 text-[10px] text-amber-700 dark:bg-amber-950/20 dark:text-amber-300">
-		Stage 6b: 写操作当前为本地 mock, 不发真实请求 (Stage 6c 接 VPS REST)
-	</div>
 </div>

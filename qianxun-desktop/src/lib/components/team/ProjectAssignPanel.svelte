@@ -118,8 +118,4 @@
 	{#if lastError}
 		<div class="text-[10px] text-red-600 dark:text-red-400">{lastError}</div>
 	{/if}
-
-	<div class="rounded border border-dashed border-amber-500/40 bg-amber-50/40 px-1.5 py-1 text-[10px] text-amber-700 dark:bg-amber-950/20 dark:text-amber-300">
-		Stage 6b: 分配当前为本地 mock, 不发真实请求 (Stage 6c 接 VPS REST)
-	</div>
 </div>

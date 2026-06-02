@@ -10,6 +10,7 @@
 	import { connectionStore } from "$lib/stores/connection.svelte";
 	import { sessionStore } from "$lib/stores/session.svelte";
 	import { vpsStore } from "$lib/stores/vps.svelte";
+	import { teamStore } from "$lib/stores/team.svelte";
 
 	// ─── Stage 1 mock 数据 ──────────────────────────────────────────────────
 	// 真实数据 Stage 2 通过 daemon_list_projects / daemon_list_sessions
@@ -142,6 +143,10 @@
 		}
 		vpsStore.startHealthCheck();
 
+		// Stage 6c: 用 mock 数据 seed teamStore (Sidebar 集成路由).
+		// 真实数据由 teamStore.refresh() 在 VPS 在线时拉取.
+		teamStore.seed(mockTeams, mockProjects);
+
 		// Stage 4 §10.3: 周期性检查 — daemon 从 degraded 变 connected 时
 		// 自动 flush 离线队列. 用 setInterval 不用 $effect, 避免 Svelte 5
 		// read-write effect cycle 陷阱 (写 sessionStore.offlineQueue 会进入
@@ -163,8 +168,6 @@
 <ThreeColumnLayout>
 	{#snippet sidebar()}
 		<Sidebar
-			projects={mockProjects}
-			teams={mockTeams}
 			activeProjectId={activeProjectId}
 			onSelectProject={onSelectProject}
 		/>

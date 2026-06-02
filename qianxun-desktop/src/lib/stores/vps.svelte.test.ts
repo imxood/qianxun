@@ -1,32 +1,43 @@
 // ───────────────────────────────────────────────────────────────────────────
-// VpsStore — Stage 4 VPS 接入骨架测试
-// 与 docs/30_子项目规划/03-tauri-desktop.md §10.4 一致
+// VpsStore — 测试
+//   Stage 4 §10.4: VPS WS 健康检查 (URL 状态机 + normalize)
+//   Stage 6c: 3 个写操作真接 fetch (用 vi.spyOn(global, 'fetch') mock)
 //
-// Stage 6b: 加 1 个写操作 mock 测试 (inviteMember → 本地 teamMembers 状态更新).
-// 真实 fetch 测试留 Stage 6c.
+// 与 docs/30_子项目规划/03-tauri-desktop.md §10.4 + §9.3 一致.
 // ───────────────────────────────────────────────────────────────────────────
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { vpsStore } from "$lib/stores/vps.svelte";
+import { settingsStore } from "$lib/stores/settings.svelte";
 
-describe("VpsStore (Stage 4 §10.4 + Stage 6b 写操作 mock)", () => {
+describe("VpsStore (Stage 4 §10.4 + Stage 6c 真接 fetch)", () => {
 	beforeEach(() => {
 		localStorage.removeItem("qianxun.vps.url");
+		localStorage.removeItem("qianxun.vps.token");
 		vpsStore.vpsUrl = "";
 		vpsStore.connectionState = "offline";
 		vpsStore.lastError = null;
 		vpsStore.stopHealthCheck();
-		vpsStore.__resetMockState();
+		// 配置 settingsStore 让 vpsFetch 能拿到 base URL + token
+		settingsStore.setVpsUrl("https://vps.example.com");
+		settingsStore.setVpsToken("test-token-abc");
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it("默认 connectionState='offline' 且 vpsUrl 为空", () => {
+		// 重置 settingsStore 避免污染
+		settingsStore.setVpsUrl("");
+		settingsStore.setVpsToken("");
 		expect(vpsStore.connectionState).toBe("offline");
 		expect(vpsStore.vpsUrl).toBe("");
 		expect(vpsStore.isDegraded).toBe(false);
-		// 未配 URL 不算降级
 	});
 
 	it("未配 URL 时 isDegraded=false (VPS 是可选的)", () => {
+		settingsStore.setVpsUrl("");
 		vpsStore.vpsUrl = "";
 		expect(vpsStore.isDegraded).toBe(false);
 	});
@@ -58,32 +69,94 @@ describe("VpsStore (Stage 4 §10.4 + Stage 6b 写操作 mock)", () => {
 		expect(vpsStore.vpsUrl).toBe("https://vps.example.com");
 	});
 
-	// ─── Stage 6b: 团队/项目写操作 mock ───────────────────────────────────
+	// ─── Stage 6c: 真接 fetch 测试 ────────────────────────────────────────
 
-	it("test_inviteMember_member_stores_role_change: inviteMember 把新成员追加到 teamMembers 且 role 正确", async () => {
-		// 准备: 已有 1 个 owner
-		const teamId = "team_1";
-		vpsStore.teamMembers[teamId] = [
-			{
-				user_id: "u_owner",
-				display_name: "owner",
-				role: "owner",
-				joined_at: "2026-06-01T00:00:00Z",
-			},
-		];
+	it("test_inviteMember_real_fetch_sends_POST_with_Bearer: 真发 POST /api/teams/:id/members, 带 Authorization Bearer", async () => {
+		const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			})
+		);
 
-		// 动作: 邀请一个新 admin 成员
-		await vpsStore.inviteMember(teamId, "u_alice", "Alice", "admin");
+		await vpsStore.inviteMember("team_1", "u_alice", "Alice", "admin");
 
-		// 验证: 列表包含新成员, role 是 admin
-		const list = vpsStore.teamMembers[teamId];
-		expect(list).toHaveLength(2);
-		const alice = list?.find((m) => m.user_id === "u_alice");
-		expect(alice).toBeDefined();
-		expect(alice?.role).toBe("admin");
-		expect(alice?.display_name).toBe("Alice");
-		// 原有 owner 保持不变
-		expect(list?.[0]?.user_id).toBe("u_owner");
-		expect(list?.[0]?.role).toBe("owner");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchSpy.mock.calls[0]!;
+		expect(url).toBe("https://vps.example.com/api/teams/team_1/members");
+		expect(init!.method).toBe("POST");
+		const headers = init!.headers as Record<string, string>;
+		expect(headers["Authorization"]).toBe("Bearer test-token-abc");
+		expect(headers["Content-Type"]).toBe("application/json");
+		const body = JSON.parse(init!.body as string);
+		expect(body).toEqual({
+			user_id: "u_alice",
+			display_name: "Alice",
+			role: "admin",
+		});
+	});
+
+	it("test_inviteMember_http_error_throws: 后端 4xx/5xx → 抛 Error with status", async () => {
+		vi.spyOn(global, "fetch").mockResolvedValue(
+			new Response("conflict", { status: 409, statusText: "Conflict" })
+		);
+
+		await expect(
+			vpsStore.inviteMember("team_1", "u_alice", "Alice", "admin")
+		).rejects.toThrow(/inviteMember failed: HTTP 409/);
+	});
+
+	it("test_changeRole_real_fetch_sends_PATCH: 真发 PATCH /api/teams/:id/members/:uid", async () => {
+		const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+			new Response("{}", { status: 200 })
+		);
+
+		await vpsStore.changeRole("team_1", "u_bob", "developer");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchSpy.mock.calls[0]!;
+		expect(url).toBe("https://vps.example.com/api/teams/team_1/members/u_bob");
+		expect(init!.method).toBe("PATCH");
+		const body = JSON.parse(init!.body as string);
+		expect(body).toEqual({ role: "developer" });
+	});
+
+	it("test_assignProject_real_fetch_sends_POST: 真发 POST /api/projects/:id/assign", async () => {
+		const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+			new Response("{}", { status: 200 })
+		);
+
+		await vpsStore.assignProject("proj_1", "u_carol");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchSpy.mock.calls[0]!;
+		expect(url).toBe("https://vps.example.com/api/projects/proj_1/assign");
+		expect(init!.method).toBe("POST");
+		const body = JSON.parse(init!.body as string);
+		expect(body).toEqual({ user_id: "u_carol" });
+	});
+
+	it("test_vpsUrl_missing_throws_no_fetch: settingsStore.vpsUrl 为空 → 抛错且不发 fetch", async () => {
+		settingsStore.setVpsUrl("");
+		const fetchSpy = vi.spyOn(global, "fetch");
+
+		await expect(
+			vpsStore.inviteMember("team_1", "u_alice", "Alice", "admin")
+		).rejects.toThrow(/vpsUrl 未配置/);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("test_vpsToken_missing_still_fetches_with_empty_Bearer: token 为空 → 仍发请求, Authorization 头为空串", async () => {
+		settingsStore.setVpsToken("");
+		const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
+			new Response("{}", { status: 200 })
+		);
+
+		await vpsStore.inviteMember("team_1", "u_alice", "Alice", "admin");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [, init] = fetchSpy.mock.calls[0]!;
+		const headers = init!.headers as Record<string, string>;
+		expect(headers["Authorization"]).toBe("");
 	});
 });
