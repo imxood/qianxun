@@ -1,0 +1,1 @@
+{"function": "() => { localStorage.setItem('qianxun_admin_token', 'mock-jwt-token-for-screenshot'); return 'set'; }"}
