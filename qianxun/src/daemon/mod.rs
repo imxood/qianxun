@@ -1,6 +1,8 @@
 pub mod agent_host;
+pub mod persistence;
 pub mod router;
 pub mod session_runtime;
+pub mod sse;
 
 use std::sync::Arc;
 
@@ -13,12 +15,19 @@ use tokio::sync::watch;
 use qianxun_memory::MemoryCore;
 
 use crate::daemon::agent_host::{AgentLoopHost, SharedState};
+use crate::daemon::persistence::SessionStore;
 
 /// Daemon 共享状态 (Stage 1 最小集).
 ///
 /// 字段是 Stage 1 真正需要的全部共享依赖. 与设计文档 §3.2 描述的
 /// 完整 AppState 相比, Stage 1 暂不引入 BudgetManager / LlmProviderPool /
 /// SessionStore / VpsWsClient 等模块 (见 README 已知 TODO).
+///
+/// Stage 2 新增 `processing_loop_enabled` 标记 — Stage 2 暂不接
+/// `processing_loop::handle_user_message` 全套, 直接调
+/// `provider.stream_completion` 实现 12 个 SSE 事件. Stage 3 接入
+/// 完整 processing_loop 后, 此 flag 切到 true 并将 prompt_handler
+/// 改为通过 `OutputSink` 桥接.
 pub struct AppState {
     pub agent_host: Arc<AgentLoopHost>,
     pub config: Arc<ResolvedConfig>,
@@ -32,8 +41,13 @@ pub struct AppState {
     pub skills: SkillManager,
     /// 共享子系统集合 (被 AgentLoopHost 引用以构造 SessionRuntime).
     pub shared: Arc<SharedState>,
+    /// Session 持久化 (Stage 3 新增, 3 张 daemon_ 表).
+    pub store: Arc<SessionStore>,
     /// 关闭信号.
     pub shutdown_tx: watch::Sender<()>,
+    /// Stage 2 留 false: 直接调 `provider.stream_completion` 走 SSE 流;
+    /// Stage 3 切 true: 接入 `processing_loop::handle_user_message` + 工具执行.
+    pub processing_loop_enabled: bool,
 }
 
 /// 启动 Daemon HTTP 服务.
@@ -59,6 +73,18 @@ pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
     // skills: 空 manager (load_all 留 Stage 2/3)
     let skills = SkillManager::new();
 
+    // Stage 3: SessionStore 必须在 AgentLoopHost 之前创建, 这样 host
+    // 启动时可以调 `restore_from_disk()` 加载上次未完成的 session.
+    // 默认路径: ~/.qianxun/daemon.db (创建目录若不存在).
+    let store_path = qianxun_core::workspace::qianxun_dir()
+        .map(|d| d.join("daemon.db"))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine ~/.qianxun home dir"))?;
+    let store = Arc::new(SessionStore::new(&store_path)?);
+    tracing::info!(
+        "[daemon] session store initialized at {}",
+        store_path.display()
+    );
+
     // 包成 Arc<SharedState>, 让 AgentLoopHost 也能引用同一份
     let shared = Arc::new(SharedState::new(
         resolved.clone(),
@@ -67,7 +93,18 @@ pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
         memory.clone(),
         skills.clone(),
     ));
-    let agent_host = Arc::new(AgentLoopHost::new(10, shared.clone()));
+    let agent_host = Arc::new(AgentLoopHost::new(10, shared.clone(), store.clone()));
+
+    // Stage 3: 启动恢复 — 加载上次未关闭的 session (Stage 2 留空)
+    match agent_host.restore_from_disk().await {
+        Ok(n) if n > 0 => {
+            tracing::info!("[daemon] restored {n} session(s) from disk");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("[daemon] restore_from_disk failed: {e} (continuing with empty state)");
+        }
+    }
 
     let config = Arc::new(resolved);
     let state = Arc::new(AppState {
@@ -78,7 +115,9 @@ pub async fn run(port: u16, resolved: ResolvedConfig) -> anyhow::Result<()> {
         memory,
         skills,
         shared,
+        store,
         shutdown_tx,
+        processing_loop_enabled: false,
     });
 
     // 启动 reap_stale 后台任务 (Stage 1 暂不 await, 实际不退出)

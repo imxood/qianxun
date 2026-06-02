@@ -6,6 +6,12 @@
 //! - `delete_session` / `reap_stale` 保留
 //! - **不** 启动 processing_loop (Stage 2 SSE 接入)
 //! - **不** 持久化 session (Stage 3 接入)
+//!
+//! Stage 3 范围:
+//! - 持有 `Arc<SessionStore>` (持久化层)
+//! - `create_session` 末尾调 `store.create()`
+//! - `restore_from_disk()` 启动时加载所有 active session 的 conversation
+//! - `delete_session` 同步调 `store` 的级联删除 (FK CASCADE 已自动处理)
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -20,6 +26,7 @@ use qianxun_core::tools::ToolRegistry;
 
 use qianxun_memory::MemoryCore;
 
+use crate::daemon::persistence::SessionStore;
 use crate::daemon::session_runtime::{SessionId, SessionRuntime};
 
 /// 共享子系统集合, 由 `AppState` 持有, 注入到 `AgentLoopHost`.
@@ -68,21 +75,28 @@ pub struct AgentLoopHost {
     sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionRuntime>>>>,
     max_sessions: usize,
     state: Arc<SharedState>,
+    /// Stage 3: session 持久化 (3 张 daemon_ 表).
+    pub store: Arc<SessionStore>,
 }
 
 impl AgentLoopHost {
-    pub fn new(max_sessions: usize, state: Arc<SharedState>) -> Self {
+    pub fn new(
+        max_sessions: usize,
+        state: Arc<SharedState>,
+        store: Arc<SessionStore>,
+    ) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             max_sessions,
             state,
+            store,
         }
     }
 
     /// 创建一个新 session, 注入全部共享依赖.
     ///
-    /// Stage 1 简化: `project_root` 暂时为 None (Stage 2 在 router 层
-    /// 根据请求 body 传入). Session 真实工作目录由 Stage 3 持久化时记录.
+    /// Stage 3: 末尾调 `self.store.create()` 持久化元数据 + 空 snapshot.
+    /// `project_root` 暂时为 None (Stage 2 在 router 层根据请求 body 传入).
     pub fn create_session(
         &self,
     ) -> Result<Arc<SessionRuntime>, String> {
@@ -123,10 +137,27 @@ impl AgentLoopHost {
             ));
         }
         sessions.insert(session_id.clone(), runtime.clone());
+        drop(sessions);
+
+        // 5. Stage 3: 持久化 session 元数据 + 空 snapshot.
+        //    config_json: 序列化 ResolvedProviderConfig (model / base_url 等).
+        //    注: ResolvedProviderConfig 暂未 derive Serialize (qianxun-core),
+        //    这里手动构造 JSON, 后续 Stage 4 给 ResolvedProviderConfig 加 Serialize derive.
+        let config_json = serde_json::json!({
+            "model": runtime.config.model,
+            "base_url": runtime.config.base_url,
+            "temperature": runtime.config.temperature,
+            "max_tokens": runtime.config.max_tokens,
+        })
+        .to_string();
+        if let Err(e) = self.store.create(&session_id, None, &config_json) {
+            tracing::error!("[daemon] session store.create failed: {e}");
+            return Err(format!("session persistence failed: {e}"));
+        }
 
         tracing::info!(
             "[daemon] created session {session_id} (total: {})",
-            sessions.len()
+            self.session_count()
         );
         Ok(runtime)
     }
@@ -149,6 +180,9 @@ impl AgentLoopHost {
     }
 
     /// 删除会话.
+    ///
+    /// Stage 3: 也从 SessionStore 删除 (FK CASCADE 自动清理
+    /// daemon_conversation_snapshots 和 daemon_event_log).
     pub fn delete_session(&self, id: &str) -> bool {
         let removed = self
             .sessions
@@ -156,10 +190,90 @@ impl AgentLoopHost {
             .expect("AgentLoopHost lock poisoned")
             .remove(id)
             .is_some();
+
+        // Stage 3: 同步删除持久化记录
         if removed {
+            if let Err(e) = self.store.delete(id) {
+                tracing::warn!("[daemon] session store.delete failed: {e}");
+            }
             tracing::info!("[daemon] deleted session {id}");
         }
         removed
+    }
+
+    /// Stage 3: 启动恢复 — 加载所有 active session 的 conversation.
+    ///
+    /// 对 `store.list_active()` 的每个 session:
+    /// 1. 调 `store.load_latest_snapshot()` 拿到 conversation_json + ordinal
+    /// 2. 构造 SessionRuntime (不调 AgentLoop, 只装 conversation 状态)
+    /// 3. 插入 in-memory HashMap
+    ///
+    /// 返回成功恢复的 session 数.
+    pub async fn restore_from_disk(&self) -> Result<usize, String> {
+        // 1. 列出所有 active session
+        let metas = self.store.list_active().map_err(|e| e.to_string())?;
+        if metas.is_empty() {
+            return Ok(0);
+        }
+
+        let mut restored = 0;
+        for meta in metas {
+            // 2. 加载最新 snapshot
+            let snap = match self
+                .store
+                .load_latest_snapshot(&meta.id)
+                .map_err(|e| e.to_string())?
+            {
+                Some(s) => s,
+                None => {
+                    tracing::warn!(
+                        "[daemon] session {id} has no snapshot, skipping",
+                        id = meta.id
+                    );
+                    continue;
+                }
+            };
+
+            let (ordinal, conversation_json) = snap;
+            tracing::info!(
+                "[daemon] restoring session {id} from snapshot ordinal={ord}",
+                id = meta.id,
+                ord = ordinal
+            );
+
+            // 3. 构造 SessionRuntime (空 AgentLoop, 还原 conversation).
+            //    注意: Stage 3 简化, conversation 字段无法从 JSON 还原
+            //    (Conversation 持有 Vec<Message>, 反序列化需要 Message
+            //    全字段支持; 后续 Stage 4 接完整 restore). 这里保持空
+            //    conversation, 但元数据 + last_active 已恢复, 客户端可
+            //    看到 session 列表.
+            let runtime = Arc::new(SessionRuntime::new(
+                meta.id.clone(),
+                meta.project_root.clone(),
+                self.state.resolved.clone(),
+                self.state.provider.clone(),
+                self.state.tools.clone(),
+                self.state.memory.clone(),
+                self.state.skills.clone(),
+            ));
+
+            // 4. 插入 HashMap
+            let mut sessions = self.sessions.write().expect("AgentLoopHost lock poisoned");
+            if sessions.len() >= self.max_sessions {
+                tracing::warn!(
+                    "[daemon] max_sessions reached while restoring, dropping {id}",
+                    id = meta.id
+                );
+                break;
+            }
+            sessions.insert(meta.id.clone(), runtime);
+
+            // 5. conversation_json 留在 store 里, 客户端 connect 后按需 replay
+            let _ = conversation_json; // 暂未反序列化 (Stage 4 完整恢复)
+            restored += 1;
+        }
+
+        Ok(restored)
     }
 
     /// 当前 session 数.
@@ -218,7 +332,11 @@ impl AgentLoopHost {
             memory,
             skills,
         ));
-        Self::new(max_sessions, state)
+        // Stage 3: 测试用 in-memory store
+        let store = Arc::new(
+            SessionStore::in_memory().expect("SessionStore::in_memory failed"),
+        );
+        Self::new(max_sessions, state, store)
     }
 }
 
