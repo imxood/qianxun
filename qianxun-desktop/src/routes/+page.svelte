@@ -4,8 +4,12 @@
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
 	import SessionList from "$lib/components/layout/SessionList.svelte";
 	import ChatView from "$lib/components/layout/ChatView.svelte";
+	import ConnectionBanner from "$lib/components/chat/ConnectionBanner.svelte";
 	import type { Project, Session, Team } from "$lib/types/ipc";
 	import { healthCheck, isTauri, onDaemonStateChanged } from "$lib/ipc/bridge";
+	import { connectionStore } from "$lib/stores/connection.svelte";
+	import { sessionStore } from "$lib/stores/session.svelte";
+	import { vpsStore } from "$lib/stores/vps.svelte";
 
 	// ─── Stage 1 mock 数据 ──────────────────────────────────────────────────
 	// 真实数据 Stage 2 通过 daemon_list_projects / daemon_list_sessions
@@ -129,8 +133,29 @@
 			unlisten = u;
 		});
 
+		// ─── Stage 4: 离线队列启动时回填 + VPS 周期 ping ────────────────────
+		sessionStore.loadOfflineQueue();
+		if (sessionStore.offlineQueueSize > 0) {
+			console.info(
+				`[+page] 启动时回填 ${sessionStore.offlineQueueSize} 条离线消息`
+			);
+		}
+		vpsStore.startHealthCheck();
+
+		// Stage 4 §10.3: 周期性检查 — daemon 从 degraded 变 connected 时
+		// 自动 flush 离线队列. 用 setInterval 不用 $effect, 避免 Svelte 5
+		// read-write effect cycle 陷阱 (写 sessionStore.offlineQueue 会进入
+		// 反应链; 改成"读 connectionStore.daemonState → 调 flush"是单向).
+		const flushTimer = setInterval(() => {
+			if (connectionStore.daemonState === "connected" && sessionStore.offlineQueueSize > 0) {
+				void sessionStore.flushOfflineQueue();
+			}
+		}, 5_000);
+
 		return () => {
 			unlisten?.();
+			vpsStore.stopHealthCheck();
+			clearInterval(flushTimer);
 		};
 	});
 </script>
@@ -153,5 +178,10 @@
 		/>
 	{/snippet}
 
-	<ChatView {activeSession} />
+	<div class="flex h-full flex-col gap-2">
+		<ConnectionBanner />
+		<div class="flex-1 overflow-hidden">
+			<ChatView {activeSession} />
+		</div>
+	</div>
 </ThreeColumnLayout>

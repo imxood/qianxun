@@ -1,6 +1,6 @@
 // ───────────────────────────────────────────────────────────────────────────
-// 千寻 Tauri 桌面端 — SessionStore (Stage 3)
-// 与 docs/30_子项目规划/03-tauri-desktop.md §4.1.1 / §3.3 数据流图 一致
+// 千寻 Tauri 桌面端 — SessionStore (Stage 3 + Stage 4 offlineQueue)
+// 与 docs/30_子项目规划/03-tauri-desktop.md §4.1.1 / §3.3 数据流图 / §10.3 离线队列 一致
 // 与 docs/30_子项目规划/_shared-contract.md §3.2 SSE 事件 schema 一致
 //
 // Stage 3 范围:
@@ -9,12 +9,34 @@
 //   - cancel(): 调 AbortController.abort()
 //   - handleEvent: 维护 indexMap (SSE event.index → messages[] array index) + 累积工具参数
 //
+// Stage 4 扩展 (不破坏 Stage 3 行为):
+//   - offlineQueue: $state<OfflineMessage[]>, 持久化到 localStorage
+//   - send(): 如 connectionStore.isDegraded → 入队而非发, toast.info
+//   - flushOfflineQueue(): 重连后自动 flush (按 FIFO 顺序逐条 send)
+//   - loadOfflineQueue() / persistOfflineQueue() / clearOfflineQueue() 内部 helper
+//
 // 渲染模型: messages 是一维 ContentBlock[]. ChatView 用 i%2 推断 role (Stage 3 简化).
-// 未来 Stage 4 会改成 Message[] 模型 (role 在 Message 层级, 不在 block 层级).
+// 未来 Stage 5 会改成 Message[] 模型 (role 在 Message 层级, 不在 block 层级).
 // ───────────────────────────────────────────────────────────────────────────
 
 import type { ContentBlock, SseEvent, StopReason } from "$lib/types/ipc";
 import { SseError, streamPrompt } from "$lib/sse/client";
+import { connectionStore } from "$lib/stores/connection.svelte";
+
+/// 离线消息: 用户在 daemon 不可达时输入, 等重连后自动发送.
+/// 与 docs/30_子项目规划/03-tauri-desktop.md §10.3 OfflineQueueItem 对齐
+/// (id / sessionId / payload / createdAt / attempts), 简化 payload 直接用 text
+/// (本阶段 message history 由 daemon 端按 sessionId 维护, 客户端只发增量).
+export interface OfflineMessage {
+	id: string; // crypto.randomUUID()
+	sessionId: string;
+	text: string;
+	createdAt: string; // ISO 8601
+	attempts: number;
+	lastError?: string;
+}
+
+const OFFLINE_QUEUE_KEY = "qianxun.offline-queue";
 
 interface SessionRuntimeState {
 	sessionId: string;
@@ -45,12 +67,18 @@ class SessionStore {
 	/// 单一活跃会话. Stage 3 简化, Stage 4 多会话时改为 sessionsById: Record<id, runtime>.
 	runtime = $state<SessionRuntimeState | null>(null);
 
+	/// 离线消息队列 (Stage 4 §10.3). 用户在 daemon 不可达时输入的 text,
+	/// 重连后由 flushOfflineQueue() 按 FIFO 顺序 send. 持久化到 localStorage.
+	offlineQueue = $state<OfflineMessage[]>([]);
+
 	// ─── 内部状态 (非响应式) ────────────────────────────────────────────────
 
 	/// SSE event.index → messages[] 数组下标的映射 (SSE 协议允许 index 任意顺序)
 	#indexMap = new Map<number, number>();
 	/// tool_use 流式参数累积 (event.index → 累计的 arguments_json 字符串)
 	#argsAcc = new Map<number, string>();
+	/// flush 排他锁 — 避免 reconnecting → connected → reconnecting 抖动时并发 flush
+	#flushing = false;
 
 	// ─── 派生 getter ────────────────────────────────────────────────────────
 
@@ -63,21 +91,41 @@ class SessionStore {
 	get currentAbort(): AbortController | null {
 		return this.runtime?.currentAbort ?? null;
 	}
+	get offlineQueueSize(): number {
+		return this.offlineQueue.length;
+	}
 
 	// ─── 公开方法 ──────────────────────────────────────────────────────────
 
-	/// 启动新会话 (或延续当前) + 发送 user message
+	/// 启动新会话 (或延续当前) + 发送 user message.
+	/// Stage 4: 如 connectionStore.isDegraded, 推入 offlineQueue 而非真发.
 	async send(text: string, model: string): Promise<void> {
 		if (!text.trim()) return;
 		// 同一时刻只允许一个流
 		if (this.runtime?.isStreaming) return;
+
+		// ── Stage 4 §10.3: 离线入队 ───────────────────────────────────────
+		if (connectionStore.isDegraded) {
+			const msg: OfflineMessage = {
+				id: uuid(),
+				sessionId: this.runtime?.sessionId ?? "",
+				text,
+				createdAt: new Date().toISOString(),
+				attempts: 0,
+			};
+			this.offlineQueue.push(msg);
+			this.persistOfflineQueue();
+			console.info(
+				`[SessionStore] 消息入队 (queueSize=${this.offlineQueue.length}, daemonState=${connectionStore.daemonState})`
+			);
+			return;
+		}
 
 		const sessionId = this.runtime?.sessionId ?? uuid();
 		const title = this.runtime?.title ?? text.slice(0, 40);
 		const userBlock: ContentBlock = { type: "text", text };
 
 		// 初始化 / 复用 runtime
-		const wasFresh = this.runtime === null;
 		this.runtime = {
 			sessionId,
 			title,
@@ -98,7 +146,7 @@ class SessionStore {
 		try {
 			await streamPrompt({
 				// Stage 3: 固定 localhost. Stage 4 改为 connectionStore.daemonUrl.
-				daemonUrl: "http://127.0.0.1:23900",
+				daemonUrl: connectionStore.daemonUrl,
 				sessionId: this.runtime.sessionId,
 				messages: [userBlock],
 				model,
@@ -132,6 +180,98 @@ class SessionStore {
 		this.runtime = null;
 		this.#indexMap.clear();
 		this.#argsAcc.clear();
+	}
+
+	// ─── Stage 4 §10.3: 离线队列管理 ────────────────────────────────────────
+
+	/// 重连成功后自动 flush. FIFO 顺序逐条 send, 失败的 message.attempts++ 留在队尾.
+	/// 排他锁: 抖动期 (reconnecting → connected → reconnecting) 不会并发 flush.
+	async flushOfflineQueue(): Promise<void> {
+		if (this.#flushing) return;
+		if (this.offlineQueue.length === 0) return;
+		if (connectionStore.isDegraded) {
+			// 仍然不可达, 不 flush (下一轮 ping 通后再试)
+			return;
+		}
+
+		this.#flushing = true;
+		try {
+			const snapshot = [...this.offlineQueue];
+			console.info(`[SessionStore] flushOfflineQueue: ${snapshot.length} 条待发`);
+
+			// 边发边修剪: 成功则从 offlineQueue 删除, 失败则 attempts++ 留在原位
+			for (const msg of snapshot) {
+				if (connectionStore.isDegraded) {
+					// 中途又掉了, 停下, 剩下的留到下次
+					console.warn("[SessionStore] flush 中途 daemon 再次失联, 中止");
+					break;
+				}
+				if (this.runtime?.isStreaming) {
+					// 当前流还没结束 (用户主动发了新消息), 让出, 留到下一轮
+					console.info("[SessionStore] 正在流式, 让出 flush, 留到下一轮");
+					break;
+				}
+
+				// 临时从队列移除 (成功就不回填, 失败时回填到队尾)
+				const idx = this.offlineQueue.findIndex((m) => m.id === msg.id);
+				if (idx >= 0) this.offlineQueue.splice(idx, 1);
+
+				try {
+					await this.send(msg.text, this.runtime?.model ?? "MiniMax-M3");
+					// 成功: 不回填
+				} catch (e) {
+					// 失败: 回填到队尾
+					msg.attempts += 1;
+					msg.lastError = (e as Error).message;
+					this.offlineQueue.push(msg);
+					console.warn(
+						`[SessionStore] flush 单条失败 (attempts=${msg.attempts}):`,
+						e
+					);
+				}
+			}
+
+			this.persistOfflineQueue();
+		} finally {
+			this.#flushing = false;
+		}
+	}
+
+	/// 用户清空队列 (Settings 提供按钮)
+	clearOfflineQueue(): void {
+		this.offlineQueue = [];
+		this.persistOfflineQueue();
+	}
+
+	// ─── Stage 4 §10.3: localStorage 持久化 ──────────────────────────────────
+
+	private persistOfflineQueue(): void {
+		if (typeof localStorage === "undefined") return;
+		try {
+			localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(this.offlineQueue));
+		} catch {
+			// ignore (private mode / quota)
+		}
+	}
+
+	/// 启动时回填 (组件 onMount 调一次)
+	loadOfflineQueue(): void {
+		if (typeof localStorage === "undefined") return;
+		try {
+			const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+			if (!raw) return;
+			const parsed = JSON.parse(raw) as OfflineMessage[];
+			if (Array.isArray(parsed)) {
+				this.offlineQueue = parsed;
+			}
+		} catch {
+			// ignore (corrupt JSON — 清掉以免反复失败)
+			try {
+				localStorage.removeItem(OFFLINE_QUEUE_KEY);
+			} catch {
+				// ignore
+			}
+		}
 	}
 
 	// ─── 内部: SSE 事件处理 ────────────────────────────────────────────────

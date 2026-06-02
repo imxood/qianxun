@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { sessionStore } from "$lib/stores/session.svelte";
+	import { t } from "$lib/i18n";
 	import Send from "@lucide/svelte/icons/send";
 	import Square from "@lucide/svelte/icons/square";
 
@@ -40,7 +41,7 @@
 		bind:this={textareaEl}
 		bind:value={text}
 		onkeydown={onKeydown}
-		placeholder="输入消息, Enter 发送, Shift+Enter 换行"
+		placeholder={t("input.placeholder")}
 		disabled={sessionStore.isStreaming}
 		rows="2"
 		class="flex-1 min-h-12 max-h-48 resize-none rounded border bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50"
@@ -63,7 +64,15 @@
 			class="flex items-center gap-1 rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
 		>
 			<Send class="size-3.5" />
-			发送
+			{t("input.send")}
 		</button>
+	{/if}
+	{#if sessionStore.offlineQueueSize > 0}
+		<span
+			class="flex items-center gap-1 self-center text-xs text-yellow-600 dark:text-yellow-400"
+			title="离线队列待发"
+		>
+			队列 {sessionStore.offlineQueueSize}
+		</span>
 	{/if}
 </div>
