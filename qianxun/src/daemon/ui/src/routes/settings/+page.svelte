@@ -37,12 +37,19 @@
 	import Loading from '$lib/components/common/Loading.svelte';
 	import ErrorBanner from '$lib/components/common/ErrorBanner.svelte';
 	import PageHeader from '$lib/components/common/PageHeader.svelte';
+	// Stage 10a — 修改密码 Dialog 用
+	import Dialog from '$lib/components/ui/dialog/Dialog.svelte';
+	import DialogBody from '$lib/components/ui/dialog/DialogBody.svelte';
+	import DialogFooter from '$lib/components/ui/dialog/DialogFooter.svelte';
+	import Input from '$lib/components/ui/input/Input.svelte';
+	import Label from '$lib/components/ui/label/Label.svelte';
 
 	import { authStore } from '$lib/stores/auth.svelte';
 	import { themeStore, type ThemeMode } from '$lib/stores/theme.svelte';
 	import { setLocale, locale, t, ALL_LOCALES, type Locale } from '$lib/i18n';
 	import { rotateAdminToken } from '$lib/api/settings';
 	import { getStatus } from '$lib/api/system';
+	import { changePassword as changePasswordApi } from '$lib/api/auth';
 	import type { SystemStatus, TokenRotateResponse } from '$lib/types/api';
 
 	// ─── Section 1: Theme ──────────────────────────────────────
@@ -68,15 +75,30 @@
 		setLocale(value);
 	}
 
-	// ─── Section 3: Token ──────────────────────────────────────
+	// ─── Section 3: Token (Stage 10a — password + JWT) ──────────
 	let rotating = $state(false);
 	let rotateError = $state<string | null>(null);
 	let lastRotated = $state<TokenRotateResponse | null>(null);
 	let copied = $state(false);
 
+	// 修改密码 dialog 状态
+	let changePwDialogOpen = $state(false);
+	let oldPassword = $state('');
+	let newPassword = $state('');
+	let changingPassword = $state(false);
+	let changePwError = $state<string | null>(null);
+	let changePwSuccess = $state<string | null>(null);
+
 	const tokenMask = $derived(
 		authStore.token
 			? authStore.token.slice(0, 6) + '…' + authStore.token.slice(-4)
+			: null
+	);
+
+	/** 过期时间戳 (本地时区, 人类可读). */
+	const expiresAtLabel = $derived(
+		authStore.expiresAt
+			? new Date(authStore.expiresAt * 1000).toLocaleString()
 			: null
 	);
 
@@ -86,7 +108,7 @@
 		try {
 			const resp = await rotateAdminToken();
 			lastRotated = resp;
-			authStore.setToken(resp.token);
+			authStore.setSession(resp.token, resp.exp, resp.sub);
 		} catch (e) {
 			rotateError = e instanceof Error ? e.message : t('settings.token.rotate_failed');
 		} finally {
@@ -117,11 +139,48 @@
 		}
 	}
 
-	function handleRevoke(): void {
-		const ok = window.confirm(t('settings.token.revoke_confirm'));
+	async function handleLogout(): Promise<void> {
+		const ok = window.confirm(t('settings.token.logout_confirm'));
 		if (!ok) return;
-		authStore.clear();
+		await authStore.logout();
 		void goto('/');
+	}
+
+	async function handleChangePassword(): Promise<void> {
+		if (!oldPassword || !newPassword) {
+			changePwError = t('settings.token.password_dialog.new_help');
+			return;
+		}
+		if (newPassword.length < 4) {
+			changePwError = t('settings.token.password_dialog.new_help');
+			return;
+		}
+		changingPassword = true;
+		changePwError = null;
+		changePwSuccess = null;
+		try {
+			await changePasswordApi(oldPassword, newPassword);
+			changePwSuccess = t('settings.token.password_changed');
+			oldPassword = '';
+			newPassword = '';
+			// 1.5s 后自动关闭 dialog
+			setTimeout(() => {
+				changePwDialogOpen = false;
+				changePwSuccess = null;
+			}, 1500);
+		} catch (e) {
+			changePwError = e instanceof Error ? e.message : t('settings.token.password_change_failed');
+		} finally {
+			changingPassword = false;
+		}
+	}
+
+	function openChangePassword(): void {
+		oldPassword = '';
+		newPassword = '';
+		changePwError = null;
+		changePwSuccess = null;
+		changePwDialogOpen = true;
 	}
 
 	// ─── Section 4: About ──────────────────────────────────────
@@ -260,6 +319,19 @@
 					{/if}
 				</div>
 
+				<div class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+					{#if authStore.sub}
+						<span data-testid="settings-token-sub">
+							{t('settings.token.logged_in_as')}: <code class="bg-muted rounded px-1 font-mono">{authStore.sub}</code>
+						</span>
+					{/if}
+					{#if expiresAtLabel}
+						<span data-testid="settings-token-expires">
+							{t('settings.token.expires_at')}: <code class="bg-muted rounded px-1 font-mono">{expiresAtLabel}</code>
+						</span>
+					{/if}
+				</div>
+
 				{#if lastRotated}
 					<div
 						class="text-muted-foreground flex items-center gap-1.5 text-xs"
@@ -297,14 +369,24 @@
 						{copied ? t('common.copied') : t('settings.token.copy')}
 					</Button>
 					<Button
+						variant="outline"
+						size="sm"
+						onclick={openChangePassword}
+						disabled={!authStore.token}
+						data-testid="settings-token-change-password"
+					>
+						<KeyRound class="h-3.5 w-3.5" />
+						{t('settings.token.change_password')}
+					</Button>
+					<Button
 						variant="destructive"
 						size="sm"
-						onclick={handleRevoke}
+						onclick={handleLogout}
 						disabled={!authStore.token}
-						data-testid="settings-token-revoke"
+						data-testid="settings-token-logout"
 					>
 						<LogOut class="h-3.5 w-3.5" />
-						{t('settings.token.revoke')}
+						{t('settings.token.logout')}
 					</Button>
 				</div>
 
@@ -406,3 +488,69 @@
 		</CardContent>
 	</Card>
 </div>
+
+<!-- Stage 10a — 修改密码 Dialog -->
+<Dialog open={changePwDialogOpen} onOpenChange={(v) => (changePwDialogOpen = v)}>
+	<DialogBody>
+		<form
+			onsubmit={(e) => {
+				e.preventDefault();
+				void handleChangePassword();
+			}}
+			class="flex flex-col gap-3"
+		>
+			<div class="flex flex-col gap-1.5">
+				<Label for="old-pw-input">{t('settings.token.password_dialog.old')}</Label>
+				<Input
+					id="old-pw-input"
+					type="password"
+					bind:value={oldPassword}
+					disabled={changingPassword}
+					autocomplete="current-password"
+					autofocus
+					data-testid="settings-old-password-input"
+				/>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<Label for="new-pw-input">{t('settings.token.password_dialog.new')}</Label>
+				<Input
+					id="new-pw-input"
+					type="password"
+					bind:value={newPassword}
+					disabled={changingPassword}
+					autocomplete="new-password"
+					data-testid="settings-new-password-input"
+				/>
+				<span class="text-muted-foreground text-xs">
+					{t('settings.token.password_dialog.new_help')}
+				</span>
+			</div>
+			{#if changePwError}
+				<p class="text-destructive text-xs" data-testid="settings-change-pw-error">{changePwError}</p>
+			{/if}
+			{#if changePwSuccess}
+				<p class="text-xs text-green-600 dark:text-green-400" data-testid="settings-change-pw-success">
+					{changePwSuccess}
+				</p>
+			{/if}
+		</form>
+	</DialogBody>
+	<DialogFooter>
+		<Button
+			variant="outline"
+			type="button"
+			onclick={() => (changePwDialogOpen = false)}
+			disabled={changingPassword}
+		>
+			{t('common.cancel')}
+		</Button>
+		<Button
+			type="button"
+			onclick={handleChangePassword}
+			disabled={changingPassword || !oldPassword || !newPassword || newPassword.length < 4}
+			data-testid="settings-change-pw-submit"
+		>
+			{changingPassword ? t('settings.token.changing_password') : t('settings.token.password_dialog.submit')}
+		</Button>
+	</DialogFooter>
+</Dialog>

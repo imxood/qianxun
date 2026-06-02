@@ -15,7 +15,7 @@
 	import { WifiOff, RefreshCw } from '@lucide/svelte';
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import TopBar from '$lib/components/layout/TopBar.svelte';
-	import TokenDialog from '$lib/components/auth/TokenDialog.svelte';
+	import PasswordDialog from '$lib/components/auth/PasswordDialog.svelte';
 	import { authStore } from '$lib/stores/auth.svelte';
 	import { themeStore } from '$lib/stores/theme.svelte';
 	import { connectionStore } from '$lib/stores/connection.svelte';
@@ -125,4 +125,4 @@
 	</div>
 </div>
 
-<TokenDialog open={tokenDialogOpen} onOpenChange={(v) => (tokenDialogOpen = v)} />
+<PasswordDialog open={tokenDialogOpen} onOpenChange={(v) => (tokenDialogOpen = v)} />
