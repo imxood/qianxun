@@ -213,6 +213,20 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.daemon {
         tracing::info!("以 Daemon 模式启动（端口 {}）", cli.port);
+        // Stage 6a: Daemon auth 需要 QIANXUN_JWT_SECRET.
+        // 启动时校验, 缺 secret 直接 fail-fast (避免 daemon 跑起来再 401 全部请求).
+        match std::env::var("QIANXUN_JWT_SECRET") {
+            Ok(s) if !s.is_empty() => {
+                tracing::info!("[daemon] JWT secret configured: set ({} bytes)", s.len());
+            }
+            _ => {
+                eprintln!(
+                    "错误: Daemon 模式需要 QIANXUN_JWT_SECRET env var (HS256 签名密钥). \
+                     请设置: export QIANXUN_JWT_SECRET=\"<random-32-bytes>\""
+                );
+                std::process::exit(1);
+            }
+        }
         daemon::run(cli.port, resolved).await?;
         return Ok(());
     }

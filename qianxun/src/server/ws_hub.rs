@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use super::auth_ws;
 use super::messages::WsFrame;
+use super::outbox::Outbox;
 use super::team_db::TeamDb;
 
 /// 连接到 VPS 的客户端类型.
@@ -87,21 +88,28 @@ pub struct WsHub {
     /// Stage 3 持久化层 — 持有 `Arc<TeamDb>`, `authenticate` 用它做
     /// device_token 查表 (替换 Stage 2 静态白名单).
     pub team_db: Arc<TeamDb>,
+    // ─── Stage 6a 新增: Outbox 引用 (节点离线缓冲, 重连 drain) ───
+    /// Stage 6a 持久化层 — 持有 `Arc<Outbox>`, `authenticate` 成功后调
+    /// `drain(machine_id)` 拿所有未送达事件, 推给新 conn. 替换 Stage 5
+    /// in-memory HashMap 实现 (进程重启即丢).
+    pub outbox: Arc<Outbox>,
 }
 
 impl std::fmt::Debug for WsHub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WsHub")
             .field("team_db", &"<Arc<TeamDb>>")
+            .field("outbox", &"<Arc<Outbox>>")
             .finish()
     }
 }
 
 impl WsHub {
-    /// 构造 WsHub, 注入 TeamDb 引用.
+    /// 构造 WsHub, 注入 TeamDb + Outbox 引用.
     ///
     /// **Stage 3**: 必须传入 `team_db` (供 `authenticate` 做 device_token 查表).
-    pub fn new(team_db: Arc<TeamDb>) -> Self {
+    /// **Stage 6a**: 必须传入 `outbox` (供 `authenticate` 成功后 drain 离线缓冲事件).
+    pub fn new(team_db: Arc<TeamDb>, outbox: Arc<Outbox>) -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             by_device: Arc::new(RwLock::new(HashMap::new())),
@@ -111,6 +119,7 @@ impl WsHub {
             device_meta: Arc::new(RwLock::new(HashMap::new())),
             last_heartbeat: Arc::new(RwLock::new(HashMap::new())),
             team_db,
+            outbox,
         }
     }
 
@@ -320,10 +329,76 @@ impl WsHub {
                     "ws device authenticated"
                 );
 
+                // ─── Stage 6a: drain outbox 把离线缓冲事件推给新 conn ───
+                // 设备重连后, 把它离线期间 VPS 入队的 prompt (via
+                // `mod.rs::handle_prompt_frame` → outbox.enqueue) 全部取出,
+                // 通过该 conn 的 tx channel 顺序推过去. 这一步在 auth 成功路径
+                // 末尾做, 因为只有此时我们才拿到 machine_id.
+                let drained = match self.outbox.drain(&machine_id) {
+                    Ok(evs) => evs,
+                    Err(e) => {
+                        // drain 失败不应阻断 auth 成功响应 — 仅记 error, 让客户端
+                        // 拿到 AuthOk (建立会话) + 后续 Event 帧路由仍正常工作
+                        // (Stage 6c 接). 失败的事件留在 outbox, 下次重试.
+                        tracing::error!(
+                            connection_id = %connection_id,
+                            machine_id = %machine_id,
+                            error = %e,
+                            "outbox drain failed (auth still succeeds)"
+                        );
+                        Vec::new()
+                    }
+                };
+                if !drained.is_empty() {
+                    // 拿 conn 的 tx, 顺序推 events. 这里短暂持 connections 读锁,
+                    // 与 push_to_user 风格一致; drained 数量级 O(10) (Stage 6a
+                    // 不限容量但实际不会多) 不会成为热点.
+                    let conns = self.connections.read().await;
+                    if let Some(conn) = conns.get(connection_id) {
+                        let mut sent = 0usize;
+                        let mut failed = 0usize;
+                        for event in &drained {
+                            match serde_json::to_string(event) {
+                                Ok(s) => {
+                                    if conn.tx.send(Message::Text(s.into())).is_ok() {
+                                        sent += 1;
+                                    } else {
+                                        failed += 1;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "outbox: serialize event failed during replay"
+                                    );
+                                    failed += 1;
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            connection_id = %connection_id,
+                            machine_id = %machine_id,
+                            drained_count = drained.len(),
+                            sent = sent,
+                            failed = failed,
+                            "outbox replayed pending events to reconnected device"
+                        );
+                    } else {
+                        // conn 已被 unregister (极小概率, register 之后立刻断了)
+                        // — drained 事件就丢了, 这是 Stage 6a 简化 (无 ack).
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            machine_id = %machine_id,
+                            drained_count = drained.len(),
+                            "outbox drained but conn already gone, events lost"
+                        );
+                    }
+                }
+
                 Ok(WsFrame::AuthOk {
                     session_token: format!("st_{}", Uuid::new_v4()),
                     server_time: now.to_rfc3339(),
-                    server_version: "0.3.0-stage2".into(),
+                    server_version: "0.3.0-stage6a".into(),
                     heartbeat_interval_ms: 30000,
                 })
             }
@@ -647,14 +722,19 @@ pub struct HubStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::outbox::Outbox;
     use crate::server::team_db::TeamDb;
     use axum::extract::ws::Message;
     use rusqlite::Connection;
     use std::time::Duration;
     use tokio::time::timeout;
 
-    /// 构造测试用 WsHub (in-memory TeamDb, 不写文件).
+    /// 构造测试用 WsHub (in-memory TeamDb + in-memory Outbox, 不写文件).
+    ///
+    /// Stage 6a: 拆分两个 connection — team_db 和 outbox 各自一份 (避免 schema
+    /// 冲突). 测试场景用各自独立 in-memory 即可.
     fn test_hub() -> WsHub {
+        // team_db connection
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS users (
@@ -668,7 +748,10 @@ mod tests {
         )
         .expect("create users");
         let team_db = Arc::new(TeamDb::from_connection(conn).expect("from_connection"));
-        WsHub::new(team_db)
+        // outbox connection (独立 in-memory, 与 team_db 隔离)
+        let outbox_conn = Connection::open_in_memory().expect("open in-memory outbox db");
+        let outbox = Arc::new(Outbox::from_connection(outbox_conn).expect("outbox from_connection"));
+        WsHub::new(team_db, outbox)
     }
 
     /// 预注册一个 device token (Stage 3 替换 Stage 2 静态白名单).

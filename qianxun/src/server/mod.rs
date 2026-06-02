@@ -93,10 +93,12 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     let db = init_db()?;
     // Stage 3: 用 init_db 创建的 Connection 构造 TeamDb, 二者共享同一 SQLite 文件.
     let team_db = Arc::new(TeamDb::from_connection(db)?);
-    let ws_hub = Arc::new(WsHub::new(team_db.clone()));
-    // Stage 5: rate limiter + outbox (in-memory, per-process).
+    // Stage 6a: outbox 走独立 connection 打开同一 vps.db (WAL 模式允许多 conn).
+    // 路径复用 init_db 的解析, 避免硬编码两份.
+    let outbox = Arc::new(Outbox::new(&vps_db_path())?);
+    let ws_hub = Arc::new(WsHub::new(team_db.clone(), outbox.clone()));
+    // Stage 5: rate limiter (in-memory, per-process).
     let rate_limiter = Arc::new(RateLimiter::new());
-    let outbox = Arc::new(Outbox::new());
     // 把 db 字段保留 (Stage 1+ 旧 handler 还在用), TeamDb 持有独立 Connection.
     // Stage 4 评估是否合并到一个 Connection.
     let state = Arc::new(VpsState {
@@ -145,10 +147,18 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// VPS 数据库文件路径 (canonical, Stage 1 已有, Stage 6a 抽出来给 outbox 复用).
+///
+/// 优先 `dirs::data_dir()`, 兜底当前目录. 与 `init_db` / `team_db_open_standalone`
+/// 共享同一路径, 避免三处硬编码漂移.
+fn vps_db_path() -> std::path::PathBuf {
+    let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    data_dir.join("qianxun").join("vps.db")
+}
+
 /// 初始化 VPS 数据库 (Stage 1 已有, 维持原行为, Stage 3 扩展 TeamDb 在 from_connection 中).
 fn init_db() -> anyhow::Result<rusqlite::Connection> {
-    let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let db_path = data_dir.join("qianxun").join("vps.db");
+    let db_path = vps_db_path();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -188,8 +198,7 @@ fn init_db() -> anyhow::Result<rusqlite::Connection> {
 /// Stage 3 临时做法: 直接复用文件路径打开第二个连接, 与 TeamDb 共享同一文件.
 /// SQLite WAL 模式支持多读单写, 两个连接可共存 (Stage 4 评估合并).
 fn team_db_open_standalone() -> anyhow::Result<rusqlite::Connection> {
-    let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let db_path = data_dir.join("qianxun").join("vps.db");
+    let db_path = vps_db_path();
     let conn = rusqlite::Connection::open(&db_path)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(conn)
@@ -906,18 +915,33 @@ async fn handle_prompt_frame(
         }
     };
 
-    // 4. 入 outbox (Stage 5 简化: 一律入, 离线时接管).
-    //    节点重连后 (Stage 6 接 `WsHub::register_device` 的 post-hook) 调
-    //    `outbox.drain(&node_id)` 顺序 flush.
-    state
+    // 4. 入 outbox (Stage 6a: SQLite 持久化, 节点离线时落盘, 重连后 drain).
+    //    enqueue 返回 Result, 失败应记 error 但不阻断 forward — forward 是
+    //    best-effort, outbox 才是可靠的 replay 路径.
+    if let Err(e) = state
         .outbox
-        .enqueue(&target_node_id, prompt_json.clone())
-        .await;
+        .enqueue(&target_node_id, &request_id, &prompt_json)
+    {
+        tracing::error!(
+            connection_id = %conn_id,
+            user_id = %from_user_id,
+            request_id = %request_id,
+            target_node_id = %target_node_id,
+            error = %e,
+            "outbox enqueue failed (forward continues, replay path compromised)"
+        );
+    }
 
     // 5. 推 prompt 给 target_node. 简化: 扫 WsHub.connections 找 node_id 匹配的 conn.
-    //    找到 → 写循环发, 否则留给 outbox 缓冲 (Stage 6 加 node_offline 错误回包).
+    //    找到 → 写循环发, 否则留给 outbox 缓冲 (Stage 6+ 加 node_offline 错误回包).
     let delivered = forward_prompt_to_node(hub, &target_node_id, &prompt_json).await;
-    let outbox_len = state.outbox.len(&target_node_id).await;
+    let outbox_pending = state
+        .outbox
+        .list_undelivered_count(&target_node_id)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "outbox list_undelivered_count failed");
+            0
+        });
 
     tracing::info!(
         connection_id = %conn_id,
@@ -925,9 +949,9 @@ async fn handle_prompt_frame(
         request_id = %request_id,
         target_project_id = %target_project_id,
         target_node_id = %target_node_id,
-        outbox_len = outbox_len,
+        outbox_pending = outbox_pending,
         delivered = delivered,
-        "prompt forwarded (Stage 5: RBAC + rate-limit + outbox)"
+        "prompt forwarded (Stage 6a: RBAC + rate-limit + outbox SQLite)"
     );
 
     None
