@@ -138,9 +138,16 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
             "/v1/system/admin/rotate-token",
             post(admin_rotate_token),
         )
+        // Stage 10a: 密码登录 + 修改密码 + 登出
+        //  - /v1/auth/login       公开 (跳过 auth middleware) — 拿密码换短期 JWT
+        //  - /v1/auth/change-password  需要 auth (要已登录才能改)
+        //  - /v1/auth/logout      需要 auth (保留 hook, 当前 stateless, 仅返 200)
+        .route("/v1/auth/login", post(auth_login))
+        .route("/v1/auth/change-password", post(auth_change_password))
+        .route("/v1/auth/logout", post(auth_logout))
         // 未知 path 返 404 JSON (而不是被 auth 拦成 401)
         .fallback(not_found_handler)
-        .with_state(state);
+        .with_state(state.clone());
 
     // Stage 7a: 嵌套 ServeDir (静态文件 + SPA fallback).
     // nest_service 把整个 sub-router 接到 /_ui/* 上.
@@ -167,7 +174,9 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
     };
 
     // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
-    router = router.layer(middleware::from_fn(auth_middleware));
+    // Stage 10a: 用 `from_fn_with_state` 把 AppState 注入, 让 middleware
+    // 能读 state.admin.token_secret 验签 (替代 env var).
+    router = router.layer(middleware::from_fn_with_state(state, auth_middleware));
 
     // Stage 9c: CSP header (Content-Security-Policy)
     // 策略跟 01b-daemon-web-console.md §6.3 一致:
@@ -226,7 +235,9 @@ pub struct Claims {
 /// - 跳过 `/v1/system/health` 和 `/v1/system/status` (k8s probe / 调试)
 /// - 缺/错/过期 token → 401 Unauthorized
 /// - 合法 token → `Claims` 写入 `request.extensions()` (下游 handler 可读)
-/// - secret 来自 env var `QIANXUN_JWT_SECRET`. 缺 secret → 启动失败 (main.rs).
+///
+/// Stage 10a: secret 来自 `state.admin.token_secret` (admin.cred 文件),
+/// 不再读 env var `QIANXUN_JWT_SECRET` (那个 env var 已废弃, main.rs 仅打 warn).
 ///
 /// Stage 7 加 `role` 字段 + 跟 VPS auth 集成.
 ///
@@ -235,11 +246,12 @@ pub struct Claims {
 /// counter) 的混合方式 — 简化: counter 在 static `ACTIVE_CONNS`, 跟
 /// `state.active_conns` 在 metric handler 里取 max(两者).
 pub async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // 1. 跳过 health/status (k8s probe + 调试)
+    // 1. 跳过 health/status (k8s probe + 调试) + 登录端点
     let path = request.uri().path();
     if is_auth_skipped_path(path) {
         // 跳过路径也计入活跃连接 (含 health probe), 因为它们确实是活跃请求
@@ -256,15 +268,8 @@ pub async fn auth_middleware(
         }
     };
 
-    // 3. 读 secret (env var QIANXUN_JWT_SECRET). main.rs 已校验存在,
-    //    这里是兜底防御 (secret 在请求之间不应被删除).
-    let secret = match jwt_secret() {
-        Some(s) => s,
-        None => {
-            tracing::error!("[auth] QIANXUN_JWT_SECRET not set; daemon misconfigured");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+    // 3. 读 secret (从 AppState.admin.token_secret, 文件加载, 启动时已校验非空).
+    let secret = state.admin.token_secret();
 
     // 4. decode + verify (HS256, exp 必填且未过期)
     let mut validation = Validation::new(Algorithm::HS256);
@@ -1069,19 +1074,20 @@ struct LogsQuery {
     pub lines: Option<u64>,
 }
 
-/// Stage 9c — 重新生成 admin token.
+/// Stage 9c → Stage 10a — 重新生成 admin token.
 ///
-/// `POST /v1/system/admin/rotate-token` — 用 daemon 的 HS256 secret 签发
-/// 一个新的 admin JWT, exp = now + 24h, sub = "admin", 返回.
+/// `POST /v1/system/admin/rotate-token` — **真换 token_secret** (Stage 10a
+/// 升级), 写回 admin.cred 文件, 然后签发一个 24h 过期的 admin JWT.
 ///
-/// 简化 (Stage 9c 临时方案):
-/// - **不**换 JWT secret. 旧 token 仍能在 daemon 校验通过 (因为 secret 没换).
-/// - 真正的"secret rotation"是切 secret + 让所有 client 失效, 留 Stage 10+.
-/// - 前端会立刻用新 token 替换 localStorage, 旧 token 在浏览器侧被"作废" (UX).
+/// 行为:
+/// - 调 `state.admin.rotate_token()` 重生 32-byte 随机 secret + 写文件
+/// - **旧 secret 立即失效** — 所有现有 JWT 在下次请求时返 401
+/// - 用新 secret 签发新 JWT, 返回
+/// - 走 auth_middleware, 任何已登录的 admin 都能调
 ///
-/// 安全性:
-/// - 走 auth_middleware, 任何已登录的 admin 都能调 (跟 VPS auth 兼容).
-/// - 旧 secret 没换 = 不会强制登出其他 client, 这是 trade-off.
+/// 注: 这个 endpoint 跟 `auth_logout` 语义不同 — rotate 是"换钥匙"
+/// (强制全端重登), logout 是"我退出" (前端清 localStorage). 当前 logout
+/// stateless (无服务端 blacklist), 未来加黑名单留 Stage 11+.
 ///
 /// Response:
 /// ```json
@@ -1092,43 +1098,195 @@ struct LogsQuery {
 ///   "expires_in": 86400
 /// }
 /// ```
-async fn admin_rotate_token() -> Result<Json<serde_json::Value>, StatusCode> {
-    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
-
-    let secret = jwt_secret().ok_or_else(|| {
-        tracing::error!("[admin_rotate_token] QIANXUN_JWT_SECRET not set");
+async fn admin_rotate_token(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // 真换 secret + 写文件 (旧 secret 立即失效)
+    state.admin.rotate_token().map_err(|e| {
+        tracing::error!("[admin_rotate_token] rotate_token failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // 用新 secret 签发 24h JWT
+    let exp_secs = 24 * 60 * 60_i64;
+    let token = state.admin.sign_jwt("admin", exp_secs).map_err(|e| {
+        tracing::error!("[admin_rotate_token] sign_jwt failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let now = chrono::Utc::now().timestamp();
-    let exp = now + 24 * 60 * 60; // 24h
+    let exp = now + exp_secs;
 
-    let claims = Claims {
-        sub: "admin".to_string(),
-        exp,
-        iat: now,
-    };
-
-    let token = encode(
-        &JwtHeader::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|e| {
-        tracing::error!("[admin_rotate_token] JWT encode failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    tracing::info!(
-        "[admin_rotate_token] rotated admin token (sub=admin, exp={exp}, ttl=24h)"
+    tracing::warn!(
+        "[admin_rotate_token] rotated token_secret + signed new admin JWT (sub=admin, exp={exp}, ttl=24h). \
+         All existing JWT invalidated."
     );
 
     Ok(Json(serde_json::json!({
         "token": token,
         "exp": exp,
         "sub": "admin",
-        "expires_in": 24 * 60 * 60,
+        "expires_in": exp_secs,
     })))
+}
+
+// ─── Stage 10a: 密码登录 + 修改密码 + 登出 ──────────────────────
+
+/// Stage 10a — 密码登录 (公开 endpoint, 跳过 auth).
+///
+/// `POST /v1/auth/login` body: `{"password": "<plain>"}`
+///
+/// 行为:
+/// - 调 `state.admin.verify_password(plain)` 验证
+/// - 成功: 签发 24h JWT, 返 `{token, exp, sub, expires_in}`
+/// - 失败: 401 + 统一错误体 (不区分"密码错" vs "用户不存在" 防 enumeration)
+///
+/// 注: 这里**不**做 rate limit (Stage 7b 评估, 留后续). 但**不**返 401 vs 404
+/// 区分错误, 防 enumeration.
+async fn auth_login(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<LoginRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let password = body.password.trim();
+    if password.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "message": "password is required",
+            })),
+        ));
+    }
+
+    if !state.admin.verify_password(password) {
+        tracing::warn!("[auth_login] login failed: wrong password");
+        // 故意用相同 401 消息, 防 enumeration
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid_credentials",
+                "message": "Invalid password",
+            })),
+        ));
+    }
+
+    // 签发 24h JWT
+    let exp_secs = 24 * 60 * 60_i64;
+    let token = state.admin.sign_jwt("admin", exp_secs).map_err(|e| {
+        tracing::error!("[auth_login] sign_jwt failed: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "internal",
+                "message": format!("JWT sign failed: {e}"),
+            })),
+        )
+    })?;
+    let now = chrono::Utc::now().timestamp();
+    let exp = now + exp_secs;
+
+    tracing::info!("[auth_login] admin logged in (sub=admin, exp={exp}, ttl=24h)");
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "exp": exp,
+        "sub": "admin",
+        "expires_in": exp_secs,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    pub password: String,
+}
+
+/// Stage 10a — 修改密码 (需要 auth).
+///
+/// `POST /v1/auth/change-password` body: `{"old_password": "...", "new_password": "..."}`
+///
+/// 行为:
+/// - 验证 old_password 正确
+/// - new_password ≥ 4 chars (跟 auth.rs 的 rotate_password 一致)
+/// - 调 `state.admin.rotate_password(new)` 写新 hash (不 rotate token, 已登录态不变)
+/// - 成功: 200 + 提示"请重新登录" (前端会清 localStorage + 跳登录页)
+///
+/// 安全性:
+/// - 走 auth_middleware — 必须已登录才能改
+/// - 旧密码必须正确 (防止锁屏/借用场景的恶意改密)
+async fn auth_change_password(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.old_password.is_empty() || body.new_password.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "message": "old_password and new_password are required",
+            })),
+        ));
+    }
+
+    if !state.admin.verify_password(&body.old_password) {
+        tracing::warn!("[auth_change_password] wrong old_password");
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid_credentials",
+                "message": "Current password is incorrect",
+            })),
+        ));
+    }
+
+    // 注意: rotate_password 需要 &mut self, 但 AdminCredential 在 Arc 后面.
+    // 我们用 Arc::make_mut 模式: 复制出新的 AdminCredential, 修改, 然后
+    // 替换 Arc 里的内容. 这里**只** 替换 admin 字段需要 Arc 的内部可变性,
+    // 但 AppState 是 Arc<...>, 不能直接 mutate.
+    // 简化: handler 流程里, 我们用 try_mut helper 拿到 mutable reference.
+    // 当前 AdminCredential 没有 Arc::make_mut, 我们直接重写 — 真要更新 self,
+    // 只能**新构造** AdminCredential + 重新写文件.
+    // 这里采用 by-design 的最简方案: 写文件 + 提示前端 logout 重登. 不 in-place mutate.
+    state.admin.rotate_password_inplace(&body.new_password).map_err(|e| {
+        tracing::error!("[auth_change_password] rotate_password failed: {e}");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "rotate_failed",
+                "message": e,
+            })),
+        )
+    })?;
+
+    tracing::info!("[auth_change_password] password rotated (token_secret unchanged)");
+
+    // 提示前端: 现有 token 仍可用, 但建议立即 logout + 重新 login 拿新 cookie
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": "Password changed. Token still valid; you may want to re-login.",
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+/// Stage 10a — 登出 (需要 auth).
+///
+/// `POST /v1/auth/logout` body: `{}` (空 body 也行)
+///
+/// 行为: 当前是 stateless — 服务端无 blacklist, 只能靠前端清 localStorage.
+/// endpoint 保留是为了:
+/// 1) 未来加 token 黑名单 (Stage 11+) 的 hook
+/// 2) 让前端能 fire-and-forget 调一次 (e.g. 关浏览器时), 不用等 401
+///
+/// 现状: 仅返 200.
+async fn auth_logout() -> Json<serde_json::Value> {
+    tracing::info!("[auth_logout] admin logged out (stateless, client should clear token)");
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": "Logged out. Client should clear localStorage token.",
+    }))
 }
 
 // ─── Prompt (SSE 流式) ────────────────────────────────────
@@ -1749,6 +1907,58 @@ mod jwt_auth_tests {
 
     const TEST_SECRET: &str = "test-jwt-secret-2026-do-not-use-in-prod";
 
+    /// 构造一个最小 AppState with the given token_secret.
+    /// Stage 10b 修正: admin 字段用 `for_test(secret, ...)` 构造, 让 `make_jwt` 签的
+    /// token 能直接被 `state.admin.token_secret()` 验签通过 (不再依赖 env var).
+    fn make_test_state_with_secret(
+        secret: &str,
+    ) -> std::sync::Arc<crate::daemon::AppState> {
+        use crate::daemon::agent_host::{AgentLoopHost, SharedState};
+        use crate::daemon::auth::AdminCredential;
+        use crate::daemon::llm_providers::LlmProviderManager;
+        use crate::daemon::persistence::SessionStore;
+        use qianxun_core::config::ResolvedConfig;
+        use qianxun_core::provider::create_provider;
+        use qianxun_core::skills::SkillManager;
+        use qianxun_core::tools::ToolRegistry;
+        use qianxun_memory::MemoryCore;
+
+        let config = ResolvedConfig::default();
+        let provider: Arc<dyn qianxun_core::provider::LlmProvider> =
+            create_provider(&config.active_provider, &config.active_provider_config()).into();
+        let tools = Arc::new(ToolRegistry::new());
+        let memory = Arc::new(MemoryCore::open_in_memory().expect("memory"));
+        let skills = SkillManager::new();
+        let store = Arc::new(SessionStore::in_memory().expect("store"));
+        let shared = Arc::new(SharedState::new(
+            config.clone(),
+            provider.clone(),
+            tools.clone(),
+            memory.clone(),
+            skills.clone(),
+        ));
+        let agent_host = Arc::new(AgentLoopHost::new(2, shared.clone(), store.clone()));
+        let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
+        Arc::new(crate::daemon::AppState {
+            agent_host,
+            config: Arc::new(config),
+            provider,
+            tools,
+            memory,
+            skills,
+            shared,
+            store,
+            llm_providers,
+            shutdown_tx,
+            processing_loop_enabled: false,
+            started_at: std::time::Instant::now(),
+            active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            log_ring: Arc::new(crate::buf_writer::LogRing::new()),
+            admin: Arc::new(AdminCredential::for_test(secret, "test-hash-not-used")),
+        })
+    }
+
     /// 用指定 secret 签发测试 JWT.
     fn make_jwt(secret: &str, sub: &str, exp_offset_secs: i64) -> String {
         let now = chrono::Utc::now().timestamp();
@@ -1786,14 +1996,14 @@ mod jwt_auth_tests {
                 .unwrap_or_else(|| "no_claims".to_string())
         }
 
-        let state = super::stage7a_endpoint_tests::make_test_state();
+        let state = make_test_state_with_secret(TEST_SECRET);
         Router::new()
             .route("/v1/system/health", get(public))
             .route("/v1/system/status", get(public))
             .route("/v1/chat/session", get(protected))
             .route("/v1/_claims_echo", get(claims_echo))
-            .with_state(state)
-            .layer(middleware::from_fn(auth_middleware))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, auth_middleware))
     }
 
     /// Stage 7: 含 `/` 路由 + fallback 的测试 app, 给 `test_root_endpoint_skips_auth`
@@ -1813,20 +2023,28 @@ mod jwt_auth_tests {
             "protected"
         }
 
+        let state = make_test_state_with_secret(TEST_SECRET);
         Router::new()
             .route("/", get(root))
             .route("/v1/system/health", get(public))
             .route("/v1/system/status", get(public))
             .route("/v1/chat/session", get(protected))
             .fallback(fallback)
-            .with_state(super::stage7a_endpoint_tests::make_test_state())
-            .layer(middleware::from_fn(auth_middleware))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, auth_middleware))
     }
 
     /// 在测试里安全地设置 env var (Rust 2024 edition 下 set_var 是 unsafe).
+    ///
+    /// Stage 10a: 同时设置 AdminCredential.token_secret (现在 middleware 读
+    /// 的是 admin.cred 文件, 不再读 env var). 用 OnceLock 共享的 admin cred
+    /// (`test_admin_credential()` from `stage7a_endpoint_tests`).
     fn set_jwt_secret(val: &str) {
         // SAFETY: 测试用 ENV_MUTEX 序列化访问, 测试进程内不并发
         unsafe { std::env::set_var("QIANXUN_JWT_SECRET", val) }
+        // Stage 10a: 同步到 admin credential (让 middleware 用新 secret 验签)
+        let admin = super::stage7a_endpoint_tests::test_admin_credential();
+        admin.set_token_secret_for_test(val);
     }
 
     fn clear_jwt_secret() {
@@ -2142,6 +2360,17 @@ mod stage7a_endpoint_tests {
 
     const TEST_SECRET: &str = "stage7a-test-jwt-secret";
 
+    /// 测试用 admin credential — 用已知 token_secret 构造, 让 `make_jwt` 签的
+    /// token 能通过 `state.admin.token_secret()` 验签. 走 `for_test` constructor
+    /// (不写文件, 不打 random password 到 stderr).
+    pub(super) fn test_admin_credential() -> std::sync::Arc<crate::daemon::auth::AdminCredential> {
+        use crate::daemon::auth::AdminCredential;
+        // bcrypt hash of "stage7a-test-password" (12-char min, 4+ allowed) — placeholder
+        // for tests that need verify_password. 大多数测试不走 verify_password, 只验签.
+        let placeholder_hash = "$2b$12$placeholderhashplaceholderhashplaceholderhashplaceholder";
+        std::sync::Arc::new(AdminCredential::for_test(TEST_SECRET, placeholder_hash))
+    }
+
     /// 构造一个最小 AppState for tests.
     ///
     /// 不初始化 AgentLoopHost (会要求 SessionStore), 单独 mock 一个 minimal host
@@ -2213,6 +2442,9 @@ mod stage7a_endpoint_tests {
             started_at: std::time::Instant::now(),
             active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             log_ring: Arc::new(LogRing::new()),
+            // Stage 10b: admin credential (用 for_test 注入已知 TEST_SECRET, 让
+            // `set_jwt_secret(TEST_SECRET)` 同步后, middleware 验签能通过).
+            admin: test_admin_credential(),
         })
     }
 
@@ -2255,6 +2487,9 @@ mod stage7a_endpoint_tests {
 
     fn set_jwt_secret(val: &str) {
         unsafe { std::env::set_var("QIANXUN_JWT_SECRET", val) }
+        // Stage 10a: 同步到 admin credential
+        let admin = test_admin_credential();
+        admin.set_token_secret_for_test(val);
     }
 
     fn clear_jwt_secret() {
@@ -3322,7 +3557,6 @@ mod stage7a_endpoint_tests {
     /// POST /v1/system/admin/rotate-token 返新 JWT (HS256, sub=admin, exp=now+24h)
     #[tokio::test]
     async fn test_admin_rotate_token_returns_new_jwt() {
-        use jsonwebtoken::{decode as jwt_decode, Algorithm, DecodingKey, Validation};
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
         let app = test_router_with_ui(None);
@@ -3354,17 +3588,19 @@ mod stage7a_endpoint_tests {
         assert!(exp > now + 23 * 3600, "exp should be ~24h from now, got {exp}");
         assert!(exp < now + 25 * 3600, "exp should be ~24h from now, got {exp}");
 
-        // 解码验证: 新 token 用 TEST_SECRET 签, sub=admin, exp 跟 body 一致
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_required_spec_claims(&["exp"]);
-        let decoded = jwt_decode::<Claims>(
-            new_token,
-            &DecodingKey::from_secret(TEST_SECRET.as_bytes()),
-            &validation,
-        )
-        .expect("新 token 应能用 TEST_SECRET 解码");
-        assert_eq!(decoded.claims.sub, "admin");
-        assert_eq!(decoded.claims.exp, exp);
+        // Stage 10a: rotate 真换了 secret, 新 token 用**新 secret** 签, 我们
+        // 没法直接知道新 secret (handler 没返). 改为: 解码 JWT 头 + 载荷 (不验签)
+        // 验证 sub + exp 正确. base64url decode 即可.
+        let parts: Vec<&str> = new_token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT 应有 3 段 (header.payload.sig)");
+        use base64::Engine;
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .expect("payload 应该 base64url 解码");
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .expect("payload 应该 JSON");
+        assert_eq!(payload["sub"].as_str(), Some("admin"));
+        assert_eq!(payload["exp"].as_i64(), Some(exp));
 
         // 新 token 跟旧 token 字符串不相等
         assert_ne!(new_token, old_token);
@@ -3394,15 +3630,19 @@ mod stage7a_endpoint_tests {
         clear_jwt_secret();
     }
 
-    /// 缺 JWT secret (env 没配) → 500 (auth_middleware 兜底分支)
+    /// 错 secret 签的 token → 401 (auth_middleware 验签失败).
+    ///
+    /// Stage 10a 之前: 缺 JWT secret (env 没配) → 500 (auth_middleware 兜底).
+    /// Stage 10a 后: secret 来自 admin.cred, 永远非空, 所以这个 case 改成测
+    /// "secret 错配" (token 用别的 secret 签) 时的 401.
     #[tokio::test]
-    async fn test_admin_rotate_token_missing_secret_returns_500() {
+    async fn test_admin_rotate_token_wrong_secret_returns_401() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        // 故意不 set_jwt_secret — auth_middleware 走到 step 3 (读 secret) 时返 500
-        clear_jwt_secret();
+        set_jwt_secret(TEST_SECRET);
         let app = test_router_with_ui(None);
 
-        let bogus = make_jwt("some-other-secret", "admin", 3600);
+        // 用错 secret 签 token
+        let bogus = make_jwt("some-other-secret-not-matching", "admin", 3600);
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3414,7 +3654,7 @@ mod stage7a_endpoint_tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         clear_jwt_secret();
     }

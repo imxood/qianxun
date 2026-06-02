@@ -253,21 +253,34 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.daemon {
         tracing::info!("以 Daemon 模式启动（端口 {}）", cli.port);
-        // Stage 6a: Daemon auth 需要 QIANXUN_JWT_SECRET.
-        // 启动时校验, 缺 secret 直接 fail-fast (避免 daemon 跑起来再 401 全部请求).
-        match std::env::var("QIANXUN_JWT_SECRET") {
-            Ok(s) if !s.is_empty() => {
-                tracing::info!("[daemon] JWT secret configured: set ({} bytes)", s.len());
-            }
-            _ => {
-                eprintln!(
-                    "错误: Daemon 模式需要 QIANXUN_JWT_SECRET env var (HS256 签名密钥). \
-                     请设置: export QIANXUN_JWT_SECRET=\"<random-32-bytes>\""
-                );
+        // Stage 10a: 加载 (或首启动创建) admin credential.
+        // 文件路径: ~/.qianxun/admin.cred (JSON: password_hash + token_secret).
+        // 首启动会生成随机 password 并打印到 stderr.
+        let cred_path = qianxun_core::workspace::qianxun_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine ~/.qianxun home dir"))?
+            .join("admin.cred");
+        let admin = match daemon::auth::AdminCredential::load_or_create(&cred_path) {
+            Ok(a) => std::sync::Arc::new(a),
+            Err(e) => {
+                eprintln!("错误: 加载 admin credential 失败 ({}): {e}", cred_path.display());
                 std::process::exit(1);
             }
+        };
+        tracing::info!(
+            "[daemon] admin credential loaded (path={}, hash_len={}B, secret_len={}B)",
+            cred_path.display(),
+            admin.password_hash().len(),
+            admin.token_secret().len()
+        );
+        // 兼容: 如果用户设了 QIANXUN_JWT_SECRET env var, 提示一下已不再使用.
+        if std::env::var("QIANXUN_JWT_SECRET").is_ok() {
+            tracing::warn!(
+                "[daemon] QIANXUN_JWT_SECRET env var is set but ignored — \
+                 token secret now stored in admin.cred file. \
+                 Run `qx --daemon` once to bootstrap; subsequent boots will use the file."
+            );
         }
-        daemon::run(cli.port, resolved, ui_dist).await?;
+        daemon::run(cli.port, resolved, ui_dist, admin).await?;
         return Ok(());
     }
 

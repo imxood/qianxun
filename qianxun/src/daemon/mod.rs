@@ -1,4 +1,5 @@
 pub mod agent_host;
+pub mod auth;
 pub mod llm_providers;
 pub mod persistence;
 pub mod router;
@@ -24,6 +25,7 @@ use qianxun_memory::MemoryCore;
 
 use crate::buf_writer::LogRing;
 use crate::daemon::agent_host::{AgentLoopHost, SharedState};
+use crate::daemon::auth::AdminCredential;
 use crate::daemon::llm_providers::LlmProviderManager;
 use crate::daemon::persistence::SessionStore;
 
@@ -69,6 +71,10 @@ pub struct AppState {
     /// 暂未接 tracing-subscriber make_writer, 留给 Stage 7c 集成; 当前
     /// 主要是给 endpoint 一个可测试的 ring buffer 抽象.
     pub log_ring: Arc<LogRing>,
+    /// Stage 10a: Admin credential (password_hash + token_secret).
+    /// auth_middleware 用 `admin.token_secret` 验签 (替代 Stage 6a 的
+    /// `QIANXUN_JWT_SECRET` env var).
+    pub admin: Arc<AdminCredential>,
 }
 
 /// 启动 Daemon HTTP 服务.
@@ -78,10 +84,14 @@ pub struct AppState {
 ///
 /// Stage 7a 新增 `ui_dist: Option<PathBuf>` 参数, 控制是否 serve SvelteKit
 /// 静态 dist (路径不存在时不 panic, 启动时 warn 即可).
+///
+/// Stage 10a: `admin: Arc<AdminCredential>` (由 main.rs 加载 — 失败时
+/// 进程已 fail-fast). 这里直接放进 AppState.
 pub async fn run(
     port: u16,
     resolved: ResolvedConfig,
     ui_dist: Option<PathBuf>,
+    admin: Arc<AdminCredential>,
 ) -> anyhow::Result<()> {
     tracing::info!("Daemon starting on 127.0.0.1:{port}");
 
@@ -178,6 +188,7 @@ pub async fn run(
         started_at: Instant::now(),
         active_conns: Arc::new(AtomicUsize::new(0)),
         log_ring: Arc::new(LogRing::new()),
+        admin,
     });
 
     // 启动 reap_stale 后台任务 (Stage 1 暂不 await, 实际不退出)
