@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { onMount } from "svelte";
 	import ThreeColumnLayout from "$lib/components/layout/ThreeColumnLayout.svelte";
 	import Sidebar from "$lib/components/layout/Sidebar.svelte";
 	import SessionList from "$lib/components/layout/SessionList.svelte";
 	import ChatView from "$lib/components/layout/ChatView.svelte";
 	import type { Project, Session, Team } from "$lib/types/ipc";
+	import { healthCheck, isTauri, onDaemonStateChanged } from "$lib/ipc/bridge";
 
 	// ─── Stage 1 mock 数据 ──────────────────────────────────────────────────
 	// 真实数据 Stage 2 通过 daemon_list_projects / daemon_list_sessions
@@ -106,6 +108,31 @@
 	function onSelectSession(id: string) {
 		activeSessionId = id;
 	}
+
+	// ─── Stage 2: IPC 桥接验证 ──────────────────────────────────────────────
+	// onMount: 调一次 healthCheck 验证 IPC 桥接通 (Tauri 走 invoke, Web 走 mock),
+	// 同时订阅 daemon://state-changed 事件, 让 console 能看到 IPC 消息来回.
+	onMount(() => {
+		console.log(`[qianxun-desktop] Stage 2 IPC bridge: isTauri=${isTauri()}`);
+		void healthCheck()
+			.then((status) => {
+				console.log("[qianxun-desktop] healthCheck →", status);
+			})
+			.catch((err) => {
+				console.error("[qianxun-desktop] healthCheck failed:", err);
+			});
+
+		let unlisten: (() => void) | undefined;
+		void onDaemonStateChanged((state) => {
+			console.log("[qianxun-desktop] daemon://state-changed →", state);
+		}).then((u) => {
+			unlisten = u;
+		});
+
+		return () => {
+			unlisten?.();
+		};
+	});
 </script>
 
 <ThreeColumnLayout>

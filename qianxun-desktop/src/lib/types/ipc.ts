@@ -192,3 +192,52 @@ export type IpcError =
 	| { code: "RateLimited"; retry_after_sec?: number; message: string }
 	| { code: "ApiError"; status: number; message: string }
 	| { code: "Internal"; message: string };
+
+// ─── SSE 事件 (12 种类型联合, 与 _shared-contract.md §3.2 / 03-tauri-desktop.md §8.2 / §8.4 一致) ──────
+
+/**
+ * 流式内容块类型. 与 ContentBlockType 对齐但只列流式会用到的 (text / thinking / tool_use).
+ */
+export type SseBlockType = "text" | "thinking" | "tool_use";
+
+/**
+ * 12 个 SSE 事件的 discriminated union.
+ * 所有事件 JSON 格式: `data: <json>\n\n`, 可选 `event: <name>\n` 标识类型.
+ */
+export type SseEvent =
+	| { type: "message_start"; session_id?: string; model?: string; max_tokens?: number }
+	| { type: "content_block_start"; index: number; block_type: SseBlockType }
+	| { type: "text_delta"; index: number; text: string }
+	| { type: "thinking_delta"; index: number; text: string }
+	| {
+			type: "tool_use_delta";
+			index: number;
+			id?: string;
+			name?: string;
+			arguments_json?: string;
+	  }
+	| {
+			type: "tool_use_complete";
+			index: number;
+			id: string;
+			name: string;
+			arguments: Record<string, unknown>;
+	  }
+	| {
+			type: "tool_result";
+			tool_use_id: string;
+			content: string | ContentBlock[];
+			is_error?: boolean;
+			elapsed_ms?: number;
+	  }
+	| { type: "content_block_stop"; index: number }
+	| {
+			type: "usage";
+			input_tokens: number;
+			output_tokens: number;
+			cache_creation_input_tokens?: number;
+			cache_read_input_tokens?: number;
+	  }
+	| { type: "message_delta"; stop_reason: StopReason }
+	| { type: "message_stop" }
+	| { type: "error"; code: "rate_limit" | "auth" | "api_error" | "internal"; message: string };
