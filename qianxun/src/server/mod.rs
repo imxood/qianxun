@@ -36,6 +36,10 @@
 //! - **静态 Web UI 起步**: `static_ui/index.html` + `login.js` (vanilla, 无框架)
 //!   mount 在 `/ui/`, 登录页调 `POST /api/auth/login` 拿 JWT 存 localStorage.
 //!
+//! Stage 6b 范围 (本版本增量):
+//! - **`RateLimiter` JSON 文件持久化** — `~/.qianxun/rate-limit.json` 节流写盘
+//!   (5s 间隔), 跨重启保留 per-user 限流状态. 仍是 per-process (Stage 7 接 Redis).
+//!
 //! Stage 6+ TODO:
 //! - RateLimiter: 改 Redis (per-process 不够, 多实例部署需共享)
 //! - Outbox: 改 SQLite 持久化 + 256 条环形 + TTL 自动清理
@@ -97,8 +101,14 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     // 路径复用 init_db 的解析, 避免硬编码两份.
     let outbox = Arc::new(Outbox::new(&vps_db_path())?);
     let ws_hub = Arc::new(WsHub::new(team_db.clone(), outbox.clone()));
-    // Stage 5: rate limiter (in-memory, per-process).
-    let rate_limiter = Arc::new(RateLimiter::new());
+    // Stage 6b: rate limiter (JSON 持久化, per-process). 启动时 load() 恢复上次状态,
+    // 之后 check() 走 5s 节流写盘. shutdown 时应调 persist() 强制 flush.
+    let rate_limiter = Arc::new(RateLimiter::with_persist(rate_limit_path())?);
+    if let Err(e) = rate_limiter.load().await {
+        // 加载失败 (文件损坏 / version 不匹配) 不阻断启动, 仅记 warn.
+        // 用户数据丢失 < shutdown flush 前的最后状态, 比启动失败好.
+        tracing::warn!(error = %e, "rate limit state load failed, starting with empty buckets");
+    }
     // 把 db 字段保留 (Stage 1+ 旧 handler 还在用), TeamDb 持有独立 Connection.
     // Stage 4 评估是否合并到一个 Connection.
     let state = Arc::new(VpsState {
@@ -154,6 +164,15 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
 fn vps_db_path() -> std::path::PathBuf {
     let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     data_dir.join("qianxun").join("vps.db")
+}
+
+/// Rate limiter 持久化文件路径 (Stage 6b).
+///
+/// 与 `vps_db_path()` 同目录 (`~/.qianxun/`), 文件名 `rate-limit.json`.
+/// 节流 5s 写一次, shutdown 显式 flush, 写盘 best-effort.
+fn rate_limit_path() -> std::path::PathBuf {
+    let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    data_dir.join("qianxun").join("rate-limit.json")
 }
 
 /// 初始化 VPS 数据库 (Stage 1 已有, 维持原行为, Stage 3 扩展 TeamDb 在 from_connection 中).

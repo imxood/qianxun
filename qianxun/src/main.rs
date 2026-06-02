@@ -88,11 +88,35 @@ struct Cli {
     /// 无则回退到内嵌模式 (向后兼容 Stage 3 行为).
     #[arg(long)]
     standalone: bool,
+
+    /// Thin client 模式调本地 daemon 时附带的 Bearer token (Stage 6b).
+    ///
+    /// 配套 daemon `auth_middleware` (HS256 JWT) 使用, 缺省时从
+    /// env var `QIANXUN_CLIENT_TOKEN` 自动读. token 与启动 daemon 时
+    /// 设置的 `QIANXUN_JWT_SECRET` 用同一个密钥签发.
+    ///
+    /// 例: `--client-token eyJhbGciOiJIUzI1NiIs...` 或
+    /// `QIANXUN_CLIENT_TOKEN=eyJ... qx --daemon-url http://...`
+    ///
+    /// 注: clap 在本项目未启用 `env` feature, env var 解析在下面手动做
+    /// (与 `--config` 走 env 的处理方式一致).
+    #[arg(long)]
+    client_token: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // 解析 --client-token: CLI flag 优先, 回退到 env var `QIANXUN_CLIENT_TOKEN`.
+    // (clap env feature 未启用, 手动读 env. 跟 `--config` 走 env 的处理一致.)
+    if cli.client_token.is_none() {
+        if let Ok(s) = std::env::var("QIANXUN_CLIENT_TOKEN") {
+            if !s.is_empty() {
+                cli.client_token = Some(s);
+            }
+        }
+    }
 
     let filter = if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::EnvFilter::from_default_env()
@@ -234,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
     // 显式指定 daemon URL → 薄客户端模式 (优先于 --standalone)
     if let Some(ref daemon_url) = cli.daemon_url {
         tracing::info!("以薄客户端模式连接 Daemon: {daemon_url}");
-        return client::run_thin_repl(daemon_url).await;
+        return client::run_thin_repl(daemon_url, cli.client_token.as_deref()).await;
     }
 
     // ── Stage 4: 默认探测 daemon ──
@@ -250,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
                 "[main] ACP thin-client 模式尚未实现, 暂以 standalone 模式运行 (daemon={daemon_url})"
             );
         } else {
-            return client::run_thin_repl(&daemon_url).await;
+            return client::run_thin_repl(&daemon_url, cli.client_token.as_deref()).await;
         }
     } else if !cli.standalone {
         tracing::info!("[main] 未检测到本地 Daemon, 回退 standalone 模式");

@@ -178,15 +178,54 @@ pub enum SseEvent {
 /// 连接到本地 Daemon (HTTP + SSE) 的 thin client.
 ///
 /// 跨 binary 共享 (TUI/ACP/CLI 三个入口共用同一个 client 实例).
+///
+/// # Stage 6b 鉴权
+///
+/// 构造时可选择附带 Bearer token (HS256 JWT, 与 daemon `auth_middleware` 配对).
+/// 设置后**所有**请求 (除 `health`/`status` — 它们被 auth middleware 跳过)
+/// 都会自动附加 `Authorization: Bearer <token>` header.
+///
+/// 构造方式:
+/// - [`DaemonClient::new`] — 不带 token, 向后兼容旧测试 (X-Api-Key 兼容已移除)
+/// - [`DaemonClient::with_token`] — 显式带 token, 生产路径
+///
+/// token 来源 (在 `main.rs` 解析):
+/// - CLI flag `--client-token <token>`
+/// - env var `QIANXUN_CLIENT_TOKEN` (clap 自动读, 跟 flag 二选一)
+///
+/// 不做的事 (Stage 6b 范围外):
+/// - 不接 token 刷新 / 重试 / 限流 (Stage 7 跟 VPS `login_handler` 集成时再加)
+/// - 不读 token 加密存储 (Stage 6a stronghold 已有, 启动时由 main.rs 注入)
 #[derive(Debug, Clone)]
 pub struct DaemonClient {
     base_url: String,
     http: reqwest::Client,
+    /// 客户端 Bearer token. `Some(t)` = 每个请求自动附 `Authorization: Bearer t`;
+    /// `None` = 不附 header (Stage 5 旧行为, 用于公开端点 / 单元测试).
+    token: Option<String>,
 }
 
 impl DaemonClient {
-    /// 构造 DaemonClient (不立即探测, 探测由 `health()` 完成).
+    /// 构造 DaemonClient (不立即探测, 探测由 `health()` 完成). 不带 token.
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::new_with_token(base_url, None)
+    }
+
+    /// 构造 DaemonClient 并附带 Bearer token. 后续所有 HTTP 请求 (除 health/status
+    /// 外) 都会自动附加 `Authorization: Bearer <token>` header.
+    ///
+    /// 对端 `daemon::router::auth_middleware` 会:
+    /// 1. 跳过 `/v1/system/health` + `/v1/system/status` (k8s probe / 调试)
+    /// 2. 提取 `Authorization: Bearer <token>`, 校验 HS256 签名 + `exp` 未过期
+    /// 3. 通过则把 `Claims{sub, exp, iat}` 写入 `request.extensions()`
+    ///
+    /// token 由调用方负责 (CLI flag / env var / stronghold), 失败返 401.
+    pub fn with_token(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self::new_with_token(base_url, Some(token.into()))
+    }
+
+    /// 内部统一构造: `token` 是 `Option<String>`, 外面两个 public ctor 转它.
+    fn new_with_token(base_url: impl Into<String>, token: Option<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -194,6 +233,7 @@ impl DaemonClient {
         Self {
             base_url: base_url.into(),
             http,
+            token,
         }
     }
 
@@ -201,10 +241,32 @@ impl DaemonClient {
         &self.base_url
     }
 
+    /// 返回当前配置的 Bearer token. `None` 表示 client 未带 token.
+    /// (供测试 / 调试 / Stage 7 token 刷新逻辑读用, 不在请求路径上使用.)
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    /// 在 `RequestBuilder` 上附加 Bearer Authorization header (若 token 存在).
+    /// 没有 token 时透传, 不修改 builder.
+    ///
+    /// 简化: `reqwest::RequestBuilder::bearer_auth` 内部用 `HeaderValue::from_str`,
+    /// 自动把 token 里的非法字符拦截; 不会 panic.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(t) => builder.bearer_auth(t.as_str()),
+            None => builder,
+        }
+    }
+
     /// 健康检查 (3s 超时). 失败表示 daemon 未启动或不可达.
+    ///
+    /// 注: `health` 在 server 端跳过 auth (k8s probe), 客户端即使带 token
+    /// 也会发, 但 server 不读. 这里仍走 `apply_auth` 保持一致 — server 跳过
+    /// 头不校验, 多发一个 header 不影响.
     pub async fn health(&self) -> Result<HealthStatus, ClientError> {
         let url = format!("{}/v1/system/health", self.base_url);
-        let resp = self.http.get(&url).send().await?;
+        let resp = self.apply_auth(self.http.get(&url)).send().await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ClientError::Status(status.as_u16(), resp.text().await.unwrap_or_default()));
@@ -216,7 +278,7 @@ impl DaemonClient {
     /// 创建 session.
     pub async fn create_session(&self) -> Result<SessionCreated, ClientError> {
         let url = format!("{}/v1/chat/session", self.base_url);
-        let resp = self.http.post(&url).send().await?;
+        let resp = self.apply_auth(self.http.post(&url)).send().await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ClientError::Status(status.as_u16(), resp.text().await.unwrap_or_default()));
@@ -228,7 +290,7 @@ impl DaemonClient {
     /// 列出 sessions (Stage 3 §6.4 扩展端点).
     pub async fn list_sessions(&self) -> Result<Vec<Session>, ClientError> {
         let url = format!("{}/v1/chat/sessions", self.base_url);
-        let resp = self.http.get(&url).send().await?;
+        let resp = self.apply_auth(self.http.get(&url)).send().await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ClientError::Status(status.as_u16(), resp.text().await.unwrap_or_default()));
@@ -247,7 +309,10 @@ impl DaemonClient {
         request: &PromptRequest,
     ) -> Result<SseStream, ClientError> {
         let url = format!("{}/v1/chat/session/{}/prompt", self.base_url, session_id);
-        let resp = self.http.post(&url).json(request).send().await?;
+        let resp = self
+            .apply_auth(self.http.post(&url).json(request))
+            .send()
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ClientError::Status(status.as_u16(), resp.text().await.unwrap_or_default()));
@@ -259,7 +324,7 @@ impl DaemonClient {
     /// 取消当前 prompt.
     pub async fn cancel(&self, session_id: &str) -> Result<(), ClientError> {
         let url = format!("{}/v1/chat/session/{}/cancel", self.base_url, session_id);
-        let resp = self.http.post(&url).send().await?;
+        let resp = self.apply_auth(self.http.post(&url)).send().await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ClientError::Status(status.as_u16(), resp.text().await.unwrap_or_default()));
@@ -610,8 +675,25 @@ pub async fn detect_local_daemon() -> Option<String> {
 ///
 /// 替换 `qianxun/src/main.rs` 中旧 `run_thin_client` (那段只读 response.text,
 /// 没解析 SSE, 不能流式输出).
-pub async fn run_thin_repl(daemon_url: &str) -> anyhow::Result<()> {
-    let client = DaemonClient::new(daemon_url.to_string());
+///
+/// # Stage 6b 鉴权
+///
+/// `token` 是 `Some(jwt)` 时构造 [`DaemonClient::with_token`], 后续所有请求
+/// 自动带 `Authorization: Bearer <jwt>`; `None` 时走 [`DaemonClient::new`]
+/// (向后兼容 Stage 5 旧测试, daemon 端会 401 拒受保护端点).
+pub async fn run_thin_repl(daemon_url: &str, token: Option<&str>) -> anyhow::Result<()> {
+    let client = match token {
+        Some(t) => {
+            tracing::info!("[client] thin client 携带 Bearer token ({} bytes)", t.len());
+            DaemonClient::with_token(daemon_url.to_string(), t.to_string())
+        }
+        None => {
+            tracing::warn!(
+                "[client] thin client 未携带 token; 受保护端点会被 daemon 401"
+            );
+            DaemonClient::new(daemon_url.to_string())
+        }
+    };
     let health = client.health().await.map_err(|e| {
         anyhow::anyhow!("无法连接 Daemon {daemon_url}: {e}")
     })?;
@@ -934,5 +1016,134 @@ mod tests {
         };
         assert!(s.label().contains("offline"));
         assert!(s.label().contains("connection refused"));
+    }
+
+    // ── Stage 6b: token 传递单测 ──
+    //
+    // 用一个**捕获请求**的 mock HTTP server 验证 client 是否在请求里
+    // 附带 `Authorization: Bearer <token>` header.
+    //
+    // 实现: TcpListener 接收第一个连接, read 全部字节到共享 `Arc<Mutex<Option<Vec<u8>>>>`,
+    // 然后返固定 JSON 响应. 调用方 await health() 后可以读 captured slot.
+
+    /// Mock HTTP server, 捕获首个请求的完整字节 (含 header) 并返 `{"status":"ok"}`.
+    /// 返回 (SocketAddr, 共享 captured slot, shutdown sender).
+    async fn start_capture_server() -> (
+        std::net::SocketAddr,
+        Arc<Mutex<Option<Vec<u8>>>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let captured_for_task = captured.clone();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut rx => break,
+                    accepted = listener.accept() => {
+                        if let Ok((mut stream, _)) = accepted {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            // 读完整 request — 用 8KB buffer 足够, HTTP/1.1
+                            // health check 一行 + Content-Length=0 不会超.
+                            let mut buf = vec![0u8; 8192];
+                            let n = stream.read(&mut buf).await.unwrap_or(0);
+                            let mut slot = captured_for_task.lock().await;
+                            if slot.is_none() {
+                                *slot = Some(buf[..n].to_vec());
+                            }
+                            drop(slot);
+                            // 返 200 + health JSON
+                            let body = r#"{"status":"ok"}"#;
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                            let _ = stream.shutdown().await;
+                        }
+                    }
+                }
+            }
+        });
+        (addr, captured, tx)
+    }
+
+    /// 测试 1: `with_token` 构造的 client, 发的请求里必须带
+    /// `Authorization: Bearer <token>`.
+    #[tokio::test]
+    async fn test_request_includes_bearer_header() {
+        let (addr, captured, shutdown) = start_capture_server().await;
+        let url = format!("http://{}", addr);
+        let client = DaemonClient::with_token(url, "test_jwt_token_abc".to_string());
+
+        // 触发一个请求 (health 即使被 server 跳过 auth, 客户端仍会发 header)
+        let h = client.health().await.expect("health should succeed");
+        assert_eq!(h.status, "ok");
+
+        // 触发受保护端点, 真正需要 header
+        let url2 = format!("http://{}", addr);
+        let _ = client.create_session().await; // 不关心结果, mock 返 health body
+        // 上面 create_session 也会被 mock 捕获, 覆盖 captured slot 的第二次
+        // 这里我们只验证 captured 里**包含** Bearer (至少一次)
+        let _ = url2; // suppress unused warning
+
+        // 读 captured
+        let _ = shutdown.send(()); // 优雅关闭 mock
+        // 等 mock 处理完
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let bytes = captured.lock().await.clone().expect("request captured");
+        let req_str = String::from_utf8_lossy(&bytes);
+        assert!(
+            req_str.contains("Authorization: Bearer test_jwt_token_abc"),
+            "request must include `Authorization: Bearer <token>` header; got:\n{req_str}"
+        );
+    }
+
+    /// 测试 2: `new()` 构造 (无 token) 的 client, 发的请求里**不**带 Authorization.
+    #[tokio::test]
+    async fn test_request_without_token_omits_header() {
+        let (addr, captured, shutdown) = start_capture_server().await;
+        let url = format!("http://{}", addr);
+        let client = DaemonClient::new(url);
+
+        let h = client.health().await.expect("health");
+        assert_eq!(h.status, "ok");
+
+        let _ = shutdown.send(());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let bytes = captured.lock().await.clone().expect("request captured");
+        let req_str = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(
+            !req_str.contains("authorization:"),
+            "request must NOT include Authorization header; got:\n{req_str}"
+        );
+    }
+
+    /// 测试 3: `with_token` 构造后, `client.token()` getter 返 Some(<token>);
+    /// `new()` 返 None. 这两个 case 合并到一个 #[test] 里更紧凑.
+    #[test]
+    fn test_with_token_constructor_stores_token() {
+        let c_with = DaemonClient::with_token("http://x", "tok_secret_123");
+        assert_eq!(
+            c_with.token(),
+            Some("tok_secret_123"),
+            "with_token must expose token via getter"
+        );
+
+        let c_without = DaemonClient::new("http://x");
+        assert_eq!(
+            c_without.token(),
+            None,
+            "new() must leave token as None"
+        );
+
+        // 4 个方法共用一个 apply_auth 路径, 这里只 spot-check 一个受保护端点
+        // 不会 panic / 不会因为 token getter 错误而崩 — 实际 header 行为由上面
+        // 两个 #[tokio::test] 验证.
     }
 }
