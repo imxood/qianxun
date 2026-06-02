@@ -38,6 +38,13 @@
 	--sidebar-accent-foreground: oklch(0.205 0 0);
 	--sidebar-border: oklch(0.922 0 0);
 	--sidebar-ring: oklch(0.708 0 0);
+
+	/* Stage 5 §11: Daemon 状态点 CSS 变量 (4 态).
+	 * light 主题: 饱和度略低, 避免在白底上太突兀. */
+	--state-connected: oklch(0.62 0.16 145);    /* green-500 近似 */
+	--state-reconnecting: oklch(0.72 0.16 80);  /* amber-500 近似 */
+	--state-degraded: oklch(0.62 0.22 27);      /* red-500 近似 */
+	--state-offline: oklch(0.55 0.01 260);      /* zinc-500 近似 */
 }
 
 .dark {
@@ -72,6 +79,12 @@
 	--sidebar-accent-foreground: oklch(0.985 0 0);
 	--sidebar-border: oklch(1 0 0 / 10%);
 	--sidebar-ring: oklch(0.439 0 0);
+
+	/* Stage 5 §11: dark 主题状态点 (亮度略提, 适配深底) */
+	--state-connected: oklch(0.72 0.18 145);
+	--state-reconnecting: oklch(0.78 0.18 80);
+	--state-degraded: oklch(0.7 0.22 27);
+	--state-offline: oklch(0.65 0.01 260);
 }
 
 @theme inline {

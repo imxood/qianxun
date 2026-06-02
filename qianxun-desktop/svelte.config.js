@@ -1,4 +1,4 @@
-import adapter from '@sveltejs/adapter-auto';
+import adapter from '@sveltejs/adapter-static';
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -7,10 +7,14 @@ const config = {
 		runes: ({ filename }) => (filename.split(/[/\\]/).includes('node_modules') ? undefined : true)
 	},
 	kit: {
-		// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
-		// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
-		// See https://svelte.dev/docs/kit/adapters for more information about adapters.
-		adapter: adapter(),
+		// adapter-static (Stage 5 §12): 全平台生产打包输出静态资源,
+		// Tauri 走 frontendDist 加载. fallback: 'index.html' 让 SvelteKit
+		// 处理 SPA 路由 fallback (Tauri 客户端单页应用).
+		adapter: adapter({
+			fallback: 'index.html',
+			precompress: false,
+			strict: false
+		}),
 		// Path aliases for shadcn-svelte
 		alias: {
 			$components: 'src/lib/components',

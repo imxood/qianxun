@@ -11,6 +11,8 @@
 // Stage 1: 简单 ping '/health' 端点, 端点不存在时切到 'offline'.
 // Stage 2 (当前): 走 $lib/ipc/bridge.ts → Tauri 2.0 invoke('daemon_health_fetch')
 //                  (Tauri 环境) / 浏览器 fetch fallback (Web 环境).
+// Stage 5 (§11): 新增 stateColorVar() — 把 4 态映射到 CSS 变量, 主题切换时
+//                 自动跟随 (light/dark 用不同色值, 见 layout.css :root / .dark).
 // ───────────────────────────────────────────────────────────────────────────
 
 import type { DaemonState, HealthStatus } from "$lib/types/ipc";
@@ -19,6 +21,16 @@ import { fetchDaemonHealth } from "$lib/ipc/bridge";
 const DEFAULT_DAEMON_URL = "http://127.0.0.1:23900";
 const HEALTH_CHECK_INTERVAL_MS = 10_000; // §4.1.2: 10s 周期
 const REQUEST_TIMEOUT_MS = 3_000;
+
+/// 4 态对应的 CSS 变量名. 真实色值在 src/routes/layout.css 的 :root / .dark
+/// 中定义 (--state-connected, --state-reconnecting, --state-degraded, --state-offline).
+/// UI 组件用 `style="background: var(--state-color)"` 渲染, 主题切换零代码改动.
+const STATE_COLOR_VAR: Record<DaemonState, string> = {
+	connected: "var(--state-connected)",
+	reconnecting: "var(--state-reconnecting)",
+	degraded: "var(--state-degraded)",
+	offline: "var(--state-offline)",
+};
 
 class ConnectionStore {
 	daemonUrl = $state<string>(DEFAULT_DAEMON_URL);
@@ -41,6 +53,11 @@ class ConnectionStore {
 		const ago = Math.floor((Date.now() - this.lastError.ts) / 1000);
 		return `${ago}s 前: ${this.lastError.message}`;
 	});
+
+	/// 当前状态的 CSS 颜色变量 (供 ThreeColumnLayout 顶栏状态点用).
+	/// Stage 5 §11: 不再硬编码 bg-red-500 / bg-green-500, 改用 var(--state-XXX)
+	/// 实现 light/dark 主题自适应. 主题色定义在 layout.css.
+	stateColorVar = $derived(STATE_COLOR_VAR[this.daemonState] ?? "var(--state-offline)");
 
 	// ─── 内部 ────────────────────────────────────────────────────────────────
 

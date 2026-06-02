@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2.0.0",
   "productName": "qianxun-desktop",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "identifier": "com.minimax.qianxun-desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "千寻 TUI",
+        "title": "千寻 (Qianxun)",
         "width": 1280,
-        "height": 800
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
       }
     ],
     "security": {
@@ -23,7 +27,28 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.png"]
+    "category": "DeveloperTool",
+    "shortDescription": "千寻 — 个人 AI 编程助手 (Tauri 桌面端)",
+    "longDescription": "千寻是 Rust 实现的个人 AI 编程助手, 支持本地 Daemon + 云端 VPS 双模式, 含团队协作/项目管理/会话流式对话.",
+    "targets": ["appimage", "deb", "rpm", "nsis", "msi", "app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "copyright": "© 2026 minimax",
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    },
+    "windows": {
+      "wix": {
+        "language": ["en-US", "zh-CN"]
+      }
+    }
   }
 }
