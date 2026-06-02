@@ -12,11 +12,22 @@
 //   'offline'     — vpsUrl 为空 或 上次连接失败
 //   'connecting'  — 正在尝试 WS handshake
 //   'connected'   — WS 握手成功
+//
+// Stage 6b: + 团队/项目写操作 (inviteMember / changeRole / assignProject).
+//   - 当前为本地 mock: 不发真实 fetch, 只更新 `teamMembers` / `projectAssignees`
+//     状态, 让 UI 能验证写操作流程. Stage 6c 替换为真实 VPS REST fetch.
+//   - 真实 fetch 时, 凭据取自 settingsStore.getVpsToken() (Stage 6b 简化: 从
+//     localStorage 读明文, Stage 7 升级为 stronghold + 密码弹窗).
 // ───────────────────────────────────────────────────────────────────────────
+
+import type { TeamMember, TeamRole } from "$lib/types/ipc";
 
 const STORAGE_KEY = "qianxun.vps.url";
 const VPS_PING_INTERVAL_MS = 30_000; // §10.4
 const VPS_HANDSHAKE_TIMEOUT_MS = 5_000;
+// Stage 6b: mock 写操作的人为延迟, 让 UI 能看到 "提交中…" 状态. Stage 6c 真发
+// 请求时这个延迟自然来自网络, 不需要模拟.
+const MOCK_WRITE_DELAY_MS = 50;
 
 export type VpsConnectionState = "offline" | "connecting" | "connected";
 
@@ -25,6 +36,12 @@ class VpsStore {
 	connectionState = $state<VpsConnectionState>("offline");
 	lastError = $state<string | null>(null);
 	lastConnectedAt = $state<number | null>(null);
+
+	// Stage 6b: mock 写操作的本地状态. 真实接入后会被 fetch + 缓存策略取代.
+	//  - teamMembers:      per-team 成员列表 (mock 后端 truth)
+	//  - projectAssignees: per-project 已分配成员 id 列表
+	teamMembers = $state<Record<string, TeamMember[]>>({});
+	projectAssignees = $state<Record<string, string[]>>({});
 
 	#timer: ReturnType<typeof setInterval> | null = null;
 	#ws: WebSocket | null = null;
@@ -196,6 +213,74 @@ class VpsStore {
 			u = "wss://" + u.slice("https://".length);
 		}
 		return u.endsWith("/hub") ? u : `${u.replace(/\/$/, "")}/hub`;
+	}
+
+	// ─── Stage 6b: 团队/项目写操作 (mock) ────────────────────────────────────
+	//
+	// 三个方法当前都是本地 mock, 不发网络请求, 仅更新 store 内部状态.
+	// Stage 6c 将替换为真实 VPS REST fetch (POST /api/teams/:id/members 等).
+	// 真实 fetch 时, 凭据 (vpsToken) 取自 settingsStore.getVpsToken().
+
+	/// POST /api/teams/:teamId/members { user_id, display_name, role }
+	/// mock: 50ms 延迟后把新成员追加到 teamMembers[teamId].
+	async inviteMember(
+		teamId: string,
+		userId: string,
+		displayName: string,
+		role: TeamRole
+	): Promise<void> {
+		await new Promise((r) => setTimeout(r, MOCK_WRITE_DELAY_MS));
+		if (!teamId || !userId) {
+			throw new Error("inviteMember: teamId/userId 必填");
+		}
+		const list = this.teamMembers[teamId] ?? [];
+		if (list.some((m) => m.user_id === userId)) {
+			throw new Error(`user_id=${userId} 已在团队中`);
+		}
+		this.teamMembers[teamId] = [
+			...list,
+			{
+				user_id: userId,
+				display_name: displayName || userId,
+				role,
+				joined_at: new Date().toISOString(),
+			},
+		];
+	}
+
+	/// PATCH /api/teams/:teamId/members/:userId { role }
+	/// mock: 找到该 user 并改 role.
+	async changeRole(teamId: string, userId: string, role: TeamRole): Promise<void> {
+		await new Promise((r) => setTimeout(r, MOCK_WRITE_DELAY_MS));
+		const list = this.teamMembers[teamId];
+		if (!list) {
+			throw new Error(`changeRole: team=${teamId} 没有成员`);
+		}
+		const idx = list.findIndex((m) => m.user_id === userId);
+		if (idx < 0) {
+			throw new Error(`changeRole: user=${userId} 不在团队中`);
+		}
+		this.teamMembers[teamId] = list.map((m) =>
+			m.user_id === userId ? { ...m, role } : m
+		);
+	}
+
+	/// POST /api/projects/:projectId/assign { user_id }
+	/// mock: 把 userId 加入 projectAssignees[projectId] (去重).
+	async assignProject(projectId: string, userId: string): Promise<void> {
+		await new Promise((r) => setTimeout(r, MOCK_WRITE_DELAY_MS));
+		if (!projectId || !userId) {
+			throw new Error("assignProject: projectId/userId 必填");
+		}
+		const list = this.projectAssignees[projectId] ?? [];
+		if (list.includes(userId)) return; // 幂等
+		this.projectAssignees[projectId] = [...list, userId];
+	}
+
+	/// Stage 6b 测试钩子: 清空 mock 状态. Stage 6c 删除.
+	__resetMockState(): void {
+		this.teamMembers = {};
+		this.projectAssignees = {};
 	}
 }
 
