@@ -17,6 +17,7 @@
 // ───────────────────────────────────────────────────────────────────────────
 
 import type { ContentBlock, SseEvent } from "$lib/types/ipc";
+import { parseSseStream } from "$lib/sse/parser";
 
 export interface SsePromptOptions {
 	daemonUrl: string;
@@ -118,7 +119,10 @@ export async function streamPrompt(opts: SsePromptOptions): Promise<void> {
 				throw new SseError("api", `HTTP ${response.status} from daemon`);
 			}
 
-			await readSseStream(response.body, opts);
+			// 委托给 parser.ts 的 AsyncGenerator, 每个事件触发 onEvent 回调
+			for await (const event of parseSseStream(response.body)) {
+				opts.onEvent(event);
+			}
 			return; // 流正常结束
 		} catch (e) {
 			if (e instanceof SseError) {
@@ -137,65 +141,3 @@ export async function streamPrompt(opts: SsePromptOptions): Promise<void> {
 	}
 }
 
-// ─── SSE 流解析 (RFC: text/event-stream) ─────────────────────────────────────
-
-async function readSseStream(
-	stream: ReadableStream<Uint8Array> | null,
-	opts: SsePromptOptions
-): Promise<void> {
-	if (!stream) {
-		throw new SseError("network", "Empty response body");
-	}
-
-	const reader = stream.getReader();
-	const decoder = new TextDecoder("utf-8");
-	let buffer = "";
-	let dataLines: string[] = [];
-
-	try {
-		while (true) {
-			const { value, done } = await reader.read();
-			if (done) break;
-
-			buffer += decoder.decode(value, { stream: true });
-			// 按 \n 切; 保留最后一段 (可能是不完整的行)
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-
-			for (const rawLine of lines) {
-				// SSE wire 用 \r\n, 去掉尾部 \r
-				const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-
-				if (line.startsWith(":")) {
-					// 注释行, 忽略
-					continue;
-				}
-				if (line.startsWith("data:")) {
-					const data = line.slice(5).trimStart();
-					dataLines.push(data);
-				} else if (line === "") {
-					// 空行 = dispatch
-					if (dataLines.length > 0) {
-						const dataStr = dataLines.join("\n");
-						dataLines = [];
-						try {
-							const event = JSON.parse(dataStr) as SseEvent;
-							opts.onEvent(event);
-						} catch (e) {
-							console.warn("[SSE] parse error:", e, dataStr);
-						}
-					}
-				}
-				// 其他 SSE 字段 (event: / id: / retry:) 暂忽略 —
-				// Daemon 按 _shared-contract.md §3.2 约定, 类型在 JSON 的 type 字段,
-				// 暂不依赖 wire 上的 event: 行.
-			}
-		}
-	} finally {
-		try {
-			reader.releaseLock();
-		} catch {
-			// ignore — reader may already be released by abort
-		}
-	}
-}
