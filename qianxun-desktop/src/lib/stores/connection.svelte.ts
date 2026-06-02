@@ -8,11 +8,13 @@
 //   'degraded'     — 已连但 health 异常 (如 health 端点返回 down)
 //   'connected'    — 完全健康
 //
-// Stage 1 (当前): 简单 ping '/health' 端点, 端点不存在时切到 'offline'.
-// Stage 2: 接入 Tauri 2.0 invoke('daemon_health'), 真实连接本地 Daemon.
+// Stage 1: 简单 ping '/health' 端点, 端点不存在时切到 'offline'.
+// Stage 2 (当前): 走 $lib/ipc/bridge.ts → Tauri 2.0 invoke('daemon_health_fetch')
+//                  (Tauri 环境) / 浏览器 fetch fallback (Web 环境).
 // ───────────────────────────────────────────────────────────────────────────
 
 import type { DaemonState, HealthStatus } from "$lib/types/ipc";
+import { fetchDaemonHealth } from "$lib/ipc/bridge";
 
 const DEFAULT_DAEMON_URL = "http://127.0.0.1:23900";
 const HEALTH_CHECK_INTERVAL_MS = 10_000; // §4.1.2: 10s 周期
@@ -88,31 +90,28 @@ class ConnectionStore {
 		const timer = setTimeout(() => this.#abortController?.abort(), REQUEST_TIMEOUT_MS);
 
 		try {
-			const res = await fetch(`${this.daemonUrl}/v1/system/health`, {
-				method: "GET",
-				signal: this.#abortController.signal,
-				headers: { Accept: "application/json" },
-			});
+			// Stage 2: 走 IPC bridge (Tauri: invoke 真实后端 / Web: 浏览器 fetch).
+			const data = await fetchDaemonHealth(this.daemonUrl);
+			this.#abortController?.abort(); // 拿到结果后立即取消超时
 
-			if (!res.ok) {
-				this.#markError(`HTTP ${res.status}`);
-				return;
-			}
-
-			const data = (await res.json()) as HealthStatus;
-			// 兼容: 后端返回的 status 可能是 'ok' / 'starting' / 'down' 等
-			// 这里统一映射为 4 态之一.
+			// 兼容: 后端返回的 status 可能是 4 态之一, 统一收口.
 			const next: DaemonState =
 				data.status === "connected" || data.status === "reconnecting" || data.status === "degraded"
 					? data.status
-					: data.status === "offline"
-						? "offline"
-						: "connected";
-			this.health = { ...data, status: next };
-			this.daemonState = next;
-			this.lastHealthCheck = Date.now();
-			this.lastError = null;
-			this.attempt = 0;
+					: "offline";
+
+			// bridge 在网络错误时已返回 status="offline", 这里不区分网络/HTTP,
+			// 直接用返回的 status 即可. 如果是 offline 且本轮是首 ping, 走 reconnecting;
+			// 累计 ≥3 次失败切 degraded (保留 Stage 1 的语义).
+			if (next === "offline") {
+				this.#markError("daemon 不可达");
+			} else {
+				this.health = { ...data, status: next };
+				this.daemonState = next;
+				this.lastHealthCheck = Date.now();
+				this.lastError = null;
+				this.attempt = 0;
+			}
 		} catch (e) {
 			const err = e as Error;
 			// AbortError 不算错误 (用户主动取消或 timer 触发)

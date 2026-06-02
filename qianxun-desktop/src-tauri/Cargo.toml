@@ -1,0 +1,44 @@
+[package]
+name = "qianxun-desktop"
+version = "0.1.0"
+description = "千寻 Tauri 桌面端 (Track C) — Stage 2 Tauri 2.0 集成骨架"
+authors = ["maxu"]
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Stage 2: 这是独立 Cargo crate, 不加入主 workspace.
+# qianxun-core 走 path dep 复用主项目核心库.
+#
+# 显式声明 [workspace] (空 table) — 防止 Cargo 沿父目录找到主 workspace
+# 然后报 "current package believes it's in a workspace when it's not" 错误.
+
+[workspace]
+
+[lib]
+name = "qianxun_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2" }
+tauri-plugin-shell = "2"
+tauri-plugin-http = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+# HTTP 客户端 (用于 daemon_health_fetch), 复用 qianxun-core 的 reqwest 配置策略:
+# default-features=false 走纯 rustls, 不需要 OpenSSL/cmake.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots"] }
+# 直接复用主项目核心库 (path = src-tauri/ -> qianxun-desktop/ -> qianxun/ -> qianxun-core/)
+qianxun-core = { path = "../../qianxun-core" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

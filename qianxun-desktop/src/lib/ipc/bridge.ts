@@ -1,0 +1,100 @@
+// ───────────────────────────────────────────────────────────────────────────
+// 千寻 Tauri 桌面端 — IPC Bridge (Stage 2)
+//
+// 抽象 Tauri 2.0 invoke/listen 调用, 让上层 store 不感知运行环境:
+//   - 在 Tauri 容器内: 走 @tauri-apps/api 真实 IPC (Rust src-tauri/ 后端)
+//   - 在浏览器中 (Web dev / pnpm dev): 走 mock + 浏览器 fetch fallback
+//
+// Stage 2 范围: 4 个导出函数 (healthCheck / fetchDaemonHealth /
+// onDaemonStateChanged / isTauri). 不接 SSE (Stage 3), 不接 Team (Stage 4).
+// ───────────────────────────────────────────────────────────────────────────
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { HealthStatus } from "$lib/types/ipc";
+
+/// 检查是否在 Tauri 容器内.
+/// Tauri 2.0 在 window 上挂 `__TAURI_INTERNALS__` 内部对象 (非 `__TAURI__`).
+/// SSR 场景下没有 window, 一律按 web 处理.
+export function isTauri(): boolean {
+	if (typeof window === "undefined") return false;
+	return "__TAURI_INTERNALS__" in window;
+}
+
+/// Invoke Tauri command: `health_check` (本地 mock, 不走网络).
+/// 非 Tauri 环境下直接返回 mock offline 状态, 让 UI 能跑出降级态.
+export async function healthCheck(): Promise<HealthStatus> {
+	if (!isTauri()) {
+		return mockHealth();
+	}
+	return await invoke<HealthStatus>("health_check");
+}
+
+/// Invoke Tauri command: 实际 fetch daemon `/v1/system/health` 端点.
+/// Tauri 环境: 走 Rust 端 `daemon_health_fetch(url)`, 由 reqwest 3s 超时.
+/// Web 环境: 浏览器 fetch (受 CORS 限制; 失败时返回 offline).
+export async function fetchDaemonHealth(daemonUrl: string): Promise<HealthStatus> {
+	if (!isTauri()) {
+		return await webFetchDaemonHealth(daemonUrl);
+	}
+	return await invoke<HealthStatus>("daemon_health_fetch", { url: daemonUrl });
+}
+
+/// Listen Tauri event: `daemon://state-changed` (连接状态机变化).
+/// Stage 2: 后端 setup 阶段会立即发一次 'connected' 用来验证 IPC 桥接通.
+/// 真实状态机接入留 Stage 3 (与 daemon-stage2-sse-stream 对齐).
+/// 非 Tauri 环境返回 noop unlisten 函数, 调用方无需分支.
+export async function onDaemonStateChanged(
+	handler: (state: string) => void
+): Promise<UnlistenFn> {
+	if (!isTauri()) {
+		// Web 模式下立即 mock 一次 'offline', 让 UI 状态机有一个起点.
+		handler("offline");
+		return () => {};
+	}
+	return await listen<string>("daemon://state-changed", (e) => handler(e.payload));
+}
+
+// ─── 内部 helpers ────────────────────────────────────────────────────────
+
+async function webFetchDaemonHealth(daemonUrl: string): Promise<HealthStatus> {
+	const endpoint = `${daemonUrl.replace(/\/$/, "")}/v1/system/health`;
+	try {
+		const r = await fetch(endpoint, { signal: AbortSignal.timeout(3000) });
+		if (!r.ok) return mockOffline();
+		// 尝试按后端 HealthStatus 格式解析; 失败时降级为 offline.
+		const data = (await r.json()) as Partial<HealthStatus>;
+		return {
+			status: data.status ?? "offline",
+			version: data.version ?? "web",
+			uptime_sec: data.uptime_sec ?? 0,
+			session_count: data.session_count ?? 0,
+			mcp_online: data.mcp_online ?? 0,
+			provider_status: data.provider_status ?? {},
+		};
+	} catch {
+		return mockOffline();
+	}
+}
+
+function mockHealth(): HealthStatus {
+	return {
+		status: "offline",
+		version: "mock",
+		uptime_sec: 0,
+		session_count: 0,
+		mcp_online: 0,
+		provider_status: {},
+	};
+}
+
+function mockOffline(): HealthStatus {
+	return {
+		status: "offline",
+		version: "unknown",
+		uptime_sec: 0,
+		session_count: 0,
+		mcp_online: 0,
+		provider_status: {},
+	};
+}
