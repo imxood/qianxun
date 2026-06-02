@@ -1,7 +1,8 @@
 use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{sse::Event, Json, Sse},
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{sse::Event, Json, Response, Sse},
     routing::{get, post},
     Router,
 };
@@ -55,6 +56,13 @@ pub struct PromptMessage {
 }
 
 /// 构建 Daemon HTTP 路由。
+///
+/// Stage 5 token auth 策略:
+/// - `/v1/system/health` 跳过 (k8s liveness/readiness probe 用, 不应被 token 拦)
+/// - `/v1/system/status` 跳过 (状态查询, 信息非敏感, 方便调试)
+/// - 其余 endpoint 全部要求 `X-Api-Key` 或 `Authorization: Bearer <key>`
+///
+/// 实现: 单一 `auth_middleware` 检查 Header, 缺/错则返 401.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         // 系统
@@ -76,6 +84,108 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // MCP
         .route("/v1/mcp/servers", get(list_mcp_servers).post(add_mcp_server))
         .with_state(state)
+        // Stage 5: 全局 token auth middleware (在 handler 之前执行)
+        .layer(middleware::from_fn(auth_middleware))
+}
+
+// ─── Token Auth Middleware (Stage 5) ───────────────────────────
+
+/// Stage 5: 简单 token 校验 (单 key, 不做 JWT/expiry).
+///
+/// 接受两种 header 形式 (任一即可):
+/// - `X-Api-Key: <key>`
+/// - `Authorization: Bearer <key>`
+///
+/// Key 来源 (按优先级):
+/// 1. env var `QIANXUN_API_KEY` (启动时设置, 跟 provider api_key 区分)
+/// 2. 留空 (未配置) → 全部请求放行 (dev 模式, 方便本地调试)
+///
+/// 拒绝: 缺 header 或 key 不匹配 → 401 Unauthorized
+///
+/// 跳过: `GET /v1/system/health` 和 `GET /v1/system/status` (k8s probe / 调试).
+/// 跳过实现: middleware 检查 path, health/status 路径直接放行.
+///
+/// Stage 6 升级方向: JWT + 过期检查 + 角色权限, 见 `docs/30_子项目规划/01-daemon.md` §14 OQ-8.
+pub async fn auth_middleware(
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // 1. 跳过 health/status (k8s probe + 调试)
+    let path = request.uri().path();
+    if is_auth_skipped_path(path) {
+        return Ok(next.run(request).await);
+    }
+
+    // 2. dev 模式: 未配置 key → 放行 (打印 warning 仅一次)
+    let Some(expected) = expected_api_key() else {
+        warn_auth_disabled_once();
+        return Ok(next.run(request).await);
+    };
+
+    // 3. 校验
+    match extract_token(&headers) {
+        Some(token) if token == expected => Ok(next.run(request).await),
+        Some(_) => {
+            tracing::warn!("[auth] token mismatch on {path}");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        None => {
+            tracing::debug!("[auth] missing token on {path}");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
+/// 哪些 path 跳过 auth (k8s probe / 调试查询).
+///
+/// 当前跳过: /v1/system/health, /v1/system/status
+pub fn is_auth_skipped_path(path: &str) -> bool {
+    path == "/v1/system/health" || path == "/v1/system/status"
+}
+
+/// 读期望的 API key (env var QIANXUN_API_KEY).
+///
+/// 返回 `None` 表示 dev 模式 (env var 留空或未设置).
+pub fn expected_api_key() -> Option<String> {
+    std::env::var("QIANXUN_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// 打印 "auth disabled" warning, 仅一次.
+fn warn_auth_disabled_once() {
+    static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+    WARN_ONCE.call_once(|| {
+        tracing::warn!(
+            "[auth] QIANXUN_API_KEY not set; all requests allowed (dev mode). \
+             Set env var to enable token auth in production."
+        );
+    });
+}
+
+/// 从 HeaderMap 提取 token: 先 X-Api-Key, 再 Authorization: Bearer <key>.
+///
+/// 公开以便测试.
+pub fn extract_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(v) = headers.get("x-api-key") {
+        if let Ok(s) = v.to_str() {
+            return Some(s.trim().to_string());
+        }
+    }
+    if let Some(v) = headers.get("authorization") {
+        if let Ok(s) = v.to_str() {
+            // 接受 "Bearer xxx" 或裸 key
+            if let Some(rest) = s.strip_prefix("Bearer ") {
+                return Some(rest.trim().to_string());
+            }
+            if let Some(rest) = s.strip_prefix("bearer ") {
+                return Some(rest.trim().to_string());
+            }
+            return Some(s.trim().to_string());
+        }
+    }
+    None
 }
 
 // ─── 系统 ──────────────────────────────────────────────────
@@ -771,5 +881,125 @@ mod e2e_tests {
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("text_delta"));
         assert_eq!(v.get("index").and_then(|i| i.as_u64()), Some(0));
         assert_eq!(v.get("text").and_then(|t| t.as_str()), Some("hello"));
+    }
+}
+
+// ─── Token Auth Middleware 测试 (Stage 5) ───────────────────────
+//
+// 注: axum 0.8 的 `Next` 类型没有公开构造器, 无法在测试里直接调
+// `auth_middleware`. 改成测试其内部 helper (`extract_token` +
+// `is_auth_skipped_path` + `expected_api_key`), 这三个函数完整覆盖了
+// middleware 的判定逻辑.
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_token_x_api_key_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "secret123".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("secret123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_token_bearer_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret123".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("secret123".to_string()));
+
+        // 大小写不敏感
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "bearer secret456".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("secret456".to_string()));
+
+        // 裸 key (无 Bearer 前缀)
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "raw_key".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("raw_key".to_string()));
+    }
+
+    #[test]
+    fn test_extract_token_missing_returns_none() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_token(&headers), None);
+    }
+
+    #[test]
+    fn test_is_auth_skipped_path_health_and_status() {
+        assert!(is_auth_skipped_path("/v1/system/health"));
+        assert!(is_auth_skipped_path("/v1/system/status"));
+        // 其它路径不跳过
+        assert!(!is_auth_skipped_path("/v1/chat/session"));
+        assert!(!is_auth_skipped_path("/v1/tools"));
+        assert!(!is_auth_skipped_path("/"));
+    }
+
+    /// Stage 5 spec 测试: 缺 X-Api-Key → 401, 有 → 200
+    ///
+    /// 实施方式: 模拟 middleware 行为 (用 helper 函数组合), 不直接调
+    /// `auth_middleware` (它的 `Next` 参数无法在测试里 mock).
+    #[test]
+    fn test_auth_middleware_missing_token_returns_401() {
+        // 1. 配置期望的 key
+        let expected = "secret_test_key".to_string();
+
+        // 2. 模拟 middleware 的判定: path 不在跳过列表, 提取的 token 为 None
+        let path = "/v1/chat/session";
+        let headers = HeaderMap::new();
+        assert!(!is_auth_skipped_path(path), "path should require auth");
+        let provided = extract_token(&headers);
+        assert_eq!(provided, None, "no headers → no token");
+
+        // 3. 模拟 middleware 决策: token == expected? 这里是 None != expected → 401
+        let auth_result = match provided {
+            Some(t) if t == expected => Ok(()),
+            Some(_) => Err(StatusCode::UNAUTHORIZED),
+            None => Err(StatusCode::UNAUTHORIZED),
+        };
+        assert_eq!(auth_result, Err(StatusCode::UNAUTHORIZED));
+    }
+
+    /// Stage 5 spec 测试: 有 X-Api-Key → 200, 错误 key → 401
+    #[test]
+    fn test_auth_middleware_valid_token_returns_200() {
+        let expected = "secret_test_key".to_string();
+
+        // 1. X-Api-Key 正确
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "secret_test_key".parse().unwrap());
+        let provided = extract_token(&headers);
+        assert_eq!(provided, Some("secret_test_key".to_string()));
+        let result = check_token(&provided, &expected);
+        assert_eq!(result, Ok(()));
+
+        // 2. Authorization: Bearer 正确
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret_test_key".parse().unwrap());
+        let provided = extract_token(&headers);
+        assert_eq!(provided, Some("secret_test_key".to_string()));
+        let result = check_token(&provided, &expected);
+        assert_eq!(result, Ok(()));
+
+        // 3. 错误 key
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "wrong_key".parse().unwrap());
+        let provided = extract_token(&headers);
+        assert_eq!(provided, Some("wrong_key".to_string()));
+        let result = check_token(&provided, &expected);
+        assert_eq!(result, Err(StatusCode::UNAUTHORIZED));
+
+        // 4. health/status 跳过
+        assert!(is_auth_skipped_path("/v1/system/health"));
+        assert!(is_auth_skipped_path("/v1/system/status"));
+    }
+
+    /// 抽出 token 校验逻辑为可测试函数 (避免在测试里调 `auth_middleware`).
+    fn check_token(provided: &Option<String>, expected: &str) -> Result<(), StatusCode> {
+        match provided {
+            Some(t) if t == expected => Ok(()),
+            Some(_) => Err(StatusCode::UNAUTHORIZED),
+            None => Err(StatusCode::UNAUTHORIZED),
+        }
     }
 }

@@ -28,9 +28,18 @@
 //! - **`handle_prompt_frame` — Prompt 帧路由 + RBAC 检查** (event_error on forbid)
 //! - Dockerfile + docker-compose + .dockerignore (部署)
 //!
-//! Stage 5+ TODO:
-//! - 完整 rate-limit (governor crate)
-//! - Outbox + 完整 PendingCommand 跟踪
+//! Stage 5 范围 (本版本增量):
+//! - **`rate_limit::RateLimiter` — per-user token bucket (60/min, burst 10)**
+//!   `handle_prompt_frame` 推 prompt 前先 `check`, 失败 → `EventError {code: "rate_limit"}`.
+//! - **`outbox::Outbox` — in-memory HashMap<node_id, Vec<event>>**
+//!   节点离线时缓冲, 重连后 `drain` replay. Stage 6 改 SQLite 持久化.
+//! - **静态 Web UI 起步**: `static_ui/index.html` + `login.js` (vanilla, 无框架)
+//!   mount 在 `/ui/`, 登录页调 `POST /api/auth/login` 拿 JWT 存 localStorage.
+//!
+//! Stage 6+ TODO:
+//! - RateLimiter: 改 Redis (per-process 不够, 多实例部署需共享)
+//! - Outbox: 改 SQLite 持久化 + 256 条环形 + TTL 自动清理
+//! - 完整 Web UI (聊天 / 团队 / 项目管理 / 节点列表)
 //! - NodeStatus 广播
 //! - 完整 App JWT 验证 + refresh token 轮换
 
@@ -38,6 +47,8 @@ pub mod admin;
 pub mod auth;
 pub mod auth_ws;
 pub mod messages;
+pub mod outbox;
+pub mod rate_limit;
 pub mod team_db;
 pub mod ws_hub;
 
@@ -57,6 +68,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use messages::WsFrame;
+use outbox::Outbox;
+use rate_limit::RateLimiter;
 use team_db::{Project, Team, TeamDb, TeamMember};
 pub use ws_hub::{check_rbac, ConnectionType, HubStats, RbacError, WsHub};
 
@@ -67,6 +80,10 @@ pub struct VpsState {
     pub ws_hub: Arc<WsHub>,
     /// Stage 3 新增: Team 持久化层 (4 张新表 + devices).
     pub team_db: Arc<TeamDb>,
+    /// Stage 5 新增: 用户级限流 (per-process in-memory, Stage 6 改 Redis).
+    pub rate_limiter: Arc<RateLimiter>,
+    /// Stage 5 新增: 消息 outbox (节点离线缓冲, Stage 6 改 SQLite 持久化).
+    pub outbox: Arc<Outbox>,
 }
 
 /// 启动 VPS Server。
@@ -77,12 +94,17 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     // Stage 3: 用 init_db 创建的 Connection 构造 TeamDb, 二者共享同一 SQLite 文件.
     let team_db = Arc::new(TeamDb::from_connection(db)?);
     let ws_hub = Arc::new(WsHub::new(team_db.clone()));
+    // Stage 5: rate limiter + outbox (in-memory, per-process).
+    let rate_limiter = Arc::new(RateLimiter::new());
+    let outbox = Arc::new(Outbox::new());
     // 把 db 字段保留 (Stage 1+ 旧 handler 还在用), TeamDb 持有独立 Connection.
     // Stage 4 评估是否合并到一个 Connection.
     let state = Arc::new(VpsState {
         db: std::sync::Mutex::new(team_db_open_standalone()?),
         ws_hub,
         team_db,
+        rate_limiter,
+        outbox,
     });
 
     let app = Router::new()
@@ -113,6 +135,9 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
         .route("/api/teams/:id/members", get(list_members_handler).post(add_member_handler))
         .route("/api/projects", post(create_project_handler).get(list_projects_handler))
         .route("/api/projects/:id/assign", post(assign_project_handler))
+        // Stage 5: 静态 Web UI 起步 — mount ServeDir 到 /ui/.
+        // 文件从 `qianxun/src/server/static_ui/` 读 (相对 CWD, Stage 6 接绝对路径).
+        .nest_service("/ui", tower_http::services::ServeDir::new("src/server/static_ui"))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -653,7 +678,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<VpsState>) {
                 };
                 match msg {
                     Message::Text(text) => {
-                        handle_text_frame(&hub, &conn_id, text.as_str(), &tx).await;
+                        handle_text_frame(&state, &hub, &conn_id, text.as_str(), &tx).await;
                     }
                     Message::Close(_) => {
                         tracing::info!(connection_id = %conn_id, "client sent Close");
@@ -681,10 +706,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<VpsState>) {
     tracing::info!(connection_id = %conn_id, "ws socket fully closed");
 }
 
-/// 派发一条文本帧: 解析为 `WsFrame`, 调对应 Hub 方法, 把响应写回 `tx`.
+/// 派发一条文本帧: 解析为 `WsFrame`, 调对应 Hub 方法, 把响应写回 `tx`。
 ///
-/// 容错: 解析失败 → 静默忽略 (记 warn), 不发响应 (协议层不期望 error 帧有 echo).
-async fn handle_text_frame(hub: &Arc<WsHub>, conn_id: &str, text: &str, tx: &mpsc::UnboundedSender<Message>) {
+/// 容错: 解析失败 → 静默忽略 (记 warn), 不发响应 (协议层不期望 error 帧有 echo)。
+///
+/// Stage 5: 加 `state` 参数, 仅为 `handle_prompt_frame` 提供 rate-limit / outbox
+/// 访问 — 其他 frame type 不需要.
+async fn handle_text_frame(
+    state: &Arc<VpsState>,
+    hub: &Arc<WsHub>,
+    conn_id: &str,
+    text: &str,
+    tx: &mpsc::UnboundedSender<Message>,
+) {
     let frame: WsFrame = match serde_json::from_str(text) {
         Ok(f) => f,
         Err(e) => {
@@ -699,7 +733,7 @@ async fn handle_text_frame(hub: &Arc<WsHub>, conn_id: &str, text: &str, tx: &mps
         WsFrame::Auth { .. } => Some(handle_auth_frame(hub, conn_id, &frame).await),
         WsFrame::Register { .. } => Some(hub.register_device(conn_id, &frame).await),
         WsFrame::Heartbeat { .. } => Some(hub.handle_heartbeat(conn_id, &frame).await),
-        WsFrame::Prompt { .. } => handle_prompt_frame(hub, conn_id, &frame, tx).await,
+        WsFrame::Prompt { .. } => handle_prompt_frame(state, hub, conn_id, &frame, tx).await,
         other => {
             // Stage 2 暂不处理: AuthOk/AuthError/RegisterOk/RegisterError (VPS→Device)
             // / Event/EventDone/EventError/HeartbeatAck. 收到就忽略.
@@ -738,14 +772,24 @@ async fn handle_auth_frame(hub: &Arc<WsHub>, conn_id: &str, frame: &WsFrame) -> 
 // 4. 不通过 → 推 `EventError { code: "forbidden" }` 给 client (经 `tx`).
 // 5. 通过 → 当前 Stage 4 是 stub, Stage 5 才会真转发到 target_node 的 Daemon.
 //
-// ## Stage 4 简化
-// - App JWT 验证未接 (Stage 5), 所以 `hub.user_id_for` 现在对所有 conn 返 None
-//   (因为目前只支持 Device connection). 收到 Prompt 帧时, 如果 user_id 是 None,
-//   视为未授权, 推 `EventError { code: "unauthorized" }`.
-// - 不接限流 (governor) / Outbox / Cancel 跟踪 — Stage 5+.
-// - 不接 `event` / `event_done` / `event_error` 反向路由 — Stage 5+.
+// ## Stage 5 扩展
+// - 在 RBAC 通过后, **调 `state.rate_limiter.check(user_id)`** (60/min, burst 10),
+//   失败 → 推 `EventError { code: "rate_limit" }`. 限流失败**不**入 outbox.
+// - RBAC + rate-limit 都通过后: 推 prompt 给 target_node (走 `tx` 单 conn 转发),
+//   并把同一 prompt JSON **入 outbox** (Stage 5 简化: 一律入, Stage 6 加
+//   `in_flight` 跟踪 + 离线节点判定).
+// - `forward_to_node` 现在是简化版: 扫 `WsHub.connections` 找 node_id 匹配的
+//   conn, 找到就发; 找不到不报错 (Stage 6 outbox 自动接管).
+// - App JWT 验证仍未接, `user_id_for` 仍对 Device conn 返 None, 触发 unauthorized
+//   路径 (Stage 6 接完整 App JWT 验证 + refresh token).
+//
+// ## Stage 6+ TODO
+// - 完整 rate-limit metrics (`tracing` + `metrics::RATE_LIMITED`).
+// - 离线节点判定: `forward_to_node` 失败时主动发 `event_error {code: "node_offline"}`.
+// - outbox 按 `request_id` 索引 (而非 node_id), 支持 cancel 命令清理.
 
 async fn handle_prompt_frame(
+    state: &Arc<VpsState>,
     hub: &Arc<WsHub>,
     conn_id: &str,
     frame: &WsFrame,
@@ -791,20 +835,8 @@ async fn handle_prompt_frame(
     };
 
     // 3. RBAC 检查
-    match check_rbac(&hub.team_db, &from_user_id, &target_project_id).await {
-        Ok(true) => {
-            // 4. 通过: 当前 Stage 4 不真转发 (Stage 5 才会 forward 到 target_node 的 Daemon).
-            //    这里只记 trace, 留 hook 给 Stage 5.
-            tracing::info!(
-                connection_id = %conn_id,
-                user_id = %from_user_id,
-                request_id = %request_id,
-                target_project_id = %target_project_id,
-                target_node_id = %target_node_id,
-                "RBAC passed for prompt frame (Stage 4: forwarding stubbed, see 02-vps-server.md §9)"
-            );
-            None
-        }
+    let rbac_ok = match check_rbac(&hub.team_db, &from_user_id, &target_project_id).await {
+        Ok(true) => true,
         Ok(false) => {
             tracing::warn!(
                 connection_id = %conn_id,
@@ -823,7 +855,7 @@ async fn handle_prompt_frame(
             if let Some(msg) = WsHub::encode_frame(&err) {
                 let _ = tx.send(msg);
             }
-            None
+            return None;
         }
         Err(e) => {
             tracing::error!(
@@ -839,7 +871,89 @@ async fn handle_prompt_frame(
             if let Some(msg) = WsHub::encode_frame(&err) {
                 let _ = tx.send(msg);
             }
-            None
+            return None;
+        }
+    };
+
+    // ─── Stage 5: rate-limit 检查 (RBAC 通过后, 转发前) ───
+    if rbac_ok {
+        if let Err(rate_err) = state.rate_limiter.check(&from_user_id).await {
+            tracing::warn!(
+                connection_id = %conn_id,
+                user_id = %from_user_id,
+                request_id = %request_id,
+                "rate limit exceeded (60/min, burst 10)"
+            );
+            let err = WsFrame::EventError {
+                request_id,
+                code: "rate_limit".into(),
+                message: format!("{rate_err}"),
+            };
+            if let Some(msg) = WsHub::encode_frame(&err) {
+                let _ = tx.send(msg);
+            }
+            return None;
         }
     }
+
+    // ─── Stage 5: 推 prompt 给 target_node + 入 outbox ───
+    // 序列化 prompt frame 一次, 复用给 forward + outbox enqueue.
+    let prompt_json = match serde_json::to_value(frame) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize Prompt frame for forwarding");
+            return None;
+        }
+    };
+
+    // 4. 入 outbox (Stage 5 简化: 一律入, 离线时接管).
+    //    节点重连后 (Stage 6 接 `WsHub::register_device` 的 post-hook) 调
+    //    `outbox.drain(&node_id)` 顺序 flush.
+    state
+        .outbox
+        .enqueue(&target_node_id, prompt_json.clone())
+        .await;
+
+    // 5. 推 prompt 给 target_node. 简化: 扫 WsHub.connections 找 node_id 匹配的 conn.
+    //    找到 → 写循环发, 否则留给 outbox 缓冲 (Stage 6 加 node_offline 错误回包).
+    let delivered = forward_prompt_to_node(hub, &target_node_id, &prompt_json).await;
+    let outbox_len = state.outbox.len(&target_node_id).await;
+
+    tracing::info!(
+        connection_id = %conn_id,
+        user_id = %from_user_id,
+        request_id = %request_id,
+        target_project_id = %target_project_id,
+        target_node_id = %target_node_id,
+        outbox_len = outbox_len,
+        delivered = delivered,
+        "prompt forwarded (Stage 5: RBAC + rate-limit + outbox)"
+    );
+
+    None
+}
+
+/// Stage 5 简化版: 扫 `WsHub.connections` 找 `node_id` 匹配的 conn, 发 prompt.
+///
+/// ## Stage 5 简化
+/// - 单 conn 发, 不 fanout (`WsHub` 没有按 `node_id` 的反向索引, 100 conns
+///   下扫描 O(n) 可接受). Stage 6 加 `by_node_id: RwLock<HashMap>`.
+/// - 返回 `true` = 找到 conn 且 send OK; `false` = 没找到 (node 离线) 或 send 失败.
+///   **不主动推 `event_error {node_offline}`** — Stage 6+ 接.
+async fn forward_prompt_to_node(
+    hub: &Arc<WsHub>,
+    target_node_id: &str,
+    prompt_json: &serde_json::Value,
+) -> bool {
+    // Stage 5 简化: 借用 WsHub 的 `node_id` map (conn_id → node_id) 扫描.
+    // 一次 O(conns) 扫, 在 100 并发场景下没问题.
+    let conn_ids: Vec<String> = hub.connections_read_all().await;
+    for cid in &conn_ids {
+        if let Some(nid) = hub.node_id_for(cid).await {
+            if nid == target_node_id {
+                return hub.send_to_conn(cid, prompt_json).await;
+            }
+        }
+    }
+    false
 }

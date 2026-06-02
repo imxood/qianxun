@@ -1,0 +1,39 @@
+[Unit]
+Description=Qianxun Daemon - Personal AI Assistant
+Documentation=https://github.com/qianxun/qianxun
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h = $HOME; ExecStart 必须绝对路径. 部署时按需调整 qx 二进制位置.
+ExecStart=%h/.cargo/bin/qx daemon --port 23900
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
+# 优雅关闭: systemd 发 SIGTERM, Daemon 6 步关闭
+# (见 docs/30_子项目规划/01-daemon.md §10.5)
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# 环境
+Environment=RUST_LOG=info
+Environment=QIANXUN_HOME=%h/.qianxun
+# Stage 5: token auth (Stage 6 改为 keyring + JWT)
+# 留空 = dev 模式 (auth_middleware 放行所有请求)
+# 生产部署建议: 生成强随机 key, 例如: openssl rand -hex 32
+Environment=QIANXUN_API_KEY=
+
+# 资源限制 (防止 OOM)
+MemoryMax=2G
+CPUQuota=200%
+
+# 日志 (journald)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qx-daemon
+
+[Install]
+WantedBy=default.target

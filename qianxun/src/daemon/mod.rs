@@ -1,6 +1,7 @@
 pub mod agent_host;
 pub mod persistence;
 pub mod router;
+pub mod service;
 pub mod session_runtime;
 pub mod sse;
 

@@ -496,6 +496,41 @@ impl WsHub {
             ConnectionType::Device => None,
         }
     }
+
+    // ─── Stage 5: 节点路由 + 消息发送 helper ───
+    //
+    // 目的: `handle_prompt_frame` (mod.rs) 需要按 `target_node_id` 找到对应
+    // connection 并把 prompt 发过去. 当前没有 `node_id → conn_id` 反向索引
+    // (Stage 6 加), 所以 helper 暴露 conn_id 列表 + 单 conn 发送.
+
+    /// 列出所有 active conn_id (Stage 5 简化版, 用在 `forward_prompt_to_node` 扫描).
+    ///
+    /// Stage 5: O(N) 返回. 100 conns 量级无问题. Stage 6 加 `by_node_id` 反向索引.
+    pub async fn connections_read_all(&self) -> Vec<String> {
+        self.connections.read().await.keys().cloned().collect()
+    }
+
+    /// 给定 conn_id, 把 JSON value 作为 `WsFrame` 文本帧发到该 conn 的写循环.
+    ///
+    /// 这里直接用 `serde_json::Value` 而不是 `WsFrame`, 是为了 forward 透传
+    /// (不重新构造 WsFrame, 避免字段对不上). Stage 6 可以收紧.
+    ///
+    /// 返回: send 成功 → `true`, send 失败 (channel 关闭, conn 断) → `false`.
+    pub async fn send_to_conn(&self, conn_id: &str, value: &serde_json::Value) -> bool {
+        let conns = self.connections.read().await;
+        let Some(conn) = conns.get(conn_id) else {
+            return false;
+        };
+        let text = match serde_json::to_string(value) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "send_to_conn: serialize failed");
+                return false;
+            }
+        };
+        // mpsc send 失败 = channel 关闭, conn 已 unregister
+        conn.tx.send(Message::Text(text.into())).is_ok()
+    }
 }
 
 // ─── Stage 4: RBAC 检查 ────────────────────────────────
