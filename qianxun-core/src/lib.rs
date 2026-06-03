@@ -9,3 +9,4 @@ pub mod context;
 pub mod skills;
 pub mod mcp;
 pub mod kanban;
+pub mod blackboard;

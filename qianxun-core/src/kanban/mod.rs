@@ -25,12 +25,16 @@
 //! - `daemon/kanban_host.rs` — daemon 端 Kanban host (MVP-3)
 
 pub mod db;
+pub mod dispatcher;
 pub mod error;
 pub mod state_machine;
+pub mod team;
 pub mod types;
 
 pub use db::KanbanDb;
+pub use dispatcher::{DispatchedRun, KanbanDispatcher};
 pub use error::KanbanError;
+pub use team::{Profile, ProfileKind, Role, TeamConfig, TeamRegistry};
 pub use types::{
     AgentRun, BlackboardCell, BoardStatus, DependencyKind, KanbanBoard, KanbanEvent,
     KanbanEventKind, KanbanScope, Project, ProjectStatus, RunOutcome, RunStatus, Task,

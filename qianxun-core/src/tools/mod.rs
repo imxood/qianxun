@@ -22,8 +22,9 @@ pub enum ToolCategory {
 }
 
 /// 工具类别过滤器，表示一组允许的工具类别。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolCategoryFilter {
+    #[serde(skip)]
     allowed: std::collections::HashSet<ToolCategory>,
 }
 

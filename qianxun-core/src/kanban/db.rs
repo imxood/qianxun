@@ -471,7 +471,7 @@ impl KanbanDb {
 // =============================================================================
 
 /// SQL row -> Task.
-fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+pub fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     let status_str: String = row.get(6)?;
     let status = str_to_task_status(&status_str).unwrap_or(TaskStatus::Triage);
     let metadata_str: String = row.get(9)?;
