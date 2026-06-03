@@ -350,8 +350,223 @@ fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_event_log_session_seq
             ON daemon_event_log(session_id, seq);
+
+        -- === 4-12. Kanban 子系统 (MVP-2 plan 1) — 8 张 kanban_* 表 ===
+        -- 见 v6 §6.5 + §3.6.2. 沿用 daemon.db, 跟 daemon_sessions 同一文件.
+        -- 字段名 t_/r_ 前缀 (v6 §6.2 决策, 避免 SQL JOIN 混淆).
+
+        -- §3.6.2 Project (v5 新增) — 1:N Board
+        CREATE TABLE IF NOT EXISTS kanban_projects (
+            id            TEXT PRIMARY KEY,         -- 'proj_xxx'
+            name          TEXT NOT NULL,
+            description   TEXT NOT NULL,
+            default_root  TEXT NOT NULL,
+            extra_roots   TEXT NOT NULL DEFAULT '[]',  -- JSON array
+            status        TEXT NOT NULL DEFAULT 'active',  -- active | archived
+            owner         TEXT NOT NULL DEFAULT 'local',
+            created_at    TEXT NOT NULL,            -- RFC3339
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_projects_status ON kanban_projects(status);
+
+        -- §6.5 Board — 1:1 Project (v1 简化, v2 多 board)
+        CREATE TABLE IF NOT EXISTS kanban_boards (
+            id            TEXT PRIMARY KEY,         -- 'kb_xxx'
+            project_id    TEXT REFERENCES kanban_projects(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            project_root  TEXT NOT NULL,
+            default_role  TEXT NOT NULL DEFAULT 'coordinator',
+            status        TEXT NOT NULL DEFAULT 'active',  -- active | archived
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_boards_status ON kanban_boards(status);
+        CREATE INDEX IF NOT EXISTS idx_kanban_boards_project ON kanban_boards(project_id);
+
+        -- §6.5 Role — 角色模板 (跟 Profile 1:N)
+        CREATE TABLE IF NOT EXISTS kanban_role_defs (
+            id            TEXT PRIMARY KEY,         -- 'role_xxx'
+            name          TEXT NOT NULL UNIQUE,
+            description   TEXT NOT NULL,
+            instructions  TEXT NOT NULL,
+            default_profile_id TEXT,                -- FK kanban_profiles.id
+            allowed_tool_categories TEXT NOT NULL,  -- JSON: ['Read', 'Search', ...]
+            created_at    TEXT NOT NULL
+        );
+
+        -- §6.5 Profile — Agent 实例定义 (Hermes 角色内化)
+        CREATE TABLE IF NOT EXISTS kanban_profiles (
+            id            TEXT PRIMARY KEY,         -- 'prof_xxx'
+            name          TEXT NOT NULL UNIQUE,
+            kind          TEXT NOT NULL DEFAULT 'local',  -- local | remote
+            working_dir   TEXT NOT NULL,
+            tool_filter   TEXT NOT NULL,            -- JSON
+            max_turns     INTEGER NOT NULL DEFAULT 32,
+            model         TEXT,
+            system_prompt_template TEXT NOT NULL,
+            created_at    TEXT NOT NULL
+        );
+
+        -- §6.5 Task — 主表 (字段 t_/r_ 前缀)
+        CREATE TABLE IF NOT EXISTS kanban_tasks (
+            id            TEXT PRIMARY KEY,         -- 'task_xxx'
+            board_id      TEXT NOT NULL REFERENCES kanban_boards(id) ON DELETE CASCADE,
+            parent_id     TEXT REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            assignee_role TEXT NOT NULL,            -- FK kanban_role_defs.id
+            status        TEXT NOT NULL DEFAULT 'triage',
+            priority      INTEGER NOT NULL DEFAULT 128,
+            deadline      TEXT,
+            metadata      TEXT NOT NULL DEFAULT '{}',  -- JSON
+            created_at    TEXT NOT NULL,
+            t_started_at  TEXT,
+            t_completed_at TEXT,
+            last_heartbeat_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_tasks_board ON kanban_tasks(board_id);
+        CREATE INDEX IF NOT EXISTS idx_kanban_tasks_parent ON kanban_tasks(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_kanban_tasks_status ON kanban_tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_kanban_tasks_assignee ON kanban_tasks(assignee_role);
+
+        -- §6.5 TaskLink — DAG 边
+        CREATE TABLE IF NOT EXISTS kanban_task_links (
+            parent_id     TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            child_id      TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            dep_type      TEXT NOT NULL DEFAULT 'sequential',
+            created_at    TEXT NOT NULL,
+            PRIMARY KEY (parent_id, child_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_task_links_child ON kanban_task_links(child_id);
+
+        -- §6.5 AgentRun — 执行历史 (重试时新建 row)
+        CREATE TABLE IF NOT EXISTS kanban_runs (
+            id            TEXT PRIMARY KEY,         -- 'run_xxx'
+            task_id       TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            profile_id    TEXT NOT NULL REFERENCES kanban_profiles(id),
+            status        TEXT NOT NULL DEFAULT 'pending',
+            claim_id      TEXT NOT NULL,            -- UUID v4, 重新认领时换
+            r_heartbeat_at TEXT,
+            started_at    TEXT NOT NULL,
+            ended_at      TEXT,
+            outcome       TEXT NOT NULL DEFAULT 'success',
+            summary       TEXT NOT NULL DEFAULT '',
+            error         TEXT,
+            token_input   INTEGER NOT NULL DEFAULT 0,
+            token_output  INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_runs_task ON kanban_runs(task_id);
+        CREATE INDEX IF NOT EXISTS idx_kanban_runs_status ON kanban_runs(status);
+
+        -- §4 模式 2 Blackboard — 独立表化 (v6 决策, 不塞 task_comments)
+        CREATE TABLE IF NOT EXISTS kanban_blackboard (
+            task_id       TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            key           TEXT NOT NULL,
+            value         TEXT NOT NULL,            -- JSON
+            author        TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            PRIMARY KEY (task_id, key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_blackboard_task ON kanban_blackboard(task_id);
+
+        -- §6.3 23 种事件 (audit + 实时推送)
+        CREATE TABLE IF NOT EXISTS kanban_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id       TEXT,                     -- NULL 表示 board 级事件
+            run_id        TEXT,
+            kind          TEXT NOT NULL,
+            payload       TEXT NOT NULL,            -- JSON
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_events_task ON kanban_events(task_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_kanban_events_kind ON kanban_events(kind);
         ",
-    )
+    )?;
+    // MVP-2 plan 1: ALTER TABLE 迁移 (2 个) + default project 注入 + 老数据归位
+    init_kanban_schema(conn)?;
+    Ok(())
+}
+
+// ─── 内部: Kanban 迁移 (MVP-2 plan 1) ─────────────────────
+
+/// 2 个 ALTER TABLE 迁移 (v6 §3.6.2 + §6.5).
+///
+/// SQLite 不支持 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, 用 try_each 模式:
+/// 每次尝试, 失败 (列已存在) 时 skip.
+///
+/// 老 board/session 默认归到 "default" project (id = 'proj_default'),
+/// 由 `ensure_default_project()` 创建.
+pub fn init_kanban_schema(conn: &Connection) -> rusqlite::Result<()> {
+    // 1. ALTER: kanban_boards 加 project_id
+    let _ = conn.execute(
+        "ALTER TABLE kanban_boards ADD COLUMN project_id TEXT REFERENCES kanban_projects(id)",
+        [],
+    );
+    // 2. ALTER: daemon_sessions 加 project_id
+    let _ = conn.execute(
+        "ALTER TABLE daemon_sessions ADD COLUMN project_id TEXT REFERENCES kanban_projects(id)",
+        [],
+    );
+    // 3. 索引 (ALTER 之后才能创建基于列的索引)
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kanban_boards_project_alter ON kanban_boards(project_id)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daemon_sessions_project ON daemon_sessions(project_id)",
+        [],
+    );
+    // 4. 注入 default project
+    ensure_default_project(conn)?;
+    // 5. 老 board / session 归到 default (只跑一次, 已归的 WHERE 命中 0 行)
+    let _ = conn.execute(
+        "UPDATE kanban_boards SET project_id = 'proj_default' WHERE project_id IS NULL",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE daemon_sessions SET project_id = 'proj_default' WHERE project_id IS NULL",
+        [],
+    );
+    Ok(())
+}
+
+/// 确保 default project 存在 (id = 'proj_default').
+///
+/// 用 try_each 模式: 如果 `kanban_projects` 表不存在 (上游 DDL 没建),
+/// 优雅返回 Ok 而不是 panic, 让调用方决定下一步.
+pub fn ensure_default_project(conn: &Connection) -> rusqlite::Result<()> {
+    // 1. 检查 kanban_projects 表是否存在
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_projects'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !table_exists {
+        // 表不存在, 跳过 (上游 DDL 还没跑)
+        return Ok(());
+    }
+    // 2. 检查 proj_default 行是否存在
+    let row_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM kanban_projects WHERE id = ?1",
+            rusqlite::params!["proj_default"],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !row_exists {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO kanban_projects \
+             (id, name, description, default_root, extra_roots, status, owner, created_at, updated_at) \
+             VALUES ('proj_default', 'default', 'Auto-created default project', '', '[]', 'active', 'local', ?1, ?1)",
+            rusqlite::params![now],
+        )?;
+    }
+    Ok(())
 }
 
 // ─── Tests ──────────────────────────────────────────────────
@@ -748,4 +963,247 @@ mod tests {
         assert!(json_str.contains("\"type\":\"system\""), "should have system line");
         assert!(json_str.contains("User"), "should have user message line");
     }
+
+    // ========== Kanban Schema (MVP-2 plan 1) ==========
+
+    /// 验证 init_kanban_schema 8 张表 DDL 全部落地.
+    /// CREATE TABLE IF NOT EXISTS, 老表已存在不会破坏.
+    #[test]
+    fn test_init_kanban_schema_creates_all_tables() {
+        let conn = Connection::open_in_memory().expect("in_memory");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        // 先建 kanban_projects (FK 目标), 才能 ALTER 引用
+        conn.execute_batch(KANBAN_BASE_DDL).expect("base ddl");
+        init_kanban_schema(&conn).expect("init_kanban");
+
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'kanban_%' ORDER BY name")
+                .expect("prepare");
+            stmt.query_map([], |row| row.get(0))
+                .expect("query_map")
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        let expected = [
+            "kanban_blackboard",
+            "kanban_boards",
+            "kanban_events",
+            "kanban_profiles",
+            "kanban_projects",
+            "kanban_role_defs",
+            "kanban_runs",
+            "kanban_task_links",
+            "kanban_tasks",
+        ];
+        assert_eq!(
+            tables.len(),
+            expected.len(),
+            "kanban_* tables count mismatch: got {tables:?}"
+        );
+        for name in expected {
+            assert!(tables.contains(&name.to_string()), "missing table {name}");
+        }
+    }
+
+    /// 验证 init_kanban_schema 幂等: 跑 2 次不报错 (ALTER 失败 skip, IF NOT EXISTS
+    /// 跳过).
+    #[test]
+    fn test_init_kanban_schema_idempotent() {
+        let conn = Connection::open_in_memory().expect("in_memory");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        conn.execute_batch(KANBAN_BASE_DDL).expect("base ddl");
+        init_kanban_schema(&conn).expect("init 1st");
+        init_kanban_schema(&conn).expect("init 2nd (idempotent)");
+        init_kanban_schema(&conn).expect("init 3rd");
+    }
+
+    /// 验证 kanban_boards.project_id 列存在.
+    #[test]
+    fn test_kanban_boards_project_id_column_exists() {
+        let conn = Connection::open_in_memory().expect("in_memory");
+        conn.execute_batch(KANBAN_BASE_DDL).expect("base ddl");
+        init_kanban_schema(&conn).expect("init_kanban");
+
+        let cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(kanban_boards)")
+                .expect("pragma");
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .expect("query_map")
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        assert!(
+            cols.contains(&"project_id".to_string()),
+            "kanban_boards should have project_id column, got: {cols:?}"
+        );
+    }
+
+    /// 验证 daemon_sessions.project_id 列存在.
+    #[test]
+    fn test_daemon_sessions_project_id_column_exists() {
+        let conn = Connection::open_in_memory().expect("in_memory");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        conn.execute_batch(SESSION_DDL).expect("session ddl");
+        // 单独建 kanban_projects (init_kanban_schema 依赖它)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kanban_projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, default_root TEXT NOT NULL, extra_roots TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'active', owner TEXT NOT NULL DEFAULT 'local', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+        ).expect("projects ddl");
+        init_kanban_schema(&conn).expect("init_kanban");
+
+        let cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(daemon_sessions)")
+                .expect("pragma");
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .expect("query_map")
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        assert!(
+            cols.contains(&"project_id".to_string()),
+            "daemon_sessions should have project_id column, got: {cols:?}"
+        );
+    }
+
+    /// 验证 default project 自动注入 (id = 'proj_default').
+    #[test]
+    fn test_default_project_inserted() {
+        let conn = Connection::open_in_memory().expect("in_memory");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        conn.execute_batch(KANBAN_BASE_DDL).expect("base ddl");
+        init_kanban_schema(&conn).expect("init_kanban");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kanban_projects WHERE id = 'proj_default'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query default project");
+        assert_eq!(count, 1, "default project should be inserted exactly once");
+    }
+
+    /// 验证老 kanban_boards 归到 default project (WHERE project_id IS NULL UPDATE).
+    ///
+    /// 模拟迁移场景: 先跑 init_kanban_schema (建表 + 注入 default project),
+    /// 然后插入老 board (没 project_id), 再跑一次 init_kanban_schema 触发
+    /// UPDATE 迁移.
+    #[test]
+    fn test_old_kanban_boards_assigned_to_default_project() {
+        let conn = Connection::open_in_memory().expect("in_memory");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        conn.execute_batch(KANBAN_BASE_DDL).expect("base ddl");
+        init_kanban_schema(&conn).expect("init 1st (setup)");
+
+        // 插入一个老 board (无 project_id) — 模拟迁移前的老数据
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO kanban_boards (id, name, project_root, status, created_at, updated_at) \
+             VALUES ('kb_old', 'old board', '/tmp', 'active', ?1, ?1)",
+            rusqlite::params![now],
+        )
+        .expect("insert old board");
+
+        // 跑第二次 init_kanban_schema, 触发 UPDATE 迁移
+        init_kanban_schema(&conn).expect("init 2nd (trigger UPDATE migration)");
+
+        let pid: Option<String> = conn
+            .query_row(
+                "SELECT project_id FROM kanban_boards WHERE id = 'kb_old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query board");
+        assert_eq!(
+            pid.as_deref(),
+            Some("proj_default"),
+            "old board should be assigned to default project after migration"
+        );
+    }
+
+    // ---- 辅助 DDL (测试用) ----
+    // 跟 create_tables 里 DDL 一样, 这里复制出来让测试独立.
+    const SESSION_DDL: &str = "
+        CREATE TABLE IF NOT EXISTS daemon_sessions (
+            id              TEXT PRIMARY KEY,
+            project_root    TEXT,
+            config_json     TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'active',
+            created_at      TEXT NOT NULL,
+            last_active_at  TEXT NOT NULL,
+            message_count   INTEGER NOT NULL DEFAULT 0
+        );
+    ";
+
+    // 基础 9 张 kanban_* 表 DDL (跟 create_tables 里一致)
+    const KANBAN_BASE_DDL: &str = "
+        CREATE TABLE IF NOT EXISTS kanban_projects (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            description   TEXT NOT NULL,
+            default_root  TEXT NOT NULL,
+            extra_roots   TEXT NOT NULL DEFAULT '[]',
+            status        TEXT NOT NULL DEFAULT 'active',
+            owner         TEXT NOT NULL DEFAULT 'local',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS kanban_boards (
+            id            TEXT PRIMARY KEY,
+            project_id    TEXT REFERENCES kanban_projects(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            project_root  TEXT NOT NULL,
+            default_role  TEXT NOT NULL DEFAULT 'coordinator',
+            status        TEXT NOT NULL DEFAULT 'active',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS kanban_role_defs (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL,
+            instructions TEXT NOT NULL, default_profile_id TEXT,
+            allowed_tool_categories TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS kanban_profiles (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 'local',
+            working_dir TEXT NOT NULL, tool_filter TEXT NOT NULL,
+            max_turns INTEGER NOT NULL DEFAULT 32, model TEXT,
+            system_prompt_template TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS kanban_tasks (
+            id TEXT PRIMARY KEY,
+            board_id TEXT NOT NULL REFERENCES kanban_boards(id) ON DELETE CASCADE,
+            parent_id TEXT REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            title TEXT NOT NULL, body TEXT NOT NULL, assignee_role TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'triage',
+            priority INTEGER NOT NULL DEFAULT 128, deadline TEXT,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL, t_started_at TEXT, t_completed_at TEXT,
+            last_heartbeat_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS kanban_task_links (
+            parent_id TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            child_id TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            dep_type TEXT NOT NULL DEFAULT 'sequential',
+            created_at TEXT NOT NULL, PRIMARY KEY (parent_id, child_id)
+        );
+        CREATE TABLE IF NOT EXISTS kanban_runs (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL REFERENCES kanban_profiles(id),
+            status TEXT NOT NULL DEFAULT 'pending', claim_id TEXT NOT NULL,
+            r_heartbeat_at TEXT, started_at TEXT NOT NULL, ended_at TEXT,
+            outcome TEXT NOT NULL DEFAULT 'success', summary TEXT NOT NULL DEFAULT '',
+            error TEXT, token_input INTEGER NOT NULL DEFAULT 0, token_output INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS kanban_blackboard (
+            task_id TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            key TEXT NOT NULL, value TEXT NOT NULL, author TEXT NOT NULL,
+            updated_at TEXT NOT NULL, PRIMARY KEY (task_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS kanban_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, run_id TEXT,
+            kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+    ";
 }
