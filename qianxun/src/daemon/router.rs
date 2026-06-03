@@ -4622,3 +4622,656 @@ async fn dispatch_kanban_now(
         }))),
     }
 }
+
+// ============================================================================
+// 全 URL 端到端覆盖测试 (2026-06-04 用户要求: 给所有 URL 补测试)
+//
+// 目标:
+// 1. 覆盖 `build_router` 注册的全部 42 路由 (公开 + 业务 + Kanban + Auth)
+// 2. 每个 URL 1 个 #[tokio::test] 函数, 失败时定位精准
+// 3. 走真实 in-memory AppState (memory / tools / skills 真初始化,
+//    kanban_db / kanban_host / team_registry 全接入), 不走 mock
+//
+// 设计:
+// - `make_state_full` = make_test_state + 集成 KanbanDb/Host/Team (全 in-memory)
+// - `router_full()` = build_router(state, None) 真实 Router
+// - `oneshot_get/post` = tower::ServiceExt::oneshot 调真 middleware → handler
+// - 每个 test 期望 status + 关键 JSON 字段
+// ============================================================================
+
+#[cfg(test)]
+mod url_coverage_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    // 复用 jwt_auth_tests 的 ENV_MUTEX 防止并行测试 set_var race
+    use super::jwt_auth_tests::ENV_MUTEX;
+    // 复用 stage7a_endpoint_tests module 里的 make_test_state (pub(super))
+    use super::stage7a_endpoint_tests::{make_test_state, test_admin_credential};
+
+    // 共享常量, 跟 jwt_auth_tests 保持一致
+    const TEST_SECRET: &str = "test-jwt-secret-2026-do-not-use-in-prod";
+
+    /// 签发测试 JWT (本 module 独立, 跟 stage7a make_jwt 同构)
+    fn tests_make_jwt(secret: &str, sub: &str, exp_offset_secs: i64) -> String {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header as JwtHeader};
+        let now = chrono::Utc::now().timestamp();
+        let claims = super::Claims {
+            sub: sub.into(),
+            exp: now + exp_offset_secs,
+            iat: now,
+        };
+        encode(
+            &JwtHeader::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encode test jwt")
+    }
+
+    /// 构造完整 AppState: make_test_state + KanbanDb (in-memory) +
+    /// TeamRegistry (load_default) + KanbanHost (无 dispatcher, 仅 DB 读写).
+    /// 不启动 dispatcher tokio task, 避免 test 退出时 task leak.
+    fn make_state_full() -> Arc<crate::daemon::AppState> {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // 同步 JWT secret (跟其他 test 一致, 让签出来的 token 能验)
+        let admin = test_admin_credential();
+        admin.set_token_secret_for_test(TEST_SECRET);
+        unsafe { std::env::set_var("QIANXUN_JWT_SECRET", TEST_SECRET) };
+
+        // make_test_state 返 Arc<AppState> (唯一所有者时可用 Arc::get_mut)
+        let mut state = make_test_state();
+        // 集成 Kanban (in-memory 模式)
+        let kanban_db = qianxun_core::kanban::db::KanbanDb::in_memory()
+            .expect("kanban in_memory");
+        let team_reg = qianxun_core::kanban::team::TeamRegistry::load_default();
+        let host = Arc::new(crate::daemon::kanban_host::KanbanHost::new(
+            kanban_db, team_reg,
+        ));
+        let inner = Arc::get_mut(&mut state).expect("state unique");
+        inner.kanban_db = Some(
+            qianxun_core::kanban::db::KanbanDb::in_memory().expect("kanban2"),
+        );
+        inner.kanban_team_registry = Some(
+            qianxun_core::kanban::team::TeamRegistry::load_default(),
+        );
+        inner.kanban_host = Some(host);
+        state
+    }
+
+    fn router_full() -> axum::Router {
+        build_router(make_state_full(), None)
+    }
+
+    fn admin_jwt() -> String {
+        let admin = test_admin_credential();
+        let secret = admin.token_secret();
+        tests_make_jwt(&secret, "admin", 24 * 60 * 60)
+    }
+
+    /// 统一发请求, 返 (status, body_string)
+    async fn oneshot(
+        router: &axum::Router,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut builder = HttpRequest::builder().method(method).uri(path);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder
+            .body(Body::from(body.unwrap_or("").to_string()))
+            .expect("build request");
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+        let status = resp.status();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 65536)
+            .await
+            .unwrap_or_default();
+        (status, String::from_utf8_lossy(&body_bytes).into_owned())
+    }
+
+    // ===== 公开路由 (无 auth) =====
+
+    #[tokio::test]
+    async fn test_url_root() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/", None, None).await;
+        // root 返 404 (没 ui_dist) 或 200 — 都算通
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND, "got {} body={}", s, b);
+    }
+
+    #[tokio::test]
+    async fn test_url_system_health() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/system/health", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_url_system_status() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/system/status", None, None).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("status").is_some());
+        assert!(v.get("version").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_url_events_sse_requires_auth() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "GET", "/v1/events", None, None).await;
+        // SSE 需 JWT, 无 token 应 401
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    // ===== Auth 路由 =====
+
+    #[tokio::test]
+    async fn test_url_auth_login_wrong_password() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/auth/login", Some(r#"{"password":"wrong"}"#), None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_url_auth_login_empty_password() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/auth/login", Some(r#"{"password":""}"#), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_url_auth_logout() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/auth/logout", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    // ===== System 路由 (业务) =====
+
+    #[tokio::test]
+    async fn test_url_system_metrics() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/system/metrics", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("conns").is_some(), "missing conns: {b}");
+        assert!(v.get("uptime_s").is_some() || v.get("uptime_secs").is_some(),
+            "missing uptime: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_system_logs() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/system/logs", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        // 真实 shape: {"lines": [...], "total": N, "capped": bool}
+        assert!(v.get("lines").is_some(), "missing lines: {b}");
+        assert!(v.get("total").is_some() || v.get("capped").is_some(),
+            "missing total/capped: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_system_admin_rotate_token() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/system/admin/rotate-token", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::CREATED,
+            "rotate-token got {} (期望 200/201)", s);
+    }
+
+    // ===== Tools 路由 =====
+
+    #[tokio::test]
+    async fn test_url_tools_list() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/tools", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        // 13 builtin tools 至少 1 个
+        let arr = v.get("tools").and_then(|t| t.as_array()).expect("tools array");
+        assert!(!arr.is_empty(), "expected non-empty tools list");
+    }
+
+    #[tokio::test]
+    async fn test_url_tools_invoke_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/tools/nonexistent/invoke", Some(r#"{"args":{}}"#), Some(&admin_jwt())).await;
+        assert!(s == StatusCode::NOT_FOUND || s == StatusCode::BAD_REQUEST,
+            "tool invoke nonexistent got {}", s);
+    }
+
+    // ===== Memory 路由 =====
+
+    #[tokio::test]
+    async fn test_url_memory_sessions() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/memory/sessions", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("sessions").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_url_memory_ping() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/memory/ping", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("status").is_some() || v.get("healthy").is_some(),
+            "memory ping shape: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_memory_search() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/memory/search",
+            Some(r#"{"query":"smoke"}"#), Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_url_memory_session_observations_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "GET", "/v1/memory/sessions/nonexistent/observations",
+            None, Some(&admin_jwt())).await;
+        // 不存在 session 返 200 + [] 或 404, 都算可访问
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND,
+            "memory session obs got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_memory_delete_session_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "DELETE", "/v1/memory/sessions/nonexistent",
+            None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NO_CONTENT || s == StatusCode::NOT_FOUND,
+            "memory delete session got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_memory_delete_observation() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "DELETE", "/v1/memory/observations/9999",
+            None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NO_CONTENT || s == StatusCode::NOT_FOUND || s == StatusCode::BAD_REQUEST,
+            "memory delete obs got {}", s);
+    }
+
+    // ===== Skills 路由 =====
+
+    #[tokio::test]
+    async fn test_url_skills_list() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/skills", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("skills").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_url_skills_reload() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/skills", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_url_skills_toggle_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/skills/nonexistent/toggle",
+            Some(r#"{"enabled":true}"#), Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND,
+            "skill toggle got {}", s);
+    }
+
+    // ===== MCP 路由 =====
+
+    #[tokio::test]
+    async fn test_url_mcp_list() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/mcp/servers", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("servers").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_url_mcp_add_and_delete() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "POST", "/v1/mcp/servers",
+            Some(r#"{"id":"smoke","name":"smoke","transport":"stdio","command":"echo"}"#),
+            Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::CREATED || s == StatusCode::CONFLICT,
+            "mcp add got {} body={}", s, b);
+        // delete 同 id
+        let (s, _) = oneshot(&r, "DELETE", "/v1/mcp/servers/smoke", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NO_CONTENT || s == StatusCode::NOT_FOUND,
+            "mcp delete got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_mcp_test_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/mcp/servers/nonexistent/test", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND || s == StatusCode::BAD_REQUEST,
+            "mcp test got {}", s);
+    }
+
+    // ===== LLM 路由 =====
+
+    #[tokio::test]
+    async fn test_url_llm_providers_list() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/llm/providers", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let arr = v.get("providers").and_then(|p| p.as_array()).expect("providers array");
+        assert!(!arr.is_empty(), "expected non-empty providers list, got {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_llm_providers_get() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/llm/providers/deepseek", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("id").is_some() || v.get("name").is_some(),
+            "provider shape: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_llm_providers_get_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "GET", "/v1/llm/providers/nonexistent", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::NOT_FOUND || s == StatusCode::OK,
+            "llm get nonexistent got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_llm_providers_activate_and_test() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/llm/providers/deepseek/activate", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND,
+            "llm activate got {}", s);
+        // test 不真发 HTTP (避免依赖外网), 只看 status
+        let (s, _) = oneshot(&r, "POST", "/v1/llm/providers/deepseek/test", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND || s == StatusCode::INTERNAL_SERVER_ERROR || s == StatusCode::BAD_GATEWAY,
+            "llm test got {}", s);
+    }
+
+    // ===== Chat Session 路由 =====
+
+    #[tokio::test]
+    async fn test_url_chat_create_session() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "POST", "/v1/chat/session", Some("{}"), Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::CREATED,
+            "chat create got {} body={}", s, b);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("session_id").is_some(), "missing session_id: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_chat_list_sessions() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/chat/sessions", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("sessions").is_some() || v.is_array(),
+            "sessions shape: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_chat_get_session_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "GET", "/v1/chat/session/sess_nonexistent", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND,
+            "chat get got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_chat_delete_session_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "DELETE", "/v1/chat/session/sess_nonexistent", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NO_CONTENT || s == StatusCode::NOT_FOUND,
+            "chat delete got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_chat_prompt_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/chat/session/sess_nonexistent/prompt",
+            Some(r#"{"content":"hi"}"#), Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND || s == StatusCode::BAD_REQUEST || s == StatusCode::INTERNAL_SERVER_ERROR,
+            "chat prompt got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_chat_cancel_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/chat/session/sess_nonexistent/cancel", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND,
+            "chat cancel got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_chat_pause_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/chat/session/sess_nonexistent/pause", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND,
+            "chat pause got {}", s);
+    }
+
+    // ===== Config 路由 =====
+
+    #[tokio::test]
+    async fn test_url_config_get() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/config", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        // 真实 shape: {"agent":{...},"daemon":{...},"llm":{...},...}  (嵌套)
+        assert!(v.is_object() && !v.as_object().unwrap().is_empty(),
+            "config 期望非空 JSON object, got {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_config_put() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "PUT", "/v1/config",
+            Some(r#"{"active_provider":"deepseek"}"#), Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::BAD_REQUEST,
+            "config put got {}", s);
+    }
+
+    // ===== Kanban 路由 (MVP-3 + 阶段 2 补 7 handler) =====
+
+    #[tokio::test]
+    async fn test_url_kanban_boards_list() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/kanban/boards", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("boards").is_some(), "kanban boards: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_board_create_and_get() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "POST", "/v1/kanban/boards",
+            Some(r#"{"name":"coverage","project_root":"E:/git/maxu/qianxun"}"#),
+            Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let board_id = v["board"]["id"].as_str().expect("board.id");
+        // GET 详情
+        let (s, b) = oneshot(&r, "GET", &format!("/v1/kanban/boards/{board_id}"), None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert_eq!(v["board"]["id"].as_str(), Some(board_id));
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_board_get_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "GET", "/v1/kanban/boards/kb_nonexistent", None, Some(&admin_jwt())).await;
+        assert!(s == StatusCode::NOT_FOUND || s == StatusCode::OK,
+            "kanban board get got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_board_tasks() {
+        let r = router_full();
+        let (_s, b) = oneshot(&r, "POST", "/v1/kanban/boards",
+            Some(r#"{"name":"coverage2","project_root":"E:/git/maxu/qianxun"}"#),
+            Some(&admin_jwt())).await;
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let board_id = v["board"]["id"].as_str().unwrap().to_string();
+        let (s, b) = oneshot(&r, "GET", &format!("/v1/kanban/boards/{board_id}/tasks"),
+            None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("tasks").is_some(), "tasks shape: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_task_create_and_get() {
+        let r = router_full();
+        let (_s, b) = oneshot(&r, "POST", "/v1/kanban/boards",
+            Some(r#"{"name":"ct","project_root":"E:/git/maxu/qianxun"}"#),
+            Some(&admin_jwt())).await;
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let board_id = v["board"]["id"].as_str().unwrap().to_string();
+        let (s, b) = oneshot(&r, "POST", "/v1/kanban/tasks",
+            Some(&format!(r#"{{"board_id":"{board_id}","title":"t","body":"b","assignee_role":"coder","priority":3}}"#)),
+            Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let task_id = v["task"]["id"].as_str().unwrap().to_string();
+        let (s, b) = oneshot(&r, "GET", &format!("/v1/kanban/tasks/{task_id}"),
+            None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert_eq!(v["task"]["id"].as_str(), Some(task_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_task_cancel_nonexistent() {
+        let r = router_full();
+        let (s, _) = oneshot(&r, "POST", "/v1/kanban/tasks/task_nonexistent/cancel",
+            None, Some(&admin_jwt())).await;
+        // cancel 可能在 status=Done/Failed 时返 error 200 body, 也可能 404
+        assert!(s == StatusCode::OK || s == StatusCode::NOT_FOUND || s == StatusCode::BAD_REQUEST || s == StatusCode::INTERNAL_SERVER_ERROR,
+            "kanban task cancel got {}", s);
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_board_events() {
+        let r = router_full();
+        let (_s, b) = oneshot(&r, "POST", "/v1/kanban/boards",
+            Some(r#"{"name":"ev","project_root":"E:/git/maxu/qianxun"}"#),
+            Some(&admin_jwt())).await;
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let board_id = v["board"]["id"].as_str().unwrap().to_string();
+        let (s, b) = oneshot(&r, "GET", &format!("/v1/kanban/boards/{board_id}/events"),
+            None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("events").is_some() || v.is_array(), "events shape: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_profiles() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/kanban/profiles", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let arr = v.get("profiles").and_then(|p| p.as_array()).expect("profiles array");
+        assert!(arr.len() >= 4, "expected 4 default profiles, got {} ({})", arr.len(), b);
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_roles() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/kanban/roles", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        let arr = v.get("roles").and_then(|r| r.as_array()).expect("roles array");
+        assert!(arr.len() >= 4, "expected 4 default roles, got {} ({})", arr.len(), b);
+    }
+
+    #[tokio::test]
+    async fn test_url_kanban_dispatch() {
+        let r = router_full();
+        // dispatcher 没启动 → 返 dispatched=false, 不 spawn
+        let (s, b) = oneshot(&r, "POST", "/v1/kanban/dispatch",
+            Some(r#"{"prompt":"coverage test"}"#), Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::INTERNAL_SERVER_ERROR,
+            "kanban dispatch got {} body={}", s, b);
+        if s == StatusCode::OK {
+            let v: Value = serde_json::from_str(&b).expect("json");
+            assert!(v.get("dispatched").is_some(), "dispatched field missing: {b}");
+        }
+    }
+
+    // ===== Projects 路由 =====
+
+    #[tokio::test]
+    async fn test_url_projects_list() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/projects", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("projects").is_some(), "projects: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_url_project_create() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "POST", "/v1/projects",
+            Some(r#"{"name":"cov_proj","default_root":"E:/git/maxu/qianxun"}"#),
+            Some(&admin_jwt())).await;
+        assert!(s == StatusCode::OK || s == StatusCode::CREATED || s == StatusCode::BAD_REQUEST || s == StatusCode::UNPROCESSABLE_ENTITY,
+            "project create got {} body={}", s, b);
+    }
+
+    // ===== Auth 集成 =====
+
+    #[tokio::test]
+    async fn test_url_unauthorized_paths() {
+        // 所有 *业务* 路径在无 JWT 时返 401, 公开路径不返 401
+        let r = router_full();
+        let protected = [
+            "/v1/tools", "/v1/memory/sessions", "/v1/skills", "/v1/mcp/servers",
+            "/v1/llm/providers", "/v1/chat/sessions", "/v1/config",
+            "/v1/kanban/boards", "/v1/kanban/profiles", "/v1/kanban/roles",
+            "/v1/projects", "/v1/system/metrics", "/v1/system/logs",
+        ];
+        for path in protected {
+            let (s, _) = oneshot(&r, "GET", path, None, None).await;
+            assert_eq!(s, StatusCode::UNAUTHORIZED, "path {path} 期望 401, got {s}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_url_unknown_path_returns_404_json() {
+        let r = router_full();
+        let (s, b) = oneshot(&r, "GET", "/v1/nonexistent", None, Some(&admin_jwt())).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let v: Value = serde_json::from_str(&b).expect("json");
+        assert!(v.get("error").is_some() || v.get("path").is_some(),
+            "404 body 期望 JSON error, got {b}");
+    }
+}

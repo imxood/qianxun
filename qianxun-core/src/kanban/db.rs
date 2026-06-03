@@ -73,6 +73,20 @@ impl KanbanDb {
         })
     }
 
+    /// 初始化 Kanban 8 张表 + 索引 (v6 §6.5 设计).
+    ///
+    /// 用于 in_memory 测试 + 独立 db 文件场景. daemon 启动走
+    /// `qianxun::daemon::persistence::create_tables` (完整 daemon.db 初始化,
+    /// 含 kanban 部分跟 3 张 daemon_sessions 表一起建).
+    ///
+    /// 幂等: 全部 `IF NOT EXISTS`, 重复跑 OK.
+    pub fn init_schema(&self) -> Result<(), KanbanError> {
+        const SCHEMA: &str = include_str!("kanban_schema.sql");
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(SCHEMA)?;
+        Ok(())
+    }
+
     /// 从已有 `Arc<Mutex<Connection>>` 构造 (跟 daemon 共享 daemon.db).
     pub fn from_connection(conn: Arc<Mutex<Connection>>) -> Self {
         Self { conn }

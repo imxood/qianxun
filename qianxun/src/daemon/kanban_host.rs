@@ -92,6 +92,11 @@ pub struct KanbanHost {
 impl KanbanHost {
     /// 创建 host (不启动 dispatcher, 用 `start()` 启动后台 task)
     pub fn new(db: KanbanDb, team_registry: TeamRegistry) -> Self {
+        // 幂等 init 8 张 kanban_* 表 (独立 in-memory / db 文件场景用).
+        // daemon 启动时 create_tables 已经建过, 这次再跑 0 副作用.
+        if let Err(e) = db.init_schema() {
+            tracing::warn!("[kanban_host] init_schema 失败 (继续运行): {e}");
+        }
         let dispatcher = Arc::new(KanbanDispatcher::new(db.clone(), team_registry.clone()));
         let (sse_tx, _) = broadcast::channel(256);
         Self {
