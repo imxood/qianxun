@@ -81,6 +81,16 @@ qianxun/                 # workspace 根
             ├── mod.rs, auth.rs
 ```
 
+### 缺口 7 修复 (MVP-0, 2026-06-03)
+
+`qianxun/src/daemon/mod.rs` 第 125-165 行的 3 个启动序列块 (tools / memory / skills) 全部**真实初始化**, 不再是 `None` / `in_memory` 占位:
+
+- `tools`: `ToolRegistry::new()` + `register_all_builtin()` 注册 8 个 builtin 工具 (失败 fallback 空 + warn)
+- `memory`: `MemoryCore::open("~/.qianxun/mem.db")` 真 SQLite 路径 (失败 fallback `open_in_memory()` + warn)
+- `skills`: `SkillManager::load_all(None)` 同步加载全局 skill (空目录静默 OK)
+
+执行历史: Day 1-3 commits `ea7b335` / `da04950` / `02fb2e2` / `159f966`, Day 4 E2E 验收 commit `42e1bdd` (cargo test 214/0 + clippy 0/0 + daemon 三端点全 PASS). 详细计划见 `docs/30_子项目规划/05-mvp-0-checklist.md`, daemon 现状见 `docs/10_事实源/daemon-state.md`.
+
 ## 构建顺序
 
 | Phase | 状态 | 交付 |

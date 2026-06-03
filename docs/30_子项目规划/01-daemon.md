@@ -2875,6 +2875,24 @@ Tools / Memory / Sessions / Config / System 8 大模块, 跟 Tauri 桌面端的
 
 ---
 
+## 实际进度
+
+> **2026-06-03 更新** — 缺口 7 修复 (MVP-0 落地), daemon 启动序列里 `AppState.tools / memory / skills` 三个共享子系统全部真实初始化, 不再是 `None` / `in_memory` 占位.
+
+**完成内容** (5 天, 1 周):
+
+- ✅ Day 1 — `ToolRegistry::register_all_builtin()` (commit `ea7b335`)
+- ✅ Day 2 — `SkillManager::load_all(None)` + `/v1/skills` 端点 (commit `da04950`)
+- ✅ Day 3 — `MemoryCore::open("~/.qianxun/mem.db")` + `/v1/memory/ping` 端点 (commit `02fb2e2`)
+- ✅ 合并 commit `159f966` 整理为单点真实初始化
+- ✅ Day 4 — E2E 验收 (commit `42e1bdd`): cargo test --workspace 214/0, clippy 0/0, daemon 三端点 (`/v1/tools` count=8, `/v1/skills` count=1, `/v1/memory/ping` status=ok) 全 PASS
+
+**关键文件**: `qianxun/src/daemon/mod.rs:125-165` — 3 个启动序列块, 每条都带失败 fallback + `warn` 日志, daemon 不会因子系统启动失败而拒启. 详细计划见 `docs/30_子项目规划/05-mvp-0-checklist.md`, 现状见 `docs/10_事实源/daemon-state.md`.
+
+**后续**: Track A 详细设计的 §4 AgentLoopHost 重构 / §5 SSE 流式 / §6 持久化 / §7 Thin Client 仍待 Phase 4a 实施, 不在 MVP-0 范围.
+
+---
+
 ## 附录 A: 与其他 Track 的接口
 
 ### A.1 上游 — Track B (VPS Server)
