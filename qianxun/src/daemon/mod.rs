@@ -11,6 +11,9 @@ pub mod sse;
 #[cfg(test)]
 mod llm_integration_tests;
 
+#[cfg(test)]
+mod mvp1_integration_tests;
+
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
