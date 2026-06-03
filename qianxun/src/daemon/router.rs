@@ -498,8 +498,22 @@ async fn memory_search() -> Json<serde_json::Value> {
 
 // ─── 技能 ──────────────────────────────────────────────────
 
-async fn list_skills() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"skills": []}))
+/// GET /v1/skills — 列出已加载技能名 (从 `state.skills` 实时读).
+///
+/// Day 2.3 准备: 仅返名字 + count, 不返 description / path / frontmatter,
+/// UI 端 SkillSummary 字段对齐留 Track D (skills/mod.rs 改造后).
+///
+/// `SkillManager` 当前不持有 `Arc<RwLock<>>`, AppState.skills 是 `Clone`
+/// (无内部状态) — 跟 `reload_skills` / `toggle_skill` 保持同一模式.
+async fn list_skills(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let skills = state.skills.clone();
+    let names = skills.available_skills();
+    Json(serde_json::json!({
+        "skills": names,
+        "count": names.len(),
+    }))
 }
 
 // ─── MCP ──────────────────────────────────────────────────
