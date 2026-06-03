@@ -1,3 +1,6 @@
+// ACP session: 部分 variant (ToolCall) 暂不构造, 留 Phase 4.
+#![allow(dead_code)]
+
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::AgentLoop;
 use qianxun_core::skills::{SkillManager, SkillWatcher};

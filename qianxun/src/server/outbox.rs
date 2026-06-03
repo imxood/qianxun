@@ -1,5 +1,8 @@
 //! 消息 outbox (Stage 6a): 节点离线时缓冲, 重连后 replay. SQLite 持久化.
 //!
+//! persist/persist_call_count/user_count 暂未调用, 留 Phase 4.
+#![allow(dead_code)]
+//!
 //! ## 设计
 //!
 //! 按 `node_id` 索引的持久化队列, 存 `outbox` 表:

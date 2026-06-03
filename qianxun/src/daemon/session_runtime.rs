@@ -1,5 +1,8 @@
 //! SessionRuntime — 每个 session 的全部运行时状态。
 //!
+//! ToolUseDelta/ToolResult variant 留 Phase 4 接 streaming tool call.
+#![allow(dead_code)]
+//!
 //! Stage 1 范围: 仅持有引用, 不启动 AgentLoop. 真正的 processing_loop
 //! 调度 (Stage 2 SSE 流式) 在 router 层 spawn task 后调用.
 //!

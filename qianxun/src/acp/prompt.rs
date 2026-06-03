@@ -1,3 +1,6 @@
+// ACP prompt: mod 命名跟目录同名 (acp/prompt.rs), clippy 觉得有歧义; 暂保留, 后续可改名 _mod.
+#![allow(clippy::module_inception)]
+
 use crate::acp::handler::AcpRequestHandler;
 use crate::acp::output::{AcpOutputEvent, AcpOutputSink};
 use crate::acp::types::*;
@@ -267,7 +270,7 @@ impl AcpRequestHandler {
                         &prompt_text
                     };
                     if let Some(m) = &memory {
-                        let _ = m.remember(&summary, "conversation").await;
+                        let _ = m.remember(summary, "conversation").await;
                     }
 
                     let mut sessions = sessions_arc2.lock().await;

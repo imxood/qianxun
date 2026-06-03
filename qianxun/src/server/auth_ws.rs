@@ -1,5 +1,8 @@
 //! WebSocket auth 验证 (Stage 3: SQLite-backed).
 //!
+//! is_device_to_vps/is_app_to_vps 暂未调用, 留 Phase 4.
+#![allow(dead_code)]
+//!
 //! ## Stage 2 → Stage 3 变化
 //!
 //! - **Stage 2**: 静态白名单 (`test_token_dt_xxx` / `_yyy`).

@@ -1,3 +1,6 @@
+// CLI output: 旧 TTY 渲染代码, TUI 模式后多数 sink/helper 暂未调用, 留 Phase 4 清理.
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use std::fmt::Display;
 fn style<D: Display>(d: D) -> AnsiStyled<D> {
@@ -410,7 +413,7 @@ impl OutputSink for CliOutputSink {
                 } else if status == "工具执行完成，继续请求 LLM..." {
                     spinner.set_message("继续思考...");
                 } else {
-                    spinner.set_message(status.to_string());
+                    spinner.set_message(status);
                 }
                 return; // spinner 状态下只更新消息，不输出
             }

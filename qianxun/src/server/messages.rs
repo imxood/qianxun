@@ -1,5 +1,8 @@
 //! WebSocket 消息类型 (与 `docs/30_子项目规划/_shared-contract.md` §3.3 + `02-vps-server.md` §11.3 对齐).
 //!
+//! from_connection 暂未调用, 留 Phase 4.
+#![allow(dead_code)]
+//!
 //! Stage 1 只定义 enum + serde 序列化, **不实现 handler**. Stage 2 (auth) + Stage 3 (routing)
 //! 才把 `WsFrame` 派发到具体 action.
 

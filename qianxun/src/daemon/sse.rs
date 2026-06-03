@@ -1,5 +1,8 @@
 //! SSE (Server-Sent Events) — 12 种事件类型 + 状态化转换器.
 //!
+//! `db` 字段留 Phase 4 接 SSE 流式 tool call 持久化.
+#![allow(dead_code, clippy::type_complexity)]
+//!
 //! 与 shared-contract §3.2 **严格一致**, 字段名/类型/tag 都不能改.
 //! 12 个事件: message_start, content_block_start, text_delta, thinking_delta,
 //! tool_use_delta, tool_use_complete, tool_result, content_block_stop, usage,
@@ -130,6 +133,7 @@ impl SseEventBuilder {
     /// - `ToolCall { .. }` → `[ContentBlockStop?, ContentBlockStart, ToolUseComplete, ContentBlockStop]`
     /// - `UsageUpdate(u)` → `[Usage]`
     /// - `Stop(reason)` → 保留, 由 `finalize` 统一收尾
+    #[allow(clippy::wrong_self_convention)] // 命名保留 LLM 业界惯例 (from_xxx), 实际需要 &mut self 做状态切换
     pub fn from_llm_event(&mut self, event: &LlmStreamEvent) -> Vec<SseEvent> {
         match event {
             LlmStreamEvent::Text(text) => self.handle_text(text),

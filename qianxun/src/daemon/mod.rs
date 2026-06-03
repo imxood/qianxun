@@ -40,6 +40,7 @@ use crate::daemon::persistence::SessionStore;
 /// `provider.stream_completion` 实现 12 个 SSE 事件. Stage 3 接入
 /// 完整 processing_loop 后, 此 flag 切到 true 并将 prompt_handler
 /// 改为通过 `OutputSink` 桥接.
+#[allow(dead_code)] // 部分字段 (provider/shared/processing_loop_enabled/active_conns) 在测试中未读, 留 Phase 4 接入
 pub struct AppState {
     pub agent_host: Arc<AgentLoopHost>,
     pub config: Arc<ResolvedConfig>,
@@ -424,17 +425,14 @@ mod graceful_shutdown_tests {
     #[tokio::test]
     async fn test_graceful_shutdown_cancels_active_sessions() {
         let state = make_test_state();
-        // for_test 模式可能不存 session in-memory, 改用直接验证 shutdown_all
-        // 不 panic + 返 >= 0
-        let cancelled_before = state.agent_host.shutdown_all();
-        assert!(cancelled_before >= 0);
+        // for_test 模式可能不存 session in-memory, 改用直接验证 shutdown_all 不 panic
+        let _cancelled_before = state.agent_host.shutdown_all();
 
         // 跑 orchestrator 不应 panic
         graceful_shutdown_orchestrator(state.clone()).await;
 
         // 再跑一次, 仍不 panic
-        let cancelled_after = state.agent_host.shutdown_all();
-        assert!(cancelled_after >= 0);
+        let _cancelled_after = state.agent_host.shutdown_all();
     }
 
     #[tokio::test]
@@ -464,9 +462,8 @@ mod graceful_shutdown_tests {
     async fn test_shutdown_all_marks_all_sessions_paused() {
         let state = make_test_state();
         // 模拟多个 active session (用 for_test 模式或直接调 create_session)
-        // 调 shutdown_all, 验证 returned count >= 0 (没 panic)
-        let n = state.agent_host.shutdown_all();
-        assert!(n >= 0, "shutdown_all returned {n}");
+        // 调 shutdown_all, 验证不 panic (返回 usize 总是 >= 0, 类型系统已保证)
+        let _n = state.agent_host.shutdown_all();
     }
 
     #[tokio::test]

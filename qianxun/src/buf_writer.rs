@@ -1,3 +1,6 @@
+// buf_writer: 部分方法 (push/is_empty) 和 Style 暂未用, 留 Phase 4.
+#![allow(dead_code)]
+
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

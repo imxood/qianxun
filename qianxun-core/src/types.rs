@@ -110,10 +110,11 @@ pub enum ToolChoice {
 // ─── AgentPattern ─────────────────────────────────────────
 
 /// Agent 工作模式。
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPattern {
     /// React: 思考 -> 行动 -> 观察 循环（默认）
+    #[default]
     React,
     /// Plan-and-Execute: 先制定计划再逐步执行
     PlanAndExecute,
@@ -121,12 +122,6 @@ pub enum AgentPattern {
     Reflective,
     /// Workflow: 按预设阶段序列执行
     Workflow,
-}
-
-impl Default for AgentPattern {
-    fn default() -> Self {
-        Self::React
-    }
 }
 
 // ─── AgentPattern 子配置 ──────────────────────────────────
@@ -218,19 +213,14 @@ impl Default for WorkflowConfig {
 // ─── Mode ──────────────────────────────────────────────────
 
 /// 千寻运行时模式（通过 `/mode` 命令切换）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     /// 自动模式（默认）：可自由调用所有工具
+    #[default]
     Auto,
     /// 计划模式：只允许 Read / Search / Think 类工具，禁止写操作
     Plan,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Mode {

@@ -1,5 +1,9 @@
 //! VPS Server 入口 + 共享状态 + 路由.
 //!
+//! Stage 1-3 骨架已就位 (auth/device/admin + WebSocket Hub + rate_limit + outbox).
+//! 部分 route handler / 字段 (host_type) 暂未读, 留 Phase 4 接 client 完整 wire.
+#![allow(dead_code)]
+//!
 //! Stage 1 (本版本) 的范围:
 //! - 5 个 REST 路由 (auth/device/admin) — 维持 v0.2 行为, 暂时不接完整 logic
 //! - 1 个 WebSocket 端点 (`/api/ws`) — 接受升级, 立即 close
@@ -75,7 +79,7 @@ use messages::WsFrame;
 use outbox::Outbox;
 use rate_limit::RateLimiter;
 use team_db::{Project, Team, TeamDb, TeamMember};
-pub use ws_hub::{check_rbac, ConnectionType, HubStats, RbacError, WsHub};
+pub use ws_hub::{check_rbac, ConnectionType, WsHub};
 
 /// VPS Server 共享状态。
 pub struct VpsState {

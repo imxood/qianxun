@@ -1,3 +1,8 @@
+// ENV_MUTEX 保护整段 async 操作期间 env-var 一致性 (e.g. test harness 改 env 后请求未结束).
+// 锁是 std::sync::Mutex, 持锁时间短 (一次 req duration), 跨 await 是有意为之.
+// 见 router test fns 大量用 `let _g = ENV_MUTEX.lock()...; .await;` 模式.
+#![allow(clippy::await_holding_lock)]
+
 use axum::{
     extract::{Query, Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
@@ -27,7 +32,6 @@ use qianxun_core::provider::types::LlmStreamEvent;
 use qianxun_core::types::LlmError;
 use qianxun_memory::MemoryStats;
 
-use crate::buf_writer::LogRing;
 use crate::daemon::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
 use crate::daemon::sse::{SseEvent, SseEventBuilder};
 use crate::daemon::AppState;
@@ -51,6 +55,7 @@ pub struct PromptRequest {
     #[serde(default)]
     pub messages: Vec<PromptMessage>,
     /// 可选: 覆盖 session 默认 model (Stage 2 暂忽略, 留 Stage 3 接 config 切换).
+    #[allow(dead_code)] // Stage 3 才接 config 切换, 当前仅 deserialized 备用
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -353,6 +358,8 @@ pub fn is_auth_skipped_path(path: &str) -> bool {
 /// 读 JWT secret (env var QIANXUN_JWT_SECRET).
 ///
 /// 返回 `None` 表示 env var 未设置或为空 (启动时 main.rs 会 panic).
+/// 读 daemon JWT secret (Stage 10a 前用, Stage 10a 后改 password → JWT).
+#[allow(dead_code)] // Stage 10a 改用 admin password, 留 Stage 6/9c 路径兼容
 pub fn jwt_secret() -> Option<String> {
     std::env::var("QIANXUN_JWT_SECRET")
         .ok()
@@ -2390,6 +2397,7 @@ mod stage7a_endpoint_tests {
     //! 调完整 router (带 auth middleware), 用 parent module 的 `ENV_MUTEX`
     //! 串行化 env var 操作 (Rust 2024 下 set_var 是 unsafe, 多线程并发是 UB).
     use super::*;
+    use crate::buf_writer::LogRing;
     use crate::daemon::llm_providers::LlmProviderManager;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
@@ -3576,7 +3584,7 @@ mod stage7a_endpoint_tests {
         );
 
         // 串行 3 个请求
-        for i in 0..3 {
+        for _i in 0..3 {
             let app = test_router_with_ui(None);
             let response = app
                 .oneshot(

@@ -1,5 +1,8 @@
 //! VPS Server Team/Project/Member 持久化层 (Stage 3 最小集).
 //!
+//! get_connection/HubStats/RbacError 暂未调用, 留 Phase 4.
+#![allow(dead_code, unused_imports)]
+//!
 //! ## 范围
 //!
 //! 提供 4 张新表的 SQLite 持久化 + 11 个 CRUD 方法, 完整对齐
@@ -292,6 +295,7 @@ impl TeamDb {
     pub fn lookup_device(&self, token: &str) -> SqlResult<Option<DeviceRecord>> {
         let token_hash = sha256_hex(token);
         let conn = self.conn.lock().unwrap();
+        #[allow(clippy::type_complexity)] // 6 字段 tuple 直接读, 不引入 type alias
         let row: Option<(String, Option<String>, Option<String>, String, String, Option<String>)> = conn
             .query_row(
                 "SELECT machine_id, name, host_type, status, created_at, last_active_at

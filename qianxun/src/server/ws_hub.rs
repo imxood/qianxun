@@ -1,5 +1,8 @@
 //! WebSocket Hub — Stage 1 骨架 + Stage 2 auth/heartbeat 状态.
 //!
+//! fields id/connected_at + push_to_user/device/fanout/stats 等暂未 wire, 留 Phase 4.
+#![allow(dead_code)]
+//!
 //! 设计目标:
 //! 1. 维护活跃连接的注册表: `internal_id → Connection` + 双索引 (`by_device`, `by_user`).
 //! 2. 提供 `register` / `unregister` / `push_to_user` / `push_to_device` / `stats` API.

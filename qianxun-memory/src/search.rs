@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 /// 混合搜索 —— FTS5 全文搜索 + 向量语义搜索。
+#[allow(dead_code)] // 权重字段: hybrid ranking 待实现, 留作 Phase 3a 骨架
 pub struct HybridSearch {
     db: Arc<Connection>,
     vector: Arc<RwLock<Option<VectorIndex>>>,

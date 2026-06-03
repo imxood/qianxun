@@ -1,9 +1,10 @@
-use std::borrow::Cow;
+// CLI REPL: 旧 cli 路径, TUI/daemon 模式上线后多数 helper/sink 暂未调用, 留 Phase 4 迁移后清理.
+#![allow(dead_code, unused_imports)]
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::engine::{AgentLoop, processing_loop};
@@ -170,7 +171,6 @@ impl Repl {
     }
 
     /// 历史文件路径: ~/.qianxun/history.txt
-
     /// 会话目录: ~/.qianxun/sessions/
     fn sessions_dir() -> Option<PathBuf> {
         let dir = qianxun_core::workspace::qianxun_dir()?.join("sessions");
@@ -533,7 +533,7 @@ impl Repl {
         });
 
         while self.running {
-            let turn_count = self.agent_loop.turn_count;
+            let _turn_count = self.agent_loop.turn_count;
             // TUI 接管事件循环
             let mut input = String::new();
             print!("❯ ");
@@ -712,7 +712,7 @@ impl Repl {
                 let sys = system_prompt::build_system_prompt(
                     &self.workspace_context,
                     self.global_instructions.as_deref(),
-                    &mode,
+                    mode,
                 );
                 self.conversation = Conversation::new(Some(sys));
                 self.conversation.set_budget(self.budget.0, self.budget.1);
@@ -906,9 +906,7 @@ impl Repl {
                         );
                     }
                 }
-                return;
             }
-
             "/plan" => {
                 // /plan 是 /mode plan 的快捷方式，/plan auto 回到自动模式
                 let sub = cmd.strip_prefix("/plan").map(|s| s.trim()).unwrap_or("");
@@ -918,21 +916,15 @@ impl Repl {
                         eprintln!("  切换到 {} — 所有工具可用", style("自动模式").green());
                     }
                     _ => {
+                        // 包括 "plan" 和任何其他参数: 静默回退到 Plan 模式
+                        // (未知参数不影响主行为, 简化 REPL 体验)
                         self.mode = Mode::Plan;
                         eprintln!(
                             "  切换到 {} — 仅允许读取类工具（Read / Search / Think）",
                             style("计划模式").cyan()
                         );
                     }
-                    _ => {
-                        eprintln!(
-                            "  未知参数: {}。用法: {}",
-                            style(sub).red(),
-                            style("/plan [auto]").cyan()
-                        );
-                    }
                 }
-                return;
             }
 
             _ => {
@@ -962,7 +954,7 @@ impl Repl {
                 }
 
                 // 基础命令匹配（例如 /mode plan → /mode）
-                let base = cmd.split_whitespace().next().unwrap_or(cmd);
+                let _base = cmd.split_whitespace().next().unwrap_or(cmd);
                 let base_matches: Vec<&&str> = SLASH_COMMANDS
                     .iter()
                     .filter(|c| cmd.starts_with(*c))
@@ -1089,7 +1081,7 @@ impl Repl {
             } else {
                 &msg
             };
-            let _ = m.remember(&summary, "conversation").await;
+            let _ = m.remember(summary, "conversation").await;
         }
 
         // 自动保存会话（每次轮次后）
