@@ -21,6 +21,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -37,6 +38,7 @@ use qianxun_memory::MemoryStats;
 use crate::daemon::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
 use crate::daemon::output_sink::DaemonOutputSink;
 use crate::daemon::sse::{SseEvent, SseEventBuilder};
+use crate::daemon::kanban_host::KanbanSseEvent;
 use crate::daemon::AppState;
 
 /// 健康检查响应。
@@ -96,6 +98,10 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/", get(root_handler))
         .route("/v1/system/health", get(health_handler))
         .route("/v1/system/status", get(status_handler))
+        // 阶段 5.1 (2026-06-04): 统一系统事件流 — 桥接 kanban_host.sse_tx,
+        // 前端 /kanban/{id} 等 Kanban 页面 SSE 实时刷新依赖此端点. Chat SSE
+        // 继续走 /v1/chat/session/{id}/prompt 单独流.
+        .route("/v1/events", get(events_handler))
         // 会话
         .route("/v1/chat/session", post(create_session))
         .route("/v1/chat/session/{id}", get(get_session).delete(delete_session))
@@ -471,6 +477,91 @@ async fn status_handler() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "stage": "stage-2-sse-streaming",
     }))
+}
+
+/// 阶段 5.1 (2026-06-04): `GET /v1/events` — 统一系统事件 SSE 流.
+///
+/// 当前覆盖:
+/// - 5 个 Kanban SSE 事件 (Assigned/Progress/Completed/Spawned/BlackboardUpdate)
+///   来自 `kanban_host.sse_tx` (broadcast::Sender, 256 buffer).
+/// - 15s 心跳 `: keepalive` (注释行, 标准 SSE 协议), 防 NAT 切断.
+///
+/// 未覆盖 (v2):
+/// - chat 流式事件 (TextDelta/ToolUse 等) — 仍走 `/v1/chat/session/{id}/prompt`
+/// - 系统级事件 (config_changed/error 等) — 暂无 broadcast, 后续 task 加.
+///
+/// 行为契约:
+/// - 客户端断连: `state.kanban_host` 为 `None` (单测场景) 返 503 + JSON 错误.
+async fn events_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, (StatusCode, Json<serde_json::Value>)>
+{
+    let host = state.kanban_host.as_ref().ok_or_else(|| {
+        tracing::warn!("[/v1/events] kanban_host not initialized");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "kanban_unavailable",
+                "message": "Kanban subsystem not initialized; SSE disabled",
+            })),
+        )
+    })?;
+    let rx: broadcast::Receiver<KanbanSseEvent> = host.subscribe();
+
+    // 用 futures::stream::unfold 包装 broadcast::Receiver + interval.
+    // state 字段: (rx, keepalive_interval).
+    let stream = futures::stream::unfold(
+        (rx, tokio::time::interval(std::time::Duration::from_secs(15))),
+        |(mut rx, mut keepalive)| async move {
+            tokio::select! {
+                evt = rx.recv() => {
+                    match evt {
+                        Ok(ev) => Some((
+                            Ok::<Event, Infallible>(kanban_sse_to_event(&ev)),
+                            (rx, keepalive),
+                        )),
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("[/v1/events] subscriber lagged {n} kanban events");
+                            Some((
+                                Ok(Event::default()
+                                    .event("lagged")
+                                    .data(format!("{{\"skipped\":{n}}}"))),
+                                (rx, keepalive),
+                            ))
+                        }
+                        Err(broadcast::error::RecvError::Closed) => None,
+                    }
+                }
+                _ = keepalive.tick() => {
+                    Some((
+                        Ok::<Event, Infallible>(Event::default().comment("keepalive")),
+                        (rx, keepalive),
+                    ))
+                }
+            }
+        },
+    );
+
+    // 头 1 个 ready 心跳 (注释行, 标准 SSE), 然后链 unfold
+    let ready = futures::stream::once(async {
+        Ok::<Event, Infallible>(Event::default().comment("ready"))
+    });
+    let chained = futures::stream::select(ready, stream);
+    let boxed: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = Box::pin(chained);
+    Ok(Sse::new(boxed))
+}
+
+/// `KanbanSseEvent` → axum SSE `Event` (data: <json>).
+///
+/// 5 个 variant 全部用 `#[serde(tag = "type", rename_all = "snake_case")]`,
+/// 直接 `serde_json::to_string` 拿到 `{"type":"kanban_task_assigned", ...}` 帧,
+/// 跟前端 `kanban_parser.ts::parseKanbanEvent` 对称.
+fn kanban_sse_to_event(event: &KanbanSseEvent) -> Event {
+    let json = serde_json::to_string(event).unwrap_or_else(|e| {
+        tracing::error!("[/v1/events] serialize kanban event: {e}");
+        r#"{"type":"error","code":"internal","message":"event serialization failed"}"#.to_string()
+    });
+    Event::default().data(json)
 }
 
 // ─── 会话 ──────────────────────────────────────────────────
