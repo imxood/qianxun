@@ -530,6 +530,75 @@ pub fn str_to_task_status(s: &str) -> Option<TaskStatus> {
     }
 }
 
+/// SQL row -> AgentRun (列顺序跟 kanban_host.rs::start() 一致).
+pub fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRun> {
+    let status_str: String = row.get(3)?;
+    let status = str_to_run_status(&status_str).unwrap_or(RunStatus::Pending);
+    let outcome_str: String = row.get(8)?;
+    let outcome = str_to_run_outcome(&outcome_str).unwrap_or(RunOutcome::Success);
+    let started_at_str: String = row.get(6)?;
+    let started_at = started_at_str
+        .parse::<DateTime<Utc>>()
+        .unwrap_or_else(|_| Utc::now());
+    let parse_opt = |s: String| s.parse::<DateTime<Utc>>().ok();
+    let heartbeat_str: Option<String> = row.get(5)?;
+    let ended_str: Option<String> = row.get(7)?;
+    Ok(AgentRun {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        profile_id: row.get(2)?,
+        status,
+        claim_id: row.get(4)?,
+        r_heartbeat_at: heartbeat_str.and_then(parse_opt),
+        started_at,
+        ended_at: ended_str.and_then(parse_opt),
+        outcome,
+        summary: row.get(9)?,
+        error: row.get(10)?,
+        token_input: row.get::<_, i64>(11)? as u64,
+        token_output: row.get::<_, i64>(12)? as u64,
+    })
+}
+
+/// RunStatus -> snake_case str.
+pub fn run_status_to_str(s: RunStatus) -> &'static str {
+    match s {
+        RunStatus::Pending => "pending",
+        RunStatus::Running => "running",
+        RunStatus::Done => "done",
+        RunStatus::Crashed => "crashed",
+        RunStatus::TimedOut => "timed_out",
+        RunStatus::Failed => "failed",
+        RunStatus::Cancelled => "cancelled",
+    }
+}
+
+/// str -> RunStatus (宽容解析).
+pub fn str_to_run_status(s: &str) -> Option<RunStatus> {
+    match s {
+        "pending" => Some(RunStatus::Pending),
+        "running" => Some(RunStatus::Running),
+        "done" => Some(RunStatus::Done),
+        "crashed" => Some(RunStatus::Crashed),
+        "timed_out" => Some(RunStatus::TimedOut),
+        "failed" => Some(RunStatus::Failed),
+        "cancelled" => Some(RunStatus::Cancelled),
+        _ => None,
+    }
+}
+
+/// str -> RunOutcome (宽容解析).
+pub fn str_to_run_outcome(s: &str) -> Option<RunOutcome> {
+    match s {
+        "success" => Some(RunOutcome::Success),
+        "partial_success" => Some(RunOutcome::PartialSuccess),
+        "failure" => Some(RunOutcome::Failure),
+        "skipped" => Some(RunOutcome::Skipped),
+        "gate_blocked" => Some(RunOutcome::GateBlocked),
+        _ => None,
+    }
+}
+
 /// RunOutcome -> snake_case str.
 pub fn run_outcome_to_str(o: RunOutcome) -> &'static str {
     match o {

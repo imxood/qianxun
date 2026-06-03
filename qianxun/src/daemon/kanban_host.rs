@@ -102,12 +102,75 @@ impl KanbanHost {
         }
     }
 
-    /// 启动 dispatcher 后台 task (每 2 秒调 dispatch_once)
-    pub fn start(self: Arc<Self>) {
-        let dispatcher = self.dispatcher.clone();
+    /// 启动 dispatcher 后台 task (每 2 秒调 dispatch_once, 拾到 ready task 后
+    /// 调 `agent_host.create_session_for_kanban_task` 真 spawn session, v2 接
+    /// processing_loop).
+    pub fn start(self: Arc<Self>, agent_host: std::sync::Arc<crate::daemon::agent_host::AgentLoopHost>) {
+        let me = self.clone();
+        let agent_host = agent_host.clone();
         tokio::spawn(async move {
             tracing::info!("[kanban_host] dispatcher run_forever starting");
-            dispatcher.run_forever().await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                match me.dispatcher.dispatch_once().await {
+                    Ok(Some(r)) => {
+                        tracing::info!(
+                            "[kanban_host] dispatched task={} run={} profile={}",
+                            r.task_id, r.run_id, r.profile_name
+                        );
+                        // emit KanbanTaskAssigned SSE
+                        let _ = me.sse_tx.send(KanbanSseEvent::KanbanTaskAssigned {
+                            task_id: r.task_id.clone(),
+                            run_id: r.run_id.clone(),
+                            profile_name: r.profile_name.clone(),
+                            title: String::new(),
+                        });
+                        // 真 spawn session (2026-06-04 阶段 4)
+                        // 简化版: 调 create_session + 持久化, 跑 LLM 留 v2
+                        let db = me.db.clone();
+                        let agent_host2 = agent_host.clone();
+                        let task_id = r.task_id.clone();
+                        let run_id = r.run_id.clone();
+                        let _ = db
+                            .run_blocking(move |c: &rusqlite::Connection| -> Result<_, qianxun_core::kanban::KanbanError> {
+                                // 查 task + run
+                                let task: Option<qianxun_core::kanban::types::Task> = c
+                                    .query_row(
+                                        "SELECT id, board_id, parent_id, title, body, assignee_role, status, priority, deadline, metadata, created_at, t_started_at, t_completed_at, last_heartbeat_at \
+                                         FROM kanban_tasks WHERE id = ?1",
+                                        rusqlite::params![task_id],
+                                        |row| {
+                                            use qianxun_core::kanban::db::row_to_task;
+                                            row_to_task(row)
+                                        },
+                                    )
+                                    .ok();
+                                let run: Option<qianxun_core::kanban::types::AgentRun> = c
+                                    .query_row(
+                                        "SELECT id, task_id, profile_id, status, claim_id, r_heartbeat_at, started_at, ended_at, outcome, summary, error, token_input, token_output \
+                                         FROM kanban_runs WHERE id = ?1",
+                                        rusqlite::params![run_id],
+                                        |row| {
+                                            use qianxun_core::kanban::db::row_to_run;
+                                            row_to_run(row)
+                                        },
+                                    )
+                                    .ok();
+                                if let (Some(task), Some(run)) = (task, run) {
+                                    match agent_host2.create_session_for_kanban_task(&task, &run) {
+                                        Ok(_rt) => {}
+                                        Err(e) => tracing::error!("[kanban_host] spawn failed: {e}"),
+                                    }
+                                }
+                                Ok(())
+                            })
+                            .await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("[kanban_host] dispatch error: {e}"),
+                }
+            }
         });
     }
 

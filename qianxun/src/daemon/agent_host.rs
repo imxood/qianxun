@@ -162,6 +162,45 @@ impl AgentLoopHost {
         Ok(runtime)
     }
 
+    /// 2026-06-04 阶段 4: 给 Kanban task 真 spawn session.
+    ///
+    /// MVP 简化版: 调 `create_session` 构造 SessionRuntime, 持久化到
+    /// SessionStore, 不真接 processing_loop (worker 实际跑 LLM 留 v2
+    /// 跟 processing_loop 集成). 当前已能:
+    /// - 创建 session (Stage 1 闭环)
+    /// - 持久化 metadata
+    /// - 注册到 AgentLoopHost.sessions HashMap
+    ///
+    /// 后续 v2: kanban_scope 注入 SessionRuntime, 工具白名单护栏,
+    /// 调 handle_user_message 启动 worker.
+    pub fn create_session_for_kanban_task(
+        &self,
+        task: &qianxun_core::kanban::types::Task,
+        run: &qianxun_core::kanban::types::AgentRun,
+    ) -> Result<Arc<SessionRuntime>, String> {
+        // 1. 调 create_session (Stage 1 闭环)
+        let runtime = self.create_session()?;
+
+        // 2. 持久化到 SessionStore (daemon.db, 通过 state.store)
+        let cfg = r#"{"kanban":true,"task_id":"TASK","run_id":"RUN"}"#
+            .replace("TASK", &task.id)
+            .replace("RUN", &run.id);
+        // Task 没 project_root 字段, project_root 在 Board 上, 这里传 None
+        // (后续 v2: 查 board.project_root 再传)
+        if let Err(e) = self.store.create(&runtime.session_id, None, &cfg) {
+            tracing::warn!(
+                "[kanban] persist session {} failed: {e}",
+                runtime.session_id
+            );
+        }
+
+        tracing::info!(
+            "[kanban] spawned session {} for task={} run={} profile={} (processing_loop 留 v2)",
+            runtime.session_id, task.id, run.id, run.profile_id
+        );
+        Ok(runtime)
+    }
+
     /// 检查会话是否存在.
     pub fn session_exists(&self, id: &str) -> bool {
         self.sessions

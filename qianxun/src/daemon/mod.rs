@@ -228,7 +228,7 @@ pub async fn run(
     );
 
     let state = Arc::new(AppState {
-        agent_host,
+        agent_host: agent_host.clone(),
         config,
         provider,
         tools,
@@ -255,7 +255,7 @@ pub async fn run(
                 qianxun_core::kanban::db::KanbanDb::from_connection(store_db.clone()),
                 team_reg,
             ));
-            host.clone().start();
+            host.clone().start(agent_host.clone());
             Some(host)
         },
     });
