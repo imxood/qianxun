@@ -25,6 +25,7 @@ use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::provider::types::LlmStreamEvent;
 use qianxun_core::types::LlmError;
+use qianxun_memory::MemoryStats;
 
 use crate::buf_writer::LogRing;
 use crate::daemon::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
@@ -96,6 +97,8 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         // 记忆
         .route("/v1/memory/sessions", get(memory_sessions))
         .route("/v1/memory/search", post(memory_search))
+        // Day-3.2: 轻量健康检查 — 验证 MemoryCore 可达 + 报三表行数
+        .route("/v1/memory/ping", get(memory_ping))
         // 技能 (Stage 7a: 加 reload + toggle)
         .route("/v1/skills", get(list_skills).post(reload_skills))
         .route("/v1/skills/{name}/toggle", post(toggle_skill))
@@ -494,6 +497,37 @@ async fn memory_sessions() -> Json<serde_json::Value> {
 
 async fn memory_search() -> Json<serde_json::Value> {
     Json(serde_json::json!({"results": []}))
+}
+
+/// Day-3.2 — `GET /v1/memory/ping` 轻量健康检查.
+///
+/// 调 `MemoryCore::stats()` 验证 SQLite 连接可访问 + 报三表 (observations /
+/// memories / sessions) 行数. 失败时返 500 (而非 200), 方便 Web UI / 上层
+/// 探测脚本区分"端点存在但 db 坏"和"端点不存在"两种场景.
+///
+/// 走 `auth_middleware` — 任何已登录 admin 都能调. 故意**不**加到
+/// `is_auth_skipped_path`, 因为这个 endpoint 暴露数据体量, 算元信息.
+async fn memory_ping(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let MemoryStats {
+        observation_count,
+        memory_count,
+        session_count,
+    } = state.memory.stats().await.map_err(|e| {
+        tracing::error!("[memory_ping] stats() failed: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("memory stats failed: {e}"),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "observations": observation_count,
+        "memories": memory_count,
+        "sessions": session_count,
+    })))
 }
 
 // ─── 技能 ──────────────────────────────────────────────────

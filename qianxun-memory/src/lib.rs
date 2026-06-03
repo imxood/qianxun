@@ -15,6 +15,23 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
+/// 记忆数据库轻量统计 (供 `GET /v1/memory/ping` 使用).
+///
+/// 三张核心表:
+/// - `observations` — 压缩后的单步观测 (observe 写入)
+/// - `memories`     — 跨会话持久记忆 (remember 写入)
+/// - `sessions`     — session 生命周期记录 (session_start 写入)
+///
+/// `i64` 对应 SQLite INTEGER PRIMARY KEY / COUNT(*); 用 i64 是因为
+/// `rusqlite::types::Value::Integer` 走 `FromSql for i64` 最稳, u64 容易
+/// 在大于 i64::MAX 的极端值 (实际不会) 触发溢出警告.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryStats {
+    pub observation_count: i64,
+    pub memory_count: i64,
+    pub session_count: i64,
+}
+
 /// 当前活跃 session 的上下文。
 ///
 /// observe() 期间需要用真实 session_id 替代早期实现的硬编码 "global"。
@@ -104,6 +121,35 @@ impl MemoryCore {
         .await
         .map_err(|e| anyhow::anyhow!("delete_session join: {e}"))??;
         Ok(n)
+    }
+
+    /// Day-3.2: 轻量统计 (observations / memories / sessions 三表行数).
+    ///
+    /// 供 `GET /v1/memory/ping` 使用 — 验证 MemoryCore 可达 + 给出当前
+    /// 数据库体量. 走 `spawn_blocking` 避免持 `std::sync::Mutex` 锁阻塞
+    /// tokio reactor (跟 `delete_observation` / `delete_session` 同模式).
+    ///
+    /// 返回 `MemoryStats`, 调用方决定如何序列化. 任何 SQLite 错误都向上
+    /// 抛 `anyhow::Error` (handler 端映射 500).
+    pub async fn stats(&self) -> anyhow::Result<MemoryStats> {
+        let db = self.db.clone();
+        let stats = tokio::task::spawn_blocking(move || -> rusqlite::Result<MemoryStats> {
+            let conn = db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let observation_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))?;
+            let memory_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+            let session_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+            Ok(MemoryStats {
+                observation_count,
+                memory_count,
+                session_count,
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("stats spawn_blocking join: {e}"))??;
+        Ok(stats)
     }
 }
 
