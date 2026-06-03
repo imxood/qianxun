@@ -186,8 +186,13 @@ impl KanbanDb {
         .map_err(|e| KanbanError::BlockingJoin(e.to_string()))?
     }
 
-    /// 更新 task 状态 (走 state_machine 校验, 见 plan 3 完整集成).
-    /// 本期 MVP-2 plan 2 直接写库, state_machine check 留 plan 3 集成.
+    /// 更新 task 状态 (走 state_machine 校验 + recompute_parent).
+    ///
+    /// 流程 (MVP-2 plan 3 集成):
+    /// 1. 读 current status from DB
+    /// 2. 调 `state_machine::check_transition(from, to)` 校验
+    /// 3. UPDATE 状态 + 同步 t_started_at / t_completed_at
+    /// 4. 调 `state_machine::recompute_parent` 触发父状态机
     pub async fn update_task_status(
         &self,
         id: &str,
@@ -198,23 +203,46 @@ impl KanbanDb {
         let status_str = task_status_to_str(new_status).to_string();
         tokio::task::spawn_blocking(move || -> Result<(), KanbanError> {
             let conn = conn.lock().map_err(|e| KanbanError::BlockingJoin(e.to_string()))?;
-            // 同步 t_started_at / t_completed_at 字段
+            // 1. 读 current status
+            let current_str: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM kanban_tasks WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .ok();
+            let current = current_str
+                .as_deref()
+                .and_then(str_to_task_status)
+                .unwrap_or(TaskStatus::Triage);
+            // 2. 校验转换合法
+            super::state_machine::check_transition(current, new_status)?;
+            // 3. UPDATE 状态 + 同步 t_started_at / t_completed_at
             let now_str = Utc::now().to_rfc3339();
             let set_started = matches!(new_status, TaskStatus::InProgress);
-            let set_completed = matches!(new_status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled);
-            let sql = if set_started {
-                "UPDATE kanban_tasks SET status = ?1, t_started_at = COALESCE(t_started_at, ?2) WHERE id = ?3"
-            } else if set_completed {
-                "UPDATE kanban_tasks SET status = ?1, t_completed_at = ?2 WHERE id = ?3"
-            } else {
-                "UPDATE kanban_tasks SET status = ?1 WHERE id = ?2"
-            };
+            let set_completed = matches!(
+                new_status,
+                TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+            );
             if set_started {
-                conn.execute(sql, params![status_str, now_str, id])?;
+                conn.execute(
+                    "UPDATE kanban_tasks SET status = ?1, t_started_at = COALESCE(t_started_at, ?2) WHERE id = ?3",
+                    params![status_str, now_str, id],
+                )?;
             } else if set_completed {
-                conn.execute(sql, params![status_str, now_str, id])?;
+                conn.execute(
+                    "UPDATE kanban_tasks SET status = ?1, t_completed_at = ?2 WHERE id = ?3",
+                    params![status_str, now_str, id],
+                )?;
             } else {
-                conn.execute(sql, params![status_str, id])?;
+                conn.execute(
+                    "UPDATE kanban_tasks SET status = ?1 WHERE id = ?2",
+                    params![status_str, id],
+                )?;
+            }
+            // 4. 触发父状态机 (Hermes recompute_parent)
+            if matches!(new_status, TaskStatus::Done) {
+                let _ = super::state_machine::recompute_parent(&conn, &id);
             }
             Ok(())
         })
@@ -674,25 +702,34 @@ mod tests {
         let all = db.list_tasks(&board, None).await.expect("list all");
         assert_eq!(all.len(), 3);
 
-        // t1 -> ready, t2 -> in_progress, t3 保持 triage
+        // t1: Triage -> Ready, t2: Triage -> Ready -> InProgress (符合 state_machine)
         db.update_task_status(&t1.id, TaskStatus::Ready).await.expect("u1");
-        db.update_task_status(&t2.id, TaskStatus::InProgress).await.expect("u2");
+        db.update_task_status(&t2.id, TaskStatus::Ready).await.expect("u2a");
+        db.update_task_status(&t2.id, TaskStatus::InProgress).await.expect("u2b");
+        // t3 保持 triage
 
         let triage = db.list_tasks(&board, Some(TaskStatus::Triage)).await.expect("triage");
         assert_eq!(triage.len(), 1);
         assert_eq!(triage[0].title, "e");
+        let ready = db.list_tasks(&board, Some(TaskStatus::Ready)).await.expect("ready");
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].title, "a");
+        let in_progress = db.list_tasks(&board, Some(TaskStatus::InProgress)).await.expect("ip");
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0].title, "c");
     }
 
     #[tokio::test]
     async fn test_update_task_status_syncs_timestamps() {
         let (db, board, _profile) = setup_db().await;
         let task = db.create_task(None, &board, None, "x", "y", "coder", 128).await.expect("c");
-        // triage -> in_progress 应自动设 t_started_at
+        // Triage -> Ready -> InProgress (符合 state_machine 合法转换)
+        db.update_task_status(&task.id, TaskStatus::Ready).await.expect("r");
         db.update_task_status(&task.id, TaskStatus::InProgress).await.expect("u");
         let fetched = db.get_task(&task.id).await.expect("g").unwrap();
         assert_eq!(fetched.status, TaskStatus::InProgress);
         assert!(fetched.t_started_at.is_some(), "t_started_at should be set");
-        // in_progress -> done 应自动设 t_completed_at
+        // InProgress -> Done 应自动设 t_completed_at
         db.update_task_status(&task.id, TaskStatus::Done).await.expect("d");
         let fetched2 = db.get_task(&task.id).await.expect("g2").unwrap();
         assert!(fetched2.t_completed_at.is_some(), "t_completed_at should be set");

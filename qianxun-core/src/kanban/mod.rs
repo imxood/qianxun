@@ -26,6 +26,7 @@
 
 pub mod db;
 pub mod error;
+pub mod state_machine;
 pub mod types;
 
 pub use db::KanbanDb;
