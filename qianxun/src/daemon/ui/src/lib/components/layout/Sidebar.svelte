@@ -5,7 +5,7 @@
 	// 包含连接状态指示 (Stage 9c 离线检测接入)
 
 	import { page } from '$app/state';
-	import { Brain, Sparkles, Server, Wrench, Database, MessagesSquare, FileCog, Activity, MessageSquare, Settings as SettingsIcon } from '@lucide/svelte';
+	import { Brain, Sparkles, Server, Wrench, Database, MessagesSquare, FileCog, Activity, MessageSquare, Settings as SettingsIcon, KanbanSquare, FolderKanban, Users } from '@lucide/svelte';
 	import { t } from '$lib/i18n';
 	import { uiStore } from '$lib/stores/ui.svelte';
 	import { connectionStore } from '$lib/stores/connection.svelte';
@@ -36,6 +36,13 @@
 	// Stage 9c: 第 3 区 — 系统 (Settings 单飞)
 	const systemItems: NavItem[] = [
 		{ href: '/settings', label: 'Settings', i18n: 'nav.settings', icon: SettingsIcon }
+	];
+
+	// 2026-06-04 阶段 3: Kanban 协作区 (3 项)
+	const kanbanItems: NavItem[] = [
+		{ href: '/kanban', label: 'Kanban', i18n: 'nav.kanban', icon: KanbanSquare },
+		{ href: '/projects', label: 'Projects', i18n: 'nav.projects', icon: FolderKanban },
+		{ href: '/team', label: 'Team', i18n: 'nav.team', icon: Users }
 	];
 
 	function isActive(href: string): boolean {

@@ -25,6 +25,7 @@
 
 	"nav.management": "管理",
 	"nav.operations": "运维",
+	"nav.collaboration": "协作",
 	"nav.system": "系统",
 	"nav.chat": "Chat",
 	"nav.llm": "LLM Providers",
@@ -35,6 +36,9 @@
 	"nav.sessions": "Chat Sessions",
 	"nav.config": "Config",
 	"nav.settings": "Settings",
+	"nav.kanban": "Kanban",
+	"nav.projects": "Projects",
+	"nav.team": "Team",
 
 	"topbar.connected": "Daemon 已连接",
 	"topbar.offline": "Daemon 离线",

@@ -25,6 +25,7 @@
 
 	"nav.management": "Management",
 	"nav.operations": "Operations",
+	"nav.collaboration": "Collab",
 	"nav.system": "System",
 	"nav.chat": "Chat",
 	"nav.llm": "LLM Providers",
@@ -35,6 +36,9 @@
 	"nav.sessions": "Chat Sessions",
 	"nav.config": "Config",
 	"nav.settings": "Settings",
+	"nav.kanban": "Kanban",
+	"nav.projects": "Projects",
+	"nav.team": "Team",
 
 	"topbar.connected": "Daemon connected",
 	"topbar.offline": "Daemon offline",
