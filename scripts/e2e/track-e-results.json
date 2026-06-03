@@ -1,0 +1,42 @@
+{
+  "results": {
+    "health": "ok",
+    "tools": {
+      "status": 200,
+      "count": 8,
+      "sample": [
+        {
+          "description": "读取文件内容",
+          "name": "read_text_file"
+        },
+        {
+          "description": "写入文件",
+          "name": "write_text_file"
+        },
+        {
+          "description": "搜索文件",
+          "name": "search"
+        }
+      ]
+    },
+    "skills": {
+      "status": 200,
+      "count": 1,
+      "names": [
+        "rust-dev"
+      ]
+    },
+    "memory": {
+      "status": 200,
+      "pingStatus": "ok",
+      "body": {
+        "memories": 12,
+        "observations": 0,
+        "sessions": 0,
+        "status": "ok"
+      }
+    }
+  },
+  "exitCode": 0,
+  "daemonLogTail": "admin credential loaded (path=C:\\Users\\maxu\\.qianxun\\admin.cred, hash_len=60B, secret_len=43B)\n\u001b[2m2026-06-03 14:45:56.324\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m Daemon starting on 127.0.0.1:23900\n\u001b[2m2026-06-03 14:45:56.324\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] Web UI disabled (no --ui-dist / QIANXUN_UI_DIST)\n\u001b[2m2026-06-03 14:45:56.324\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqianxun_core::provider\u001b[0m\u001b[2m:\u001b[0m [provider] creating provider: id=minimax model=MiniMax-M3 base_url=https://api.minimaxi.com/anthropic\n\u001b[2m2026-06-03 14:45:56.325\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] builtin tools registered \u001b[3mregistered\u001b[0m\u001b[2m=\u001b[0m13\n\u001b[2m2026-06-03 14:45:56.326\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] memory opened \u001b[3mpath\u001b[0m\u001b[2m=\u001b[0m\"C:\\\\Users\\\\maxu\\\\.qianxun\\\\mem.db\"\n\u001b[2m2026-06-03 14:45:56.326\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqianxun_core::skills\u001b[0m\u001b[2m:\u001b[0m [skills] loaded 1 skills from \"C:\\\\Users\\\\maxu\\\\.qianxun\\\\skills\"\n\u001b[2m2026-06-03 14:45:56.326\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] skills loaded \u001b[3mcount\u001b[0m\u001b[2m=\u001b[0m1\n\u001b[2m2026-06-03 14:45:56.327\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] session store initialized at C:\\Users\\maxu\\.qianxun\\daemon.db\n\u001b[2m2026-06-03 14:45:56.327\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon::agent_host\u001b[0m\u001b[2m:\u001b[0m [daemon] restoring session sess_20260602_163653_245256 from snapshot ordinal=1\n\u001b[2m2026-06-03 14:45:56.327\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon::agent_host\u001b[0m\u001b[2m:\u001b[0m [daemon] restoring session sess_20260602_163629_675207 from snapshot ordinal=1\n\u001b[2m2026-06-03 14:45:56.327\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon::agent_host\u001b[0m\u001b[2m:\u001b[0m [daemon] restoring session sess_20260602_034516_151057 from snapshot ordinal=0\n\u001b[2m2026-06-03 14:45:56.327\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] restored 3 session(s) from disk\n\u001b[2m2026-06-03 14:45:56.327\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mqx::daemon\u001b[0m\u001b[2m:\u001b[0m [daemon] LLM provider manager initialized: 2 providers, active=minimax\n"
+}
