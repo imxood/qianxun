@@ -84,6 +84,11 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
+    /// 暴露共享 connection (给 MVP-3 KanbanDb 复用 daemon.db, v6 §7.3 决策).
+    pub fn db_arc(&self) -> std::sync::Arc<std::sync::Mutex<rusqlite::Connection>> {
+        self.db.clone()
+    }
+
     /// 打开 / 创建 SQLite 数据库, 初始化 3 张表.
     pub fn new(path: &Path) -> Result<Self, SessionStoreError> {
         // 确保父目录存在

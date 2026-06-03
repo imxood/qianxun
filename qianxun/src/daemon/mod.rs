@@ -1,5 +1,6 @@
 pub mod agent_host;
 pub mod auth;
+pub mod kanban_host;
 pub mod llm_providers;
 pub mod output_sink;
 pub mod persistence;
@@ -7,6 +8,7 @@ pub mod router;
 pub mod service;
 pub mod session_runtime;
 pub mod sse;
+pub mod team_registry;
 
 #[cfg(test)]
 mod llm_integration_tests;
@@ -68,6 +70,11 @@ pub struct AppState {
     /// Stage 3 切 true: 接入 `processing_loop::handle_user_message` + 工具执行.
     pub processing_loop_enabled: bool,
     /// Stage 7b: daemon 启动时间戳. `/v1/system/metrics` 计算 uptime.
+    /// MVP-3 plan 1: Kanban 子系统集成 (kanban_db + dispatcher + team_registry).
+    /// 3 个字段都用 `Option` 让测试场景 (无 Kanban) 不需要构造完整 host.
+    pub kanban_db: Option<qianxun_core::kanban::db::KanbanDb>,
+    pub kanban_team_registry: Option<qianxun_core::kanban::team::TeamRegistry>,
+    pub kanban_host: Option<Arc<kanban_host::KanbanHost>>,
     pub started_at: Instant,
     /// Stage 7b: 当前活跃 HTTP 请求数. auth_middleware 进时 +1, 出时 -1
     /// (drop guard 实现). `/v1/system/metrics` 报告.
@@ -175,6 +182,8 @@ pub async fn run(
         .map(|d| d.join("daemon.db"))
         .ok_or_else(|| anyhow::anyhow!("cannot determine ~/.qianxun home dir"))?;
     let store = Arc::new(SessionStore::new(&store_path)?);
+    // MVP-3 plan 1: 提前 clone store 共享 connection, 给 KanbanDb 复用 daemon.db
+    let store_db = store.db_arc();
     tracing::info!(
         "[daemon] session store initialized at {}",
         store_path.display()
@@ -229,6 +238,18 @@ pub async fn run(
         active_conns: Arc::new(AtomicUsize::new(0)),
         log_ring: Arc::new(LogRing::new()),
         admin,
+        // MVP-3 plan 1: 跟 store 共享 connection, 复用 daemon.db
+        kanban_db: Some(qianxun_core::kanban::db::KanbanDb::from_connection(store_db.clone())),
+        kanban_team_registry: Some(qianxun_core::kanban::team::TeamRegistry::load_default()),
+        kanban_host: {
+            let team_reg = qianxun_core::kanban::team::TeamRegistry::load_default();
+            let host = Arc::new(kanban_host::KanbanHost::new(
+                qianxun_core::kanban::db::KanbanDb::from_connection(store_db.clone()),
+                team_reg,
+            ));
+            host.clone().start();
+            Some(host)
+        },
     });
 
     // 启动 reap_stale 后台任务 (Stage 1 暂不 await, 实际不退出)
@@ -345,6 +366,23 @@ pub async fn graceful_shutdown_orchestrator(state: Arc<AppState>) {
 
 // ─── Tests (Stage 10b) ──────────────────────────────────────────
 
+/// MVP-3 plan 1 test helper: 构造最小 Kanban 字段 (3 个) 复用 store.db_arc().
+/// 4 处测试都调这个, 避免重复 8 行构造.
+pub fn make_minimal_kanban_for_test(
+    store: &Arc<SessionStore>,
+) -> (
+    qianxun_core::kanban::db::KanbanDb,
+    qianxun_core::kanban::team::TeamRegistry,
+    Arc<crate::daemon::kanban_host::KanbanHost>,
+) {
+    let team_reg = qianxun_core::kanban::team::TeamRegistry::load_default();
+    let host = Arc::new(crate::daemon::kanban_host::KanbanHost::new(
+        qianxun_core::kanban::db::KanbanDb::from_connection(store.db_arc()),
+        team_reg.clone(),
+    ));
+    (qianxun_core::kanban::db::KanbanDb::from_connection(store.db_arc()), team_reg, host)
+}
+
 #[cfg(test)]
 mod graceful_shutdown_tests {
     use super::*;
@@ -410,6 +448,10 @@ mod graceful_shutdown_tests {
                 "test_secret_for_graceful_shutdown_tests_xx",
                 "placeholder_hash",
             )),
+            // MVP-3 plan 1: 测试场景不集成 Kanban
+            kanban_db: None,
+            kanban_team_registry: None,
+            kanban_host: None,
         })
     }
 

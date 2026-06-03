@@ -128,6 +128,10 @@ fn make_test_state() -> Arc<crate::daemon::AppState> {
         active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         log_ring: Arc::new(LogRing::new()),
         admin,
+        // MVP-3 plan 1: 测试场景不集成 Kanban
+        kanban_db: None,
+        kanban_team_registry: None,
+        kanban_host: None,
     })
 }
 

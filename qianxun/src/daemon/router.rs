@@ -156,6 +156,17 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
             "/v1/system/admin/rotate-token",
             post(admin_rotate_token),
         )
+        // MVP-3 plan 2: Kanban 核心路由 (v6 §8.5, 留 v2 扩展)
+        //  - POST /v1/kanban/boards                 创建 board, 自动 spawn techlead
+        //  - GET  /v1/kanban/boards                 列出 boards
+        //  - GET  /v1/kanban/boards/{id}            查 board 详情
+        //  - GET  /v1/kanban/boards/{id}/tasks      列 board 下 task
+        //  - GET  /v1/projects                      列 projects (v5 §3.6)
+        //  - POST /v1/projects                      创建 project
+        .route("/v1/kanban/boards", get(list_kanban_boards).post(create_kanban_board))
+        .route("/v1/kanban/boards/{id}", get(get_kanban_board))
+        .route("/v1/kanban/boards/{id}/tasks", get(list_kanban_board_tasks))
+        .route("/v1/projects", get(list_projects).post(create_project))
         // Stage 10a: 密码登录 + 修改密码 + 登出
         //  - /v1/auth/login       公开 (跳过 auth middleware) — 拿密码换短期 JWT
         //  - /v1/auth/change-password  需要 auth (要已登录才能改)
@@ -2148,6 +2159,10 @@ mod jwt_auth_tests {
             active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             log_ring: Arc::new(crate::buf_writer::LogRing::new()),
             admin: Arc::new(AdminCredential::for_test(secret, "test-hash-not-used")),
+            // MVP-3 plan 1: 测试场景不集成 Kanban, 3 字段 None
+            kanban_db: None,
+            kanban_team_registry: None,
+            kanban_host: None,
         })
     }
 
@@ -2642,6 +2657,10 @@ mod stage7a_endpoint_tests {
             // Stage 10b: admin credential (用 for_test 注入已知 TEST_SECRET, 让
             // `set_jwt_secret(TEST_SECRET)` 同步后, middleware 验签能通过).
             admin: test_admin_credential(),
+            // MVP-3 plan 1: 测试场景不集成 Kanban
+            kanban_db: None,
+            kanban_team_registry: None,
+            kanban_host: None,
         })
     }
 
@@ -4059,3 +4078,291 @@ mod stage12_memory_observations_tests {
     }
 }
 
+
+// =============================================================================
+// Kanban HTTP 路由 (MVP-3 plan 2, v6 §8.5)
+// =============================================================================
+
+use qianxun_core::kanban::types::{
+    BoardStatus, KanbanBoard, Project, ProjectStatus,
+};
+
+/// GET /v1/kanban/boards - 列出 boards
+async fn list_kanban_boards(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state
+        .kanban_host
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let boards = host
+        .db
+        .run_blocking(|c: &rusqlite::Connection| -> Result<Vec<KanbanBoard>, qianxun_core::kanban::KanbanError> {
+            let mut stmt = c.prepare(
+                "SELECT id, project_id, name, project_root, default_role, status, created_at, updated_at \
+                 FROM kanban_boards ORDER BY created_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let status_str: String = row.get(5)?;
+                    let status = match status_str.as_str() {
+                        "archived" => BoardStatus::Archived,
+                        _ => BoardStatus::Active,
+                    };
+                    let cas: String = row.get(6)?;
+                    let uas: String = row.get(7)?;
+                    Ok(KanbanBoard {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        name: row.get(2)?,
+                        project_root: row.get::<_, String>(3)?.into(),
+                        default_role: row.get(4)?,
+                        status,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&cas)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&uas)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kanban query: {e}")))?;
+    Ok(Json(serde_json::json!({ "boards": boards })))
+}
+
+/// POST /v1/kanban/boards - 创建 board + emit KanbanTaskSpawned SSE
+async fn create_kanban_board(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state
+        .kanban_host
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let name = body["name"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "name required".into()))?;
+    let project_root = body["project_root"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "project_root required".into()))?;
+    let default_role = body["default_role"].as_str().unwrap_or("techlead");
+    let board = host
+        .db
+        .run_blocking({
+            let name = name.to_string();
+            let project_root = project_root.to_string();
+            let default_role = default_role.to_string();
+            move |c: &rusqlite::Connection| -> Result<KanbanBoard, qianxun_core::kanban::KanbanError> {
+                let now_str = chrono::Utc::now().to_rfc3339();
+                let board_id = format!("kb_{}", uuid::Uuid::new_v4());
+                c.execute(
+                    "INSERT INTO kanban_boards (id, project_id, name, project_root, default_role, status, created_at, updated_at) \
+                     VALUES (?1, 'proj_default', ?2, ?3, ?4, 'active', ?5, ?5)",
+                    rusqlite::params![board_id, name, project_root, default_role, now_str],
+                )?;
+                Ok(KanbanBoard {
+                    id: board_id,
+                    project_id: "proj_default".into(),
+                    name: name.clone(),
+                    project_root: std::path::PathBuf::from(project_root),
+                    default_role,
+                    status: BoardStatus::Active,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            }
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create board: {e}")))?;
+    // emit SSE: KanbanTaskSpawned 复用表示 board 创建 (任务面板展示)
+    host.emit(crate::daemon::kanban_host::KanbanSseEvent::KanbanTaskSpawned {
+        parent_task_id: None,
+        child_task_id: board.id.clone(),
+        title: format!("board: {name}"),
+        assignee_role: board.default_role.clone(),
+    });
+    Ok(Json(serde_json::json!({ "board": board })))
+}
+
+/// GET /v1/kanban/boards/{id} - 查 board 详情
+async fn get_kanban_board(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state
+        .kanban_host
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let id_c = id.clone();
+    let board = host
+        .db
+        .run_blocking(move |c: &rusqlite::Connection| -> Result<Option<KanbanBoard>, qianxun_core::kanban::KanbanError> {
+            let mut stmt = c.prepare(
+                "SELECT id, project_id, name, project_root, default_role, status, created_at, updated_at \
+                 FROM kanban_boards WHERE id = ?1",
+            )?;
+            let board = stmt
+                .query_row(rusqlite::params![id_c], |row| {
+                    let status_str: String = row.get(5)?;
+                    let status = match status_str.as_str() {
+                        "archived" => BoardStatus::Archived,
+                        _ => BoardStatus::Active,
+                    };
+                    let cas: String = row.get(6)?;
+                    let uas: String = row.get(7)?;
+                    Ok(KanbanBoard {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        name: row.get(2)?,
+                        project_root: row.get::<_, String>(3)?.into(),
+                        default_role: row.get(4)?,
+                        status,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&cas)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&uas)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                    })
+                })
+                .ok();
+            Ok(board)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+    match board {
+        Some(b) => Ok(Json(serde_json::json!({ "board": b }))),
+        None => Err((StatusCode::NOT_FOUND, format!("board not found: {id}"))),
+    }
+}
+
+/// GET /v1/kanban/boards/{id}/tasks - 列 board 下 task
+async fn list_kanban_board_tasks(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state
+        .kanban_host
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let tasks = host
+        .db
+        .list_tasks(&id, None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("list tasks: {e}")))?;
+    let count_by_status: std::collections::HashMap<String, usize> = {
+        let mut m = std::collections::HashMap::new();
+        for t in &tasks {
+            *m.entry(format!("{:?}", t.status)).or_insert(0) += 1;
+        }
+        m
+    };
+    Ok(Json(serde_json::json!({
+        "tasks": tasks,
+        "total": tasks.len(),
+        "by_status": count_by_status,
+    })))
+}
+
+/// GET /v1/projects - 列出 projects
+async fn list_projects(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state
+        .kanban_host
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let projects = host
+        .db
+        .run_blocking(|c: &rusqlite::Connection| -> Result<Vec<Project>, qianxun_core::kanban::KanbanError> {
+            let mut stmt = c.prepare(
+                "SELECT id, name, description, default_root, extra_roots, status, owner, created_at, updated_at \
+                 FROM kanban_projects ORDER BY created_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let status_str: String = row.get(5)?;
+                    let status = match status_str.as_str() {
+                        "archived" => ProjectStatus::Archived,
+                        _ => ProjectStatus::Active,
+                    };
+                    let extra_roots_str: String = row.get(4)?;
+                    let extra_roots: Vec<std::path::PathBuf> = serde_json::from_str(&extra_roots_str)
+                        .unwrap_or_default();
+                    let cas: String = row.get(7)?;
+                    let uas: String = row.get(8)?;
+                    Ok(Project {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        default_root: row.get::<_, String>(3)?.into(),
+                        extra_roots,
+                        status,
+                        owner: row.get(6)?,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&cas)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&uas)
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+    Ok(Json(serde_json::json!({ "projects": projects })))
+}
+
+/// POST /v1/projects - 创建 project
+async fn create_project(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state
+        .kanban_host
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let name = body["name"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "name required".into()))?;
+    let description = body["description"].as_str().unwrap_or("");
+    let default_root = body["default_root"].as_str().unwrap_or("");
+    let project = host
+        .db
+        .run_blocking({
+            let name = name.to_string();
+            let description = description.to_string();
+            let default_root = default_root.to_string();
+            move |c: &rusqlite::Connection| -> Result<Project, qianxun_core::kanban::KanbanError> {
+                let now_str = chrono::Utc::now().to_rfc3339();
+                let project_id = format!("proj_{}", uuid::Uuid::new_v4());
+                c.execute(
+                    "INSERT INTO kanban_projects (id, name, description, default_root, extra_roots, status, owner, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, '[]', 'active', 'local', ?5, ?5)",
+                    rusqlite::params![project_id, name, description, default_root, now_str],
+                )?;
+                Ok(Project {
+                    id: project_id,
+                    name: name.clone(),
+                    description,
+                    default_root: std::path::PathBuf::from(default_root),
+                    extra_roots: vec![],
+                    status: ProjectStatus::Active,
+                    owner: "local".into(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            }
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create: {e}")))?;
+    Ok(Json(serde_json::json!({ "project": project })))
+}

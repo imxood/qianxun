@@ -119,6 +119,10 @@ async fn spawn_test_daemon(
             )
             .expect("test admin credential"),
         ),
+        // MVP-3 plan 1: Kanban 字段 (测试不集成真 Kanban, 全 None)
+        kanban_db: None,
+        kanban_team_registry: None,
+        kanban_host: None,
     });
 
     // 7. Build router (不带 UI dist, 走 None)
