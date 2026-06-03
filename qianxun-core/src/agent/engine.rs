@@ -504,3 +504,38 @@ pub mod processing_loop {
         }
     }
 }
+
+/// Heartbeat 桥 (v6 §4 模式 7, MVP-2 plan 6 收尾).
+///
+/// 在 `processing_loop` 处理 LlmStreamEvent::Text / ToolCall 之后调用,
+/// 60s 限频 (内部维护 last 时刻), best-effort 写 `kanban_tasks.last_heartbeat_at`.
+///
+/// 集成用法 (MVP-3 在 daemon/agent_host.rs::spawn_session_for_task 调):
+/// ```ignore
+/// maybe_write_heartbeat(&kanban_db, &task_id).await;
+/// ```
+pub async fn maybe_write_heartbeat(
+    db: &crate::kanban::db::KanbanDb,
+    task_id: &str,
+) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    // 60s 限频 (进程级, MVP-2 plan 6 简化: 单 Mutex 共享)
+    static LAST: std::sync::OnceLock<Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    let cache = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    {
+        let mut map = cache.lock().unwrap();
+        if let Some(prev) = map.get(task_id) {
+            if now.duration_since(*prev).as_secs() < 60 {
+                return; // 60s 限频, skip
+            }
+        }
+        map.insert(task_id.to_string(), now);
+    }
+    // 写 DB (best-effort, 失败 warn 不抛)
+    if let Err(e) = db.update_heartbeat(task_id).await {
+        tracing::warn!("[kanban] heartbeat failed for {task_id}: {e}");
+    }
+}

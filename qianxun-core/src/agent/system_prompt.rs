@@ -70,6 +70,21 @@ pub fn build_system_prompt(
     parts.join("\n")
 }
 
+/// 注入 Kanban 上下文 (v6 §4 模式 3 Worker scope 护栏).
+///
+/// 加 `[CURRENT_TASK_ID]` 占位符让 LLM 知道当前 task, 防 prompt injection
+/// 篡改兄弟任务 (Worker 只能动 assigned task).
+pub fn inject_kanban_scope(prompt: &str, task_id: Option<&str>, role_suffix: Option<&str>) -> String {
+    let mut out = prompt.to_string();
+    if let Some(tid) = task_id {
+        out.push_str(&format!("\n\n[CURRENT_TASK_ID]\n{tid}\n"));
+    }
+    if let Some(role) = role_suffix {
+        out.push_str(&format!("\n[ROLE]\n{role}\n"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +102,30 @@ mod tests {
         let prompt = build_system_prompt("", None, "auto");
         assert!(prompt.contains("千寻"));
         assert!(prompt.contains("自动模式"));
+    }
+
+    #[test]
+    fn test_inject_kanban_scope_with_task_and_role() {
+        let base = "base prompt";
+        let out = inject_kanban_scope(base, Some("task_abc"), Some("Worker"));
+        assert!(out.contains("[CURRENT_TASK_ID]"));
+        assert!(out.contains("task_abc"));
+        assert!(out.contains("[ROLE]"));
+        assert!(out.contains("Worker"));
+        assert!(out.contains("base prompt"));
+    }
+
+    #[test]
+    fn test_inject_kanban_scope_with_neither() {
+        let base = "base prompt";
+        let out = inject_kanban_scope(base, None, None);
+        assert_eq!(out, base, "no scope -> unchanged");
+    }
+
+    #[test]
+    fn test_inject_kanban_scope_with_task_only() {
+        let out = inject_kanban_scope("base", Some("task_x"), None);
+        assert!(out.contains("[CURRENT_TASK_ID]"));
+        assert!(!out.contains("[ROLE]"));
     }
 }
