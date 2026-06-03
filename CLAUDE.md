@@ -75,10 +75,40 @@ qianxun/                 # workspace 根
         ├── acp/         # ACP 协议 (Zed 集成)
         │   ├── types.rs, transport.rs, session.rs, output.rs
         │   ├── prompt.rs, forwarding_tools.rs, handler.rs, server.rs
-        ├── daemon/      # Daemon 模式 (HTTP + axum) — 骨架, 未接 AgentLoop
+        ├── daemon/      # Daemon 模式 (HTTP + axum) — Kanban 接入中
         │   ├── mod.rs, router.rs, agent_host.rs
+        │   ├── kanban_host.rs, team_registry.rs, persistence.rs, sse.rs
+        │   ├── llm_providers.rs, output_sink.rs, session_runtime.rs
+        │   └── auth.rs, service.rs
         └── server/      # VPS Server 模式 (HTTP + jwt + keyring)
             ├── mod.rs, auth.rs
+```
+
+### Kanban 模块 (v6 §14.1 MVP-2 + MVP-3, 2026-06-04)
+
+按 v6 多 Agent Kanban 架构 (8 周 MVP) 落地, 跟 daemon.db 共享 SQLite (8 张 kanban_* 表 + 2 ALTER).
+
+```
+qianxun-core/src/kanban/   # Kanban 核心库
+├── mod.rs        # 入口 + 公共导出
+├── types.rs      # 8 struct (Project/KanbanBoard/Task/TaskLink/AgentRun/BlackboardCell/KanbanEvent/KanbanScope) + 5 enum + 24 事件
+├── error.rs      # KanbanError (thiserror, 16 错误 + is_recoverable)
+├── db.rs         # KanbanDb 封装, 10 个核心 CRUD 方法 (Task/Run/Blackboard/Event)
+├── state_machine.rs  # check_transition (13 合法) + recompute_parent (Hermes 关键不变量)
+├── dispatcher.rs # KanbanDispatcher 骨架 (dispatch_once + run_forever 2s 周期)
+└── team.rs       # Profile + Role + TeamConfig + TeamRegistry (4 默认 role)
+
+qianxun-core/src/blackboard/  # 黑板模块
+├── mod.rs
+└── cell.rs       # 跟 kanban_blackboard 表对应
+
+qianxun-core/src/tools/kanban.rs  # 12 个 kanban_* 工具 (4/12 落地: create/complete/heartbeat/write_blackboard)
+qianxun-core/src/agent/pattern.rs # 4 pattern dispatcher (Chat/SingleTask/MultiTask/Hybrid)
+
+qianxun/src/daemon/kanban_host.rs # daemon 端 Kanban 中央集成 (KanbanDb + Dispatcher + 5 SSE 事件 broadcast)
+qianxun/src/daemon/team_registry.rs  # daemon 侧 Profile/Role 加载
+qianxun/src/daemon/router.rs     # 12 个 Kanban HTTP 端点 (boards/tasks/projects/profiles/roles)
+qianxun/src/daemon/sse.rs        # 17 个 SSE 事件 (12 原有 + 5 Kanban: Assigned/Progress/Completed/Spawned/BlackboardUpdate)
 ```
 
 ### 缺口 7 修复 (MVP-0, 2026-06-03)

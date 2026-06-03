@@ -262,3 +262,72 @@ struct ProjectAssignment {
    - Team/Project/Session 字段是否一致?
 4. 如有不一致, 派第 4 个 worker 做对齐 (or 调整 prompt 重派)
 5. 最终 3 个文件 + 一致性检查报告, 交付给用户
+
+
+---
+
+## §8 Kanban 端点 (v6 §8.5, 2026-06-04 落地 12/23)
+
+按 v6 §14.1 MVP-2 + MVP-3 落地. 复用 daemon.db, 8 张 kanban_* 表 (projects/boards/role_defs/profiles/tasks/task_links/runs/blackboard/events) + 2 ALTER (kanban_boards + daemon_sessions 加 project_id).
+
+### §8.1 Projects (6 端点, MVP-3 落地 2/6)
+
+| 端点 | 方法 | 状态 | 用途 |
+|------|------|------|------|
+| `/v1/projects` | GET | ✅ | 列 projects |
+| `/v1/projects` | POST | ✅ | 创建 project |
+| `/v1/projects/{id}` | GET | ⏸️ v2 | 查 project 详情 |
+| `/v1/projects/{id}` | PATCH | ⏸️ v2 | 改 project 元数据 |
+| `/v1/projects/{id}/archive` | POST | ⏸️ v2 | 归档 project |
+| `/v1/projects/{id}/sessions` | GET | ⏸️ v2 | 列 project 下所有 session |
+
+### §8.2 Kanban Boards (4 端点, MVP-3 落地 3/4)
+
+| 端点 | 方法 | 状态 | 用途 |
+|------|------|------|------|
+| `/v1/kanban/boards` | GET | ✅ | 列 boards |
+| `/v1/kanban/boards` | POST | ✅ | 创建 board (emit KanbanTaskSpawned SSE) |
+| `/v1/kanban/boards/{id}` | GET | ✅ | 查 board 详情 |
+| `/v1/kanban/boards/{id}/archive` | POST | ⏸️ v2 | 归档 board |
+
+### §8.3 Kanban Tasks (5 端点, MVP-3 落地 3/5)
+
+| 端点 | 方法 | 状态 | 用途 |
+|------|------|------|------|
+| `/v1/kanban/boards/{id}/tasks` | GET | ✅ | 列 board 下 task (含 by_status 聚合) |
+| `/v1/kanban/tasks` | POST | ✅ | 创建 task (emit SSE, 跟 kanban_create 工具对应) |
+| `/v1/kanban/tasks/{id}` | GET | ✅ | 查 task 详情 |
+| `/v1/kanban/tasks/{id}/cancel` | POST | ✅ | 取消 task (Triage/Ready/Blocked -> Cancelled) |
+| `/v1/kanban/tasks/{id}/retry` | POST | ⏸️ v2 | 重试 (Failed -> Ready) |
+
+### §8.4 Events SSE (1 端点 + 5 事件)
+
+| 端点 | 方法 | 状态 | 用途 |
+|------|------|------|------|
+| `/v1/kanban/boards/{id}/events` | GET | ✅ | 列 board 事件 (audit + 实时推送, 最多 100 条) |
+
+### §8.5 Teams (4 端点, MVP-3 落地 2/4)
+
+| 端点 | 方法 | 状态 | 用途 |
+|------|------|------|------|
+| `/v1/kanban/profiles` | GET | ✅ | 列 4 默认 profile (techlead/coder/verifier/researcher) |
+| `/v1/kanban/profiles` | POST | ⏸️ v2 | 创建自定义 profile |
+| `/v1/kanban/profiles/{id}` | PUT | ⏸️ v2 | 改 profile |
+| `/v1/kanban/roles` | GET | ✅ | 列 4 默认 role |
+| `/v1/kanban/roles` | POST | ⏸️ v2 | 创建自定义 role |
+| `/v1/kanban/roles/{id}` | PUT | ⏸️ v2 | 改 role |
+| `/v1/kanban/dispatch` | POST | ✅ | 手动 dispatch (测试 + UI 用) |
+
+### §8.6 Kanban SSE 事件 (5 新 variant, 12 -> 17 总)
+
+跟现有 12 个 SseEvent 拼成 17 个. 客户端按 `type` 字段分发.
+
+| type tag | 字段 | 触发场景 |
+|----------|------|----------|
+| `kanban_task_assigned` | task_id, run_id, profile_name, title | dispatcher 拾到 ready task 派给 worker |
+| `kanban_task_progress` | task_id, run_id, event_kind, preview | worker 写黑板/评论/调工具 |
+| `kanban_task_completed` | task_id, run_id, outcome, summary, token_input, token_output, elapsed_ms | worker 调 kanban_complete |
+| `kanban_task_spawned` | parent_task_id?, child_task_id, title, assignee_role | techlead 调 kanban_create (拆子任务) |
+| `kanban_blackboard_update` | task_id, key, value_preview | 任意 worker 写黑板 |
+
+Bridge: `impl From<KanbanSseEvent> for SseEvent` 在 `qianxun/src/daemon/sse.rs`, 字段透传.
