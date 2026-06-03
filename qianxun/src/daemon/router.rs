@@ -383,6 +383,7 @@ pub fn is_auth_skipped_path(path: &str) -> bool {
     path == "/"
         || path == "/v1/system/health"
         || path == "/v1/system/status"
+        || path == "/v1/auth/login"
         || path.starts_with("/ui/")
         || path == "/ui"
         || path.starts_with("/_app/")
