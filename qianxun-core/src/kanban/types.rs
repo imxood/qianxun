@@ -369,10 +369,6 @@ mod tests {
         TaskStatus::Triage
     }
 
-    fn sample_worker_scope() -> WorkerScope {
-        WorkerScope::Worker
-    }
-
     #[test]
     fn test_task_status_default_is_triage() {
         assert_eq!(sample_task_status(), TaskStatus::Triage);

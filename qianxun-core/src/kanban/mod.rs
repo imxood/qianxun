@@ -24,9 +24,11 @@
 //! - `daemon/persistence.rs` — 8 张表 DDL + ALTER TABLE (MVP-2 plan 1)
 //! - `daemon/kanban_host.rs` — daemon 端 Kanban host (MVP-3)
 
+pub mod db;
 pub mod error;
 pub mod types;
 
+pub use db::KanbanDb;
 pub use error::KanbanError;
 pub use types::{
     AgentRun, BlackboardCell, BoardStatus, DependencyKind, KanbanBoard, KanbanEvent,

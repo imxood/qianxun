@@ -20,3 +20,5 @@ uuid = { workspace = true, features = ["v4"] }
 reqwest = { workspace = true }
 json_comments = { workspace = true }
 notify = { workspace = true }
+# Kanban 持久化层 (MVP-2 plan 2) — 复用 daemon.db, 跟 team_db.rs 一致
+rusqlite = { workspace = true, features = ["bundled"] }

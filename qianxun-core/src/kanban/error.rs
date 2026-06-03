@@ -77,9 +77,9 @@ pub enum KanbanError {
     #[error("dispatcher already running")]
     DispatcherAlreadyRunning,
 
-    /// SQLite 错误 (rusqlite, 仅 daemon crate 用, qianxun-core 用 String 转发)
+    /// SQLite 错误 (rusqlite)
     #[error("sqlite error: {0}")]
-    Sqlite(String),
+    Sqlite(#[from] rusqlite::Error),
 
     /// JSON 错误 (serde_json)
     #[error("json error: {0}")]
@@ -159,7 +159,8 @@ mod tests {
 
     #[test]
     fn test_from_sqlite_error() {
-        let kb_err: KanbanError = KanbanError::Sqlite("QueryReturnedNoRows".into());
+        let sqlite_err = rusqlite::Error::QueryReturnedNoRows;
+        let kb_err: KanbanError = sqlite_err.into();
         assert!(kb_err.to_string().contains("sqlite"));
     }
 
