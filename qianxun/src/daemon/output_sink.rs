@@ -305,6 +305,19 @@ impl OutputSink for DaemonOutputSink {
         self.tool_use(tool_call_id, tool_name, arguments).await;
     }
 
+    async fn on_tool_result(
+        &self,
+        tool_use_id: &str,
+        content: &str,
+        is_error: bool,
+        elapsed_ms: u64,
+    ) {
+        // 路由到内部 tool_result 直接方法 — 发独立 SseEvent::ToolResult 事件
+        // (不动块状态, 跟 on_tool_call 路径对称). 旧 default no-op 让 tool_result
+        // 事件在 SSE 流里消失, 跟 shared-contract §3.2 不符 — 这里 override 修复.
+        self.tool_result(tool_use_id, content, is_error, elapsed_ms).await;
+    }
+
     async fn on_token_usage(&self, usage: &TokenUsage) {
         self.usage(usage).await;
     }
@@ -750,6 +763,105 @@ mod tests {
                     arguments.get("path").and_then(|v| v.as_str()),
                     Some("/x")
                 );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// 验证: 调 dyn OutputSink 的 `on_tool_result` trait 方法实际发出 SseEvent::ToolResult
+    /// 事件 (不是走 trait 默认 no-op — 这是上一轮 verifier 抓到的 bug).
+    ///
+    /// 跟 `on_tool_call` (ToolUseComplete 事件) 配对: 调用方 (processing_loop) 走
+    /// `&dyn OutputSink` 时, on_tool_call → on_tool_result 序列必须产生 ToolUseComplete
+    /// + ToolResult 两条事件, 客户端能渲染 "调工具 → 拿结果" 完整配对.
+    #[tokio::test]
+    async fn test_output_sink_trait_routes_on_tool_result_to_tool_result_event() {
+        let (sink, rx, _store) = make_sink();
+        let sink = std::sync::Arc::new(sink);
+        let dyn_sink: Arc<dyn OutputSink> = sink.clone();
+
+        // 1. 调工具 (走 trait) → 发 ToolUseComplete
+        dyn_sink
+            .on_tool_call("toolu_42", "read_text_file", &json!({"path": "/x"}))
+            .await;
+        // 2. 工具执行完 (走 trait) → 必须发 ToolResult (旧 default no-op 会漏掉这条)
+        dyn_sink
+            .on_tool_result("toolu_42", "file contents here", false, 17)
+            .await;
+        // 3. 收尾
+        sink.finish_turn_str("end_turn").await;
+        drop(sink);
+        drop(dyn_sink);
+
+        let events = collect(rx, Duration::from_millis(100)).await;
+        let types: Vec<&'static str> = events.iter().map(|e| e.type_name()).collect();
+        // 期望: CBS(tool_use#0), TUC, CBS_STOP(0), [ToolResult 独立事件无 block 配对],
+        //       CBS_STOP(0)? (不, ToolResult 不动块) — 实际序列应只看到 tool_use 块的
+        //       start+stop 一次, 然后 ToolResult 直接插在中间
+        assert!(
+            types.contains(&"tool_use_complete"),
+            "expected ToolUseComplete; got: {types:?}"
+        );
+        assert!(
+            types.contains(&"tool_result"),
+            "expected ToolResult; got: {types:?} \
+             (如果这条 fail, 说明 on_tool_result trait 方法走了 default no-op — 上一轮 verifier bug)"
+        );
+
+        // 验证 ToolResult 字段
+        let tr = events
+            .iter()
+            .find(|e| matches!(e, SseEvent::ToolResult { .. }))
+            .expect("ToolResult must exist");
+        match tr {
+            SseEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                elapsed_ms,
+            } => {
+                assert_eq!(tool_use_id, "toolu_42");
+                assert_eq!(content, "file contents here");
+                assert!(!*is_error);
+                assert_eq!(*elapsed_ms, 17);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        // 验证 ToolResult 不动块状态 — 只有 1 个 CBS (tool_use 块)
+        let cbs_count = types.iter().filter(|t| **t == "content_block_start").count();
+        assert_eq!(cbs_count, 1, "ToolResult must not open a new block");
+    }
+
+    /// 验证: tool_result 错误路径 (is_error=true) 通过 trait 也能正确发出
+    /// (跟正常路径一致, 走同一条 send_event 路径).
+    #[tokio::test]
+    async fn test_output_sink_trait_routes_on_tool_result_error_path() {
+        let (sink, rx, _store) = make_sink();
+        let sink = std::sync::Arc::new(sink);
+        let dyn_sink: Arc<dyn OutputSink> = sink.clone();
+
+        dyn_sink
+            .on_tool_call("t1", "bash", &json!({"cmd": "false"}))
+            .await;
+        dyn_sink
+            .on_tool_result("t1", "Error: command failed", true, 3)
+            .await;
+        sink.finish_turn_str("end_turn").await;
+        drop(sink);
+        drop(dyn_sink);
+
+        let events = collect(rx, Duration::from_millis(100)).await;
+        let tr = events
+            .iter()
+            .find(|e| matches!(e, SseEvent::ToolResult { .. }))
+            .expect("ToolResult must exist even on error");
+        match tr {
+            SseEvent::ToolResult {
+                is_error, content, ..
+            } => {
+                assert!(*is_error, "is_error must be true");
+                assert!(content.contains("command failed"));
             }
             _ => unreachable!(),
         }
