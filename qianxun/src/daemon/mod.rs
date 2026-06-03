@@ -1,6 +1,7 @@
 pub mod agent_host;
 pub mod auth;
 pub mod llm_providers;
+pub mod output_sink;
 pub mod persistence;
 pub mod router;
 pub mod service;

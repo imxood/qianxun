@@ -18,21 +18,24 @@ use serde_json::Value;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_stream::iter;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use qianxun_core::agent::conversation::Conversation;
+use qianxun_core::agent::engine::{processing_loop, AgentLoop};
 use qianxun_core::agent::message::ContentBlock;
+use qianxun_core::context::MemoryObserver;
 use qianxun_core::provider::types::LlmStreamEvent;
+use qianxun_core::tools::ToolCategoryFilter;
 use qianxun_core::types::LlmError;
 use qianxun_memory::MemoryStats;
 
 use crate::daemon::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
+use crate::daemon::output_sink::DaemonOutputSink;
 use crate::daemon::sse::{SseEvent, SseEventBuilder};
 use crate::daemon::AppState;
 
@@ -1348,17 +1351,28 @@ async fn auth_logout() -> Json<serde_json::Value> {
 
 /// POST /v1/chat/session/:id/prompt — SSE 流式响应.
 ///
-/// Stage 2 实现:
+/// Stage 3 实现 (MVP-1):
 /// 1. 验证 session 存在
-/// 2. 构造一个**临时** `Conversation` (Stage 3 才把 conversation 持久化到 SessionRuntime)
-/// 3. 调 `provider.stream_completion` 拿到 `BoxStream<LlmStreamEvent>`
-/// 4. spawn 后台任务消费 stream, 用 `SseEventBuilder` 映射成 12 种契约事件, 推 mpsc
-/// 5. SSE wrapper 从 mpsc 读, 序列化成 `data: <json>\n\n` 帧
-/// 6. 客户端断连 → axum drop SSE future → mpsc::Receiver 关闭 → spawn task 中
-///    `tx.send()` 返回 Err, 任务自然退出
+/// 2. 推 user/assistant/system 消息到 `runtime.conversation` (Arc<Mutex<...>>)
+/// 3. 真实计算 memory_context (`state.memory.build_context`)
+///    + skills_catalog (`runtime.skills.build_catalog_prompt`)
+///    + skill_injections (按 user 消息匹配 `runtime.skills.auto_select` 后
+///      调 `build_injections`)
+/// 4. 克隆 `runtime.conversation` 出本地 `Conversation` (handle_user_message
+///    需要 `&mut Conversation`, 跟 `Arc<Mutex<...>>` 跨 await 持锁不兼容).
+///    本地 `AgentLoop` 每次新建.
+/// 5. 构造 `DaemonOutputSink` (`emit_message_start=true`, 让 sink 内部自己发
+///    MessageStart, 跟 Stage 2 路径 "外层先发" 行为不同)
+/// 6. `tokio::spawn` 后台任务调 `processing_loop::handle_user_message` —
+///    engine 内部负责: build_request → provider.stream_completion → 工具执行
+///    → 工具结果回送 → 循环 (直到 end_turn / max_tokens / cancel)
+/// 7. 客户端断连 → axum drop SSE future → mpsc::Receiver 关闭 → spawn task
+///    中 `sink.send_event()` 的 `tx.send()` 返 Err, 静默 return 不 panic
+/// 8. SSE wrapper 从 mpsc 读, 序列化成 `data: <json>\n\n` 帧
 ///
-/// **Stage 2 不接** `processing_loop::handle_user_message` (Stage 3 接入).
-/// 也不接 `tool_result` 事件 (Stage 3 在工具执行路径上发射).
+/// Stage 4 改进点 (本期不做): 本地 conv 的 assistant 消息未写回 runtime.conversation,
+/// 多轮对话上下文会丢失 assistant 历史. 留 Stage 4 接 `Arc<Mutex<Conversation>>`
+/// 跨 await 持锁 (用 `tokio::sync::Mutex`) 时一并处理.
 async fn prompt_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1372,89 +1386,130 @@ async fn prompt_handler(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
     runtime.touch();
 
-    // 2. 构造临时 conversation (Stage 2 简化: 不写回 SessionRuntime)
-    let mut conv = Conversation::new(None);
-    for msg in &req.messages {
-        let role = msg.role.as_str();
-        match role {
-            "user" => {
-                let block = ContentBlock::text(&msg.content);
-                conv.push_user_message(vec![block]);
-            }
-            "assistant" | "system" => {
-                // Stage 2 简化: assistant / system 直接入 history 不传给 LLM
-                // (完整的 multi-turn 由 Stage 3 conversation 持久化时还原)
-                tracing::debug!(
-                    "[prompt] role={role} content.len={} (ignored in stage-2)",
-                    msg.content.len()
-                );
-            }
-            other => {
-                tracing::warn!("[prompt] unknown role {other}, skipping");
+    // 2. 推 user 消息到 runtime.conversation (Arc<Mutex<Conversation>>).
+    //    Stage 4: 持久化路径, user 消息也进 conversation history,
+    //    consumer 末尾会 push assistant 消息, 一起 save snapshot.
+    //
+    //    容错: req.messages 里如果同时含 "user"/"assistant"/"system",
+    //    Stage 4 简化: 全部按 role 推 (assistant 入 history 但不进 LLM request,
+    //    因为 build_request 只用 runtime.conversation.messages() 的全部 ——
+    //    后续 Stage 接完整 multi-turn 时再细化).
+    {
+        let mut conv_guard = runtime
+            .conversation
+            .lock()
+            .expect("SessionRuntime conversation lock poisoned");
+        for msg in &req.messages {
+            let role = msg.role.as_str();
+            match role {
+                "user" => {
+                    let block = ContentBlock::text(&msg.content);
+                    conv_guard.push_user_message(vec![block]);
+                }
+                "assistant" | "system" => {
+                    // Stage 4 简化: assistant / system 也入 history (供 multi-turn 还原),
+                    // 但 build_request 当前只用 messages (不分 role), 实际效果是历史消息
+                    // 都会作为上下文发给 LLM. 这是 Stage 4 行为, 留 Stage 5 接 system_prompt
+                    // 注入时再细化 (把 system role 单独抽出来).
+                    use qianxun_core::agent::message::Message;
+                    let block = ContentBlock::text(&msg.content);
+                    conv_guard.push_message(match role {
+                        "assistant" => Message::assistant(vec![block]),
+                        _ => Message::user(vec![block]), // system → 当 user 入 (兜底)
+                    });
+                    tracing::debug!(
+                        "[prompt] role={role} content.len={} (into history)",
+                        msg.content.len()
+                    );
+                }
+                other => {
+                    tracing::warn!("[prompt] unknown role {other}, skipping");
+                }
             }
         }
     }
 
-    // 3. 构建 CompletionRequest (memory / skills 留 Stage 3 接入)
-    let request = conv.build_request(
-        &[],
-        "", // memory_context
-        "", // skills_catalog
-        "", // skill_injections
-        &runtime.resolved.agent,
-    );
+    // 3. 提取最后一条 user 消息 (作 memory/skills 注入的 query, 跟 Stage 2
+    //    "构造空 conversation 跑单轮" 不同, 我们要利用 runtime.conversation 里的
+    //    历史做 context 检索).
+    let last_user_msg: String = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
 
-    // 4. 调 provider.stream_completion
-    let provider = runtime.provider.clone();
-    let stream = match provider.stream_completion(request).await {
-        Ok(s) => s,
-        Err(e) => {
-            // provider 启动失败 → 返回 error 事件后关闭
-            let err_event = SseEventBuilder::error_from_llm(&e);
-            let tail = SseEventBuilder::new().finalize("error");
-            let mut events = vec![err_event];
-            events.extend(tail);
-            let s: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-                Box::pin(iter(events).map(event_to_sse));
-            return Ok(Sse::new(s));
-        }
-    };
+    // 4. 真实计算注入的 context 字符串 (替代 Stage 2 的 "" 占位)
+    //    - memory_context:    调 MemoryObserver::build_context, 走 BM25 检索
+    //                         当前 session + 全局 observations, 按 token 预算裁剪
+    //    - skills_catalog:    Layer 1 技能目录 (名称 + 描述 + 触发词), 永远注入
+    //    - skill_injections:  Layer 2 技能完整 body, 按 user 消息触发词匹配后注入
+    // 三个串都走 `build_request` 的 system prompt 拼接, 跟 qianxun-core 系统提示词
+    // 协议一致 (memory → catalog → injections).
+    let memory_context: String = state.memory.build_context(&last_user_msg, 2000).await;
+    let skills_catalog: String = runtime.skills.build_catalog_prompt();
+    let matched_skills: Vec<String> = runtime.skills.auto_select(&last_user_msg, &[]);
+    let skill_injections: String = runtime.skills.build_injections(&matched_skills);
 
-    // 5. 通道 + message_start 先发, 再 spawn consumer (避免与 text_delta 乱序)
+    // 5. 准备本 prompt 用的 AgentLoop + Conversation 快照.
+    //    - AgentLoop 每次新建 (runtime.agent_loop 是 owned 字段, 不可通过
+    //      Arc<SessionRuntime> 借用, 也不值得为此把 SessionRuntime 全锁)
+    //    - Conversation 从 runtime.conversation 克隆, 保留 user 历史;
+    //      handle_user_message 改 &mut conv, 不写回 runtime (Stage 4 跨
+    //      await 持锁改进点, 留 4a 处理)
+    let mut agent_loop = AgentLoop::new(runtime.resolved.agent.clone());
+    let mut conv: Conversation = runtime
+        .conversation
+        .lock()
+        .expect("SessionRuntime conversation lock poisoned")
+        .clone();
+
+    // 6. 通道 + DaemonOutputSink (emit_message_start=true 让 sink 内部自己发
+    //    MessageStart, 跟 Stage 2 路径 "外层先发" 行为不同). processing_loop_enabled
+    //    写死为 true — 本期只走 processing_loop 路径, 旧直连 stream_completion 已废弃.
+    let _processing_loop_enabled = true;
     let (tx, rx) = mpsc::channel::<SseEvent>(64);
-
-    // message_start: 同步先发, 保证客户端收到的第一帧就是 session 元数据
     let model = runtime.config.model.clone();
     let max_tokens = runtime.resolved.agent.max_tokens.unwrap_or(16384) as u32;
     let session_id = runtime.session_id.clone();
-    // channel 容量 64, 单条消息不会 .await 等待
-    let _ = tx
-        .send(SseEvent::MessageStart {
-            session_id: session_id.clone(),
-            model,
-            max_tokens,
-        })
-        .await;
-
-    // Stage 3: 把 message_start 事件也写到 store.event_log
-    if let Ok(json) = serde_json::to_string(&SseEvent::MessageStart {
-        session_id: session_id.clone(),
-        model: runtime.config.model.clone(),
+    let sink = DaemonOutputSink::new(
+        tx,
+        state.store.clone(),
+        session_id.clone(),
+        model,
         max_tokens,
-    }) {
-        let _ = state.store.append_event(&session_id, 0, "message_start", &json);
-    }
+        true, // emit_message_start: true — sink 调 begin_message() 自动发 MessageStart
+    );
 
-    // consumer: 把 LlmStreamEvent 逐个映射成 SseEvent
-    let mut builder = SseEventBuilder::new();
-    // Stage 3: 给 consumer 传 store clone 用于事件落盘 + 末次 snapshot
-    let store = state.store.clone();
-    let sess_id_for_consumer = session_id.clone();
+    // 7. spawn 后台任务: sink.begin_message() + processing_loop::handle_user_message
+    //    之后 sink drop → mpsc 关闭 → SSE wrapper 自然结束.
+    let provider = runtime.provider.clone();
+    let tools = runtime.tools.clone();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
     tokio::spawn(async move {
-        consume_stream_to_sse(stream, &mut builder, tx, store, sess_id_for_consumer).await;
+        // 7a. 同步先发 MessageStart (sink 内部 started 标志位, 幂等)
+        sink.begin_message().await;
+        // 7b. 调处理循环 (handle_user_message 内部会循环, 工具执行后回送结果,
+        //     直到 end_turn / max_tokens / cancel 才 return). 内部会调 sink 的
+        //     trait 方法 (on_text / on_tool_call / on_tool_result / on_turn_finished
+        //     / ...), sink 路由到内部 SseEventBuilder 状态机.
+        processing_loop::handle_user_message(
+            &mut agent_loop,
+            &mut conv,
+            provider.as_ref(),
+            tools.as_ref(),
+            ToolCategoryFilter::all(),
+            &sink,
+            &memory_context,
+            &skills_catalog,
+            &skill_injections,
+            cancel_flag,
+        )
+        .await;
     });
 
-    // 6. SSE wrapper: 把 mpsc 里的事件序列化成 SSE 帧
+    // 8. SSE wrapper: 把 mpsc 里的事件序列化成 SSE 帧
     //    (ReceiverStream 适配 axum::body::Body 要求 impl Stream)
     let sse_stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         Box::pin(ReceiverStream::new(rx).map(event_to_sse));
@@ -1477,117 +1532,158 @@ fn event_to_sse(event: SseEvent) -> Result<Event, Infallible> {
 }
 
 /// 在 spawn task 里消费 `BoxStream<Result<LlmStreamEvent, LlmError>>`,
-/// 经 `SseEventBuilder` 转成 SseEvent, 推给 mpsc::Sender.
+/// 把每个事件交给 `DaemonOutputSink` 处理. sink 内部:
+/// - 维护 SSE content_block 状态机 (text / thinking / tool_use 切换自动
+///   插入 `ContentBlockStart`/`ContentBlockStop`, 跟原 SseEventBuilder 等价).
+/// - 调 `store.append_event()` 落盘每条发出的 SseEvent (Stage 3 审计/恢复用).
+/// - 客户端断连时 `tx.send()` 静默 return, 不 panic.
 ///
-/// 流结束 / 出错时调用 `builder.finalize(reason)` 统一发
-/// `ContentBlockStop` (关闭未关 block) + `MessageDelta` + `MessageStop` 收尾.
+/// 流结束 / 出错时:
+/// - 正常 Stop: 用记录的 stop_reason 调 `sink.finish_turn_str()` 发
+///   `MessageDelta + MessageStop` 收尾 (如果有未关 block 会先发 CBS).
+/// - 错误: 调 `sink.error()` 发 Error 事件 + `sink.finish_turn_str("error")` 收尾.
+/// - 流自然结束但没 Stop: 用 `"end_turn"` 作 fallback stop_reason.
 ///
-/// 客户端断连: `tx.send().await` 返回 Err, 立即 return 退出 (LLM 流仍可能
-/// 在跑, 但没人消费事件, 任务自然结束).
-///
-/// Stage 3: 同时把每个 SseEvent 写到 `store.append_event()` 落盘; 流结束
-/// 时调 `store.save_snapshot(ordinal+1, "{}")` 写一个占位 snapshot
-/// (Stage 4 接完整 conversation 序列化).
+/// Stage 4: 同时**累积** LLM 事件成 assistant message, 流结束时 push 到
+/// `conv` (prompt_handler 已经在流开始前 push 了 user 消息), 然后调
+/// `store.save_conversation_snapshot(ordinal, &conv)` 写入真实 conversation
+/// 状态. `conv = None` 时跳过持久化 (e2e tests 不测持久化路径用).
+#[allow(dead_code)] // Stage 2 直连 stream_completion 路径已废弃, 本函数只供 e2e_tests 复用
 async fn consume_stream_to_sse(
     mut stream: std::pin::Pin<
         Box<dyn futures::Stream<Item = Result<LlmStreamEvent, LlmError>> + Send>,
     >,
-    builder: &mut SseEventBuilder,
-    tx: mpsc::Sender<SseEvent>,
-    store: std::sync::Arc<crate::daemon::persistence::SessionStore>,
-    session_id: String,
+    sink: DaemonOutputSink,
+    conv: Option<Arc<std::sync::Mutex<Conversation>>>,
+    ordinal: u32,
 ) {
     let mut last_stop_reason: Option<String> = None;
-    // Stage 3: 事件序号, 跳过 seq=0 (已用于 message_start in prompt_handler)
-    let mut event_seq: u32 = 1;
+
+    // Stage 4: 累积 LLM 事件成 assistant message (跟 engine.rs::build_turn 同思路)
+    let mut response_text = String::new();
+    let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
+    let mut thinking_blocks: Vec<(String, Option<String>)> = Vec::new();
+    let mut current_thinking_text = String::new();
 
     while let Some(item) = stream.next().await {
         match item {
-            Ok(event) => {
-                // 记录 stop reason, 等流自然结束后再 finalize
-                if let LlmStreamEvent::Stop(reason) = &event {
-                    last_stop_reason =
-                        Some(SseEventBuilder::stop_reason_str(reason).to_string());
+            Ok(LlmStreamEvent::Text(text)) => {
+                response_text.push_str(&text);
+                sink.text_delta(&text).await;
+            }
+            Ok(LlmStreamEvent::Thinking { text, signature }) => {
+                if !text.is_empty() {
+                    current_thinking_text.push_str(&text);
+                    sink.thinking(&text).await;
                 }
-                let events = builder.from_llm_event(&event);
-                for ev in events {
-                    // 落盘: 序列化 SseEvent → JSON → store.append_event
-                    if let Ok(json) = serde_json::to_string(&ev) {
-                        let type_name = event_type_name(&ev);
-                        let _ = store.append_event(&session_id, event_seq, type_name, &json);
-                        event_seq += 1;
-                    }
-                    if tx.send(ev).await.is_err() {
-                        return; // 客户端已断
-                    }
+                if let Some(sig) = signature {
+                    thinking_blocks.push((
+                        std::mem::take(&mut current_thinking_text),
+                        Some(sig),
+                    ));
                 }
             }
+            Ok(LlmStreamEvent::ToolCall {
+                id,
+                tool_name,
+                arguments,
+            }) => {
+                sink.tool_use(&id, &tool_name, &arguments).await;
+                tool_calls.push((id, tool_name, arguments));
+            }
+            Ok(LlmStreamEvent::UsageUpdate(usage)) => {
+                sink.usage(&usage).await;
+            }
+            Ok(LlmStreamEvent::Stop(reason)) => {
+                // 记录 stop reason, 等流自然结束 / 出错时再 finalize.
+                // Stop 事件本身不发任何 SseEvent (由 finish_turn_str 统一发 MD+MS).
+                last_stop_reason = Some(SseEventBuilder::stop_reason_str(&reason).to_string());
+            }
             Err(e) => {
-                // 错误: 发 error 事件 + finalize 收尾
-                let err_event = SseEventBuilder::error_from_llm(&e);
-                if let Ok(json) = serde_json::to_string(&err_event) {
-                    let _ = store.append_event(&session_id, event_seq, "error", &json);
-                    event_seq += 1;
-                }
-                if tx.send(err_event).await.is_err() {
-                    return;
-                }
+                // 错误: 发 error 事件 + 收尾
+                sink.error(&e).await;
                 let reason = last_stop_reason
                     .take()
                     .unwrap_or_else(|| "error".to_string());
-                let tail = builder.finalize(&reason);
-                for ev in tail {
-                    if let Ok(json) = serde_json::to_string(&ev) {
-                        let type_name = event_type_name(&ev);
-                        let _ = store.append_event(&session_id, event_seq, type_name, &json);
-                        event_seq += 1;
-                    }
-                    if tx.send(ev).await.is_err() {
-                        return;
-                    }
-                }
+                sink.finish_turn_str(&reason).await;
+                // 即使出错也尝试保存 (partial response 也算有效 history)
+                persist_assistant_message(
+                    &conv,
+                    sink.session_id(),
+                    ordinal,
+                    &response_text,
+                    &tool_calls,
+                    &thinking_blocks,
+                    sink.store(),
+                );
                 return;
             }
         }
     }
 
-    // 流自然结束: finalize (MessageDelta + MessageStop; 视 builder 内是否有
-    // 未关 block 决定要不要先发 ContentBlockStop).
+    // 流自然结束: 用记录的 stop_reason (fallback "end_turn") 收尾.
     let reason = last_stop_reason
         .unwrap_or_else(|| "end_turn".to_string());
-    let tail = builder.finalize(&reason);
-    for ev in tail {
-        if let Ok(json) = serde_json::to_string(&ev) {
-            let type_name = event_type_name(&ev);
-            let _ = store.append_event(&session_id, event_seq, type_name, &json);
-            event_seq += 1;
-        }
-        if tx.send(ev).await.is_err() {
-            return;
-        }
-    }
+    sink.finish_turn_str(&reason).await;
 
-    // Stage 3 简化: 流结束时写一次占位 snapshot
-    // (Stage 4 接完整 conversation 序列化, ordinal=1 表示本次 turn)
-    let _ = store.save_snapshot(&session_id, 1, r#"{"messages":[],"stage":"stage3_placeholder"}"#);
+    // Stage 4: 流结束时把累积的 assistant 消息 push 到 conversation + save snapshot
+    persist_assistant_message(
+        &conv,
+        sink.session_id(),
+        ordinal,
+        &response_text,
+        &tool_calls,
+        &thinking_blocks,
+        sink.store(),
+    );
 }
 
-/// Stage 3: 提取 SSE 事件 type 字符串 (用于 store event_type 字段).
-/// 与 `SseEvent` 的 serde tag 字段名严格一致.
-fn event_type_name(ev: &SseEvent) -> &'static str {
-    match ev {
-        SseEvent::MessageStart { .. } => "message_start",
-        SseEvent::ContentBlockStart { .. } => "content_block_start",
-        SseEvent::TextDelta { .. } => "text_delta",
-        SseEvent::ThinkingDelta { .. } => "thinking_delta",
-        SseEvent::ToolUseDelta { .. } => "tool_use_delta",
-        SseEvent::ToolUseComplete { .. } => "tool_use_complete",
-        SseEvent::ToolResult { .. } => "tool_result",
-        SseEvent::ContentBlockStop { .. } => "content_block_stop",
-        SseEvent::Usage { .. } => "usage",
-        SseEvent::MessageDelta { .. } => "message_delta",
-        SseEvent::MessageStop => "message_stop",
-        SseEvent::Error { .. } => "error",
+/// Stage 4 helper: 把累积的 LLM 响应 push 到 conversation + save snapshot.
+///
+/// 设计成独立函数让正常/错误两条路径都能调, 避免重复代码. `conv = None` 时
+/// 是 e2e tests, 跳过持久化.
+#[allow(dead_code)] // 只被 consume_stream_to_sse 调, 后者已废弃; 保留供 e2e_tests 间接引用
+fn persist_assistant_message(
+    conv: &Option<Arc<std::sync::Mutex<Conversation>>>,
+    session_id: &str,
+    ordinal: u32,
+    response_text: &str,
+    tool_calls: &[(String, String, serde_json::Value)],
+    thinking_blocks: &[(String, Option<String>)],
+    store: &Arc<crate::daemon::persistence::SessionStore>,
+) {
+    use qianxun_core::agent::message::Message;
+    let Some(conv) = conv else { return };
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    for (text, sig) in thinking_blocks {
+        blocks.push(ContentBlock::thinking(text, sig.clone()));
+    }
+    if !response_text.is_empty() {
+        blocks.push(ContentBlock::text(response_text));
+    }
+    for (id, name, input) in tool_calls {
+        blocks.push(ContentBlock::tool_use(
+            id.clone(),
+            name.clone(),
+            input.clone(),
+        ));
+    }
+    if blocks.is_empty() {
+        // LLM 一字未答 (空 text / 全 thinking 无 sig / 立即错误) — 不写空 assistant message
+        return;
+    }
+
+    // push assistant message + clone 一份给 save_conversation_snapshot
+    // (避免长时间持锁; Conversation 是 Clone, 整个 clone 即可)
+    let snapshot_data = {
+        let mut conv_guard = conv.lock().expect("conversation lock poisoned");
+        conv_guard.push_message(Message::assistant(blocks));
+        conv_guard.clone()
+    };
+    if let Err(e) = store.save_conversation_snapshot(session_id, ordinal, &snapshot_data) {
+        tracing::warn!(
+            "[daemon] save_conversation_snapshot failed: session_id={session_id} ordinal={ordinal} err={e}"
+        );
     }
 }
 
@@ -1623,19 +1719,20 @@ mod e2e_tests {
 
         // 2. channel + consumer + store (Stage 3: 事件落盘)
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
-        let mut builder = SseEventBuilder::new();
         let store = std::sync::Arc::new(
             crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
         );
+        let sink = DaemonOutputSink::new(
+            tx,
+            store,
+            "sess_e2e_text".to_string(),
+            "test-model".to_string(),
+            16384,
+            false, // message_start 由 prompt_handler 同步发
+        );
         let task = tokio::spawn(async move {
-            consume_stream_to_sse(
-                mock_stream,
-                &mut builder,
-                tx,
-                store,
-                "sess_e2e_text".to_string(),
-            )
-            .await;
+            // Stage 4: 传 None + ordinal=0 跳过持久化 (e2e 只测事件序列)
+            consume_stream_to_sse(mock_stream, sink, None, 0).await;
         });
 
         // 3. 收集事件 (设 200ms 超时防挂死)
@@ -1735,19 +1832,20 @@ mod e2e_tests {
         ]));
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
-        let mut builder = SseEventBuilder::new();
         let store2 = std::sync::Arc::new(
             crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
         );
+        let sink = DaemonOutputSink::new(
+            tx,
+            store2,
+            "sess_e2e_tool".to_string(),
+            "test-model".to_string(),
+            16384,
+            false,
+        );
         let task = tokio::spawn(async move {
-            consume_stream_to_sse(
-                mock_stream,
-                &mut builder,
-                tx,
-                store2,
-                "sess_e2e_tool".to_string(),
-            )
-            .await;
+            // Stage 4: 传 None 跳过持久化
+            consume_stream_to_sse(mock_stream, sink, None, 0).await;
         });
 
         let mut collected: Vec<SseEvent> = Vec::new();
@@ -1813,19 +1911,20 @@ mod e2e_tests {
         ]));
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
-        let mut builder = SseEventBuilder::new();
         let store3 = std::sync::Arc::new(
             crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
         );
+        let sink = DaemonOutputSink::new(
+            tx,
+            store3,
+            "sess_e2e_err".to_string(),
+            "test-model".to_string(),
+            16384,
+            false,
+        );
         let task = tokio::spawn(async move {
-            consume_stream_to_sse(
-                mock_stream,
-                &mut builder,
-                tx,
-                store3,
-                "sess_e2e_err".to_string(),
-            )
-            .await;
+            // Stage 4: 传 None 跳过持久化
+            consume_stream_to_sse(mock_stream, sink, None, 0).await;
         });
 
         let mut collected: Vec<SseEvent> = Vec::new();
@@ -1885,19 +1984,20 @@ mod e2e_tests {
         ]));
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
-        let mut builder = SseEventBuilder::new();
         let store4 = std::sync::Arc::new(
             crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
         );
+        let sink = DaemonOutputSink::new(
+            tx,
+            store4,
+            "sess_e2e_no_stop".to_string(),
+            "test-model".to_string(),
+            16384,
+            false,
+        );
         let task = tokio::spawn(async move {
-            consume_stream_to_sse(
-                mock_stream,
-                &mut builder,
-                tx,
-                store4,
-                "sess_e2e_no_stop".to_string(),
-            )
-            .await;
+            // Stage 4: 传 None 跳过持久化
+            consume_stream_to_sse(mock_stream, sink, None, 0).await;
         });
 
         let mut collected: Vec<SseEvent> = Vec::new();

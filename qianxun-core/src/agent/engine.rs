@@ -319,13 +319,16 @@ pub mod processing_loop {
                                     "[tool] execute: {name} ({id}) args={}",
                                     serde_json::to_string(args).unwrap_or_default(),
                                 );
+                                let tool_start = std::time::Instant::now();
                                 match tools
                                     .execute_async_with_filter(name, args.clone(), &tool_filter)
                                     .await
                                 {
                                     Ok(output) => {
+                                        let elapsed_ms =
+                                            tool_start.elapsed().as_millis() as u64;
                                         tracing::info!(
-                                            "[tool] result: {name} ({id}) is_error={} len={}",
+                                            "[tool] result: {name} ({id}) is_error={} len={} elapsed_ms={elapsed_ms}",
                                             output.is_error,
                                             output.content.len(),
                                         );
@@ -333,13 +336,27 @@ pub mod processing_loop {
                                             "[tool] result content: {name} ({id})\n{}",
                                             trunc(&output.content, 5000),
                                         );
+                                        // 通知 sink 工具执行完成 (default no-op,
+                                        // 旧 sink 不感知; daemon SSE 用来发 tool_result 事件)
+                                        sink.on_tool_result(
+                                            id,
+                                            &output.content,
+                                            output.is_error,
+                                            elapsed_ms,
+                                        )
+                                        .await;
                                         results.push((id.clone(), output.content, output.is_error));
                                     }
                                     Err(e) => {
+                                        let elapsed_ms =
+                                            tool_start.elapsed().as_millis() as u64;
                                         tracing::error!("[tool] error: {name} ({id}): {e}");
                                         sink.on_status(&format!("工具执行失败: {name} — {e}"))
                                             .await;
-                                        results.push((id.clone(), format!("Error: {e}"), true));
+                                        let err_content = format!("Error: {e}");
+                                        sink.on_tool_result(id, &err_content, true, elapsed_ms)
+                                            .await;
+                                        results.push((id.clone(), err_content, true));
                                     }
                                 }
                             }

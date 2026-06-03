@@ -88,6 +88,32 @@ pub enum SseEvent {
     Error { code: String, message: String },
 }
 
+impl SseEvent {
+    /// 返回 SSE 事件 type tag 字符串, 与 `#[serde(rename = "...")]` 严格一致.
+    /// 用于 `SessionStore::append_event()` 的 `event_type` 字段 (落盘时存
+    /// 事件类型便于查询/恢复) 以及任何需要字符串 type 标识的地方.
+    ///
+    /// 为什么不直接 serde 序列化后 parse `type` 字段: 序列化是 allocate 操作,
+    /// 而 type_name 用于每条事件的 store.append_event 调用, 高频热路径.
+    /// 用 match 直接返回静态字符串零分配.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            SseEvent::MessageStart { .. } => "message_start",
+            SseEvent::ContentBlockStart { .. } => "content_block_start",
+            SseEvent::TextDelta { .. } => "text_delta",
+            SseEvent::ThinkingDelta { .. } => "thinking_delta",
+            SseEvent::ToolUseDelta { .. } => "tool_use_delta",
+            SseEvent::ToolUseComplete { .. } => "tool_use_complete",
+            SseEvent::ToolResult { .. } => "tool_result",
+            SseEvent::ContentBlockStop { .. } => "content_block_stop",
+            SseEvent::Usage { .. } => "usage",
+            SseEvent::MessageDelta { .. } => "message_delta",
+            SseEvent::MessageStop => "message_stop",
+            SseEvent::Error { .. } => "error",
+        }
+    }
+}
+
 // ─── Block type tracking ────────────────────────────────────
 
 /// 当前 content_block 的逻辑类型, 用于状态机决定是否需要开/关 block.
@@ -334,6 +360,16 @@ impl SseEventBuilder {
         self.next_block_index += 1;
         idx
     }
+
+    /// 公开给 sink 用: 分配并返回下一个 block index, 同步推进内部计数器.
+    ///
+    /// 用例: 处理 `tool_result` 等不通过 `from_llm_event` 进入的事件 — sink 需要
+    /// 自己分配 index (`ContentBlockStart` / `ContentBlockStop` 配对), 而 builder
+    /// 自己的 `next_block()` 是私有方法. 通过这个公开方法, sink 可跟 builder 的
+    /// index 序列保持一致, 客户端看到的 block 序号连续递增.
+    pub fn allocate_block_index(&mut self) -> u32 {
+        self.next_block()
+    }
 }
 
 impl Default for SseEventBuilder {
@@ -349,6 +385,108 @@ mod tests {
     use super::*;
     use qianxun_core::types::TokenUsage;
     use serde_json::json;
+
+    #[test]
+    fn test_type_name_matches_serde_tag() {
+        // 验证 12 个 variant 的 type_name 跟 #[serde(rename = "...")] 字段一致.
+        // 这是 SseEvent ↔ SessionStore event_type 列的契约, 必须严丝合缝.
+        let cases: Vec<(SseEvent, &'static str)> = vec![
+            (
+                SseEvent::MessageStart {
+                    session_id: "s".into(),
+                    model: "m".into(),
+                    max_tokens: 1,
+                },
+                "message_start",
+            ),
+            (
+                SseEvent::ContentBlockStart {
+                    index: 0,
+                    block_type: "text".into(),
+                },
+                "content_block_start",
+            ),
+            (
+                SseEvent::TextDelta {
+                    index: 0,
+                    text: "x".into(),
+                },
+                "text_delta",
+            ),
+            (
+                SseEvent::ThinkingDelta {
+                    index: 0,
+                    text: "y".into(),
+                },
+                "thinking_delta",
+            ),
+            (
+                SseEvent::ToolUseDelta {
+                    index: 0,
+                    id: "i".into(),
+                    name: "n".into(),
+                    arguments_json: "{}".into(),
+                },
+                "tool_use_delta",
+            ),
+            (
+                SseEvent::ToolUseComplete {
+                    index: 0,
+                    id: "i".into(),
+                    name: "n".into(),
+                    arguments: json!({}),
+                },
+                "tool_use_complete",
+            ),
+            (
+                SseEvent::ToolResult {
+                    tool_use_id: "i".into(),
+                    content: "r".into(),
+                    is_error: false,
+                    elapsed_ms: 0,
+                },
+                "tool_result",
+            ),
+            (
+                SseEvent::ContentBlockStop { index: 0 },
+                "content_block_stop",
+            ),
+            (
+                SseEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+                "usage",
+            ),
+            (
+                SseEvent::MessageDelta {
+                    stop_reason: "end_turn".into(),
+                },
+                "message_delta",
+            ),
+            (SseEvent::MessageStop, "message_stop"),
+            (
+                SseEvent::Error {
+                    code: "api_error".into(),
+                    message: "boom".into(),
+                },
+                "error",
+            ),
+        ];
+        assert_eq!(cases.len(), 12);
+        for (ev, expected) in cases {
+            let actual = ev.type_name();
+            assert_eq!(actual, expected, "type_name mismatch for {expected}");
+            // 跟 serde 输出的 `type` 字段交叉验证
+            let serialized = serde_json::to_string(&ev).expect("serialize");
+            assert!(
+                serialized.contains(&format!(r#""type":"{expected}""#)),
+                "serde tag for {expected} diverged: {serialized}"
+            );
+        }
+    }
 
     #[test]
     fn test_text_event_roundtrip() {
