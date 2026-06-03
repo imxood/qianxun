@@ -86,6 +86,50 @@ pub enum SseEvent {
 
     #[serde(rename = "error")]
     Error { code: String, message: String },
+
+    // ===== MVP-4: 5 个新 Kanban 事件 (v6 §8.4, 12 -> 17) =====
+    /// Kanban 任务分配 (前端可以"切到 worker 视图")
+    #[serde(rename = "kanban_task_assigned")]
+    KanbanTaskAssigned {
+        task_id: String,
+        run_id: String,
+        profile_name: String,
+        title: String,
+    },
+    /// Kanban 任务进度
+    #[serde(rename = "kanban_task_progress")]
+    KanbanTaskProgress {
+        task_id: String,
+        run_id: String,
+        event_kind: String,
+        preview: String,
+    },
+    /// Kanban 任务完成
+    #[serde(rename = "kanban_task_completed")]
+    KanbanTaskCompleted {
+        task_id: String,
+        run_id: String,
+        outcome: String,
+        summary: String,
+        token_input: u64,
+        token_output: u64,
+        elapsed_ms: u64,
+    },
+    /// Kanban 派生子任务
+    #[serde(rename = "kanban_task_spawned")]
+    KanbanTaskSpawned {
+        parent_task_id: Option<String>,
+        child_task_id: String,
+        title: String,
+        assignee_role: String,
+    },
+    /// Kanban 黑板变更
+    #[serde(rename = "kanban_blackboard_update")]
+    KanbanBlackboardUpdate {
+        task_id: String,
+        key: String,
+        value_preview: String,
+    },
 }
 
 impl SseEvent {
@@ -110,6 +154,12 @@ impl SseEvent {
             SseEvent::MessageDelta { .. } => "message_delta",
             SseEvent::MessageStop => "message_stop",
             SseEvent::Error { .. } => "error",
+            // MVP-4: 5 个新 Kanban variant
+            SseEvent::KanbanTaskAssigned { .. } => "kanban_task_assigned",
+            SseEvent::KanbanTaskProgress { .. } => "kanban_task_progress",
+            SseEvent::KanbanTaskCompleted { .. } => "kanban_task_completed",
+            SseEvent::KanbanTaskSpawned { .. } => "kanban_task_spawned",
+            SseEvent::KanbanBlackboardUpdate { .. } => "kanban_blackboard_update",
         }
     }
 }
@@ -369,6 +419,34 @@ impl SseEventBuilder {
     /// index 序列保持一致, 客户端看到的 block 序号连续递增.
     pub fn allocate_block_index(&mut self) -> u32 {
         self.next_block()
+    }
+}
+
+// =============================================================================
+// MVP-4: KanbanSseEvent -> SseEvent 桥 (v6 §8.4)
+// =============================================================================
+
+/// 把 kanban_host::KanbanSseEvent 转成 SseEvent 走 SSE 流.
+impl From<crate::daemon::kanban_host::KanbanSseEvent> for SseEvent {
+    fn from(event: crate::daemon::kanban_host::KanbanSseEvent) -> Self {
+        use crate::daemon::kanban_host::KanbanSseEvent::*;
+        match event {
+            KanbanTaskAssigned { task_id, run_id, profile_name, title } => {
+                SseEvent::KanbanTaskAssigned { task_id, run_id, profile_name, title }
+            }
+            KanbanTaskProgress { task_id, run_id, event_kind, preview } => {
+                SseEvent::KanbanTaskProgress { task_id, run_id, event_kind, preview }
+            }
+            KanbanTaskCompleted { task_id, run_id, outcome, summary, token_input, token_output, elapsed_ms } => {
+                SseEvent::KanbanTaskCompleted { task_id, run_id, outcome, summary, token_input, token_output, elapsed_ms }
+            }
+            KanbanTaskSpawned { parent_task_id, child_task_id, title, assignee_role } => {
+                SseEvent::KanbanTaskSpawned { parent_task_id, child_task_id, title, assignee_role }
+            }
+            KanbanBlackboardUpdate { task_id, key, value_preview } => {
+                SseEvent::KanbanBlackboardUpdate { task_id, key, value_preview }
+            }
+        }
     }
 }
 

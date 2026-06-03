@@ -1817,6 +1817,12 @@ mod e2e_tests {
                 SseEvent::ToolUseComplete { .. } => "tool_use_complete",
                 SseEvent::ToolResult { .. } => "tool_result",
                 SseEvent::ContentBlockStop { .. } => "content_block_stop",
+                // MVP-4: 5 新 Kanban variant (测试不触发)
+                SseEvent::KanbanTaskAssigned { .. } => "kanban_task_assigned",
+                SseEvent::KanbanTaskProgress { .. } => "kanban_task_progress",
+                SseEvent::KanbanTaskCompleted { .. } => "kanban_task_completed",
+                SseEvent::KanbanTaskSpawned { .. } => "kanban_task_spawned",
+                SseEvent::KanbanBlackboardUpdate { .. } => "kanban_blackboard_update",
                 SseEvent::Usage { .. } => "usage",
                 SseEvent::MessageDelta { .. } => "message_delta",
                 SseEvent::MessageStop => "message_stop",
@@ -4365,4 +4371,154 @@ async fn create_project(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create: {e}")))?;
     Ok(Json(serde_json::json!({ "project": project })))
+}
+
+// =============================================================================
+// MVP-3 plan 3: Tasks 路由 (精简 4 核心)
+// =============================================================================
+
+async fn get_kanban_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    match host.db.get_task(&id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get task: {e}")))?
+    {
+        Some(t) => Ok(Json(serde_json::json!({ "task": t }))),
+        None => Err((StatusCode::NOT_FOUND, format!("task not found: {id}"))),
+    }
+}
+
+async fn create_kanban_task(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let board_id = body["board_id"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "board_id required".into()))?;
+    let title = body["title"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "title required".into()))?;
+    let body_text = body["body"].as_str().unwrap_or("");
+    let assignee_role = body["assignee_role"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "assignee_role required".into()))?;
+    let parent_id = body["parent_id"].as_str();
+    let priority = body["priority"].as_u64().unwrap_or(128) as u8;
+    let task = host.db.create_task(
+        None, board_id, parent_id, title, body_text, assignee_role, priority,
+    ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create: {e}")))?;
+    host.emit(crate::daemon::kanban_host::KanbanSseEvent::KanbanTaskSpawned {
+        parent_task_id: parent_id.map(String::from),
+        child_task_id: task.id.clone(),
+        title: title.into(),
+        assignee_role: assignee_role.into(),
+    });
+    Ok(Json(serde_json::json!({ "task": task })))
+}
+
+async fn cancel_kanban_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    use qianxun_core::kanban::types::TaskStatus;
+    host.db.update_task_status(&id, TaskStatus::Cancelled).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cancel: {e}")))?;
+    host.emit(crate::daemon::kanban_host::KanbanSseEvent::KanbanTaskCompleted {
+        task_id: id.clone(),
+        run_id: String::new(),
+        outcome: "cancelled".into(),
+        summary: "user cancelled".into(),
+        token_input: 0,
+        token_output: 0,
+        elapsed_ms: 0,
+    });
+    Ok(Json(serde_json::json!({ "task_id": id, "cancelled": true })))
+}
+
+async fn list_kanban_board_events(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let id_c = id.clone();
+    let events = host.db.run_blocking(move |c: &rusqlite::Connection|
+        -> Result<Vec<(i64, String, Option<String>, String, String)>, qianxun_core::kanban::KanbanError>
+    {
+        let mut stmt = c.prepare(
+            "SELECT e.id, e.kind, e.task_id, e.payload, e.created_at \
+             FROM kanban_events e \
+             LEFT JOIN kanban_tasks t ON t.id = e.task_id \
+             WHERE t.board_id = ?1 OR e.task_id IS NULL \
+             ORDER BY e.created_at DESC LIMIT 100",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id_c], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(rows)
+    }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("events: {e}")))?;
+    let event_list: Vec<serde_json::Value> = events.into_iter().map(|(eid, kind, tid, payload, created_at)| {
+        serde_json::json!({
+            "id": eid, "kind": kind, "task_id": tid,
+            "payload": serde_json::from_str::<serde_json::Value>(&payload).unwrap_or(serde_json::Value::Null),
+            "created_at": created_at,
+        })
+    }).collect();
+    Ok(Json(serde_json::json!({ "events": event_list, "total": event_list.len() })))
+}
+
+// =============================================================================
+// MVP-3 plan 4: Teams 路由 (精简 3 核心)
+// =============================================================================
+
+async fn list_kanban_profiles(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let roles = host.team_registry.list_roles().await;
+    let mut profiles = Vec::new();
+    for r in &roles {
+        let name = r.default_profile_id.replace("prof_", "");
+        if let Some(p) = host.team_registry.get_profile(&name).await {
+            profiles.push(p);
+        }
+    }
+    Ok(Json(serde_json::json!({ "profiles": profiles, "total": profiles.len() })))
+}
+
+async fn list_kanban_roles(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    let roles = host.team_registry.list_roles().await;
+    Ok(Json(serde_json::json!({ "roles": roles, "total": roles.len() })))
+}
+
+async fn dispatch_kanban_now(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = state.kanban_host.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "kanban host not initialized".into()))?;
+    match host.dispatch_once().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("dispatch: {e}")))?
+    {
+        Some(r) => Ok(Json(serde_json::json!({
+            "dispatched": true,
+            "task_id": r.task_id,
+            "run_id": r.run_id,
+            "profile_name": r.profile_name,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "dispatched": false,
+            "reason": "no ready task or all profiles busy",
+        }))),
+    }
 }
