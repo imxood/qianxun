@@ -2,7 +2,16 @@ use crate::agent::message::{ContentBlock, Message, UserMessageId};
 use crate::provider::types::CompletionRequest;
 use crate::types::AgentConfig;
 use std::path::Path;
-use tokio::io::AsyncWriteExt;
+
+/// JSONL 序列化时的解析错误 (供 `from_jsonl_str` 返回).
+#[derive(Debug, thiserror::Error)]
+pub enum ConversationFormatError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
@@ -125,30 +134,57 @@ impl Conversation {
     /// 第一行: {"type":"system","prompt":"..."}
     /// 后续行: 每个 Message 一行 JSON
     pub async fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        let mut file = tokio::fs::File::create(path).await?;
+        let s = self.to_jsonl_string();
+        tokio::fs::write(path, s).await
+    }
+
+    /// JSONL 格式序列化为字符串 (Stage 4 daemon 持久化层用, 不经文件系统).
+    ///
+    /// 格式:
+    /// - 第一行: `{"type":"system","prompt":"<system_prompt | null>"}`
+    /// - 后续行: 每个 `Message` 一行 JSON (serde 默认 external tag: `{"User":{...}}` / `{"Assistant":{...}}`)
+    ///
+    /// 带尾部换行 (callers 想拼成单行大字符串时再 strip).
+    pub fn to_jsonl_string(&self) -> String {
+        let mut out = String::new();
         let header = serde_json::json!({"type": "system", "prompt": self.system_prompt});
-        let line = serde_json::to_string(&header).expect("header serialization");
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        out.push_str(&serde_json::to_string(&header).expect("header serialization"));
+        out.push('\n');
         for msg in &self.messages {
-            let line = serde_json::to_string(msg).expect("message serialization");
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
+            out.push_str(&serde_json::to_string(msg).expect("message serialization"));
+            out.push('\n');
         }
-        Ok(())
+        out
     }
 
     /// 从 JSONL 文件加载会话。
     pub async fn load_from(path: &Path) -> std::io::Result<Self> {
         let content = tokio::fs::read_to_string(path).await?;
-        let mut lines = content.lines();
+        // 任意格式错误都转成 IoError (保持签名兼容)
+        Self::from_jsonl_str(&content).map_err(|e| match e {
+            ConversationFormatError::Json(je) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, je)
+            }
+            ConversationFormatError::Io(ie) => ie,
+        })
+    }
+
+    /// 从 JSONL 字符串反序列化 (Stage 4 daemon 持久化层用).
+    ///
+    /// 容错: 损坏的 message 行 (serde 失败) 静默跳过, 不阻断整次加载.
+    /// 系统行 (第一行 `{"type":"system",...}`) 失败时忽略, 视作无 system_prompt.
+    pub fn from_jsonl_str(s: &str) -> Result<Self, ConversationFormatError> {
+        let mut lines = s.lines();
         let mut system_prompt = None;
         let mut messages = Vec::new();
 
         if let Some(first) = lines.next() {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(first) {
                 if val.get("type").and_then(|v| v.as_str()) == Some("system") {
-                    system_prompt = val.get("prompt").and_then(|v| v.as_str()).map(String::from);
+                    system_prompt = val
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                 }
             }
         }

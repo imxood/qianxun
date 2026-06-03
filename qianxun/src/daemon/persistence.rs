@@ -27,6 +27,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use qianxun_core::agent::conversation::Conversation;
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
@@ -38,6 +39,9 @@ pub enum SessionStoreError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("conversation format error: {0}")]
+    ConversationFormat(#[from] qianxun_core::agent::conversation::ConversationFormatError),
 
     #[error("connection lock poisoned")]
     LockPoisoned,
@@ -216,6 +220,43 @@ impl SessionStore {
             )
             .optional()?;
         Ok(row.map(|(o, j)| (o as u32, j)))
+    }
+
+    /// Stage 4: 增量 snapshot — 接收真实 `Conversation` 引用, 调
+    /// `Conversation::to_jsonl_string()` 拿到 JSONL 串, 写入 snapshots 表.
+    ///
+    /// 行为跟 `save_snapshot` (字符串版) 一致: `INSERT OR REPLACE` (同
+    /// `(session_id, ordinal)` 覆盖) + 更新 `daemon_sessions.last_active_at`.
+    pub fn save_conversation_snapshot(
+        &self,
+        session_id: &str,
+        ordinal: u32,
+        conversation: &Conversation,
+    ) -> Result<(), SessionStoreError> {
+        let jsonl = conversation.to_jsonl_string();
+        self.save_snapshot(session_id, ordinal, &jsonl)
+    }
+
+    /// Stage 4: 启动恢复 — 加载最新 snapshot 并反序列化为 `Conversation`.
+    ///
+    /// 容错: ordinal=0 的占位 snapshot (`{"messages":[]}`) 不是 JSONL 格式,
+    /// `from_jsonl_str` 会自然忽略 (没有 system 行, 也没有 message 行,
+    /// 返一个空的 `Conversation`), 等价于"无 conversation 状态".
+    ///
+    /// 字段对齐: 旧 session 可能用了 `system_prompt = None`, 加载后保持 None.
+    pub fn load_latest_conversation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(u32, Conversation)>, SessionStoreError> {
+        let Some((ordinal, jsonl)) = self.load_latest_snapshot(session_id)? else {
+            return Ok(None);
+        };
+        // ordinal=0 的占位 snapshot 是 `{"messages":[]}` 不是 JSONL,
+        // from_jsonl_str 会自然返一个 system_prompt=None, messages=[] 的
+        // 空 Conversation. 保持原样返回 (ordinal=0 也能让 caller 区分
+        // "刚刚 create" vs "有 turn" — 见 caller 端的处理).
+        let conversation = Conversation::from_jsonl_str(&jsonl)?;
+        Ok(Some((ordinal, conversation)))
     }
 
     /// 启动恢复: 加载事件流 (从 seq > from_seq 开始, 按 seq 升序).
@@ -529,5 +570,182 @@ mod tests {
         assert_eq!(sess_count, 0, "session should be deleted");
         assert_eq!(snap_count_after, 0, "snapshots should cascade delete");
         assert_eq!(evt_count_after, 0, "events should cascade delete");
+    }
+
+    // ─── Stage 4: 真实 Conversation 持久化 ─────────────────────
+
+    /// 验证 save_conversation_snapshot 把 Conversation 序列化成 JSONL
+    /// (含 system 行 + message 行) 写进 SQLite, load_latest_conversation
+    /// 反序列化后字段完全一致.
+    #[test]
+    fn test_save_and_load_conversation_roundtrip() {
+        use qianxun_core::agent::message::{ContentBlock, Message};
+        use qianxun_core::agent::conversation::Conversation;
+
+        let store = SessionStore::in_memory().expect("in_memory");
+        let cfg = r#"{"model":"x"}"#;
+        store.create("sess_conv", Some("/work"), cfg).expect("create");
+
+        // 构造一个真实 Conversation: system_prompt + 1 user msg + 1 assistant msg
+        let mut conv = Conversation::new(Some("You are a helper.".to_string()));
+        conv.push_user_message(vec![ContentBlock::text("hello")]);
+        conv.push_message(Message::assistant(vec![ContentBlock::text("hi there!")]));
+
+        // save_conversation_snapshot 写 ordinal=1
+        store
+            .save_conversation_snapshot("sess_conv", 1, &conv)
+            .expect("save conv");
+
+        // load_latest_conversation 反序列化
+        let (ord, loaded) = store
+            .load_latest_conversation("sess_conv")
+            .expect("load conv")
+            .expect("should have snapshot");
+
+        assert_eq!(ord, 1);
+        assert_eq!(loaded.messages().len(), 2, "user + assistant");
+
+        // 验证 user message
+        match &loaded.messages()[0] {
+            Message::User { content, .. } => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0].text.as_deref(), Some("hello"));
+            }
+            other => panic!("expected User message, got {other:?}"),
+        }
+
+        // 验证 assistant message
+        match &loaded.messages()[1] {
+            Message::Assistant { content, .. } => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0].text.as_deref(), Some("hi there!"));
+            }
+            other => panic!("expected Assistant message, got {other:?}"),
+        }
+
+        // 验证 ordinal=1 是 max (load 返最大)
+        let (ord_max, _) = store
+            .load_latest_conversation("sess_conv")
+            .expect("load max")
+            .expect("present");
+        assert_eq!(ord_max, 1, "load_latest should return max ordinal");
+    }
+
+    /// 验证空 Conversation (无 messages) 能正确 save/load.
+    #[test]
+    fn test_save_load_empty_conversation() {
+        use qianxun_core::agent::conversation::Conversation;
+
+        let store = SessionStore::in_memory().expect("in_memory");
+        let cfg = r#"{"model":"x"}"#;
+        store.create("sess_empty", None, cfg).expect("create");
+
+        // 空 conv (无 system_prompt, 无 messages)
+        let conv = Conversation::new(None);
+        assert_eq!(conv.messages().len(), 0);
+
+        store
+            .save_conversation_snapshot("sess_empty", 1, &conv)
+            .expect("save empty");
+
+        let (ord, loaded) = store
+            .load_latest_conversation("sess_empty")
+            .expect("load empty")
+            .expect("present");
+        assert_eq!(ord, 1);
+        assert_eq!(loaded.messages().len(), 0, "empty conv should load as empty");
+    }
+
+    /// 验证 ordinal=0 的占位 snapshot (create 时写入的 `{"messages":[]}`)
+    /// 通过 load_latest_conversation 加载时不会 panic, 自然返一个空 Conversation.
+    #[test]
+    fn test_load_placeholder_snapshot_returns_empty_conv() {
+        let store = SessionStore::in_memory().expect("in_memory");
+        let cfg = r#"{"model":"x"}"#;
+        store.create("sess_placeholder", None, cfg).expect("create");
+
+        // 不写任何 save_conversation_snapshot, 只用 create 留下的 ordinal=0 占位
+        let (ord, loaded) = store
+            .load_latest_conversation("sess_placeholder")
+            .expect("load placeholder")
+            .expect("present");
+        assert_eq!(ord, 0, "placeholder should be ordinal 0");
+        assert_eq!(loaded.messages().len(), 0);
+    }
+
+    /// 验证 save_conversation_snapshot 走 INSERT OR REPLACE: 同 ordinal 二次写
+    /// 会覆盖, 后续 load 拿到最新版.
+    #[test]
+    fn test_save_conversation_overwrites_same_ordinal() {
+        use qianxun_core::agent::message::ContentBlock;
+        use qianxun_core::agent::conversation::Conversation;
+
+        let store = SessionStore::in_memory().expect("in_memory");
+        let cfg = r#"{"model":"x"}"#;
+        store.create("sess_overwrite", None, cfg).expect("create");
+
+        // 第 1 次写 ordinal=1: 1 user msg
+        let mut conv1 = Conversation::new(None);
+        conv1.push_user_message(vec![ContentBlock::text("first")]);
+        store
+            .save_conversation_snapshot("sess_overwrite", 1, &conv1)
+            .expect("save 1");
+
+        // 第 2 次写 ordinal=1 (覆盖): 2 user msg
+        let mut conv2 = Conversation::new(None);
+        conv2.push_user_message(vec![ContentBlock::text("first")]);
+        conv2.push_user_message(vec![ContentBlock::text("second")]);
+        store
+            .save_conversation_snapshot("sess_overwrite", 1, &conv2)
+            .expect("save 2 overwrite");
+
+        // load 拿到的是覆盖后的版本
+        let (_, loaded) = store
+            .load_latest_conversation("sess_overwrite")
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.messages().len(), 2, "ordinal 1 was overwritten");
+    }
+
+    /// 验证 SessionStore 的字符串版 save_snapshot 和新加的
+    /// save_conversation_snapshot 互不干扰 (可以混用, 各自走自己的路径).
+    #[test]
+    fn test_string_and_conversation_snapshot_interop() {
+        use qianxun_core::agent::conversation::Conversation;
+        use qianxun_core::agent::message::ContentBlock;
+
+        let store = SessionStore::in_memory().expect("in_memory");
+        let cfg = r#"{"model":"x"}"#;
+        store.create("sess_mix", None, cfg).expect("create");
+
+        // ordinal=1 用字符串版 (任意 JSON 内容)
+        store
+            .save_snapshot("sess_mix", 1, r#"{"messages":[],"legacy":"true"}"#)
+            .expect("save string");
+
+        // ordinal=2 用 conversation 版
+        let mut conv = Conversation::new(Some("sys".into()));
+        conv.push_user_message(vec![ContentBlock::text("hi")]);
+        store
+            .save_conversation_snapshot("sess_mix", 2, &conv)
+            .expect("save conv");
+
+        // load_latest_conversation 应该拿到 ordinal=2 (max)
+        let (ord, loaded) = store
+            .load_latest_conversation("sess_mix")
+            .expect("load")
+            .expect("present");
+        assert_eq!(ord, 2, "max ordinal is 2");
+        assert_eq!(loaded.messages().len(), 1);
+
+        // load_latest_snapshot (字符串版) 也应该拿到 ordinal=2 的内容
+        let (ord_str, json_str) = store
+            .load_latest_snapshot("sess_mix")
+            .expect("load str")
+            .expect("present");
+        assert_eq!(ord_str, 2);
+        // JSONL 格式: system 行含 prompt, 后续含消息
+        assert!(json_str.contains("\"type\":\"system\""), "should have system line");
+        assert!(json_str.contains("User"), "should have user message line");
     }
 }

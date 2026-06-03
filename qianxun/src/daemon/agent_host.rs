@@ -293,12 +293,16 @@ impl AgentLoopHost {
         cancelled
     }
 
-    /// Stage 3: 启动恢复 — 加载所有 active session 的 conversation.
+    /// Stage 3 + Stage 4: 启动恢复 — 加载所有 active session 的 conversation.
     ///
     /// 对 `store.list_active()` 的每个 session:
-    /// 1. 调 `store.load_latest_snapshot()` 拿到 conversation_json + ordinal
-    /// 2. 构造 SessionRuntime (不调 AgentLoop, 只装 conversation 状态)
+    /// 1. 调 `store.load_latest_conversation()` 拿到完整 `Conversation` + ordinal
+    /// 2. 构造 SessionRuntime (不调 AgentLoop, 把 conversation 注入)
     /// 3. 插入 in-memory HashMap
+    ///
+    /// Stage 4 跟 Stage 3 区别: 真实反序列化 conversation (用
+    /// `Conversation::from_jsonl_str` 容错 — 旧占位 snapshot `{"messages":[]}`
+    /// 会被 from_jsonl_str 忽略, 返一个空 Conversation, 跟"刚 create"语义一致).
     ///
     /// 返回成功恢复的 session 数.
     pub async fn restore_from_disk(&self) -> Result<usize, String> {
@@ -310,10 +314,12 @@ impl AgentLoopHost {
 
         let mut restored = 0;
         for meta in metas {
-            // 2. 加载最新 snapshot
-            let snap = match self
+            // 2. Stage 4: 加载最新 snapshot 并反序列化成 Conversation.
+            //    容错: 占位 snapshot (create 时写入的 ordinal=0) 没有 system 行也没
+            //    message 行, from_jsonl_str 自然返空 Conversation, 等价于"无 history".
+            let (ordinal, conversation) = match self
                 .store
-                .load_latest_snapshot(&meta.id)
+                .load_latest_conversation(&meta.id)
                 .map_err(|e| e.to_string())?
             {
                 Some(s) => s,
@@ -326,19 +332,17 @@ impl AgentLoopHost {
                 }
             };
 
-            let (ordinal, conversation_json) = snap;
+            let msg_count = conversation.messages().len();
             tracing::info!(
-                "[daemon] restoring session {id} from snapshot ordinal={ord}",
+                "[daemon] restoring session {id} from snapshot ordinal={ord} messages={n}",
                 id = meta.id,
-                ord = ordinal
+                ord = ordinal,
+                n = msg_count
             );
 
             // 3. 构造 SessionRuntime (空 AgentLoop, 还原 conversation).
-            //    注意: Stage 3 简化, conversation 字段无法从 JSON 还原
-            //    (Conversation 持有 Vec<Message>, 反序列化需要 Message
-            //    全字段支持; 后续 Stage 4 接完整 restore). 这里保持空
-            //    conversation, 但元数据 + last_active 已恢复, 客户端可
-            //    看到 session 列表.
+            //    Stage 4: SessionRuntime.conversation 是 Arc<Mutex<Conversation>>,
+            //    我们把还原的 conversation 包装成 Arc<Mutex<>> 注进去.
             let runtime = Arc::new(SessionRuntime::new(
                 meta.id.clone(),
                 meta.project_root.clone(),
@@ -348,6 +352,15 @@ impl AgentLoopHost {
                 self.state.memory.clone(),
                 self.state.skills.clone(),
             ));
+
+            // Stage 4: 把还原的 conversation 注入 SessionRuntime
+            {
+                let mut conv_guard = runtime
+                    .conversation
+                    .lock()
+                    .expect("SessionRuntime conversation lock poisoned");
+                *conv_guard = conversation;
+            }
 
             // 4. 插入 HashMap
             let mut sessions = self.sessions.write().expect("AgentLoopHost lock poisoned");
@@ -360,8 +373,6 @@ impl AgentLoopHost {
             }
             sessions.insert(meta.id.clone(), runtime);
 
-            // 5. conversation_json 留在 store 里, 客户端 connect 后按需 replay
-            let _ = conversation_json; // 暂未反序列化 (Stage 4 完整恢复)
             restored += 1;
         }
 
@@ -456,7 +467,11 @@ mod tests {
             || !runtime.config.model.is_empty());
         assert_eq!(runtime.agent_loop.turn_count, 0);
         assert_eq!(runtime.agent_loop.retry_count, 0);
-        assert_eq!(runtime.conversation.messages().len(), 0);
+        // Stage 4: conversation 改 Arc<Mutex<>> 包装, lock 后再读 messages
+        assert_eq!(
+            runtime.conversation.lock().expect("conv lock").messages().len(),
+            0
+        );
 
         // HashMap 里现在有 1 个
         assert_eq!(host.session_count(), 1);
@@ -491,5 +506,80 @@ mod tests {
             Err(msg) => assert!(msg.contains("Max sessions reached"), "unexpected error: {msg}"),
             Ok(_) => panic!("third session should be rejected"),
         }
+    }
+
+    /// Stage 4: 验证 restore_from_disk 能把 store 里的 conversation 反序列化
+    /// 出来, 注入到 SessionRuntime.
+    #[tokio::test]
+    async fn test_restore_from_disk_injects_conversation() {
+        use qianxun_core::agent::conversation::Conversation;
+        use qianxun_core::agent::message::{ContentBlock, Message};
+
+        let host = AgentLoopHost::for_test(10, ResolvedConfig::default());
+
+        // 1. 手动往 store 写一个 session + 含真实 conversation 的 snapshot
+        let cfg = r#"{"model":"x"}"#;
+        host.store
+            .create("sess_restore", Some("/work"), cfg)
+            .expect("create");
+        let mut conv = Conversation::new(Some("You are a helper.".to_string()));
+        conv.push_user_message(vec![ContentBlock::text("hello")]);
+        conv.push_message(Message::assistant(vec![ContentBlock::text("hi!")]));
+        host.store
+            .save_conversation_snapshot("sess_restore", 1, &conv)
+            .expect("save conv");
+
+        // 2. 调 restore_from_disk
+        let n = host.restore_from_disk().await.expect("restore");
+        assert_eq!(n, 1, "1 session should be restored");
+        assert!(host.session_exists("sess_restore"));
+
+        // 3. 验证 runtime.conversation 已被注入 (反序列化结果)
+        let runtime = host
+            .get_session("sess_restore")
+            .expect("runtime should be back");
+        let conv_guard = runtime
+            .conversation
+            .lock()
+            .expect("conv lock");
+        assert_eq!(conv_guard.messages().len(), 2, "user + assistant restored");
+        match &conv_guard.messages()[0] {
+            Message::User { content, .. } => {
+                assert_eq!(content[0].text.as_deref(), Some("hello"));
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+        match &conv_guard.messages()[1] {
+            Message::Assistant { content, .. } => {
+                assert_eq!(content[0].text.as_deref(), Some("hi!"));
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    /// Stage 4: 验证 restore_from_disk 处理 ordinal=0 的占位 snapshot 不 panic,
+    /// 还原成空 conversation (跟"刚 create"等价).
+    #[tokio::test]
+    async fn test_restore_from_disk_with_placeholder_snapshot() {
+        let host = AgentLoopHost::for_test(10, ResolvedConfig::default());
+
+        // create 自带 ordinal=0 占位
+        let cfg = r#"{"model":"x"}"#;
+        host.store
+            .create("sess_placeholder", None, cfg)
+            .expect("create");
+
+        let n = host.restore_from_disk().await.expect("restore");
+        assert_eq!(n, 1);
+
+        let runtime = host
+            .get_session("sess_placeholder")
+            .expect("runtime should be back");
+        let conv_guard = runtime.conversation.lock().expect("conv lock");
+        assert_eq!(
+            conv_guard.messages().len(),
+            0,
+            "placeholder snapshot should yield empty conversation"
+        );
     }
 }
