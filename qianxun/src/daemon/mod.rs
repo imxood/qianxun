@@ -110,14 +110,22 @@ pub async fn run(
     // Stage 7a: Web UI dist 路径决策 + 启动时日志.
     match &ui_dist {
         Some(p) if p.is_dir() => {
-            tracing::info!("[daemon] Web UI serving at /_ui/* from {}", p.display());
+            tracing::info!("[daemon] Web UI serving at /ui/* from {}", p.display());
         }
         Some(p) => {
             tracing::warn!(
-                "[daemon] Web UI dist path does not exist: {} (/_ui/* will return 503). \
-                 Build with: pnpm --dir qianxun/src/daemon/ui build",
+                "[daemon] Web UI dist path does not exist: {} (/ui/* will return 503). \
+                 兜底: 跑 pnpm build (build.rs 应该已跑过, 但兜底防漏)",
                 p.display()
             );
+            // 兜底: 跑 1 次 pnpm build (build.rs 是主流程, 这里保 cargo run 也能用)
+            let _ = std::process::Command::new("pnpm")
+                .args(["--dir", "qianxun/src/daemon/ui", "build"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status();
+            if p.is_dir() {
+                tracing::info!("[daemon] ✅ pnpm 兜底 build 成功, UI now serving from {}", p.display());
+            }
         }
         None => {
             tracing::info!("[daemon] Web UI disabled (no --ui-dist / QIANXUN_UI_DIST)");

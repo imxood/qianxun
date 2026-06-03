@@ -105,8 +105,8 @@ struct Cli {
 
     /// Stage 7a: Web Admin Console 静态文件 dist 路径 (SvelteKit 产物).
     /// 优先级: CLI > env `QIANXUN_UI_DIST` > 默认 (`<exe 同级>/ui/` release
-    /// 或 `<workspace>/qianxun/src/daemon/ui/dist/` debug). 路径不存在时
-    /// daemon 仍启动, 但 `/_ui/*` 返 503 + 提示 `pnpm build`.
+    /// 或 `<workspace>/qianxun/src/daemon/ui/build/` debug). 路径不存在时
+    /// daemon 仍启动, 但 `/ui/*` 返 503 + 提示 `pnpm build`.
     #[arg(long)]
     ui_dist: Option<String>,
 }
@@ -355,7 +355,7 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// 优先级:
 /// 1. `<exe 同级>/ui/` (release 打包时)
-/// 2. `<workspace>/qianxun/src/daemon/ui/dist/` (dev)
+/// 2. `<workspace>/qianxun/src/daemon/ui/build/` (dev)
 /// 3. 都没有 → None (daemon 启动时打 "Web UI disabled")
 fn default_ui_dist_path() -> Option<std::path::PathBuf> {
     // 1. exe 同级
@@ -369,14 +369,14 @@ fn default_ui_dist_path() -> Option<std::path::PathBuf> {
     }
     // 2. workspace dev 路径
     if let Ok(cwd) = std::env::current_dir() {
-        // 从 cwd 向上找 qianxun-core 标志 (workspace root), 然后用 qianxun/src/daemon/ui/dist
+        // 从 cwd 向上找 qianxun-core 标志 (workspace root), 然后用 qianxun/src/daemon/ui/build
         if let Some(root) = find_workspace_root(&cwd) {
             let candidate = root
                 .join("qianxun")
                 .join("src")
                 .join("daemon")
                 .join("ui")
-                .join("dist");
+                .join("build");
             if candidate.is_dir() {
                 return Some(candidate);
             }

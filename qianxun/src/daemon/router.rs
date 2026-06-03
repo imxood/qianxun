@@ -78,7 +78,7 @@ pub struct PromptMessage {
 /// - `/` 跳过 (服务自描述/landing, 信息非敏感, 浏览器/HTTP 探针命中要返 200)
 /// - `/v1/system/health` 跳过 (k8s liveness/readiness probe 用, 不应被 token 拦)
 /// - `/v1/system/status` 跳过 (状态查询, 信息非敏感, 方便调试)
-/// - `/_ui/*` 跳过 (Stage 7a: 静态文件 serve, 走 cookie/JWT 端另一套 —
+/// - `/ui/*` 跳过 (Stage 7a: 静态文件 serve, 走 cookie/JWT 端另一套 —
 ///   Stage 7a 简化: Web UI 首次访问弹 token 输入框, 浏览器把 daemon 启动
 ///   时打印的 token 粘进去即用, 不做密码)
 /// - 其余 endpoint 全部要求 `Authorization: Bearer <jwt>` (HS256 + exp)
@@ -166,6 +166,14 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/v1/kanban/boards", get(list_kanban_boards).post(create_kanban_board))
         .route("/v1/kanban/boards/{id}", get(get_kanban_board))
         .route("/v1/kanban/boards/{id}/tasks", get(list_kanban_board_tasks))
+        // 阶段 2: 7 个 Kanban handler 注册 (MVP-3 plan 3+4 函数已定义, 修路由注册 bug)
+        .route("/v1/kanban/tasks/{id}", get(get_kanban_task))
+        .route("/v1/kanban/tasks", post(create_kanban_task))
+        .route("/v1/kanban/tasks/{id}/cancel", post(cancel_kanban_task))
+        .route("/v1/kanban/boards/{id}/events", get(list_kanban_board_events))
+        .route("/v1/kanban/profiles", get(list_kanban_profiles))
+        .route("/v1/kanban/roles", get(list_kanban_roles))
+        .route("/v1/kanban/dispatch", post(dispatch_kanban_now))
         .route("/v1/projects", get(list_projects).post(create_project))
         // Stage 10a: 密码登录 + 修改密码 + 登出
         //  - /v1/auth/login       公开 (跳过 auth middleware) — 拿密码换短期 JWT
@@ -179,24 +187,24 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .with_state(state.clone());
 
     // Stage 7a: 嵌套 ServeDir (静态文件 + SPA fallback).
-    // nest_service 把整个 sub-router 接到 /_ui/* 上.
+    // nest_service 把整个 sub-router 接到 /ui/* 上.
     router = match ui_dist {
         Some(dir) if dir.is_dir() => {
             let index_html = dir.join("index.html");
             if index_html.is_file() {
                 // SPA fallback: 文件不存在 → 返 index.html (vite/adam 行为)
                 let svc = ServeDir::new(&dir).fallback(ServeFile::new(&index_html));
-                router.nest_service("/_ui", svc)
+                router.nest_service("/ui", svc)
             } else {
                 // 没 index.html → 直接 ServeDir, 不做 fallback (404 由 ServeDir 返)
                 let svc = ServeDir::new(&dir);
-                router.nest_service("/_ui", svc)
+                router.nest_service("/ui", svc)
             }
         }
         _ => {
-            // dist 不存在或未配置 → /_ui/* 走兜底 handler 返 503
+            // dist 不存在或未配置 → /ui/* 走兜底 handler 返 503
             router.nest_service(
-                "/_ui",
+                "/ui",
                 axum::routing::get(ui_dist_missing).fallback(ui_dist_missing),
             )
         }
@@ -365,18 +373,18 @@ pub fn active_conns_count() -> usize {
 /// - `/` — 服务自描述/landing, 浏览器/curl 探针应能命中不报错
 /// - `/v1/system/health` — k8s liveness/readiness probe
 /// - `/v1/system/status` — 状态查询 (信息非敏感, 调试方便)
-/// - `/_ui/*` — Stage 7a 静态文件 serve (SPA 资源不需要每个文件都打 token;
+/// - `/ui/*` — Stage 7a 静态文件 serve (SPA 资源不需要每个文件都打 token;
 ///   真正要 auth 的 Web UI 资源是 SvelteKit 内部 fetch 走 `/v1/*` 时的 Bearer
 ///   token; Stage 7a 简化: 启动时打 admin token, UI 粘进 localStorage)
-/// - `/_app/*` — Stage 12 防御性: SvelteKit `paths.base = '/_ui'` 时, JS/CSS
-///   资源在 `/_ui/_app/...` 下 (被 `/_ui/*` 覆盖), 但若 SvelteKit 改 base
+/// - `/_app/*` — Stage 12 防御性: SvelteKit `paths.base = '/ui'` 时, JS/CSS
+///   资源在 `/ui/_app/...` 下 (被 `/ui/*` 覆盖), 但若 SvelteKit 改 base
 ///   或 adapter 行为变了, 资源会落到 `/_app/...`. 显式 skip 防 401.
 pub fn is_auth_skipped_path(path: &str) -> bool {
     path == "/"
         || path == "/v1/system/health"
         || path == "/v1/system/status"
-        || path.starts_with("/_ui/")
-        || path == "/_ui"
+        || path.starts_with("/ui/")
+        || path == "/ui"
         || path.starts_with("/_app/")
         || path == "/_app"
 }
@@ -2531,10 +2539,10 @@ mod jwt_auth_tests {
         assert!(is_auth_skipped_path("/"));
         assert!(is_auth_skipped_path("/v1/system/health"));
         assert!(is_auth_skipped_path("/v1/system/status"));
-        // Stage 7a: /_ui/* 跳过 auth (SvelteKit 静态资源)
-        assert!(is_auth_skipped_path("/_ui"));
-        assert!(is_auth_skipped_path("/_ui/"));
-        assert!(is_auth_skipped_path("/_ui/assets/main.js"));
+        // Stage 7a: /ui/* 跳过 auth (SvelteKit 静态资源)
+        assert!(is_auth_skipped_path("/ui"));
+        assert!(is_auth_skipped_path("/ui/"));
+        assert!(is_auth_skipped_path("/ui/assets/main.js"));
         // Stage 12 防御性: SvelteKit 资源也跳过 (若 paths.base 改了)
         assert!(is_auth_skipped_path("/_app"));
         assert!(is_auth_skipped_path("/_app/"));
@@ -2730,7 +2738,7 @@ mod stage7a_endpoint_tests {
         let response = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/_ui/")
+                    .uri("/ui/")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2754,7 +2762,7 @@ mod stage7a_endpoint_tests {
         let response = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/_ui/")
+                    .uri("/ui/")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2786,7 +2794,7 @@ mod stage7a_endpoint_tests {
         let response = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/_ui/index.html")
+                    .uri("/ui/index.html")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2802,7 +2810,7 @@ mod stage7a_endpoint_tests {
         let response = app2
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/_ui/assets/main.js")
+                    .uri("/ui/assets/main.js")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2817,7 +2825,7 @@ mod stage7a_endpoint_tests {
         let response = app3
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/_ui/llm/some-page")
+                    .uri("/ui/llm/some-page")
                     .body(Body::empty())
                     .unwrap(),
             )

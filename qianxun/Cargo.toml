@@ -3,6 +3,7 @@ name = "qianxun"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+build = "src/daemon/build.rs"
 description = "千寻 — 个人 AI 助手"
 
 [[bin]]
@@ -40,3 +41,8 @@ tokio-stream = { workspace = true }
 bcrypt = { workspace = true }
 base64 = "0.22"
 getrandom = "0.2"
+
+[build-dependencies]
+# build.rs 用 std + Command 即可, 不引新 crate
+# (cargo 自动把 build.rs 视作独立编译单元, 不需要 [dependencies])
+
