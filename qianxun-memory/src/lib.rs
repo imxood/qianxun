@@ -32,6 +32,25 @@ pub struct MemoryStats {
     pub session_count: i64,
 }
 
+/// Stage 12: 单条 observation 记录 (跟 `observations` 表 1:1).
+///
+/// 字段对应 `db::create_tables` 里 CREATE TABLE observations:
+///   id TEXT PRIMARY KEY,
+///   session_id TEXT NOT NULL,
+///   timestamp TEXT NOT NULL,
+///   data TEXT NOT NULL,           -- JSON 编码的 observation 业务字段
+///   created_at TEXT NOT NULL
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Observation {
+    pub id: String,
+    pub session_id: String,
+    pub timestamp: String,
+    /// JSON 字符串 (frontend 自己 JSON.parse). 保持 TEXT 不主动 deserialize
+    /// 是为了: (a) 减少内存拷贝 (b) 让 frontend 控制 schema 演进
+    pub data: String,
+    pub created_at: String,
+}
+
 /// 当前活跃 session 的上下文。
 ///
 /// observe() 期间需要用真实 session_id 替代早期实现的硬编码 "global"。
@@ -88,6 +107,43 @@ impl MemoryCore {
         .await
         .map_err(|e| anyhow::anyhow!("delete_observation join: {e}"))??;
         Ok(affected > 0)
+    }
+
+    /// Stage 12: 同步列出某 session 的所有 observations (供
+    /// `GET /v1/memory/sessions/{id}/observations`).
+    ///
+    /// 走 `spawn_blocking`. 按 `timestamp ASC` 返回 (最旧在前, 跟 Web Console
+    /// Memory 面板时间线展示一致).
+    ///
+    /// 返回 `Vec<Observation>` 包含 id, session_id, timestamp, data, created_at.
+    /// 空 session → 空 vec (不返错误, 跟"session 存在但没观察"语义一致).
+    pub async fn list_observations(&self, session_id: &str) -> anyhow::Result<Vec<Observation>> {
+        let db = self.db.clone();
+        let session_id = session_id.to_string();
+        let rows = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Observation>> {
+            let conn = db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, timestamp, data, created_at \
+                 FROM observations \
+                 WHERE session_id = ?1 \
+                 ORDER BY timestamp ASC"
+            )?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    Ok(Observation {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        timestamp: row.get(2)?,
+                        data: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("list_observations join: {e}"))??;
+        Ok(rows)
     }
 
     /// Stage 7b: 同步删除整个 memory session 及其级联 observations (供

@@ -21,6 +21,7 @@ import { reloadSkills } from './skills';
 import { listMcpServers } from './mcp';
 import { listChatSessionsAll } from './chat';
 import { getMetrics } from './system';
+import { listObservations } from './memory';
 import { authStore } from '$lib/stores/auth.svelte';
 
 // global fetch mock
@@ -193,5 +194,60 @@ describe('integration: 真实 daemon endpoint 契约', () => {
 		const [url, init] = fetchMock.mock.calls[0]!;
 		expect(url).toBe('/v1/system/metrics');
 		expect((init as RequestInit).method).toBe('GET');
+	});
+
+	// 7. Stage 12: listObservations — 补漏 — daemon 现在有
+	//    `GET /v1/memory/sessions/{id}/observations` endpoint, 之前 Svelte
+	//    调了但 daemon 返 404 (Gap 1). 现补 mock 测试覆盖, 确认 Svelte 端
+	//    用的是正确的 URL + method.
+	//    (memory.ts:listObservations 直接返 observations 数组, 不是包外层对象)
+	it('test_list_observations: GET /v1/memory/sessions/{id}/observations 返空数组 (Stage 12)', async () => {
+		fetchMock.mockResolvedValueOnce(
+			jsonResponse({
+				observations: [],
+				total: 0,
+				session_id: 'sess_xyz'
+			})
+		);
+
+		const result = await listObservations('sess_xyz');
+		expect(Array.isArray(result)).toBe(true);
+		expect(result).toEqual([]);
+
+		const [url, init] = fetchMock.mock.calls[0]!;
+		expect(url).toBe('/v1/memory/sessions/sess_xyz/observations');
+		expect((init as RequestInit).method === 'GET' || (init as RequestInit).method === undefined).toBe(true);
+	});
+
+	// 8. Stage 12: listObservations 真有数据时
+	it('test_list_observations_with_data: 返 Observation[] 含 id/timestamp/data', async () => {
+		fetchMock.mockResolvedValueOnce(
+			jsonResponse({
+				observations: [
+					{
+						id: 'obs_01',
+						session_id: 'sess_1',
+						timestamp: '2026-06-03T00:00:00Z',
+						data: '{"obs_type":"file_read","content":"main.rs"}',
+						created_at: '2026-06-03T00:00:00Z'
+					},
+					{
+						id: 'obs_02',
+						session_id: 'sess_1',
+						timestamp: '2026-06-03T00:01:00Z',
+						data: '{"obs_type":"user_message","content":"hi"}',
+						created_at: '2026-06-03T00:01:00Z'
+					}
+				],
+				total: 2,
+				session_id: 'sess_1'
+			})
+		);
+
+		const result = await listObservations('sess_1');
+		expect(result).toHaveLength(2);
+		expect(result[0]?.id).toBe('obs_01');
+		expect(result[1]?.id).toBe('obs_02');
+		expect(result[0]?.timestamp).toBe('2026-06-03T00:00:00Z');
 	});
 });

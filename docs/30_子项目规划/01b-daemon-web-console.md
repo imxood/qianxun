@@ -146,6 +146,29 @@ qianxun/src/daemon/ui/           # SvelteKit SPA
 | ☆9 | **Settings** | `/settings` | 主题 (light/dark/system) / 语言 (zh-CN/en) / token 配置 / 关于 | 7c |
 | ☆10 | **Chat (次要)** | `/chat` | 项目列表 + 3 栏布局 + 流式聊天 (复用 Tauri 组件) | 7c |
 
+### 3.1 关键概念区分: Chat Session vs Memory Session
+
+**两个完全不同的概念, URL 相似但语义不同, 容易混淆**:
+
+| 维度 | Chat Session (`/v1/chat/sessions/{id}`) | Memory Session (`/v1/memory/sessions/{id}`) |
+|---|---|---|
+| **存储** | `~/.qianxun/daemon.db` (daemon SessionStore) | `~/.qianxun/mem.db` (qianxun-memory SQLite) |
+| **生命周期** | 单次聊天会话 (用户开 + 聊 + 关) | 跨聊天的长程记忆 (自动从 chat 提取 + consolidate) |
+| **数据** | 完整 message 列表 + snapshot + event log | 观察 (observations) + 摘要 (summaries) + 原始记录 |
+| **Web UI 入口** | `/chat` (主入口) + `/sessions` (管理) | `/memory` (管理) |
+| **典型操作** | cancel / pause / delete 单个 session | 搜索 observations / 删 整个 memory session |
+| **持久化** | 用户主动 (关 chat 触发) | 自动 (memory observer 钩子) |
+
+**关系**: Chat Session 中的某些事件 (e.g. user 输入, LLM 响应) 会通过
+`MemoryObserver` 钩子自动转成 Memory Session 的 observations. 一个 Chat Session
+可能产生 0+ 个 observations, 这些 observations 归属对应的 Memory Session.
+
+**新增 endpoint** (Stage 12):
+- `GET /v1/memory/sessions/{id}/observations` — 列某 Memory Session 的所有 observations
+  (Web UI 点 Memory 面板 session 后, 右侧观察详情)
+- 这 endpoint 容易跟 `/v1/chat/session/{id}/prompt` 混淆 (路径都是 `/session/{id}/...`).
+  实际差别: chat 的是 conversation 消息流, memory 的是 observations 观察记录.
+
 ## §4 API Gap 分析 (Stage 7 范围)
 
 ### 4.1 已有 endpoint (Stage 1-6 已实现)
@@ -187,10 +210,24 @@ qianxun/src/daemon/ui/           # SvelteKit SPA
 | `/v1/config` | PUT | ☆ | 写 config (含 hot-reload 通知) | Stage 7b |
 | `/v1/memory/observations/{id}` | DELETE | ☆ | 删观察 | Stage 7b |
 | `/v1/memory/sessions/{id}` | DELETE | ☆ | 删整个 session | Stage 7b |
+| `/v1/memory/sessions/{id}/observations` | GET | ★ (Stage 12 补) | 列某 session 下的 observations (Memory 面板点 session 后看观察详情) | Stage 7b + 12 |
 | `/v1/system/metrics` | GET | ☆ | 资源指标 (CPU/内存/conns/uptime) | Stage 7b |
 | `/v1/system/logs` | GET | ☆ | 日志查看 (tracing JSON 输出) | Stage 7b |
 
-**预估** 17 个新 endpoint. 30 min cap → 拆 3 stage, 每 stage 5-6 个 + 1 个 UI 模块.
+**预估** 18 个新 endpoint. 30 min cap → 拆 3 stage, 每 stage 5-6 个 + 1 个 UI 模块.
+
+> **2026-06-03 补 (Stage 12)**: `GET /v1/memory/sessions/{id}/observations` 实际
+> 归属 Stage 7b 计划但当时漏实现. Svelte 端 `memory.ts:listObservations`
+> 早已调, daemon router 没注册, 返 404. Stage 12 补:
+> 1. `qianxun-memory` 加 `MemoryCore::list_observations()` 方法 + `Observation` struct
+> 2. `qianxun/src/daemon/router.rs` 加 `memory_session_observations` handler + 3 个 cargo 测试
+> 3. Svelte `MemoryObservation` type 修正对齐 daemon schema (id/session_id/timestamp/data/created_at)
+> 4. memory 页面 UI 字段渲染更新
+> 5. `is_auth_skipped_path` 加 `/_app/*` 防御 (若 SvelteKit `paths.base` 改了)
+> 6. 2 个 Svelte integration test 覆盖 (mock fetch, 验证 URL + 字段)
+
+> **2026-06-03 文档清理**: 旧 01b §4.1 表里列了 `GET /v1/system/config`, 但
+> 代码里没这个 endpoint (只有 `/v1/config`). RUNNING-GUIDE 已删该行.
 
 ## §5 Stage 拆分 (3 sub-stage, 30 min cap)
 

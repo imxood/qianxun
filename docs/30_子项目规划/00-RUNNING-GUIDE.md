@@ -410,7 +410,6 @@ pnpm exec playwright test                        # 5 spec pass (login / llm / sk
 | GET | `/` | ✓ | 服务自描述 JSON (Stage 7 bugfix) |
 | GET | `/v1/system/health` | ✓ | k8s probe |
 | GET | `/v1/system/status` | ✓ | 运行时状态 |
-| GET | `/v1/system/config` | | 当前 config |
 | GET | `/v1/system/metrics` | | 资源 (CPU/mem/conns/uptime) |
 | GET | `/v1/system/logs?lines=N` | | 日志 tail (默认 100, 上限 1000) |
 | GET | `/v1/system/admin/rotate-token` | | 旋转 admin token (Stage 9c) |

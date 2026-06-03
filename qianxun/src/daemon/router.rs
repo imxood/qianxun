@@ -107,6 +107,13 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/v1/memory/search", post(memory_search))
         // Day-3.2: 轻量健康检查 — 验证 MemoryCore 可达 + 报三表行数
         .route("/v1/memory/ping", get(memory_ping))
+        // Stage 12: 列出某 session 的所有 observations (供 Web Console Memory 面板
+        // 点 session 后右侧观察详情). 之前 Svelte memory.ts:listObservations 已调,
+        // 但 daemon 端没注册, 返 404. 现补.
+        .route(
+            "/v1/memory/sessions/{id}/observations",
+            get(memory_session_observations),
+        )
         // 技能 (Stage 7a: 加 reload + toggle)
         .route("/v1/skills", get(list_skills).post(reload_skills))
         .route("/v1/skills/{name}/toggle", post(toggle_skill))
@@ -350,12 +357,17 @@ pub fn active_conns_count() -> usize {
 /// - `/_ui/*` — Stage 7a 静态文件 serve (SPA 资源不需要每个文件都打 token;
 ///   真正要 auth 的 Web UI 资源是 SvelteKit 内部 fetch 走 `/v1/*` 时的 Bearer
 ///   token; Stage 7a 简化: 启动时打 admin token, UI 粘进 localStorage)
+/// - `/_app/*` — Stage 12 防御性: SvelteKit `paths.base = '/_ui'` 时, JS/CSS
+///   资源在 `/_ui/_app/...` 下 (被 `/_ui/*` 覆盖), 但若 SvelteKit 改 base
+///   或 adapter 行为变了, 资源会落到 `/_app/...`. 显式 skip 防 401.
 pub fn is_auth_skipped_path(path: &str) -> bool {
     path == "/"
         || path == "/v1/system/health"
         || path == "/v1/system/status"
         || path.starts_with("/_ui/")
         || path == "/_ui"
+        || path.starts_with("/_app/")
+        || path == "/_app"
 }
 
 /// 读 JWT secret (env var QIANXUN_JWT_SECRET).
@@ -537,6 +549,31 @@ async fn memory_ping(
         "observations": observation_count,
         "memories": memory_count,
         "sessions": session_count,
+    })))
+}
+
+/// Stage 12: `GET /v1/memory/sessions/{id}/observations` — 列出某 memory session
+/// 的所有 observations (供 Web Console Memory 面板点 session 后右侧观察详情).
+///
+/// 返回 `{observations: [...], total: N, session_id: "..."}`. observations 按
+/// `timestamp ASC` 排序 (最旧在前, 跟 Web Console 时间线展示一致).
+///
+/// 走 JWT auth (跟 `memory_sessions` / `memory_search` 一致). 空 session → 返
+/// `{observations: [], total: 0}` 不返 404, 跟"session 存在但没观察"语义对齐.
+async fn memory_session_observations(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let observations = state
+        .memory
+        .list_observations(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("list_observations: {e}")))?;
+    let total = observations.len();
+    Ok(Json(serde_json::json!({
+        "observations": observations,
+        "total": total,
+        "session_id": id,
     })))
 }
 
@@ -2477,6 +2514,10 @@ mod jwt_auth_tests {
         assert!(is_auth_skipped_path("/_ui"));
         assert!(is_auth_skipped_path("/_ui/"));
         assert!(is_auth_skipped_path("/_ui/assets/main.js"));
+        // Stage 12 防御性: SvelteKit 资源也跳过 (若 paths.base 改了)
+        assert!(is_auth_skipped_path("/_app"));
+        assert!(is_auth_skipped_path("/_app/"));
+        assert!(is_auth_skipped_path("/_app/immutable/chunks/abc.js"));
         // 其它路径不跳过
         assert!(!is_auth_skipped_path("/v1/chat/session"));
         assert!(!is_auth_skipped_path("/v1/tools"));
@@ -3886,6 +3927,134 @@ mod stage9c_csp_tests {
         assert!(
             response.headers().contains_key("content-security-policy"),
             "CSP missing on /"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stage12_memory_observations_tests {
+    //! Stage 12: 验证 `GET /v1/memory/sessions/{id}/observations` 端到端.
+    //!
+    //! 之前 Svelte `memory.ts:listObservations` 调这个 endpoint, 但 daemon
+    //! router 没注册, 返 404, Memory 面板点 session 后右侧观察详情失败.
+    //! 现在补上, 验证:
+    //!   1. 空 session 返 `{observations: [], total: 0, session_id: "..."}` (不 404)
+    //!   2. 走 JWT auth (无 token 返 401)
+    //!   3. path 里的 session_id 回显
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+    use tower::ServiceExt;
+
+    use super::stage7a_endpoint_tests::make_test_state;
+
+    /// 跟 `make_test_state` 内部用的 AdminCredential 同样的 secret.
+    const TEST_SECRET: &str = "stage7a-test-jwt-secret";
+
+    /// 签发测试 JWT (HS256, 1h 过期).
+    fn make_test_jwt() -> String {
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            sub: "admin".into(),
+            exp: now + 3600,
+            iat: now,
+        };
+        encode(
+            &JwtHeader::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("encode test jwt")
+    }
+
+    /// helper: 发 GET 请求带 Bearer JWT
+    async fn get_with_auth(
+        app: axum::Router,
+        path: &str,
+        token: &str,
+    ) -> axum::response::Response {
+        app.oneshot(
+            HttpRequest::builder()
+                .method("GET")
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_observations_empty_session_returns_empty_array() {
+        let state = make_test_state();
+        let app = build_router(state, None);
+        let token = make_test_jwt();
+        // "never_existed" session 不存在, MemoryCore.list_observations 应返空 vec
+        let response = get_with_auth(app, "/v1/memory/sessions/never_existed/observations", &token)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "空 session 应返 200 不 404");
+        let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            body_str.contains("\"observations\":[]"),
+            "body 应含空 observations 数组, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("\"total\":0"),
+            "body 应含 total=0, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("\"session_id\":\"never_existed\""),
+            "body 应回显 session_id, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_observations_requires_auth() {
+        let state = make_test_state();
+        let app = build_router(state, None);
+        // 无 Authorization header → 401
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("GET")
+                    .uri("/v1/memory/sessions/sess_1/observations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "list_observations 应走 JWT auth, 无 token 返 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_observations_path_with_session_id_echoes_back() {
+        // 验证 session_id 字段回显 (Web Console 用它确认请求成功)
+        let state = make_test_state();
+        let app = build_router(state, None);
+        let token = make_test_jwt();
+        let response = get_with_auth(
+            app,
+            "/v1/memory/sessions/sess_test_xyz/observations",
+            &token,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            body_str.contains("\"session_id\":\"sess_test_xyz\""),
+            "body 应回显 path 里的 session_id, got: {body_str}"
         );
     }
 }

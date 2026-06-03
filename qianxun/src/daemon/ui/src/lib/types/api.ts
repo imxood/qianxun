@@ -133,10 +133,13 @@ export interface MemorySessionSummary {
 export interface MemoryObservation {
 	id: string;
 	session_id: string;
-	content: string;
-	tags?: string[];
-	created_at?: string;
-	kind?: string;
+	/// ISO 8601 字符串, 例如 "2026-06-03T00:00:00Z".
+	/// 跟 daemon `qianxun-memory::Observation.timestamp` 1:1 对齐.
+	timestamp: string;
+	/// JSON 字符串 (frontend 自己 JSON.parse). 跟 daemon `Observation.data` 1:1.
+	/// 留 TEXT 是为了 (a) 减少内存拷贝 (b) 跨版本 schema 演进.
+	data: string;
+	created_at: string;
 }
 
 /** 搜索请求 body */

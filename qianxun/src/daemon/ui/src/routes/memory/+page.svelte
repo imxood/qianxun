@@ -271,12 +271,9 @@
 								>
 									<div class="text-muted-foreground text-xs">
 										<span class="font-mono">{truncate(o.id, 12)}</span> ·
-										{formatTimestamp(o.created_at)}
-										{#if o.kind}
-											<Badge variant="outline">{o.kind}</Badge>
-										{/if}
+										{formatTimestamp(o.timestamp)}
 									</div>
-									<div class="mt-1">{truncate(o.content, 200)}</div>
+									<div class="mt-1">{truncate(o.data, 200)}</div>
 								</button>
 							</li>
 						{/each}
@@ -301,27 +298,17 @@
 							<dd class="font-mono text-xs break-all">{selectedObs.session_id}</dd>
 						</div>
 						<div>
-							<dt class="text-muted-foreground text-xs">Created</dt>
-							<dd>{selectedObs.created_at ?? '—'}</dd>
+							<dt class="text-muted-foreground text-xs">Timestamp</dt>
+							<dd>{formatTimestamp(selectedObs.timestamp)}</dd>
 						</div>
 						<div>
-							<dt class="text-muted-foreground text-xs">Kind</dt>
-							<dd>{selectedObs.kind ?? '—'}</dd>
+							<dt class="text-muted-foreground text-xs">Created</dt>
+							<dd>{selectedObs.created_at}</dd>
 						</div>
-						{#if selectedObs.tags && selectedObs.tags.length > 0}
-							<div class="md:col-span-2">
-								<dt class="text-muted-foreground text-xs">Tags</dt>
-								<dd class="mt-1 flex flex-wrap gap-1">
-									{#each selectedObs.tags as tag (tag)}
-										<Badge variant="info">{tag}</Badge>
-									{/each}
-								</dd>
-							</div>
-						{/if}
 						<div class="md:col-span-2">
-							<dt class="text-muted-foreground text-xs">Content</dt>
-							<dd class="bg-muted mt-1 rounded p-2 text-sm whitespace-pre-wrap">
-								{selectedObs.content}
+							<dt class="text-muted-foreground text-xs">Data (JSON)</dt>
+							<dd class="bg-muted mt-1 rounded p-2 text-sm whitespace-pre-wrap font-mono">
+								{selectedObs.data}
 							</dd>
 						</div>
 					</dl>
