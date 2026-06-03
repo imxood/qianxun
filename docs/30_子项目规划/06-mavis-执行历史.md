@@ -338,3 +338,116 @@ tasks:
 - 17 次 override_accept + 1 次 manual_retry + 1 次 reject
 - 4 天执行 (2026-05-31 ~ 2026-06-03)
 - 0 行 deliverable 丢失 (5 分钟 commit 节奏兜底)
+
+
+## 9. MVP-2 待执行计划 (2026-06-03 plan 文档完成, 0 代码)
+
+> 创建: 2026-06-03 | 状态: 📋 6 个 plan yaml 已落盘, 待 orchestrator 启动
+> 配套: `04-kanban-design.md` v6 §14.1 MVP-2 (1700 行 / 2 周 / 8 张表 / 12 工具 / 4 pattern)
+> 文件: `.mavis/plans/mvp2-{0..6}-*.yaml` + `mvp2-overview.yaml` (本地, 不入 git, 跟 18 个 stage plan 一样)
+
+### 9.1 拆分思路
+
+MVP-2 8 周计划里的一段 (W3-4, 估 1700 行), 单次会话写不完 8 张表 + 12 工具 + dispatcher + pattern dispatcher + 集成测试. 按 mavis 30 min cap 拆成 6 个 plan, 严格按依赖顺序, 每个 plan 估 30 min hard cap, 0 新 crate.
+
+### 9.2 6 个子 plan 依赖图
+
+```
+mvp2-0-prep (30 min)
+    ↓ 提供 KanbanError + 8 struct 骨架
+mvp2-1-schema (30 min) ← 8 张表 DDL + 2 ALTER TABLE
+    ↓ 提供 init_kanban_schema + 迁移 SQL
+mvp2-2-db-crud (30 min) ← KanbanDb CRUD 28+ 方法
+    ↓ 提供 KanbanDb + spawn_blocking 异步化
+    ├── mvp2-3-state-machine (30 min) ← 7 状态 + check_transition + recompute_parent
+    └── mvp2-4-dispatcher (30 min) ← KanbanDispatcher 骨架 + Team/Profile/Role (4 默认)
+            ↓ 提供 TeamRegistry
+            mvp2-5-tools (30 min) ← 12 个 kanban_* 工具 + Worker/Orchestrator scope 护栏
+                ↓ 提供 tools 集成
+                mvp2-6-pattern (30 min) ← 4 pattern dispatcher + heartbeat 桥 +
+                                          Project/Session 关联 (收尾)
+```
+
+### 9.3 各 plan 关键文件 (累加行数)
+
+| Plan | 关键文件 | 估行 | 30min 验收 |
+|------|----------|------|------------|
+| 0 prep | `kanban/{mod,types,error}.rs` + `lib.rs` +2 | 320 | `cargo test kanban::types` 5/5 |
+| 1 schema | `daemon/persistence.rs` +200 (8 DDL + 2 ALTER) | 250 | 9 个 kanban_* 表 + 5 单测 |
+| 2 db-crud | `kanban/db.rs` (~350 行 28+ 方法) | 400 | 10+ 单测, spawn_blocking 数 ≥ 28 |
+| 3 state-machine | `kanban/state_machine.rs` (200 行 7 状态) | 250 | check_transition 8 合法 + recompute 2 case |
+| 4 dispatcher | `kanban/dispatcher.rs` (150) + `agent/team.rs` (250) + `blackboard/{mod,cell}.rs` (95) | 550 | 5+ 单测, 4 默认 role |
+| 5 tools | `tools/builtin/kanban.rs` (350) + `tools/mod.rs` +30 | 400 | 8+ 单测, 12 工具全有 |
+| 6 pattern | `agent/pattern.rs` (150) + 5 文件改 (engine/system_prompt/output/mod/session_runtime) | 220 | 5+ 单测, 4 pattern + heartbeat + 关联 |
+| **合计** | — | **~2390** | 38+ 单测 + clippy 0 |
+
+### 9.4 关键决策 (已落 plan, 待执行确认)
+
+1. **复用 daemon.db** — 8 张 kanban_* 表跟 daemon_sessions 同一文件, 沿用 `Arc<Mutex<Connection>>` 单连接模式, 不引 r2d2 / sqlx (跟 team_db.rs:97-99 一致)
+2. **字段命名**: task 级字段加 `t_` 前缀 (t_status / t_started_at), run 级加 `r_` 前缀 (r_status / r_heartbeat_at) — 避免 SQL JOIN 时混淆 (v6 §6.2 决策)
+3. **Scope 护栏在工具层** — `KanbanTool::execute` 入口 `scope.role` 校验, 防 Worker 调 Orchestrator-only 工具, 防 prompt injection 篡改兄弟任务 (v6 §4 模式 3)
+4. **Worker task_id 从 Arc<KanbanScope> 读** — 不从 LLM 输出取, 走 system_prompt 注入 `[CURRENT_TASK_ID]` 占位符 + 工具实现里从 scope 读 (v6 §4 模式 3 风险 A)
+5. **Dispatcher MVP-2 阶段不接 AgentLoopHost** — 只返 `DispatchedRun { task_id, run_id, profile_name }` 占位, 真 spawn 留 MVP-3 (减少本次 plan 风险)
+6. **心跳 60s 限频** — 工具层 (kanban_heartbeat) + dispatcher 层 (last_heartbeat_at 检查) 双重保险
+7. **模式 3 stub** — `kanban_decompose` MVP-2 返 "[MVP-2 stub] 模式 3 留 v2", 不调 LLM; 模式 1+2 上线
+8. **0 新 crate** — 全部用 workspace 已有 (chrono / serde / uuid / thiserror / tokio / rusqlite / serde_json)
+
+### 9.5 启动步骤 (待 orchestrator 决策)
+
+```bash
+# 1. 启动 6 个 plan (按依赖顺序, 不要并发)
+mavis team plan run .mavis/plans/mvp2-0-prep.yaml
+mavis team plan run .mavis/plans/mvp2-1-schema.yaml    # 等 plan0 完成
+mavis team plan run .mavis/plans/mvp2-2-db-crud.yaml   # 等 plan1 完成
+mavis team plan run .mavis/plans/mvp2-3-state-machine.yaml &  # plan3 + plan4 可并发
+mavis team plan run .mavis/plans/mvp2-4-dispatcher.yaml &
+mavis team plan run .mavis/plans/mvp2-5-tools.yaml     # 等 plan4 完成
+mavis team plan run .mavis/plans/mvp2-6-pattern.yaml   # 等 plan5 完成
+```
+
+### 9.6 MVP-2 完成后进入 MVP-3
+
+- MVP-3 plan 文档待 v6 §14.1 MVP-3 详细拆分 (8 HTTP 端点 + ModeDecision + 5 SSE 事件)
+- 估 800 行, 单 plan 30 min cap 仍需拆 4-5 个子 plan
+- 启动时机: MVP-2 plan 6 验收 PASS 后
+
+### 9.7 经验沉淀 (从 MVP-0/1 借鉴)
+
+- **5 分钟 commit 节奏** + **早期 deliverable.md** 跟 18 个 plan 一样执行
+- **override_accept 准备好** — verifier "没找到字面 VERDICT PASS" 误判 5+ stage 经验, plan prompt 显式要求 verifier 写
+- **范围失控 reject 风险** — plan 5 (12 工具) + plan 6 (5 文件改) 是 30 min cap 高危, orchestrator 看情况拆细
+- **0 新 crate 坚持** — 跟 18 个 plan 一样, MVP-2 全用 workspace 已有依赖
+
+### 9.8 启动条件清单 (orchestrator 检查)
+
+- [ ] `git status` 干净 (当前分支 `docs/mavis-history-and-stage-12` 已合 main, 或新分支)
+- [ ] 6 个 plan yaml 全部落盘且 verifier 可读
+- [ ] `cargo test -p qianxun-core` baseline PASS (MVP-0 + MVP-1 落地)
+- [ ] `cargo clippy -p qianxun-core -- -D warnings` baseline 0 警告
+- [ ] 0 新 crate 准备 (Cargo.toml 不改)
+- [ ] orchestrator session 持续在线 (override_accept 必备, 见 §3.1)
+
+### 9.9 文件清单 (实际落盘, 2026-06-03)
+
+| 文件 | 行数 | 字节 |
+|------|------|------|
+| `mvp2-overview.yaml` | 49 | — |
+| `mvp2-0-prep.yaml` | 89 | 3721 |
+| `mvp2-1-schema.yaml` | 96 | 4174 |
+| `mvp2-2-db-crud.yaml` | 122 | 5094 |
+| `mvp2-3-state-machine.yaml` | 131 | 5608 |
+| `mvp2-4-dispatcher.yaml` | 130 | 6198 |
+| `mvp2-5-tools.yaml` | 121 | 5454 |
+| `mvp2-6-pattern.yaml` | 164 | 7061 |
+| **合计** | **902** | **~37 KB** |
+
+---
+
+**总览统计** (更新):
+- 18 个 mavis plan 阶段 (已完成) + 6 个 MVP-2 子 plan (待启动) = 24 个总 plan
+- 53+ commit on origin (Stage 1-10c + MVP-0/1 全部闭环)
+- 283+ 测试 (Rust + Svelte 合计)
+- 17 次 override_accept + 1 次 manual_retry + 1 次 reject
+- 4 天执行 (2026-05-31 ~ 2026-06-03)
+- 0 行 deliverable 丢失 (5 分钟 commit 节奏兜底)
+- MVP-2 估 ~2390 行 (6 个 plan 累加), 0 新 crate, 38+ 单测
