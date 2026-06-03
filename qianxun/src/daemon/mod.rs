@@ -121,12 +121,47 @@ pub async fn run(
         &resolved.active_provider_config(),
     )
     .into();
-    // tools: 空 registry (builtin register_all 留 Stage 2/3)
-    let tools = Arc::new(ToolRegistry::new());
-    // memory: in_memory SQLite 占位 (真实 ~/.qianxun/mem.db 留 Stage 3)
-    let memory = Arc::new(MemoryCore::open_in_memory()?);
-    // skills: 空 manager (load_all 留 Stage 2/3)
-    let skills = SkillManager::new();
+    // tools: 空 registry + register_all_builtin (Day 1 真初始化, 失败 fallback)
+    let mut tools = ToolRegistry::new();
+    match tools.register_all_builtin() {
+        Ok(n) => tracing::info!(registered = n, "[daemon] builtin tools registered"),
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "[daemon] register_all_builtin failed, fallback to empty"
+            );
+            // tools 保留为空, 继续
+        }
+    }
+    let tools = Arc::new(tools);
+
+    // memory: 改 in_memory → open("~/.qianxun/mem.db") (Day 3 真初始化, 失败 fallback)
+    let mem_path = qianxun_core::workspace::qianxun_dir()
+        .map(|d| d.join("mem.db"))
+        .unwrap_or_else(|| PathBuf::from("./mem.db"));
+    let memory = match MemoryCore::open(&mem_path) {
+        Ok(core) => {
+            tracing::info!(path = ?mem_path, "[daemon] memory opened");
+            Arc::new(core)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                path = ?mem_path,
+                "[daemon] memory open failed, fallback to in_memory"
+            );
+            Arc::new(MemoryCore::open_in_memory().expect("in_memory fallback"))
+        }
+    };
+
+    // skills: 空 manager + load_all (Day 2 真初始化, 当前 API 无 fail, 空目录静默 OK)
+    let skills = SkillManager::load_all(None);
+    let skill_count = skills.skill_count();
+    if skill_count > 0 {
+        tracing::info!(count = skill_count, "[daemon] skills loaded");
+    } else {
+        tracing::info!("[daemon] no skills loaded (empty or all failed)");
+    }
 
     // Stage 3: SessionStore 必须在 AgentLoopHost 之前创建, 这样 host
     // 启动时可以调 `restore_from_disk()` 加载上次未完成的 session.
