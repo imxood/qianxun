@@ -1,3 +1,6 @@
+// VPS auth: Expired/Response 错误 variant 暂未构造, 留 Phase 4 接 client 完整 wire.
+#![allow(dead_code)]
+
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -134,7 +137,7 @@ pub async fn create_user_handler(
         return Err((StatusCode::BAD_REQUEST, "username and password required".into()));
     }
     // TODO: use argon2 for password hashing
-    let password_hash = format!("placeholder_{}", uuid::Uuid::new_v4());
+    let _password_hash = format!("placeholder_{}", uuid::Uuid::new_v4());
     tracing::info!("user created: {}", req.username);
     Ok(Json(serde_json::json!({"status": "created", "username": req.username})))
 }

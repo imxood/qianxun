@@ -11,6 +11,7 @@ pub struct VectorEntry {
 ///
 /// 持久化：通过 SQLite observation_vectors 表（BLOB 列），启动时全量加载。
 /// 每次 add() 写入 SQLite，不做全量序列化。
+#[allow(dead_code)] // dimensions 字段: 向量一致性校验待实现, 留作 Phase 3a 骨架
 pub struct VectorIndex {
     vectors: HashMap<String, VectorEntry>,
     dimensions: usize,

@@ -1,5 +1,8 @@
 //! SessionRuntime — 每个 session 的全部运行时状态。
 //!
+//! ToolUseDelta/ToolResult variant 留 Phase 4 接 streaming tool call.
+#![allow(dead_code)]
+//!
 //! Stage 1 范围: 仅持有引用, 不启动 AgentLoop. 真正的 processing_loop
 //! 调度 (Stage 2 SSE 流式) 在 router 层 spawn task 后调用.
 //!
@@ -55,7 +58,13 @@ pub struct SessionRuntime {
 
     /// per-session 会话历史.
     /// Stage 1 留空, Stage 2 每次 prompt 起始时 `push_user_message`.
-    pub conversation: Conversation,
+    ///
+    /// Stage 4: 包成 `Arc<Mutex<...>>` 是为了 `consume_stream_to_sse` spawn
+    /// 出去的 consumer 也能 push assistant 消息, 并在 save snapshot 后
+    /// 写回 `SessionRuntime` (避免每次 prompt 都丢失上一轮的 assistant 消息).
+    /// 用 `std::sync::Mutex` 而非 `tokio::sync::Mutex` 因为 push/snapshot
+    /// 持锁时间极短 (<1ms), 没有跨 .await 持锁的需要.
+    pub conversation: Arc<std::sync::Mutex<Conversation>>,
 
     /// 共享 LLM provider (来自 AppState, Arc 引用以避免复制).
     pub provider: Arc<dyn LlmProvider>,
@@ -98,7 +107,8 @@ impl SessionRuntime {
         let agent_loop = AgentLoop::new(resolved.agent.clone());
         // Conversation 暂用 None system_prompt; Stage 2 接入 system_prompt.rs.
         // TODO (Stage 2): 用 system_prompt::build_system_prompt 构造.
-        let conversation = Conversation::new(None);
+        // Stage 4: 包成 Arc<Mutex<...>> 让 spawn 出去的 consumer 也能 push 消息.
+        let conversation = Arc::new(std::sync::Mutex::new(Conversation::new(None)));
 
         Self {
             session_id,

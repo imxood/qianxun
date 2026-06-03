@@ -1,5 +1,8 @@
 //! 用户级 token bucket 限流 (Stage 5) + 文件持久化 (Stage 6b).
 //!
+//! new/list_projects_for_team/register_device 暂未调用, 留 Phase 4.
+#![allow(dead_code)]
+//!
 //! ## 设计
 //!
 //! 限流维度: per-user_id. 不区分 device/app/msg type.
@@ -445,7 +448,7 @@ mod tests {
         assert_eq!(limiter.check("alice").await, Err(RateError::TooMany));
 
         // bob 完全不受影响
-        for i in 1..=10 {
+        for _i in 1..=10 {
             limiter.check("bob").await.expect("bob should have its own bucket");
         }
     }

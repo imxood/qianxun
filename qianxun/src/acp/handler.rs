@@ -1,3 +1,6 @@
+// ACP handler: 部分 helper 当前未调用, 留 Phase 4.
+#![allow(dead_code)]
+
 use crate::acp::output::AcpOutputEvent;
 use crate::acp::prompt::new_agent_loop;
 use crate::acp::session::SessionManager;
@@ -344,7 +347,7 @@ impl AcpRequestHandler {
 
 /// 从工作区根路径构建 memory engine。
 fn build_memory(
-    ws: &qianxun_core::workspace::ProjectRoot,
+    _ws: &qianxun_core::workspace::ProjectRoot,
 ) -> Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> {
     let db_path = qianxun_core::workspace::qianxun_dir()?.join("mem.db");
     Some(Box::new(qianxun_memory::MemoryCore::open(&db_path).ok()?))

@@ -1,5 +1,8 @@
 // Stage 10a — Admin credential 持久化 + 密码校验 + JWT 签发
 //
+// model 字段留 Phase 4 接 config.admin_model.
+#![allow(dead_code)]
+//
 // 设计目标: 替代 Stage 6a/9c 的 "env var JWT secret" 方案, 改成
 // "admin password → short-lived JWT" 模式.
 //

@@ -1,6 +1,7 @@
 pub mod agent_host;
 pub mod auth;
 pub mod llm_providers;
+pub mod output_sink;
 pub mod persistence;
 pub mod router;
 pub mod service;
@@ -9,6 +10,9 @@ pub mod sse;
 
 #[cfg(test)]
 mod llm_integration_tests;
+
+#[cfg(test)]
+mod mvp1_integration_tests;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -40,6 +44,7 @@ use crate::daemon::persistence::SessionStore;
 /// `provider.stream_completion` 实现 12 个 SSE 事件. Stage 3 接入
 /// 完整 processing_loop 后, 此 flag 切到 true 并将 prompt_handler
 /// 改为通过 `OutputSink` 桥接.
+#[allow(dead_code)] // 部分字段 (provider/shared/processing_loop_enabled/active_conns) 在测试中未读, 留 Phase 4 接入
 pub struct AppState {
     pub agent_host: Arc<AgentLoopHost>,
     pub config: Arc<ResolvedConfig>,
@@ -121,12 +126,47 @@ pub async fn run(
         &resolved.active_provider_config(),
     )
     .into();
-    // tools: 空 registry (builtin register_all 留 Stage 2/3)
-    let tools = Arc::new(ToolRegistry::new());
-    // memory: in_memory SQLite 占位 (真实 ~/.qianxun/mem.db 留 Stage 3)
-    let memory = Arc::new(MemoryCore::open_in_memory()?);
-    // skills: 空 manager (load_all 留 Stage 2/3)
-    let skills = SkillManager::new();
+    // tools: 空 registry + register_all_builtin (Day 1 真初始化, 失败 fallback)
+    let mut tools = ToolRegistry::new();
+    match tools.register_all_builtin() {
+        Ok(n) => tracing::info!(registered = n, "[daemon] builtin tools registered"),
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "[daemon] register_all_builtin failed, fallback to empty"
+            );
+            // tools 保留为空, 继续
+        }
+    }
+    let tools = Arc::new(tools);
+
+    // memory: 改 in_memory → open("~/.qianxun/mem.db") (Day 3 真初始化, 失败 fallback)
+    let mem_path = qianxun_core::workspace::qianxun_dir()
+        .map(|d| d.join("mem.db"))
+        .unwrap_or_else(|| PathBuf::from("./mem.db"));
+    let memory = match MemoryCore::open(&mem_path) {
+        Ok(core) => {
+            tracing::info!(path = ?mem_path, "[daemon] memory opened");
+            Arc::new(core)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                path = ?mem_path,
+                "[daemon] memory open failed, fallback to in_memory"
+            );
+            Arc::new(MemoryCore::open_in_memory().expect("in_memory fallback"))
+        }
+    };
+
+    // skills: 空 manager + load_all (Day 2 真初始化, 当前 API 无 fail, 空目录静默 OK)
+    let skills = SkillManager::load_all(None);
+    let skill_count = skills.skill_count();
+    if skill_count > 0 {
+        tracing::info!(count = skill_count, "[daemon] skills loaded");
+    } else {
+        tracing::info!("[daemon] no skills loaded (empty or all failed)");
+    }
 
     // Stage 3: SessionStore 必须在 AgentLoopHost 之前创建, 这样 host
     // 启动时可以调 `restore_from_disk()` 加载上次未完成的 session.
@@ -389,17 +429,14 @@ mod graceful_shutdown_tests {
     #[tokio::test]
     async fn test_graceful_shutdown_cancels_active_sessions() {
         let state = make_test_state();
-        // for_test 模式可能不存 session in-memory, 改用直接验证 shutdown_all
-        // 不 panic + 返 >= 0
-        let cancelled_before = state.agent_host.shutdown_all();
-        assert!(cancelled_before >= 0);
+        // for_test 模式可能不存 session in-memory, 改用直接验证 shutdown_all 不 panic
+        let _cancelled_before = state.agent_host.shutdown_all();
 
         // 跑 orchestrator 不应 panic
         graceful_shutdown_orchestrator(state.clone()).await;
 
         // 再跑一次, 仍不 panic
-        let cancelled_after = state.agent_host.shutdown_all();
-        assert!(cancelled_after >= 0);
+        let _cancelled_after = state.agent_host.shutdown_all();
     }
 
     #[tokio::test]
@@ -429,9 +466,8 @@ mod graceful_shutdown_tests {
     async fn test_shutdown_all_marks_all_sessions_paused() {
         let state = make_test_state();
         // 模拟多个 active session (用 for_test 模式或直接调 create_session)
-        // 调 shutdown_all, 验证 returned count >= 0 (没 panic)
-        let n = state.agent_host.shutdown_all();
-        assert!(n >= 0, "shutdown_all returned {n}");
+        // 调 shutdown_all, 验证不 panic (返回 usize 总是 >= 0, 类型系统已保证)
+        let _n = state.agent_host.shutdown_all();
     }
 
     #[tokio::test]

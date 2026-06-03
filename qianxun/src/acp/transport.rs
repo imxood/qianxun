@@ -1,3 +1,6 @@
+// ACP transport: method count 暂未调用, 留 Phase 4.
+#![allow(dead_code)]
+
 use crate::acp::types::{
     IncomingMessage, JsonRpcNotification, JsonRpcResponse, RequestId,
 };

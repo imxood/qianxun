@@ -171,6 +171,72 @@ impl ToolRegistry {
         self.builtin.insert(tool.name().to_string(), tool);
     }
 
+    /// 尝试注册单个 builtin 工具，重名时返回错误而不是覆盖。
+    ///
+    /// 给 [`Self::register_all_builtin`] 用做"失败 fallback 不 panic"的原子单元：
+    /// 构造/注册失败时跳过该工具并 warn 日志，不中断整体启动。
+    pub fn try_register(&mut self, tool: Arc<dyn AgentTool>) -> Result<(), ToolError> {
+        let name = tool.name().to_string();
+        if self.builtin.contains_key(&name) {
+            return Err(ToolError::InvalidArguments(format!(
+                "duplicate builtin tool name: {name}"
+            )));
+        }
+        self.builtin.insert(name, tool);
+        Ok(())
+    }
+
+    /// MVP-0: 一次性注册所有 builtin 工具。
+    ///
+    /// 千寻 daemon 启动时调用一次，构造 / 注册某个工具失败时跳过 + warn，
+    /// 不 panic，保证 daemon 可用（决策 D5：失败 fallback）。
+    ///
+    /// Returns: 成功注册的工具数（≥8：read/write/search/grep/list/exec/edit
+    ///   + glob/delete/mkdir/fetch/memory-recall/memory-remember）。
+    ///
+    /// Note: `SkillReadTool` 需要 `Arc<SkillManager>`，由 Day 2 在
+    ///   `SkillManager::load_all` 之后单独注册，不在本函数的硬编码列表内。
+    pub fn register_all_builtin(&mut self) -> Result<usize, ToolError> {
+        let mut count = 0;
+        let mut errors: Vec<String> = Vec::new();
+
+        // 13 个无外部依赖的 builtin 工具（SkillReadTool 单独注册）
+        let candidates: Vec<(&'static str, Arc<dyn AgentTool>)> = vec![
+            ("read_text_file", Arc::new(builtin::ReadTextFileTool)),
+            ("write_text_file", Arc::new(builtin::WriteTextFileTool)),
+            ("search", Arc::new(builtin::SearchTool)),
+            ("grep", Arc::new(builtin::GrepTool)),
+            ("list_directory", Arc::new(builtin::ListDirectoryTool)),
+            ("execute_command", Arc::new(builtin::ExecuteCommandTool)),
+            ("edit_file", Arc::new(builtin::EditFileTool)),
+            ("glob", Arc::new(builtin::GlobTool)),
+            ("delete_file", Arc::new(builtin::DeleteFileTool)),
+            ("create_directory", Arc::new(builtin::CreateDirectoryTool)),
+            ("fetch_url", Arc::new(builtin::FetchUrlTool)),
+            ("memory_recall", Arc::new(builtin::MemoryRecallTool)),
+            ("memory_remember", Arc::new(builtin::MemoryRememberTool)),
+        ];
+
+        for (name, tool) in candidates {
+            match self.try_register(tool) {
+                Ok(_) => count += 1,
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        }
+
+        if !errors.is_empty() {
+            tracing::warn!(failed = ?errors, "some builtin tools failed to register");
+        }
+        Ok(count)
+    }
+
+    /// 返回所有已注册 builtin 工具的名字列表（按插入顺序，无序保证）。
+    pub fn list_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.builtin.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     pub fn register_mcp_tool(&mut self, entry: McpToolEntry) {
         self.mcp_tools.insert(entry.name.clone(), entry);
     }

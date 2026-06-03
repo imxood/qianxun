@@ -1,3 +1,6 @@
+// ACP output: 字段 capacity 当前未读, 留 buffer 调整时启用.
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use crate::acp::types::SessionUpdateContent;
 use qianxun_core::output::OutputSink;

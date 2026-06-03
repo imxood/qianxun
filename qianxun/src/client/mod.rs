@@ -1,7 +1,7 @@
-//! Thin client for connecting to a running `qx daemon` (HTTP + SSE).
+//! # Thin client for connecting to a running `qx daemon` (HTTP + SSE).
 //!
-//! Stage 4: TUI/ACP/CLI 在检测到本地 Daemon 时走本模块的 HTTP+SSE 远程调用;
-//! 无 Daemon (或 `--standalone` flag) 时回退到原 standalone 路径 (内嵌 AgentLoop).
+//! Stage 4 接入: TUI/ACP/CLI 检测到本地 Daemon 时走本模块的 HTTP+SSE 远程调用;
+//! 无 Daemon 时回退 standalone 路径. 多数 reconnect/provider/label 暂未 wire, 留 Phase 4.
 //!
 //! # 协议契约
 //!
@@ -14,6 +14,8 @@
 //! - 不接认证 / token (Stage 5 引入)
 //! - SSE parser 简化: 只解析 `data:` 帧, 忽略 `event:` 字段 (12 事件类型全在一个流上, 按 `type` 字段分发)
 //! - 不引入新 crate (复用 reqwest / futures / tokio / serde / serde_json)
+
+#![allow(dead_code)]
 
 use futures::stream::{Stream, StreamExt};
 use reqwest::Response;

@@ -1,3 +1,7 @@
+// TUI 模式 (ratatui 单文件 ~1700 行): Phase 3d 已交付, 后续 Phase 4 thin-client 化会
+// 拆出 App/Event/State 子模块, 当前内部 helper 多 (rendering/stream diff) 暂未 wire.
+#![allow(dead_code, clippy::large_enum_variant)]
+
 use async_trait::async_trait;
 use qianxun_core::agent::context::window::AutoCompactWindow;
 use qianxun_core::agent::conversation::Conversation;
@@ -490,7 +494,7 @@ impl App {
 
     fn render_command_palette(&mut self, frame: &mut Frame, input_area: Rect) {
         let filtered = self.command_palette.filtered(self.input.value());
-        let desired_height = filtered.len().min(PALETTE_MAX_ROWS).max(1) as u16;
+        let desired_height = filtered.len().clamp(1, PALETTE_MAX_ROWS) as u16;
         let frame_area = frame.area();
         let (y, height) = if input_area.y > frame_area.y {
             let height = desired_height.min(input_area.y - frame_area.y);

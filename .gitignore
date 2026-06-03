@@ -7,3 +7,4 @@ debug.log
 *.log
 .opencode
 node_modules
+.mavis

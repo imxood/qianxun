@@ -1,5 +1,8 @@
 //! systemd / Windows Service 注册 (Stage 5 最小集).
 //!
+//! 模板字符串 + service path helpers 留 Phase 4 `qx daemon install/uninstall` 子命令用.
+#![allow(dead_code)]
+//!
 //! 设计目标 (见 `docs/30_子项目规划/01-daemon.md` §10):
 //! - **不实际注册** (开发机注册会污染环境), 只产出配置/脚本内容
 //! - 提供 `systemd_unit_template()` 返 unit file 字符串

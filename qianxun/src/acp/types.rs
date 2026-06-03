@@ -1,3 +1,7 @@
+// ACP 类型: 大量 Request/Response 结构 (InitializeResult/PromptResult/...) 仅用于序列化,
+// 当前 handler 路径未全 wire. 留 Phase 4 接 Zed editor 时启用.
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
