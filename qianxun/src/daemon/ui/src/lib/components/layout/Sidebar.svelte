@@ -17,35 +17,39 @@
 		icon: typeof Brain;
 	};
 
-	// 2026-06-04 fix: 所有 nav href 加 `/ui` 前缀. 之前 `/llm` 这种相对路径会被
-	// SvelteKit client-side router 解析成 host root 路径, 走到 daemon 走 auth → 401.
-	// 用 `BASE_PATH` 常量统一前缀, 改 base 路径只改一处.
+	// 2026-06-05 fix: 改回 base-relative 路径 (`/llm` 而不是 `/ui/llm`).
+	// SvelteKit 2 client router 看到 `<a href="/llm">` + `paths.base='/ui'` →
+	// 自动拼成 `/ui/llm` (vite dev 期望, daemon nest `/ui` 期望). 之前 commit 1
+	// 加 `/ui` 前缀反而让 SvelteKit 报 "Not found: /ui" (base 双拼解析错).
+	// 用 `BASE_PATH` 常量做基础路径, href 走 base-relative.
 	const BASE_PATH = '/ui';
+	// 2026-06-05 fix: testid 改用 `slice(1)` 跳前导 `/`. 之前 `BASE_PATH.length + 1`
+	// 是 commit 1 加 /ui 前缀时算的, 现在改回 base-relative href 之后只 1 字符前导 `/`.
 	const mgmtItems: NavItem[] = [
-		{ href: `${BASE_PATH}/chat`, label: 'Chat', i18n: 'nav.chat', icon: MessageSquare },
-		{ href: `${BASE_PATH}/llm`, label: 'LLM Providers', i18n: 'nav.llm', icon: Brain },
-		{ href: `${BASE_PATH}/skills`, label: 'Skills', i18n: 'nav.skills', icon: Sparkles },
-		{ href: `${BASE_PATH}/mcp`, label: 'MCP Servers', i18n: 'nav.mcp', icon: Server },
-		{ href: `${BASE_PATH}/tools`, label: 'Tools', i18n: 'nav.tools', icon: Wrench }
+		{ href: '/chat', label: 'Chat', i18n: 'nav.chat', icon: MessageSquare },
+		{ href: '/llm', label: 'LLM Providers', i18n: 'nav.llm', icon: Brain },
+		{ href: '/skills', label: 'Skills', i18n: 'nav.skills', icon: Sparkles },
+		{ href: '/mcp', label: 'MCP Servers', i18n: 'nav.mcp', icon: Server },
+		{ href: '/tools', label: 'Tools', i18n: 'nav.tools', icon: Wrench }
 	];
 
 	const opsItems: NavItem[] = [
-		{ href: `${BASE_PATH}/memory`, label: 'Memory', i18n: 'nav.memory', icon: Database },
-		{ href: `${BASE_PATH}/sessions`, label: 'Chat Sessions', i18n: 'nav.sessions', icon: MessagesSquare },
-		{ href: `${BASE_PATH}/config`, label: 'Config', i18n: 'nav.config', icon: FileCog },
-		{ href: `${BASE_PATH}/system`, label: 'System', i18n: 'nav.system', icon: Activity }
+		{ href: '/memory', label: 'Memory', i18n: 'nav.memory', icon: Database },
+		{ href: '/sessions', label: 'Chat Sessions', i18n: 'nav.sessions', icon: MessagesSquare },
+		{ href: '/config', label: 'Config', i18n: 'nav.config', icon: FileCog },
+		{ href: '/system', label: 'System', i18n: 'nav.system', icon: Activity }
 	];
 
 	// Stage 9c: 第 3 区 — 系统 (Settings 单飞)
 	const systemItems: NavItem[] = [
-		{ href: `${BASE_PATH}/settings`, label: 'Settings', i18n: 'nav.settings', icon: SettingsIcon }
+		{ href: '/settings', label: 'Settings', i18n: 'nav.settings', icon: SettingsIcon }
 	];
 
 	// 2026-06-04 阶段 3: Kanban 协作区 (3 项)
 	const kanbanItems: NavItem[] = [
-		{ href: `${BASE_PATH}/kanban`, label: 'Kanban', i18n: 'nav.kanban', icon: KanbanSquare },
-		{ href: `${BASE_PATH}/projects`, label: 'Projects', i18n: 'nav.projects', icon: FolderKanban },
-		{ href: `${BASE_PATH}/team`, label: 'Team', i18n: 'nav.team', icon: Users }
+		{ href: '/kanban', label: 'Kanban', i18n: 'nav.kanban', icon: KanbanSquare },
+		{ href: '/projects', label: 'Projects', i18n: 'nav.projects', icon: FolderKanban },
+		{ href: '/team', label: 'Team', i18n: 'nav.team', icon: Users }
 	];
 
 	function isActive(href: string): boolean {
@@ -103,7 +107,7 @@
 				class:hover:bg-accent={!active}
 				class:hover:text-accent-foreground={!active}
 				aria-current={active ? 'page' : undefined}
-				data-testid={`nav-${item.href.slice(BASE_PATH.length + 1)}`}
+				data-testid={`nav-${item.href.slice(1)}`}
 			>
 				<Icon class="h-4 w-4" />
 				<span class="flex-1">{t(item.i18n)}</span>
@@ -130,7 +134,7 @@
 				class:hover:bg-accent={!active}
 				class:hover:text-accent-foreground={!active}
 				aria-current={active ? 'page' : undefined}
-				data-testid={`nav-${item.href.slice(BASE_PATH.length + 1)}`}
+				data-testid={`nav-${item.href.slice(1)}`}
 			>
 				<Icon class="h-4 w-4" />
 				<span class="flex-1">{t(item.i18n)}</span>
@@ -157,7 +161,7 @@
 				class:hover:bg-accent={!active}
 				class:hover:text-accent-foreground={!active}
 				aria-current={active ? 'page' : undefined}
-				data-testid={`nav-${item.href.slice(BASE_PATH.length + 1)}`}
+				data-testid={`nav-${item.href.slice(1)}`}
 			>
 				<Icon class="h-4 w-4" />
 				<span class="flex-1">{t(item.i18n)}</span>

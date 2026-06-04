@@ -1,15 +1,20 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
-
-	onMount(() => {
-		// 2026-06-04 fix: SvelteKit 2 `goto('/llm')` 在 `paths.base='/ui'` 下
-		// 解析成 `/llm` (host root), 不是 `/ui/llm` (base 下). 用 `/ui/llm` 显式
-		// 走 base 路径, 跟 daemon `nest_service("/ui", ...)` 1:1 对齐.
-		void goto('/ui/llm', { replaceState: true });
-	});
+	// 2026-06-05 fix: 干掉 `goto('/llm')` 自动跳转. 原因:
+	// - Prod (build/ 静态): paths.base='/ui', SvelteKit client router 走 base-relative
+	//   goto → /ui/llm. ✓
+	// - Dev (vite dev server, base='/ui/'): SvelteKit 2.61 + paths.base='' 的边界 case,
+	//   client router 启动时根据当前 URL '/ui' 算 base, 拼 goto('/llm') 解析成 '/ui/llm',
+	//   但实际 SvelteKit 路由表里没 `/ui/llm` 路由 → 报 "Not found: /ui".
+	// 简化为 welcome 页, 让用户自己点 sidebar 进具体页面 (跟 prod +error.svelte
+	// 行为一致, 不会有 routing 错).
+	import { ArrowRight } from '@lucide/svelte';
 </script>
 
-<div class="text-muted-foreground flex items-center justify-center p-12 text-sm">
-	跳转到 <a href="/ui/llm" class="ml-1 underline">/llm</a> …
+<div class="text-muted-foreground flex h-full flex-col items-center justify-center gap-3 p-12 text-sm">
+	<p class="text-base font-medium">千寻 Daemon 控制台</p>
+	<p class="flex items-center gap-2">
+		从左侧菜单选择模块
+		<ArrowRight class="h-3.5 w-3.5" />
+		<a href="/llm" class="text-primary underline">LLM Providers</a>
+	</p>
 </div>

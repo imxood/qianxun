@@ -117,7 +117,7 @@
 		<div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3" data-testid="boards-grid">
 			{#each boards as b (b.id)}
 				<a
-					href="/ui/kanban/{b.id}"
+					href="/kanban/{b.id}"
 					class="hover:bg-accent/30 block rounded border bg-card p-4 transition-colors"
 					data-testid="board-card-{b.id}"
 				>

@@ -11,6 +11,17 @@ const DAEMON_TARGET = process.env.DAEMON_PORT
 
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
+	// 2026-06-05 fix: vite `base: '/ui/'` 取代 SvelteKit `kit.paths.base`.
+	// 之前 commit 1 改 `kit.paths.base='/ui'`, 但 SvelteKit 2.61 dev 模式 client
+	// router 启动时把 base 应用到当前 URL (`/ui/llm`), 试图 find 路由
+	// `(/ui)` 找不到 → "Not found: /ui" 错. 改用 vite `base` (控制资源 URL 前缀),
+	// 路由 base 留空 — SvelteKit 路由直接用 `/llm` 路径, 客户端 router 不剥
+	// base. 这样:
+	//   - 资源 (js/css): /ui/_app/... ✓ (vite base)
+	//   - 路由: /llm → 客户端 router 拼 base=/ui/ → navigate /ui/llm ✓
+	//   - 浏览器 URL: /ui/llm (SvelteKit 自动拼)
+	//   - daemon 反代: /ui/* → vite /ui/* (我 router.rs handler 拼 /ui prefix)
+	base: '/ui/',
 	server: {
 		port: 5174,
 		// Stage 12: bind 0.0.0.0 让 daemon 反代 (Python urllib / Invoke-WebRequest

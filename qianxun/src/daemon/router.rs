@@ -197,20 +197,24 @@ pub fn build_router(
         .with_state(state.clone());
 
     // Stage 7a: 嵌套 ServeDir (静态文件 + SPA fallback).
-    // Stage 12 新增 dev 模式 (`ui_dev: Some(url)`): 把 /ui/* 反代到 vite dev
-    // server, 跟 prod 静态 dist 互斥. 配 scripts/dev.py 用 — 浏览器入口永远
-    // 23900/ui (跟 prod 一致), vite HMR 走 5174 备用. 反代只支持 HTTP
-    // (无 WS 透传), 改 svelte 后浏览器手动 Cmd-R 即可 (反代 5s 启动 vs pnpm
-    // build 30s, 仍然 6x 提速).
+    // Stage 12 新增 dev 模式 (`ui_dev: Some(url)`): 把 *所有非 /v1 API* 请求
+    // 反代到 vite dev server, 跟 prod 静态 dist 互斥. 配 scripts/dev.py 用 —
+    // 浏览器入口永远 23900/ui (跟 prod 一致), vite HMR 走 5174 备用.
     //
-    // nest_service 把整个 sub-router 接到 /ui/* 上 (跟 SvelteKit paths.base = '/ui' 对齐).
+    // 关键: 2026-06-05 fix — 改用 router.fallback 而非 nest_service('/ui', ...).
+    // SvelteKit 2.61 dev 模式用 vite `base: '/ui/'` (paths.base 留空) 后,
+    // client init script 引用资源用相对 URL `../@fs/...`, 实际请求是
+    // `/@fs/...` (没 /ui prefix). nest_service('/ui', ...) 只 catch /ui/*,
+    // `/@fs/...` 落到 fallback not_found_handler → 401. 改用全局 fallback
+    // 把所有非 /v1/* 都反代到 vite, 跟 vite 自己 dev server 行为一致.
+    // 反代只支持 HTTP (无 WS 透传), 改 svelte 后浏览器手动 Cmd-R 即可.
     router = if let Some(dev_url) = ui_dev.as_deref() {
-        // dev 模式: 反代到 vite dev server.
+        // dev 模式: 全局 fallback 反代到 vite dev server.
         tracing::info!(
-            "[router] /ui/* reverse proxy → {} (dev mode, vite HMR on its own port)",
+            "[router] fallback reverse proxy → {} (dev mode, all non-/v1 paths)",
             dev_url
         );
-        router.nest_service("/ui", axum::routing::get(ui_dev_proxy).with_state(dev_url.to_string()))
+        router.fallback(axum::routing::any(ui_dev_proxy).with_state(dev_url.to_string()))
     } else {
         match ui_dist {
             Some(dir) if dir.is_dir() => {
@@ -300,18 +304,17 @@ async fn ui_dev_proxy(
     axum::extract::State(dev_url): axum::extract::State<String>,
     req: Request,
 ) -> Response {
-    // 构造 upstream URL: dev_url + `/ui` prefix + 剩余 path + query.
+    // 构造 upstream URL: dev_url + 剩余 path + query.
     // 关键: nest_service("/ui", ...) 把 /ui prefix 剥掉了 (axum 嵌套 router 行为),
-    // handler 拿到的 path 是 `/foo` 不是 `/ui/foo`. 但 Vite 端 SvelteKit 配置
-    // `paths.base='/ui'`, 必须请求 `/ui/foo` 才能命中路由. 拼回去.
+    // handler 拿到的 path 是 `/` (浏览器访问 /ui) 或 `/llm` (访问 /ui/llm).
+    // Vite dev server (用 vite `base: '/ui/'` 配置): 路由跟资源都**不**带 /ui prefix
+    // (实测: `/llm` 200, `/ui/llm` 404, `/@fs/...` 200, `/ui/@fs/...` 404). base='/ui/'
+    // 只控制 output 资源 URL (build 出来的 index.html 引用 `/ui/_app/...`), 不影响
+    // dev server 的 request 路径. 所以直接拼, 不再加 /ui prefix.
+    // (Prod 模式 build/ 静态, daemon nest /ui/* 期望 /ui 路径 — 跟 dev 不同.)
     let path = req.uri().path();
-    let path_with_base = if path.starts_with('/') {
-        format!("/ui{path}")
-    } else {
-        format!("/ui/{path}")
-    };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-    let upstream = format!("{dev_url}{path_with_base}{query}");
+    let upstream = format!("{dev_url}{path}{query}");
 
     // 转发 method + 关键 headers. host 改成 dev_url, 其它原样.
     let method = req.method().clone();
@@ -508,6 +511,19 @@ pub fn is_auth_skipped_path(path: &str) -> bool {
         || path == "/v1/auth/login"
         || path.starts_with("/ui/")
         || path == "/ui"
+        // 2026-06-05 fix: dev 模式 vite 用 `vite.base='/ui/'` 后, SvelteKit client
+        // init script 引用资源用相对路径 `../@fs/...`, 实际请求是 `/@fs/...`
+        // (没 /ui prefix). 加白名单让反代 fallback 能接住. 包括:
+        // - /@fs/, /@vite/, /@id/  (vite 内部 scheme)
+        // - /.svelte-kit/  (SvelteKit 生成 client)
+        // - /node_modules/  (依赖)
+        // - /src/  (vite dev 直接 serve SvelteKit 路由源文件)
+        || path.starts_with("/@fs/")
+        || path.starts_with("/.svelte-kit/")
+        || path.starts_with("/node_modules/")
+        || path.starts_with("/@vite/")
+        || path.starts_with("/@id/")
+        || path.starts_with("/src/")
 }
 
 /// 读 JWT secret (env var QIANXUN_JWT_SECRET).

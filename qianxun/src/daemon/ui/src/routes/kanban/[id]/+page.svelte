@@ -122,7 +122,7 @@
 	<!-- header -->
 	<header class="flex items-center justify-between">
 		<div class="flex items-center gap-2">
-			<a href="/ui/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
+			<a href="/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
 				<ArrowLeft class="size-4" />
 			</a>
 			<h1 class="text-lg font-semibold">{board?.name ?? '加载中...'}</h1>

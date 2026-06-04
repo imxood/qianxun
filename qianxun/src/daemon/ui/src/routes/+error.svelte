@@ -50,7 +50,7 @@
 
 		<div class="mt-4 flex flex-col gap-2 sm:flex-row">
 			<a
-				href="/ui/llm"
+				href="/llm"
 				class="border-input bg-background hover:bg-accent inline-flex flex-1 items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm"
 				data-testid="error-home-button"
 			>

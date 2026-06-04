@@ -56,7 +56,7 @@
 
 <div class="mx-auto flex max-w-2xl flex-col gap-4 p-6">
 	<header class="flex items-center gap-2">
-		<a href="/ui/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
+		<a href="/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
 			<ArrowLeft class="size-4" />
 		</a>
 		<h1 class="text-lg font-semibold">手动派发 (Dispatch)</h1>
@@ -103,7 +103,7 @@
 					run_id: {result.run_id}<br />
 					profile: {result.profile_name}
 				</div>
-				<a href="/ui/kanban" class="text-primary mt-2 inline-block underline">→ 跳到 Kanban</a>
+				<a href="/kanban" class="text-primary mt-2 inline-block underline">→ 跳到 Kanban</a>
 			{:else}
 				<div class="font-semibold text-amber-700 dark:text-amber-300">⚠️ 未派发</div>
 				<div class="mt-1">{result.reason}</div>

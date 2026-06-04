@@ -143,9 +143,9 @@
 		const ok = window.confirm(t('settings.token.logout_confirm'));
 		if (!ok) return;
 		await authStore.logout();
-		// 2026-06-04 fix: 见 routes/+page.svelte 注释 — SvelteKit 2 `goto` 在
-		// `paths.base='/ui'` 下要带 base 前缀才落到 daemon nest 下.
-		void goto('/ui/');
+		// 2026-06-05 fix: 改回 base-relative `/` (跟 +page.svelte 一致).
+		// SvelteKit 2 + paths.base='/ui' 自动拼 → navigate `/ui/`.
+		void goto('/');
 	}
 
 	async function handleChangePassword(): Promise<void> {

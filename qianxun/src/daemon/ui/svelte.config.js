@@ -15,12 +15,10 @@ const config = {
 			precompress: false,
 			strict: false
 		}),
-		// 2026-06-04 用户决定: 路径统一为 `/ui` (无下划线) — 符合直觉, 跟
-		// daemon router `nest_service("/ui", ...)` + `is_auth_skipped_path("/ui/*")` 1:1 对齐.
-		// build 后 index.html 引 `/ui/_app/...` 跟 daemon nest 路径完美匹配, 无 401.
-		paths: {
-			base: '/ui'
-		},
+		// 2026-06-05 fix: SvelteKit paths.base 留空, base path 改用 vite
+		// `base: '/ui/'` (见 vite.config.ts). SvelteKit 2.61 dev 模式 + paths.base
+		// 在客户端 router 启动时会跟当前 URL 冲突, 报 "Not found: /ui".
+		// Prod build 模式下, base 由 vite adapter 自动处理.
 		alias: {
 			$components: 'src/lib/components',
 			$utils: 'src/lib/utils',
