@@ -193,7 +193,7 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .with_state(state.clone());
 
     // Stage 7a: 嵌套 ServeDir (静态文件 + SPA fallback).
-    // nest_service 把整个 sub-router 接到 /ui/* 上.
+    // nest_service 把整个 sub-router 接到 /ui/* 上 (跟 SvelteKit paths.base = '/ui' 对齐).
     router = match ui_dist {
         Some(dir) if dir.is_dir() => {
             let index_html = dir.join("index.html");
@@ -228,17 +228,30 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
     //   - style-src 'self' 'unsafe-inline' (Tailwind 需要)
     //   - connect-src 'self' (API 同源)
     //   - img-src 'self' data: (允许内联 favicon)
-    let csp = "default-src 'self'; \
-               script-src 'self'; \
-               style-src 'self' 'unsafe-inline'; \
-               connect-src 'self'; \
-               img-src 'self' data:; \
-               font-src 'self' data:; \
-               object-src 'none'; \
-               base-uri 'self'; \
-               form-action 'self'";
+    // CSP (Stage 9c). 之前 .replace([' ', '\n', '\t'], "") 把空格全删了, 浏览器
+    // 解析成 "default-src'self'" 这种粘一起的 directive name, 整个 CSP 失效.
+    // 改用 `concat!` 拼接多个独立字符串字面量, 完全避开 `\<newline>` line
+    // continuation 吃掉空白的陷阱.
+    //
+    // 2026-06-04 修: SvelteKit adapter-static 的 index.html 含一个**内联 init 脚本**
+    // (设置 `__sveltekit_*` 全局变量 + import /ui/_app/.../entry/* 启动 kit),
+    // 必须在 CSP 允许内联脚本. 加 `'unsafe-inline'` 到 script-src. SvelteKit
+    // 官方文档 (https://kit.svelte.dev/docs/page-options#csp) 也建议
+    // adapter-static 用 'unsafe-inline' 因为该 init 脚本 hash 随构建变, 算
+    // 不上可预知. 后续如改用 adapter-node/server 配 nonce, 删掉 'unsafe-inline'.
+    let csp = concat!(
+        "default-src 'self'; ",
+        "script-src 'self' 'unsafe-inline'; ",
+        "style-src 'self' 'unsafe-inline'; ",
+        "connect-src 'self'; ",
+        "img-src 'self' data:; ",
+        "font-src 'self' data:; ",
+        "object-src 'none'; ",
+        "base-uri 'self'; ",
+        "form-action 'self'"
+    );
     let csp_header: HeaderName = "content-security-policy".parse().expect("valid header name");
-    let csp_value: HeaderValue = csp.replace([' ', '\n', '\t'], "").parse().expect("valid header value");
+    let csp_value: HeaderValue = csp.parse().expect("valid CSP header value");
     router = router.layer(SetResponseHeaderLayer::overriding(csp_header, csp_value));
 
     router
@@ -374,17 +387,19 @@ pub fn active_conns_count() -> usize {
 }
 
 /// 哪些 path 跳过 auth (k8s probe / 调试查询 / landing / 静态 UI).
+/// **路径统一用 `/ui` (无下划线)**: 2026-06-04 用户决定 — 文档/daemon/SvelteKit
+/// 全栈一致, 符合用户直觉 ("UI 控制台" 应该是 `/ui` 不是 `/_ui`).
 ///
 /// 当前跳过:
 /// - `/` — 服务自描述/landing, 浏览器/curl 探针应能命中不报错
 /// - `/v1/system/health` — k8s liveness/readiness probe
 /// - `/v1/system/status` — 状态查询 (信息非敏感, 调试方便)
+/// - `/v1/auth/login` — 公开登录端点
 /// - `/ui/*` — Stage 7a 静态文件 serve (SPA 资源不需要每个文件都打 token;
 ///   真正要 auth 的 Web UI 资源是 SvelteKit 内部 fetch 走 `/v1/*` 时的 Bearer
 ///   token; Stage 7a 简化: 启动时打 admin token, UI 粘进 localStorage)
-/// - `/_app/*` — Stage 12 防御性: SvelteKit `paths.base = '/ui'` 时, JS/CSS
-///   资源在 `/ui/_app/...` 下 (被 `/ui/*` 覆盖), 但若 SvelteKit 改 base
-///   或 adapter 行为变了, 资源会落到 `/_app/...`. 显式 skip 防 401.
+/// - `/ui/_app/*` — SvelteKit 资源子目录 (被 `/ui/*` 覆盖, 显式列出来防御
+///   SvelteKit 改 base 或 adapter 行为变了导致资源路径变化)
 pub fn is_auth_skipped_path(path: &str) -> bool {
     path == "/"
         || path == "/v1/system/health"
@@ -392,8 +407,6 @@ pub fn is_auth_skipped_path(path: &str) -> bool {
         || path == "/v1/auth/login"
         || path.starts_with("/ui/")
         || path == "/ui"
-        || path.starts_with("/_app/")
-        || path == "/_app"
 }
 
 /// 读 JWT secret (env var QIANXUN_JWT_SECRET).
@@ -2631,14 +2644,12 @@ mod jwt_auth_tests {
         assert!(is_auth_skipped_path("/"));
         assert!(is_auth_skipped_path("/v1/system/health"));
         assert!(is_auth_skipped_path("/v1/system/status"));
-        // Stage 7a: /ui/* 跳过 auth (SvelteKit 静态资源)
+        assert!(is_auth_skipped_path("/v1/auth/login"));
+        // Stage 7a: /ui/* 跳过 auth (SvelteKit 静态资源). 路径统一 `/ui` (无下划线),
+        // 2026-06-04 用户决定 — daemon / SvelteKit / docs 全栈一致.
         assert!(is_auth_skipped_path("/ui"));
         assert!(is_auth_skipped_path("/ui/"));
         assert!(is_auth_skipped_path("/ui/assets/main.js"));
-        // Stage 12 防御性: SvelteKit 资源也跳过 (若 paths.base 改了)
-        assert!(is_auth_skipped_path("/_app"));
-        assert!(is_auth_skipped_path("/_app/"));
-        assert!(is_auth_skipped_path("/_app/immutable/chunks/abc.js"));
         // 其它路径不跳过
         assert!(!is_auth_skipped_path("/v1/chat/session"));
         assert!(!is_auth_skipped_path("/v1/tools"));
@@ -2646,6 +2657,12 @@ mod jwt_auth_tests {
         // 未知 path 也不跳过 (期望走 fallback → 404, 但 auth 先拦是 OK 的)
         assert!(!is_auth_skipped_path("/favicon.ico"));
         assert!(!is_auth_skipped_path("/random"));
+        // `_app` / `/_ui` (有下划线) 不应再 skip — 2026-06-04 路径统一为 `/ui`,
+        // 若客户端仍调这些路径应让它走 404, 而不是默默允许.
+        assert!(!is_auth_skipped_path("/_app"));
+        assert!(!is_auth_skipped_path("/_app/"));
+        assert!(!is_auth_skipped_path("/_ui"));
+        assert!(!is_auth_skipped_path("/_ui/"));
     }
 }
 
