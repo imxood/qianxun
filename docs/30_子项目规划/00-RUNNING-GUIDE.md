@@ -331,6 +331,108 @@ Daemon 收到 SIGINT / SIGTERM / Ctrl-C 时, 自动跑 6 步优雅关闭 (5s 内
 
 ---
 
+## 7b. Dev / Release / Build 工作流 (Stage 12 — `scripts/run.py`)
+
+**核心**: 单 Python 脚本 (`scripts/run.py`) 统一所有编译/部署/启动, **完全删了** `qianxun/src/daemon/build.rs` (之前 `cargo build` 会自动调 pnpm, 跨语言依赖 + 双重跑). 改用 py 脚本显式控制, vite 自带 watch (dev) + 自带 build (release).
+
+**Vite 自带 watch/build, py 脚本只 orchestrate**:
+- `pnpm run dev` — Vite dev server 自带文件 watch + HMR
+- `pnpm run build` — Vite 一行命令产 static
+- py 脚本不重实现这两件事, 只管 spawn / kill / log / 模式分发
+
+### 7b.1 `scripts/run.py` 4 模式 (单 entry point)
+
+```bash
+# 默认 (dev): 后台启 vite + 前台 cargo run daemon, daemon 反代 /ui → vite
+python scripts/run.py
+
+# release: pnpm build + cargo build --release + 跑 release 二进制
+python scripts/run.py --release
+
+# 只 build debug (CI 用), build 完退出
+python scripts/run.py --build
+
+# 只 build release (release CI 用)
+python scripts/run.py --release --build
+
+# 通用修饰
+python scripts/run.py --port 23910         # 自定义端口
+python scripts/run.py --no-vite            # dev 模式不启 vite (假设 vite 已在跑)
+python scripts/run.py --skip-build         # 跳过 pnpm + cargo build (assume 已 build)
+python scripts/run.py --ui-dev http://127.0.0.1:5174  # 反代 URL (默认)
+python scripts/run.py --ui-dist <path>     # release 模式覆盖 UI dist 路径
+```
+
+### 7b.2 Dev 模式实际跑什么
+
+```
+06:07:09.347 ▸ step  模式 = DEV (debug + vite watch + 反代)
+06:07:09.347 ℹ info  daemon 端口 : 23900 (--ui-dev → http://127.0.0.1:5174)
+06:07:09.347 ℹ info  vite 端口   : 5174  (SvelteKit paths.base='/ui')
+06:07:09.347 ℹ info  浏览器入口  : http://127.0.0.1:23900/ui
+06:07:09.347 ℸ step  启 vite dev server (后台)
+         (Vite 启动 818ms)
+06:07:10.785 ✓   ok  vite:5174 up (via 127.0.0.1)
+06:07:10.786 ▸ step  启 cargo run daemon (前台)
+         (cargo 编译 + 启动, ~10-15s 首次, ~1-3s 增量)
+06:10:13.914 ✓   ok  daemon:23900 up (via localhost)
+06:10:13.914 ✓   ok  全部就绪 → http://127.0.0.1:23900/ui
+06:10:13.914 ℹ info   改 svelte 后浏览器 Cmd-R (vite 自动 watch)
+```
+
+- 后台启 `pnpm.cmd run dev` (Vite 监听 5174, base='/ui', HMR 可用)
+- 前台启 `cargo run` (daemon 监听 23900, `--ui-dev=http://127.0.0.1:5174`)
+- daemon 反代 `/ui/*` → vite dev server
+- Ctrl-C 优雅关 2 个子进程 (Windows: `taskkill /F /T /PID`, POSIX: `killpg SIGTERM`)
+
+**浏览器入口**: `http://127.0.0.1:23900/ui` (跟 prod 一致, dev 体验跟生产同源).
+**Vite HMR 备用**: `http://127.0.0.1:5174/ui` (要走 vite WS HMR 时用, 反代不支持 WS).
+
+**改 svelte 后**: 浏览器手动 Cmd-R (Vite 已经在 dev 监听文件变更, 第二次请求直接命中新代码). 启动从 60s → 5s.
+
+### 7b.3 Release 模式
+
+```
+06:11:00.001 ▸ step  模式 = RELEASE
+06:11:00.001 ℹ info  step 1/3: pnpm build
+06:11:00.001 ℹ info  $ pnpm.cmd run build
+         (pnpm build ~10-30s)
+06:11:25.123 ✓   ok  step 1/3: pnpm build done in 25.1s
+06:11:25.123 ℹ info  step 2/3: cargo build --release
+         (cargo --release 1-3min 首次)
+06:13:48.789 ✓   ok  step 2/3: cargo build --release done in 143.7s
+06:13:48.789 ▸ step  step 3/3: 跑 release daemon
+         (前台运行, Ctrl-C 退出)
+```
+
+### 7b.4 日志格式 (人类易读本地时间)
+
+- 本地时区 `HH:MM:SS.mmm` 毫秒精度 (`datetime.now().strftime("%H:%M:%S.") + microsecond // 1000`)
+- 5 级 + 颜色 + emoji:
+  - `▸ step` 紫色加粗 (模式切换/分阶段)
+  - `ℹ info` 青色 (普通信息)
+  - `✓ ok` 绿色 (成功)
+  - `⚠ warn` 黄色 (警告)
+  - `✗ err` 红色 (错误)
+- 子命令前缀 `$ cmd args` 加粗, 步骤进度 `step 1/3:` 提示当前在哪步
+- 全部 `flush=True` 实时打印, 不缓冲
+
+### 7b.5 前置条件 + 端口冲突 + 系统代理
+
+- **Python 3.8+** (用 stdlib, 无新依赖)
+- **pnpm + node ≥ 18** (Vite 8 要求)
+- 端口预检: 启动前 check 23900 (daemon) + 5174 (vite) 占用, 占用时返错给指引
+- **系统代理干扰 (Windows 常见)**: `http_proxy=127.0.0.1:1080` (公司代理) 会让 curl/Invoke-WebRequest 走代理, 代理对 loopback 返 502. `run.py` **自动 unset** 这些 env var (`HTTP_PROXY`/`HTTPS_PROXY`/`http_proxy`/`https_proxy`/`ALL_PROXY`/`all_proxy`/`NO_PROXY`/`no_proxy`), 子进程走直连 loopback. 你自己手 curl 测时也得显式 `-Proxy $null` (PowerShell) 或 `curl --noproxy *` 跳过代理.
+
+### 7b.6 为啥删 build.rs
+
+之前 `qianxun/src/daemon/build.rs` 在 `cargo build` 时自动调 pnpm install + pnpm build, 跟 `scripts/run.py` 重复 + 跨语言依赖 + dev 跟 release 走两套 skip 逻辑. 删了之后:
+- 单一入口 (`scripts/run.py`) 显式控制, 看脚本就知道发生了什么
+- CI 不用装 pnpm 跑 `cargo build` (要么用 `python scripts/run.py --build`, 要么预 build)
+- dev 模式不再需要 `QIANXUN_SKIP_UI_BUILD` 这个 hack (build.rs 都不存在了)
+
+---
+
 ## 8. 测试
 
 ### 8a. Cargo (Daemon + VPS)
