@@ -13,6 +13,12 @@ export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
 	server: {
 		port: 5174,
+		// Stage 12: bind 0.0.0.0 让 daemon 反代 (Python urllib / Invoke-WebRequest
+		// / 系统代理) 都能连. 默认 Vite 只 bind localhost (Windows 上解析到 ::1
+		// IPv6), 跟 127.0.0.1 IPv4 测试不互通 → 502. 改成 '0.0.0.0' 让 IPv4/IPv6
+		// 都能连. strictPort 避免启动失败时悄悄切端口.
+		host: '0.0.0.0',
+		strictPort: true,
 		// Stage 7a §7.2: dev proxy /v1/* → daemon
 		// daemon 端后续加 /ui/* serve 静态, 但 dev 模式 UI 走 vite, 所以
 		// 浏览器同源请求 /v1/* 全部转发到 DAEMON_TARGET 端口 daemon.
@@ -24,6 +30,8 @@ export default defineConfig({
 		}
 	},
 	preview: {
-		port: 5174
+		port: 5174,
+		host: '0.0.0.0',
+		strictPort: true
 	}
 });
