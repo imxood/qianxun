@@ -123,6 +123,7 @@ fn make_test_state() -> Arc<crate::daemon::AppState> {
         store,
         llm_providers,
         shutdown_tx,
+        ui_dev: None,
         processing_loop_enabled: false,
         started_at: std::time::Instant::now(),
         active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

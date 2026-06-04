@@ -57,6 +57,7 @@ mod graceful_shutdown_tests {
             store,
             llm_providers,
             shutdown_tx,
+            ui_dev: None,
             processing_loop_enabled: false,
             started_at: Instant::now(),
             active_conns: Arc::new(AtomicUsize::new(0)),

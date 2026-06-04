@@ -63,6 +63,9 @@ pub struct AppState {
     pub llm_providers: Arc<LlmProviderManager>,
     /// 关闭信号.
     pub shutdown_tx: watch::Sender<()>,
+    /// Stage 12: dev 模式 — `Some(url)` 表示 `ui_dev` flag 传了, auth middleware
+    /// 跳过非 `/v1/*` 路径 (vite dev 自己服务 SPA, 走 daemon auth 没意义).
+    pub ui_dev: Option<String>,
     /// Stage 2 留 false: 直接调 `provider.stream_completion` 走 SSE 流;
     /// Stage 3 切 true: 接入 `processing_loop::handle_user_message` + 工具执行.
     pub processing_loop_enabled: bool,
@@ -241,6 +244,7 @@ pub async fn run(
         store,
         llm_providers,
         shutdown_tx,
+        ui_dev: ui_dev.clone(),
         processing_loop_enabled: false,
         // sysinfo 评估: 传递依赖过大 (~80+ 包含 windows-sys, objc2-*, ntapi),
         // 超出 CLAUDE.md "< 30" 约束. 改用 stdlib + /proc/self/status (Linux) +

@@ -107,6 +107,7 @@ async fn spawn_test_daemon(
         store,
         llm_providers,
         shutdown_tx: shutdown_tx.clone(),
+        ui_dev: None,
         processing_loop_enabled: false,
         started_at: Instant::now(),
         active_conns: Arc::new(AtomicUsize::new(0)),

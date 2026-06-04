@@ -418,6 +418,13 @@ pub async fn auth_middleware(
         let _guard = ConnCounterGuard::new();
         return Ok(next.run(request).await);
     }
+    // 2026-06-05 fix: dev 模式 (有 ui_dev) 跳过所有非 `/v1/*` 路径的 auth.
+    // vite dev server 自己服务 /llm, /@fs/... 等 SPA 资源, 走 daemon auth
+    // 没意义. 仅 /v1/* (API 端点) 需要 token.
+    if state.ui_dev.is_some() && !path.starts_with("/v1/") {
+        let _guard = ConnCounterGuard::new();
+        return Ok(next.run(request).await);
+    }
 
     // 2. 提取 Authorization Bearer token
     let token = match extract_bearer_token(&headers) {
@@ -2390,6 +2397,7 @@ mod jwt_auth_tests {
             store,
             llm_providers,
             shutdown_tx,
+            ui_dev: None,
             processing_loop_enabled: false,
             started_at: std::time::Instant::now(),
             active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2889,6 +2897,7 @@ mod stage7a_endpoint_tests {
             store,
             llm_providers,
             shutdown_tx,
+            ui_dev: None,
             processing_loop_enabled: false,
             // Stage 7b 字段
             started_at: std::time::Instant::now(),
