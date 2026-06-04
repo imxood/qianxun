@@ -40,6 +40,9 @@ fn main() {
     println!("cargo:rerun-if-changed={}/vite.config.ts", ui_dir.display());
     println!("cargo:rerun-if-changed={}/src", ui_dir.display());
     println!("cargo:rerun-if-changed={}/static", ui_dir.display());
+    // 监听 build/ 目录: 删了 build/ 后 cargo 才会重跑本 build.rs,
+    // 否则 cargo fingerprint 缓存认为 build.rs 已执行, 跳过 (印的是旧 warning).
+    println!("cargo:rerun-if-changed={}/build", ui_dir.display());
 
     // 4. 增量构建: build/index.html 已有就跳过
     let build_index = ui_dir.join("build").join("index.html");
@@ -51,29 +54,48 @@ fn main() {
     }
 
     // 5. 跑 pnpm install + build
+    //
+    // Windows 注意: 全局 pnpm shim 经常是 `pnpm` (无后缀, POSIX shell 脚本
+    // `#!/bin/sh`) + `pnpm.cmd` (Windows batch) + `pnpm.ps1` (PowerShell).
+    // Rust `Command::new("pnpm")` 调 CreateProcessW, 找到 `pnpm` 无后缀文件
+    // 就直接 exec, 但 Windows 不认 POSIX shebang → spawn 失败.
+    // 修法: Windows 强制用 `pnpm.cmd`, Linux/macOS 用 `pnpm`.
+    #[cfg(windows)]
+    const PNPM_CMD: &str = "pnpm.cmd";
+    #[cfg(not(windows))]
+    const PNPM_CMD: &str = "pnpm";
+
+    // 用绝对路径, 避免 current_dir 是 qianxun/ 时再传相对路径 `--dir qianxun/src/...`
+    // 翻倍成 `qianxun/qianxun/src/...`.
+    let ui_dir_str = ui_dir.to_str().expect("ui_dir is not valid UTF-8");
+
     let run_pnpm = |args: &[&str]| -> bool {
-        println!("[qianxun build.rs] running: pnpm {}", args.join(" "));
-        let status = Command::new("pnpm")
-            .args(args)
-            .current_dir(manifest_dir)
-            .status();
+        println!("[qianxun build.rs] running: {} {}", PNPM_CMD, args.join(" "));
+        let status = Command::new(PNPM_CMD).args(args).status();
         match status {
             Ok(s) => s.success(),
             Err(e) => {
-                println!("cargo:warning=pnpm spawn failed: {e}");
+                println!("cargo:warning={} spawn failed: {e}", PNPM_CMD);
+                println!(
+                    "cargo:warning=确认 PATH 含 pnpm 安装目录 (Windows: C:\\Users\\<你>\\AppData\\Roaming\\npm), \
+                     且该目录下同时有 pnpm (无后缀) 和 pnpm.cmd (Windows batch) 两个 shim. \
+                     没有 pnpm 就用: npm install -g pnpm"
+                );
                 false
             }
         }
     };
 
-    if !run_pnpm(&["--dir", "qianxun/src/daemon/ui", "install", "--frozen-lockfile"]) {
+    if !run_pnpm(&["--dir", ui_dir_str, "install", "--frozen-lockfile"]) {
         panic!(
-            "pnpm install failed. 需要: pnpm + node ≥ 18. 手动跑: pnpm --dir qianxun/src/daemon/ui install"
+            "pnpm install failed. 需要: pnpm + node ≥ 18. 手动跑: cd {} && pnpm install",
+            ui_dir_str
         );
     }
-    if !run_pnpm(&["--dir", "qianxun/src/daemon/ui", "build"]) {
+    if !run_pnpm(&["--dir", ui_dir_str, "build"]) {
         panic!(
-            "pnpm build failed. 手动跑: pnpm --dir qianxun/src/daemon/ui build 查错"
+            "pnpm build failed. 手动跑: cd {} && pnpm build 查错",
+            ui_dir_str
         );
     }
 
