@@ -125,7 +125,7 @@ Daemon 启动时可以 serve SvelteKit SPA, 浏览器访问 `http://127.0.0.1:23
 $env:QIANXUN_UI_DIST = "E:\git\maxu\qianxun\qianxun\src\daemon\ui\build"
 .\target\release\qx.exe --daemon --port 23900
 
-# 路径不存在时 (e.g. 没 build UI): daemon 仍启动, /_ui/* 返 503 + JSON
+# 路径不存在时 (e.g. 没 build UI): daemon 仍启动, /ui/* 返 503 + JSON
 # 提示. 不 panic.
 ```
 
@@ -471,7 +471,7 @@ PUT    /v1/config                          # Stage 7b (含 hot-reload 信号)
 ### 9.8 Static UI (1)
 
 ```
-GET    /_ui/*                             # SvelteKit SPA (Stage 7a, 需 --ui-dist)
+GET    /ui/*                              # SvelteKit SPA (Stage 7a, 需 --ui-dist)
 ```
 
 **SSE 12 事件 schema** 见 `_shared-contract.md` §3.2: `message_start` / `content_block_start` / `text_delta` / `thinking_delta` / `tool_use_delta` / `tool_use_complete` / `tool_result` / `content_block_stop` / `usage` / `message_delta` / `message_stop` / `error`.
@@ -636,7 +636,7 @@ Error: Address already in use (os error 10048)
 
 ### Q11: `--ui-dist` 路径错
 
-**症状**: `Web UI dist path does not exist: ... (/_ui/* will return 503)`
+**症状**: `Web UI dist path does not exist: ... (/ui/* will return 503)`
 **解决**:
 - 跑 `pnpm --dir qianxun/src/daemon/ui build` 先 build UI
 - 确认路径是 SvelteKit 输出的 `build/` (adapter-static) 或 `dist/`, 不是源码目录

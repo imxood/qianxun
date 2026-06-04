@@ -69,7 +69,7 @@ GET    /v1/teams                                  → { teams: [...] }
 详细见 `01b-daemon-web-console.md`. 摘要:
 
 ```
-GET    /_ui/*                                     → Svelte 5 SPA 静态文件 (含 fallback to index.html)
+GET    /ui/*                                      → Svelte 5 SPA 静态文件 (含 fallback to index.html)
 
 GET    /v1/llm/providers                          → { providers: [...] }
 GET    /v1/llm/providers/{id}                     → { provider: {...} }  (key 不返)

@@ -407,7 +407,7 @@ Daemon 进程（常驻）— Phase 4 目标：
 │  └─ wss://vps:23901/ws                               │
 │                                                     │
 │  Web UI（Svelte + Vite，内嵌）                        │
-│  └─ http://127.0.0.1:23900/_ui                       │
+│  └─ http://127.0.0.1:23900/ui                        │
 └─────────────────────────────────────────────────────┘
        ↑ HTTP :23900
        │
@@ -510,7 +510,7 @@ POST /v1/system/shutdown        关闭 Daemon
 > 📋 Phase 4 规划。技术选型待前端实现时评估确认。
 
 Web UI 是 Daemon 的内嵌前端，通过 Daemon HTTP Server 提供 `/v1/` REST API 的浏览器界面。
-编译后为纯静态文件，嵌入 `qx daemon` 二进制，通过 `/_ui` 路由访问。
+编译后为纯静态文件，嵌入 `qx daemon` 二进制，通过 `/ui` 路由访问。
 
 ### 5.5 离线降级
 

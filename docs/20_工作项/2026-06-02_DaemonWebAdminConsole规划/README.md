@@ -4,7 +4,7 @@
 > 状态: ✅ Stage 7a->10c 全部完成, 8 个 plan 决策全 accept/override_accept, 收尾归并到 `04-kanban-design.md` 关联 Web Console 索引
 >
 > **目标**: 给 qianxun daemon 加一个**管理控制台** (Svelte 5 SPA),
-> 浏览器访问 `http://127.0.0.1:23900/_ui/` 即可管理 LLM / Skills /
+> 浏览器访问 `http://127.0.0.1:23900/ui/` 即可管理 LLM / Skills /
 > MCP / Tools / Memory / Sessions / Config / System 8 大模块 + Chat 视图 + Settings.
 
 ## 背景
@@ -27,7 +27,7 @@ Web Console 是 daemon 自带的**管理面板**, 解决以上痛点.
 | `docs/30_子项目规划/01-daemon.md` | ✅ 更新 | 加 §15 索引 + 更新 Phase 4b 表 + 架构图 |
 | `docs/30_子项目规划/_shared-contract.md` | ✅ 更新 | §3.1.1 加 17 个新 endpoint |
 | `qianxun/src/daemon/ui/` (Stage 7a 起) | ✅ 创建 | SvelteKit + Svelte 5 + Vite + Tailwind + shadcn-svelte |
-| `qianxun/src/daemon/router.rs` (Stage 7a 起) | ✅ 创建 | 加 `/_ui/*` 静态文件 serve + 17 个新 endpoint |
+| `qianxun/src/daemon/router.rs` (Stage 7a 起) | ✅ 创建 | 加 `/ui/*` 静态文件 serve + 17 个新 endpoint |
 
 ## Stage 拆分完成情况 (2026-06-03)
 
@@ -62,7 +62,7 @@ Web Console 是 daemon 自带的**管理面板**, 解决以上痛点.
 | 前端栈 | Svelte 5 + SvelteKit + Vite + Tailwind + shadcn-svelte | 跟 Tauri 桌面同栈 (用户规则: 所有 web 端统一栈) |
 | 部署 | daemon 启动时 serve dist/ (单二进制) | 单进程, 无额外 node runtime 依赖 |
 | 路径 | `qianxun/src/daemon/ui/` | 跟 daemon 紧耦合, 方便 build.rs 集成 |
-| 端口 | 共用 daemon 端口 23900 (路径 `/_ui/`) | 简化部署, 不开额外端口 |
+| 端口 | 共用 daemon 端口 23900 (路径 `/ui/`) | 简化部署, 不开额外端口 |
 | 鉴权 | Stage 7a 用 token + JWT; Stage 10a 加 bcrypt 密码 + short-lived JWT | 7a 简化启动, 10a 加安全 |
 | 单二进制 embedding | Stage 7-10 不做, v6 Kanban 评估 rust-embed | 简化, 避免早期过度工程 |
 

@@ -87,7 +87,7 @@ qianxun/src/daemon/             # Daemon 子命令（在单二进制内）
 │  │  ├─ /v1/config/*      配置管理                   │    │
 │  │  ├─ /v1/session/*     会话管理                   │    │
 │  │  ├─ /v1/system/*      系统状态                   │    │
-│  │  └─ /_ui/*            Web UI 静态文件            │    │
+│  │  └─ /ui/*             Web UI 静态文件            │    │
 │  └─────────────────────────────────────────────────┘    │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
@@ -243,14 +243,14 @@ Request
   │
   ├─ TowerLayer::Timeout(30s)         ← 请求级别超时
   ├─ TowerLayer::Trace               ← tracing 请求追踪
-  ├─ TowerLayer::Cors                ← 本地开发 CORS（/_ui 用）
+  ├─ TowerLayer::Cors                ← 本地开发 CORS（/ui 用）
   │
   ├─ 路由匹配
   │   ├─ /v1/* → ApiRouter
   │   │   ├─ RateLimit（按 IP 限流）
   │   │   └─ Auth（除 /v1/system/health 外全部需要）
   │   │
-  │   └─ /_ui/* → StaticFileRouter（Web UI）
+  │   └─ /ui/* → StaticFileRouter（Web UI）
   │
   └─ Response
 ```
@@ -312,7 +312,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/system/shutdown", post(shutdown_handler))
         
         // Web UI
-        .nest_service("/_ui", ServeDir::new("web/dist"))
+        .nest_service("/ui", ServeDir::new("web/dist"))
         
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http())

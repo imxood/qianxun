@@ -191,7 +191,7 @@ qianxun/src/daemon/ui/           # SvelteKit SPA
 
 | 端点 | 方法 | 优先级 | 用途 | 归属 |
 |---|---|---|---|---|
-| `/_ui/*` | GET | ★ | 静态文件 serve (SPA + fallback) | Stage 7a (router) |
+| `/ui/*` | GET | ★ | 静态文件 serve (SPA + fallback) | Stage 7a (router) |
 | `/v1/llm/providers` | GET | ★ | 列出所有 LLM provider | Stage 7a |
 | `/v1/llm/providers/{id}` | GET | ★ | 单个 provider 详情 (key **不**返) | Stage 7a |
 | `/v1/llm/providers` | POST | ★ | 新增 provider (key 写 keyring) | Stage 7a |
@@ -480,7 +480,7 @@ qianxun-mobile/                       # Flutter 项目根
 ## §12 与现有文档的关系
 
 - **01-daemon.md** Phase 4b 一节更新 (从"暂不实施" → "Stage 7 拆 7a/7b/7c 实施")
-- **01-daemon.md** §4.2 架构图 (第 108 行) 加 `/_ui/*` 详细说明
+- **01-daemon.md** §4.2 架构图 (第 108 行) 加 `/ui/*` 详细说明
 - **_shared-contract.md** §3.1 加 §4.2 列表的 17 个新 endpoint
 - **00-RUNNING-GUIDE.md** 加 Web Console 启动 + 访问说明
 - **02-vps-server.md** §3 加"两套 UI 不共享代码" 声明
