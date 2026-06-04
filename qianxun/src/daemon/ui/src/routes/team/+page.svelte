@@ -3,6 +3,7 @@
 	import { onMount } from 'svelte';
 	import { User, Briefcase } from '@lucide/svelte';
 	import { listProfiles, listRoles } from '$lib/api/kanban';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import type { Profile, Role } from '$lib/types/kanban';
 
 	let profiles = $state<Profile[]>([]);
@@ -19,6 +20,19 @@
 	}
 
 	onMount(refresh);
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释)
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
+	});
 </script>
 
 <svelte:head>

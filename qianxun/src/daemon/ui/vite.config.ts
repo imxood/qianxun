@@ -14,7 +14,7 @@ export default defineConfig({
 	server: {
 		port: 5174,
 		// Stage 7a §7.2: dev proxy /v1/* → daemon
-		// daemon 端后续加 /_ui/* serve 静态, 但 dev 模式 UI 走 vite, 所以
+		// daemon 端后续加 /ui/* serve 静态, 但 dev 模式 UI 走 vite, 所以
 		// 浏览器同源请求 /v1/* 全部转发到 DAEMON_TARGET 端口 daemon.
 		proxy: {
 			'/v1': {

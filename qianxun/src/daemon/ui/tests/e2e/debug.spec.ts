@@ -13,7 +13,7 @@ test('debug _ui load 2', async ({ page }) => {
 		if (res.request().resourceType() === 'document') logs.push(`[res-doc] ${res.url()} ${res.status()}`);
 	});
 
-	const response = await page.goto('http://127.0.0.1:23913/_ui/', { waitUntil: 'networkidle', timeout: 30_000 });
+	const response = await page.goto('http://127.0.0.1:23913/ui/', { waitUntil: 'networkidle', timeout: 30_000 });
 	console.log('STATUS:', response?.status());
 	console.log('URL:', page.url());
 

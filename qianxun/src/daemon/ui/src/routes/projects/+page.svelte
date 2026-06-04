@@ -3,6 +3,7 @@
 	import { onMount } from 'svelte';
 	import { Plus, Folder, Archive } from '@lucide/svelte';
 	import { listProjects, createProject } from '$lib/api/projects';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import type { Project } from '$lib/types/kanban';
 
 	let projects = $state<Project[]>([]);
@@ -34,6 +35,19 @@
 	}
 
 	onMount(refresh);
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释)
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
+	});
 </script>
 
 <svelte:head>

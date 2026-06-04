@@ -13,6 +13,7 @@
 	import InputBox from '$lib/components/chat/InputBox.svelte';
 	import ConnectionBanner from '$lib/components/chat/ConnectionBanner.svelte';
 	import { chatStore } from '$lib/stores/chat.svelte';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import { listProviders } from '$lib/api/llm';
 	import type { LlmProviderSummary } from '$lib/types/api';
 
@@ -61,6 +62,20 @@
 
 	onMount(() => {
 		void refresh();
+	});
+
+	// 2026-06-04 fix: 监听 authStore.token 变化, 登录后自动重试. 之前 onMount
+	// 只跑一次, 401 后用户登录不会重新拉数据.
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
 	});
 </script>
 

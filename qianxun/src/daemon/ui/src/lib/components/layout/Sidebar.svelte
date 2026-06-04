@@ -17,32 +17,35 @@
 		icon: typeof Brain;
 	};
 
-	// Stage 9c: Chat 放第 1 个 (最常用, 用户面)
+	// 2026-06-04 fix: 所有 nav href 加 `/ui` 前缀. 之前 `/llm` 这种相对路径会被
+	// SvelteKit client-side router 解析成 host root 路径, 走到 daemon 走 auth → 401.
+	// 用 `BASE_PATH` 常量统一前缀, 改 base 路径只改一处.
+	const BASE_PATH = '/ui';
 	const mgmtItems: NavItem[] = [
-		{ href: '/chat', label: 'Chat', i18n: 'nav.chat', icon: MessageSquare },
-		{ href: '/llm', label: 'LLM Providers', i18n: 'nav.llm', icon: Brain },
-		{ href: '/skills', label: 'Skills', i18n: 'nav.skills', icon: Sparkles },
-		{ href: '/mcp', label: 'MCP Servers', i18n: 'nav.mcp', icon: Server },
-		{ href: '/tools', label: 'Tools', i18n: 'nav.tools', icon: Wrench }
+		{ href: `${BASE_PATH}/chat`, label: 'Chat', i18n: 'nav.chat', icon: MessageSquare },
+		{ href: `${BASE_PATH}/llm`, label: 'LLM Providers', i18n: 'nav.llm', icon: Brain },
+		{ href: `${BASE_PATH}/skills`, label: 'Skills', i18n: 'nav.skills', icon: Sparkles },
+		{ href: `${BASE_PATH}/mcp`, label: 'MCP Servers', i18n: 'nav.mcp', icon: Server },
+		{ href: `${BASE_PATH}/tools`, label: 'Tools', i18n: 'nav.tools', icon: Wrench }
 	];
 
 	const opsItems: NavItem[] = [
-		{ href: '/memory', label: 'Memory', i18n: 'nav.memory', icon: Database },
-		{ href: '/sessions', label: 'Chat Sessions', i18n: 'nav.sessions', icon: MessagesSquare },
-		{ href: '/config', label: 'Config', i18n: 'nav.config', icon: FileCog },
-		{ href: '/system', label: 'System', i18n: 'nav.system', icon: Activity }
+		{ href: `${BASE_PATH}/memory`, label: 'Memory', i18n: 'nav.memory', icon: Database },
+		{ href: `${BASE_PATH}/sessions`, label: 'Chat Sessions', i18n: 'nav.sessions', icon: MessagesSquare },
+		{ href: `${BASE_PATH}/config`, label: 'Config', i18n: 'nav.config', icon: FileCog },
+		{ href: `${BASE_PATH}/system`, label: 'System', i18n: 'nav.system', icon: Activity }
 	];
 
 	// Stage 9c: 第 3 区 — 系统 (Settings 单飞)
 	const systemItems: NavItem[] = [
-		{ href: '/settings', label: 'Settings', i18n: 'nav.settings', icon: SettingsIcon }
+		{ href: `${BASE_PATH}/settings`, label: 'Settings', i18n: 'nav.settings', icon: SettingsIcon }
 	];
 
 	// 2026-06-04 阶段 3: Kanban 协作区 (3 项)
 	const kanbanItems: NavItem[] = [
-		{ href: '/kanban', label: 'Kanban', i18n: 'nav.kanban', icon: KanbanSquare },
-		{ href: '/projects', label: 'Projects', i18n: 'nav.projects', icon: FolderKanban },
-		{ href: '/team', label: 'Team', i18n: 'nav.team', icon: Users }
+		{ href: `${BASE_PATH}/kanban`, label: 'Kanban', i18n: 'nav.kanban', icon: KanbanSquare },
+		{ href: `${BASE_PATH}/projects`, label: 'Projects', i18n: 'nav.projects', icon: FolderKanban },
+		{ href: `${BASE_PATH}/team`, label: 'Team', i18n: 'nav.team', icon: Users }
 	];
 
 	function isActive(href: string): boolean {
@@ -100,7 +103,7 @@
 				class:hover:bg-accent={!active}
 				class:hover:text-accent-foreground={!active}
 				aria-current={active ? 'page' : undefined}
-				data-testid={`nav-${item.href.replace('/', '')}`}
+				data-testid={`nav-${item.href.slice(BASE_PATH.length + 1)}`}
 			>
 				<Icon class="h-4 w-4" />
 				<span class="flex-1">{t(item.i18n)}</span>
@@ -127,7 +130,7 @@
 				class:hover:bg-accent={!active}
 				class:hover:text-accent-foreground={!active}
 				aria-current={active ? 'page' : undefined}
-				data-testid={`nav-${item.href.replace('/', '')}`}
+				data-testid={`nav-${item.href.slice(BASE_PATH.length + 1)}`}
 			>
 				<Icon class="h-4 w-4" />
 				<span class="flex-1">{t(item.i18n)}</span>
@@ -154,7 +157,7 @@
 				class:hover:bg-accent={!active}
 				class:hover:text-accent-foreground={!active}
 				aria-current={active ? 'page' : undefined}
-				data-testid={`nav-${item.href.replace('/', '')}`}
+				data-testid={`nav-${item.href.slice(BASE_PATH.length + 1)}`}
 			>
 				<Icon class="h-4 w-4" />
 				<span class="flex-1">{t(item.i18n)}</span>

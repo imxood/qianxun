@@ -118,8 +118,10 @@ describe('Settings 页面 (Stage 9c)', () => {
 		const { getByTestId, findByTestId } = render(SettingsPage);
 		await fireEvent.click(getByTestId('settings-token-rotate'));
 		await findByTestId('settings-token-rotate-success');
-		// fetch 被调两次: status + rotate
-		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// fetch 被调三次: status (onMount) + rotate (用户点按钮) + status
+		// (rotate 后 token 变, $effect 触发重 fetch, 拿新 token 下的 daemon 状态).
+		// 2026-06-04: 之前是 2 次 (status + rotate), 改成 3 次.
+		expect(fetchMock).toHaveBeenCalledTimes(3);
 		const rotateCall = fetchMock.mock.calls[1]!;
 		expect(rotateCall[0]).toBe('/v1/system/admin/rotate-token');
 		expect((rotateCall[1] as RequestInit).method).toBe('POST');
@@ -196,7 +198,7 @@ describe('Settings 页面 (Stage 9c)', () => {
 		const Sidebar = (await loadSidebar()).default;
 		const { getByTestId } = render(Sidebar);
 		const link = getByTestId('nav-settings');
-		expect(link.getAttribute('href')).toBe('/settings');
+		expect(link.getAttribute('href')).toBe('/ui/settings');
 		// 链接应包含 'Settings' 文字
 		expect(link.textContent?.toLowerCase()).toContain('settings');
 		// 容器里应出现"系统"分组标签

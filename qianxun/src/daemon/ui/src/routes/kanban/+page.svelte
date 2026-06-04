@@ -5,6 +5,7 @@
 	import { Plus, KanbanSquare, Folder } from '@lucide/svelte';
 	import { listBoards, createBoard } from '$lib/api/kanban';
 	import { listProjects } from '$lib/api/projects';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import type { Board, Project } from '$lib/types/kanban';
 
 	let boards = $state<Board[]>([]);
@@ -28,7 +29,9 @@
 		creating = true;
 		try {
 			const b = await createBoard(newName.trim(), newProjectRoot.trim());
-			await goto(`/kanban/${b.id}`);
+			// 2026-06-04 fix: 见 routes/+page.svelte 注释 — SvelteKit 2 `goto` 在
+			// `paths.base='/ui'` 下要带 base 前缀.
+			await goto(`/ui/kanban/${b.id}`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : '创建失败';
 			creating = false;
@@ -40,6 +43,19 @@
 	}
 
 	onMount(refresh);
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释)
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
+	});
 </script>
 
 <svelte:head>
@@ -101,7 +117,7 @@
 		<div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3" data-testid="boards-grid">
 			{#each boards as b (b.id)}
 				<a
-					href="/kanban/{b.id}"
+					href="/ui/kanban/{b.id}"
 					class="hover:bg-accent/30 block rounded border bg-card p-4 transition-colors"
 					data-testid="board-card-{b.id}"
 				>

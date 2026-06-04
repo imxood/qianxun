@@ -16,17 +16,20 @@ describe('Sidebar 路由导航', () => {
 
 	it('9 个导航链接都在 (5 管理 [chat+llm+skills+mcp+tools] + 4 运维)', () => {
 		const { getByTestId } = render(Sidebar);
+		// 2026-06-04 fix: SvelteKit paths.base='/ui' 下, Sidebar href 必须带 base 前缀,
+		// 否则 SvelteKit client-side router 解析成 host root (e.g. /llm) 走 daemon
+		// 鉴权 → 401. 详见 Sidebar.svelte 注释.
 		// 管理区 (Stage 9c 加 /chat 第 1 个)
-		expect(getByTestId('nav-chat').getAttribute('href')).toBe('/chat');
-		expect(getByTestId('nav-llm').getAttribute('href')).toBe('/llm');
-		expect(getByTestId('nav-skills').getAttribute('href')).toBe('/skills');
-		expect(getByTestId('nav-mcp').getAttribute('href')).toBe('/mcp');
-		expect(getByTestId('nav-tools').getAttribute('href')).toBe('/tools');
+		expect(getByTestId('nav-chat').getAttribute('href')).toBe('/ui/chat');
+		expect(getByTestId('nav-llm').getAttribute('href')).toBe('/ui/llm');
+		expect(getByTestId('nav-skills').getAttribute('href')).toBe('/ui/skills');
+		expect(getByTestId('nav-mcp').getAttribute('href')).toBe('/ui/mcp');
+		expect(getByTestId('nav-tools').getAttribute('href')).toBe('/ui/tools');
 		// 运维区 (Stage 7b)
-		expect(getByTestId('nav-memory').getAttribute('href')).toBe('/memory');
-		expect(getByTestId('nav-sessions').getAttribute('href')).toBe('/sessions');
-		expect(getByTestId('nav-config').getAttribute('href')).toBe('/config');
-		expect(getByTestId('nav-system').getAttribute('href')).toBe('/system');
+		expect(getByTestId('nav-memory').getAttribute('href')).toBe('/ui/memory');
+		expect(getByTestId('nav-sessions').getAttribute('href')).toBe('/ui/sessions');
+		expect(getByTestId('nav-config').getAttribute('href')).toBe('/ui/config');
+		expect(getByTestId('nav-system').getAttribute('href')).toBe('/ui/system');
 	});
 
 	it('Sidebar 渲染 "管理" / "运维" 两个分区标签', () => {

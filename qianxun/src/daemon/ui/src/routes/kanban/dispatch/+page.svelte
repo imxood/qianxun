@@ -3,6 +3,7 @@
 	import { onMount } from 'svelte';
 	import { Zap, ArrowLeft } from '@lucide/svelte';
 	import { dispatchNow, listBoards } from '$lib/api/kanban';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import type { Board } from '$lib/types/kanban';
 
 	let prompt = $state('');
@@ -34,6 +35,19 @@
 	}
 
 	onMount(refresh);
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释)
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
+	});
 </script>
 
 <svelte:head>
@@ -42,7 +56,7 @@
 
 <div class="mx-auto flex max-w-2xl flex-col gap-4 p-6">
 	<header class="flex items-center gap-2">
-		<a href="/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
+		<a href="/ui/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
 			<ArrowLeft class="size-4" />
 		</a>
 		<h1 class="text-lg font-semibold">手动派发 (Dispatch)</h1>
@@ -89,7 +103,7 @@
 					run_id: {result.run_id}<br />
 					profile: {result.profile_name}
 				</div>
-				<a href="/kanban" class="text-primary mt-2 inline-block underline">→ 跳到 Kanban</a>
+				<a href="/ui/kanban" class="text-primary mt-2 inline-block underline">→ 跳到 Kanban</a>
 			{:else}
 				<div class="font-semibold text-amber-700 dark:text-amber-300">⚠️ 未派发</div>
 				<div class="mt-1">{result.reason}</div>

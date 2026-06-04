@@ -2,7 +2,6 @@
 	// Stage 7a §3 — LLM Provider 管理面板
 	// 列表 / 新增 / 编辑 / 删除 / 切 active / 测试连接
 
-	import { onMount } from 'svelte';
 	import { Plus, RefreshCw, Trash2, Pencil, Zap, CheckCircle2 } from '@lucide/svelte';
 	import Card from '$lib/components/ui/card/Card.svelte';
 	import CardHeader from '$lib/components/ui/card/CardHeader.svelte';
@@ -32,6 +31,7 @@
 		updateProvider
 	} from '$lib/api/llm';
 	import type { LlmProviderConfig, LlmProviderSummary } from '$lib/types/api';
+	import { authStore } from '$lib/stores/auth.svelte';
 
 	const PROVIDER_OPTIONS = [
 		{ value: 'deepseek', label: 'DeepSeek (Anthropic compat)' },
@@ -73,8 +73,21 @@
 		}
 	}
 
-	onMount(() => {
-		void refresh();
+	// 2026-06-04 fix: 用 $effect 监听 authStore.token 替代 onMount 一次 fetch.
+	// 之前 onMount 只 fetch 一次, 401 后用户登录也不会重试 → "Authentication required" 一直挂.
+	// firstRun 跳过首次 (onMount 已做), 仅在 token 从 null → 有值时重 fetch.
+	// 注意: token 读取必须在 firstRun check **之前**, 否则首次跑提前 return, Svelte
+	// 5 不会把 authStore.token 记为依赖, token 变化时 effect 不重跑.
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token; // 先读, 注册依赖
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
 	});
 
 	function openCreate() {

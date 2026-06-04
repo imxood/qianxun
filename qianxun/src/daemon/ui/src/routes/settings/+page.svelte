@@ -143,7 +143,9 @@
 		const ok = window.confirm(t('settings.token.logout_confirm'));
 		if (!ok) return;
 		await authStore.logout();
-		void goto('/');
+		// 2026-06-04 fix: 见 routes/+page.svelte 注释 — SvelteKit 2 `goto` 在
+		// `paths.base='/ui'` 下要带 base 前缀才落到 daemon nest 下.
+		void goto('/ui/');
 	}
 
 	async function handleChangePassword(): Promise<void> {
@@ -206,6 +208,20 @@
 
 	onMount(() => {
 		void loadDaemonStatus();
+	});
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释).
+	// firstRun 跳过首次 (onMount 已做), 仅 token 变化触发.
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void loadDaemonStatus();
+		}
 	});
 
 	// 响应 i18n 变化 — 当 locale store 变, 当前显示的 tokenMask 跟主题的

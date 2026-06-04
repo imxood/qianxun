@@ -8,6 +8,7 @@
 	import { getBoard, listBoardTasks, listBoardEvents, createTask, cancelTask } from '$lib/api/kanban';
 	import { connectSse, type SseClient } from '$lib/sse/client';
 	import { parseKanbanEvent } from '$lib/sse/kanban_parser';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import StatusBadge from '$lib/components/kanban/StatusBadge.svelte';
 	import TaskCard from '$lib/components/kanban/TaskCard.svelte';
 	import EventTimeline from '$lib/components/kanban/EventTimeline.svelte';
@@ -95,6 +96,22 @@
 	onDestroy(() => {
 		sse?.close();
 	});
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释).
+	// SSE 监听 (在 onMount 启动) 不在这里重启 — 重连靠 SSE client 自己的 retry.
+	// firstRun 跳过首次 (onMount 已做), 仅 token 变化触发. token 读取必须
+	// 在 firstRun check 之前, 否则 Svelte 5 不注册 token 依赖, 登录时不重跑.
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
+	});
 </script>
 
 <svelte:head>
@@ -105,7 +122,7 @@
 	<!-- header -->
 	<header class="flex items-center justify-between">
 		<div class="flex items-center gap-2">
-			<a href="/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
+			<a href="/ui/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
 				<ArrowLeft class="size-4" />
 			</a>
 			<h1 class="text-lg font-semibold">{board?.name ?? '加载中...'}</h1>

@@ -15,6 +15,7 @@
 	import ErrorBanner from '$lib/components/common/ErrorBanner.svelte';
 	import PageHeader from '$lib/components/common/PageHeader.svelte';
 	import { getLogs, getMetrics, getStatus } from '$lib/api/system';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import type { SystemMetrics, SystemStatus } from '$lib/types/api';
 	import { t } from '$lib/i18n';
 
@@ -109,6 +110,30 @@
 
 	onDestroy(() => {
 		if (timer) clearInterval(timer);
+	});
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释).
+	// firstRun 跳过首次 (onMount 已做 + setInterval 启动), 仅 token 变化触发.
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void (async () => {
+				loading = true;
+				try {
+					[metrics, status] = await Promise.all([getMetrics(), getStatus()]);
+				} catch (e) {
+					error = e instanceof Error ? e.message : '加载失败';
+				} finally {
+					loading = false;
+				}
+				await refreshLogs();
+			})();
+		}
 	});
 </script>
 

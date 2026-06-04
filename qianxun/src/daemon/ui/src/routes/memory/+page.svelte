@@ -25,6 +25,7 @@
 	} from '$lib/api/memory';
 	import type { MemoryObservation, MemorySearchResult, MemorySessionSummary } from '$lib/types/api';
 	import { t } from '$lib/i18n';
+	import { authStore } from '$lib/stores/auth.svelte';
 
 	let sessions = $state<MemorySessionSummary[]>([]);
 	let sessionsLoading = $state(true);
@@ -119,6 +120,20 @@
 
 	onMount(() => {
 		void refreshSessions();
+	});
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释).
+	// firstRun 跳过首次 (onMount 已做), 仅 token 变化时触发.
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refreshSessions();
+		}
 	});
 </script>
 

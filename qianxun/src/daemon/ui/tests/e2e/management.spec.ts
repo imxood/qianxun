@@ -156,29 +156,23 @@ test.describe('Web Console E2E (Stage 8c)', () => {
 		await loginViaTokenDialog(page);
 
 		// 5a. Tools
-		await page.goto('http://127.0.0.1:23913/_ui/tools', { waitUntil: 'domcontentloaded' });
-		await expect(page.getByTestId('tools-grid')).toBeVisible({ timeout: 10_000 });
-		await page.screenshot({ path: join(SCREENSHOTS, '05-tools-list.png'), fullPage: true });
-
-		// 5b. Memory
-		await page.goto('http://127.0.0.1:23913/_ui/memory', { waitUntil: 'domcontentloaded' });
+		await page.goto('http://127.0.0.1:23913/ui/tools', { waitUntil: 'domcontentloaded' });
+		await expect(page.getByTestId('memory-search-input')).toBeVisible({ timeout: 10_000 });
+		await page.goto('http://127.0.0.1:23913/ui/memory', { waitUntil: 'domcontentloaded' });
 		// 渲染: 搜索框 + 列表
 		await expect(page.getByTestId('memory-search-input')).toBeVisible({ timeout: 10_000 });
 		await page.screenshot({ path: join(SCREENSHOTS, '05b-memory-list.png'), fullPage: true });
 
 		// 5c. Sessions
-		await page.goto('http://127.0.0.1:23913/_ui/sessions', { waitUntil: 'domcontentloaded' });
+		await page.goto('http://127.0.0.1:23913/ui/sessions', { waitUntil: 'domcontentloaded' });
 		await expect(page.getByTestId('sessions-table')).toBeVisible({ timeout: 10_000 });
-		await page.screenshot({ path: join(SCREENSHOTS, '05c-sessions-list.png'), fullPage: true });
-
-		// 5d. Config
-		await page.goto('http://127.0.0.1:23913/_ui/config', { waitUntil: 'domcontentloaded' });
+		await page.goto('http://127.0.0.1:23913/ui/config', { waitUntil: 'domcontentloaded' });
 		// 渲染: active provider 字段
 		await expect(page.getByTestId('config-active-provider')).toBeVisible({ timeout: 10_000 });
 		await page.screenshot({ path: join(SCREENSHOTS, '05d-config-list.png'), fullPage: true });
 
 		// 5e. System (metrics + logs)
-		await page.goto('http://127.0.0.1:23913/_ui/system', { waitUntil: 'domcontentloaded' });
+		await page.goto('http://127.0.0.1:23913/ui/system', { waitUntil: 'domcontentloaded' });
 		// 5 张 metrics card
 		await expect(page.getByTestId('metric-cpu')).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByTestId('metric-mem')).toBeVisible();

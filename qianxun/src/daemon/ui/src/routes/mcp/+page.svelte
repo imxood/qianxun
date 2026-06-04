@@ -3,6 +3,7 @@
 	// 列表 / 新增 (stdio/HTTP) / 删除 / 测试连接
 
 	import { onMount } from 'svelte';
+	import { authStore } from '$lib/stores/auth.svelte';
 	import { Plus, Trash2, Zap, Plug } from '@lucide/svelte';
 	import Card from '$lib/components/ui/card/Card.svelte';
 	import CardHeader from '$lib/components/ui/card/CardHeader.svelte';
@@ -58,6 +59,19 @@
 
 	onMount(() => {
 		void refresh();
+	});
+
+	// 2026-06-04 fix: 登录后自动重 fetch (见 llm/+page.svelte 注释)
+	let firstRun = true;
+	$effect(() => {
+		const token = authStore.token;
+		if (firstRun) {
+			firstRun = false;
+			return;
+		}
+		if (token) {
+			void refresh();
+		}
 	});
 
 	function openCreate() {
