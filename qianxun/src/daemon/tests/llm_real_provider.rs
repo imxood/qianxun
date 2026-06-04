@@ -126,7 +126,7 @@ async fn spawn_test_daemon(
     });
 
     // 7. Build router (不带 UI dist, 走 None)
-    let app = crate::daemon::router::build_router(state, None);
+    let app = crate::daemon::router::build_router(state, None, None);
 
     // 8. Bind ephemeral port
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

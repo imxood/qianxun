@@ -109,6 +109,14 @@ struct Cli {
     /// daemon 仍启动, 但 `/ui/*` 返 503 + 提示 `pnpm build`.
     #[arg(long)]
     ui_dist: Option<String>,
+
+    /// dev 模式 (Stage 12 新增): 把 `/ui/*` 反代到 vite dev server (默认
+    /// `http://127.0.0.1:5174`). 跟 `--ui-dist` 互斥, 设了 `--ui-dev` 就走反代
+    /// (不读 dist 静态). 配 `scripts/dev.py` 用最方便: 浏览器永远 23900/ui
+    /// 入口, vite HMR 留 5174/ui 备用. 设了 QIANXUN_SKIP_UI_BUILD=1 时
+    /// build.rs 也不跑 pnpm, 启动 60s → 5s.
+    #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:5174")]
+    ui_dev: String,
 }
 
 #[tokio::main]
@@ -280,7 +288,15 @@ async fn main() -> anyhow::Result<()> {
                  Run `qx --daemon` once to bootstrap; subsequent boots will use the file."
             );
         }
-        daemon::run(cli.port, resolved, ui_dist, admin).await?;
+        // Stage 12: dev 模式 (`--ui-dev`) 优先, 跟 `--ui-dist` 互斥. 实际互斥
+        // 由 ui_dev 在 dist 检查后判定: 有 dev_url 就走反代, 跳过 dist.
+        // 简化: 直接传 Option<String>, router.rs 自己处理.
+        let ui_dev = if cli.ui_dev.is_empty() {
+            None
+        } else {
+            Some(cli.ui_dev.clone())
+        };
+        daemon::run(cli.port, resolved, ui_dist, ui_dev, admin).await?;
         return Ok(());
     }
 

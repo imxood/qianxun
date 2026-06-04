@@ -96,36 +96,42 @@ pub struct AppState {
 ///
 /// Stage 10a: `admin: Arc<AdminCredential>` (由 main.rs 加载 — 失败时
 /// 进程已 fail-fast). 这里直接放进 AppState.
+///
+/// Stage 12 新增 `ui_dev: Option<String>`: dev 模式 — 把 `/ui/*` 反代到 vite
+/// dev server, 跟 `--ui-dist` 互斥. 设了 `QIANXUN_SKIP_UI_BUILD=1` 时 build.rs
+/// 不跑 pnpm, 配合 scripts/dev.py 启动从 60s → 5s.
 pub async fn run(
     port: u16,
     resolved: ResolvedConfig,
     ui_dist: Option<PathBuf>,
+    ui_dev: Option<String>,
     admin: Arc<AdminCredential>,
 ) -> anyhow::Result<()> {
     tracing::info!("Daemon starting on 127.0.0.1:{port}");
 
     // Stage 7a: Web UI dist 路径决策 + 启动时日志.
-    match &ui_dist {
-        Some(p) if p.is_dir() => {
-            tracing::info!("[daemon] Web UI serving at /ui/* from {}", p.display());
-        }
-        Some(p) => {
-            tracing::warn!(
-                "[daemon] Web UI dist path does not exist: {} (/ui/* will return 503). \
-                 兜底: 跑 pnpm build (build.rs 应该已跑过, 但兜底防漏)",
-                p.display()
-            );
-            // 兜底: 跑 1 次 pnpm build (build.rs 是主流程, 这里保 cargo run 也能用)
-            let _ = std::process::Command::new("pnpm")
-                .args(["--dir", "qianxun/src/daemon/ui", "build"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .status();
-            if p.is_dir() {
-                tracing::info!("[daemon] ✅ pnpm 兜底 build 成功, UI now serving from {}", p.display());
+    // Stage 12: dev 模式 (`--ui-dev`) 优先 — 跳过兜底 pnpm, 不需要 dist 目录.
+    if let Some(dev_url) = ui_dev.as_deref() {
+        tracing::info!("[daemon] Web UI dev mode: /ui/* → {} (proxy)", dev_url);
+    } else {
+        match &ui_dist {
+            Some(p) if p.is_dir() => {
+                tracing::info!("[daemon] Web UI serving at /ui/* from {}", p.display());
             }
-        }
-        None => {
-            tracing::info!("[daemon] Web UI disabled (no --ui-dist / QIANXUN_UI_DIST)");
+            Some(p) => {
+                // 没 build 静态 — 返 503 提示用户跑 pnpm build 或用 scripts/dev.py.
+                // 之前会兜底跑 pnpm build, 但 dev 阶段用户用 --ui-dev 走反代
+                // 就够了, release 用户用 scripts/release.py 提前 build. 去掉
+                // 兜底省 30s 启动.
+                tracing::warn!(
+                    "[daemon] Web UI dist path does not exist: {} (/ui/* will return 503). \
+                     Run `scripts/dev.py` for dev, or `scripts/release.py` for prod build",
+                    p.display()
+                );
+            }
+            None => {
+                tracing::info!("[daemon] Web UI disabled (no --ui-dist / QIANXUN_UI_DIST)");
+            }
         }
     }
 
@@ -263,7 +269,7 @@ pub async fn run(
         reap_host.reap_stale().await;
     });
 
-    let app = router::build_router(state.clone(), ui_dist);
+    let app = router::build_router(state.clone(), ui_dist, ui_dev);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 

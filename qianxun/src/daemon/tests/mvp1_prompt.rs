@@ -196,7 +196,7 @@ async fn post_prompt_and_collect(
         .expect("create_session");
     let session_id = runtime.session_id.clone();
 
-    let app = crate::daemon::router::build_router(state.clone(), None);
+    let app = crate::daemon::router::build_router(state.clone(), None, None);
 
     let body = serde_json::json!({
         "messages": [{ "role": "user", "content": user_text }],

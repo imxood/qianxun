@@ -3,7 +3,8 @@ name = "qianxun"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-build = "src/daemon/build.rs"
+# Stage 12: build.rs 已删. UI build 走 scripts/run.py (4 模式: dev/release/build-debug/build-release).
+# vite 自带 watch (dev) + 自带 build (release), 不需要 cargo 这边再调 pnpm.
 description = "千寻 — 个人 AI 助手"
 
 [[bin]]
