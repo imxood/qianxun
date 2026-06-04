@@ -92,7 +92,11 @@ pub struct PromptMessage {
 /// 浏览器误访问 `/` 或 `/favicon.ico` 时不会被 auth 拦下, 体验更友好.
 ///
 /// `ui_dist`: SvelteKit 静态 dist 路径. None 或不存在 → `/ui/*` 返 503.
-pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
+pub fn build_router(
+    state: Arc<AppState>,
+    ui_dist: Option<PathBuf>,
+    ui_dev: Option<String>,
+) -> Router {
     let mut router = Router::new()
         // 系统
         .route("/", get(root_handler))
@@ -193,12 +197,26 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .with_state(state.clone());
 
     // Stage 7a: 嵌套 ServeDir (静态文件 + SPA fallback).
+    // Stage 12 新增 dev 模式 (`ui_dev: Some(url)`): 把 /ui/* 反代到 vite dev
+    // server, 跟 prod 静态 dist 互斥. 配 scripts/dev.py 用 — 浏览器入口永远
+    // 23900/ui (跟 prod 一致), vite HMR 走 5174 备用. 反代只支持 HTTP
+    // (无 WS 透传), 改 svelte 后浏览器手动 Cmd-R 即可 (反代 5s 启动 vs pnpm
+    // build 30s, 仍然 6x 提速).
+    //
     // nest_service 把整个 sub-router 接到 /ui/* 上 (跟 SvelteKit paths.base = '/ui' 对齐).
-    router = match ui_dist {
-        Some(dir) if dir.is_dir() => {
-            let index_html = dir.join("index.html");
-            if index_html.is_file() {
-                // SPA fallback: 文件不存在 → 返 index.html (vite/adam 行为)
+    router = if let Some(dev_url) = ui_dev.as_deref() {
+        // dev 模式: 反代到 vite dev server.
+        tracing::info!(
+            "[router] /ui/* reverse proxy → {} (dev mode, vite HMR on its own port)",
+            dev_url
+        );
+        router.nest_service("/ui", axum::routing::get(ui_dev_proxy).with_state(dev_url.to_string()))
+    } else {
+        match ui_dist {
+            Some(dir) if dir.is_dir() => {
+                let index_html = dir.join("index.html");
+                if index_html.is_file() {
+                    // SPA fallback: 文件不存在 → 返 index.html (vite/adam 行为)
                 let svc = ServeDir::new(&dir).fallback(ServeFile::new(&index_html));
                 router.nest_service("/ui", svc)
             } else {
@@ -214,6 +232,7 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
                 axum::routing::get(ui_dist_missing).fallback(ui_dist_missing),
             )
         }
+    }
     };
 
     // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
@@ -267,6 +286,88 @@ async fn ui_dist_missing() -> Response {
         })),
     )
         .into_response()
+}
+
+/// dev 模式: 反代 `/ui/*` 到 vite dev server (默认 http://127.0.0.1:5174).
+///
+/// 配 scripts/dev.py 用 — 浏览器入口永远 23900/ui, vite HMR 走 5174 备用.
+///
+/// 实现: 转发 path + method + headers (无 body, GET 为主) + 用 reqwest 拿响应
+/// 透传 status + headers + body. **不支持** WebSocket (Vite HMR WS 走 5174/ui
+/// 备用), 不支持 WebSocket Upgrade. 这是"dev 阶段简单"的折中 — 改 svelte 后
+/// 浏览器手动 Cmd-R 即可 (反代 5s 启动 vs pnpm build 30s).
+async fn ui_dev_proxy(
+    axum::extract::State(dev_url): axum::extract::State<String>,
+    req: Request,
+) -> Response {
+    // 构造 upstream URL: dev_url + `/ui` prefix + 剩余 path + query.
+    // 关键: nest_service("/ui", ...) 把 /ui prefix 剥掉了 (axum 嵌套 router 行为),
+    // handler 拿到的 path 是 `/foo` 不是 `/ui/foo`. 但 Vite 端 SvelteKit 配置
+    // `paths.base='/ui'`, 必须请求 `/ui/foo` 才能命中路由. 拼回去.
+    let path = req.uri().path();
+    let path_with_base = if path.starts_with('/') {
+        format!("/ui{path}")
+    } else {
+        format!("/ui/{path}")
+    };
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let upstream = format!("{dev_url}{path_with_base}{query}");
+
+    // 转发 method + 关键 headers. host 改成 dev_url, 其它原样.
+    let method = req.method().clone();
+    let mut upstream_req = reqwest::Request::new(method, reqwest::Url::parse(&upstream).expect("dev_url valid"));
+    {
+        let headers = upstream_req.headers_mut();
+        for (k, v) in req.headers() {
+            // host / connection 跳过 — reqwest 自己处理
+            if k == reqwest::header::HOST || k == reqwest::header::CONNECTION {
+                continue;
+            }
+            if let (Ok(name), Ok(value)) = (
+                reqwest::header::HeaderName::from_bytes(k.as_str().as_bytes()),
+                reqwest::header::HeaderValue::from_bytes(v.as_bytes()),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("reqwest client");
+
+    match client.execute(upstream_req).await {
+        Ok(r) => {
+            let status = r.status();
+            let mut resp_headers = axum::http::HeaderMap::new();
+            for (k, v) in r.headers() {
+                if let (Ok(name), Ok(value)) = (
+                    axum::http::HeaderName::from_bytes(k.as_str().as_bytes()),
+                    axum::http::HeaderValue::from_bytes(v.as_bytes()),
+                ) {
+                    resp_headers.insert(name, value);
+                }
+            }
+            // 去 hop-by-hop headers, 跟 tower-http 一致
+            resp_headers.remove(axum::http::header::CONNECTION);
+            resp_headers.remove(axum::http::header::TRANSFER_ENCODING);
+            let body = r.bytes().await.unwrap_or_default();
+            (status, resp_headers, body).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("[ui_dev_proxy] upstream error: {e} (upstream={upstream})");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "ui_dev_proxy_failed",
+                    "message": format!("vite dev server unreachable at {dev_url}: {e}. \
+                        Run `scripts/dev.py` to start vite, or use --ui-dist for prod build."),
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ─── JWT Auth Middleware (Stage 6a) ───────────────────────────
@@ -2790,7 +2891,7 @@ mod stage7a_endpoint_tests {
     /// 构造带 UI dist 路径的 test router.
     fn test_router_with_ui(ui_dist: Option<PathBuf>) -> Router {
         let state = make_test_state();
-        build_router(state, ui_dist)
+        build_router(state, ui_dist, None)
     }
 
     /// 构造带 UI dist 路径 + 共享 state 的 test router. 给需要预创建 session
@@ -2799,7 +2900,7 @@ mod stage7a_endpoint_tests {
         ui_dist: Option<PathBuf>,
     ) -> (Router, Arc<crate::daemon::AppState>) {
         let state = make_test_state();
-        let app = build_router(state.clone(), ui_dist);
+        let app = build_router(state.clone(), ui_dist, None);
         (app, state)
     }
 
@@ -3013,7 +3114,7 @@ mod stage7a_endpoint_tests {
 
         // 关键: 整个测试用**同一个** state, 避免每次新 Router 丢失数据
         let state = make_test_state();
-        let app = build_router(state.clone(), None);
+        let app = build_router(state.clone(), None, None);
 
         // 1. POST add
         let body = serde_json::json!({
@@ -4022,7 +4123,7 @@ mod stage9c_csp_tests {
     #[tokio::test]
     async fn csp_header_present_on_health_endpoint() {
         let state = make_test_state();
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -4053,7 +4154,7 @@ mod stage9c_csp_tests {
     #[tokio::test]
     async fn csp_header_present_on_root_handler() {
         let state = make_test_state();
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -4131,7 +4232,7 @@ mod stage12_memory_observations_tests {
     #[tokio::test]
     async fn list_observations_empty_session_returns_empty_array() {
         let state = make_test_state();
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
         let token = make_test_jwt();
         // "never_existed" session 不存在, MemoryCore.list_observations 应返空 vec
         let response = get_with_auth(app, "/v1/memory/sessions/never_existed/observations", &token)
@@ -4158,7 +4259,7 @@ mod stage12_memory_observations_tests {
     #[tokio::test]
     async fn list_observations_requires_auth() {
         let state = make_test_state();
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
         // 无 Authorization header → 401
         let response = app
             .oneshot(
@@ -4181,7 +4282,7 @@ mod stage12_memory_observations_tests {
     async fn list_observations_path_with_session_id_echoes_back() {
         // 验证 session_id 字段回显 (Web Console 用它确认请求成功)
         let state = make_test_state();
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
         let token = make_test_jwt();
         let response = get_with_auth(
             app,
@@ -4720,7 +4821,7 @@ mod url_coverage_tests {
     }
 
     fn router_full() -> axum::Router {
-        build_router(make_state_full(), None)
+        build_router(make_state_full(), None, None)
     }
 
     fn admin_jwt() -> String {
