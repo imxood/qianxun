@@ -4,6 +4,7 @@
 	// 2026-06-04 阶段 3, MVP-3 落地
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
+	import { base } from '$app/paths';
 	import { ArrowLeft, Plus, X } from '@lucide/svelte';
 	import { getBoard, listBoardTasks, listBoardEvents, createTask, cancelTask } from '$lib/api/kanban';
 	import { connectSse, type SseClient } from '$lib/sse/client';
@@ -122,7 +123,7 @@
 	<!-- header -->
 	<header class="flex items-center justify-between">
 		<div class="flex items-center gap-2">
-			<a href="/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
+			<a href="{base}/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
 				<ArrowLeft class="size-4" />
 			</a>
 			<h1 class="text-lg font-semibold">{board?.name ?? '加载中...'}</h1>

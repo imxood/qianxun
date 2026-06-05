@@ -19,6 +19,9 @@ export default defineConfig({
 			),
 			'$app/navigation': fileURLToPath(
 				new URL('./src/test-stubs/app-navigation.ts', import.meta.url)
+			),
+			'$app/paths': fileURLToPath(
+				new URL('./src/test-stubs/app-paths.ts', import.meta.url)
 			)
 		},
 		// Svelte 5 mount/unmount 在 jsdom 走 client 入口, 不要默认的 node 条件

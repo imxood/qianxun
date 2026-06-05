@@ -15,10 +15,19 @@ const config = {
 			precompress: false,
 			strict: false
 		}),
-		// 2026-06-05 fix: SvelteKit paths.base 留空, base path 改用 vite
-		// `base: '/ui/'` (见 vite.config.ts). SvelteKit 2.61 dev 模式 + paths.base
-		// 在客户端 router 启动时会跟当前 URL 冲突, 报 "Not found: /ui".
-		// Prod build 模式下, base 由 vite adapter 自动处理.
+		// 2026-06-05 fix v6: `paths.base='/ui'` 在 prod build 会被注入到
+		// `__sveltekit_xxx.base = "/ui"` (跟 dev 模式的 __sveltekit_dev 不同).
+		// prod 模式跑 daemon 静态模式: 浏览器在 /ui, base='/ui' → 路由根='/' → 找
+		// +page.svelte (welcome) ✓. dev 模式 base 公式固定返空 跟 paths.base
+		// 冲突, dev mode 仍是 broken (单独走 vite 直连 5174 调试, 不靠 daemon
+		// 反代). 这次 focus 是 prod mode 跑通 — daemon 静态 + 浏览器 /ui 入口.
+		paths: {
+			base: '/ui',
+			relative: true
+			// 注: SvelteKit 2.61 没有 `paths.trailingSlash` option. 改用
+			// `paths.relative: true` + daemon router 加 redirect /ui → /ui/
+			// (v7 fix 在 router.rs).
+		},
 		alias: {
 			$components: 'src/lib/components',
 			$utils: 'src/lib/utils',

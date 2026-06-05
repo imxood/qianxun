@@ -198,8 +198,9 @@ describe('Settings 页面 (Stage 9c)', () => {
 		const Sidebar = (await loadSidebar()).default;
 		const { getByTestId } = render(Sidebar);
 		const link = getByTestId('nav-settings');
-		// 2026-06-05 fix: 改回 base-relative (跟 Sidebar 9 nav 一致, 见 layout.test.ts)
-		expect(link.getAttribute('href')).toBe('/settings');
+		// 2026-06-05 fix v2: paths.base='/ui' 下 href 用 `base` 拼 = `/ui/settings`
+		// (跟 Sidebar 9 nav 一致, 见 layout.test.ts)
+		expect(link.getAttribute('href')).toBe('/ui/settings');
 		// 链接应包含 'Settings' 文字
 		expect(link.textContent?.toLowerCase()).toContain('settings');
 		// 容器里应出现"系统"分组标签

@@ -2,6 +2,7 @@
 	// /kanban — boards 列表 + 创建 (2026-06-04 阶段 3, MVP-3 落地)
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
 	import { Plus, KanbanSquare, Folder } from '@lucide/svelte';
 	import { listBoards, createBoard } from '$lib/api/kanban';
 	import { listProjects } from '$lib/api/projects';
@@ -29,9 +30,9 @@
 		creating = true;
 		try {
 			const b = await createBoard(newName.trim(), newProjectRoot.trim());
-			// 2026-06-04 fix: 见 routes/+page.svelte 注释 — SvelteKit 2 `goto` 在
-			// `paths.base='/ui'` 下要带 base 前缀.
-			await goto(`/ui/kanban/${b.id}`);
+			// 2026-06-05 fix v2: 跟 +page.svelte + settings 一致, 用 `base` 拼.
+			// `goto('/ui/kanban/${b.id}')` 跟 `goto(base + '/kanban/${b.id}')` 等价.
+			await goto(`${base}/kanban/${b.id}`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : '创建失败';
 			creating = false;
@@ -117,7 +118,7 @@
 		<div class="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3" data-testid="boards-grid">
 			{#each boards as b (b.id)}
 				<a
-					href="/kanban/{b.id}"
+					href="{base}/kanban/{b.id}"
 					class="hover:bg-accent/30 block rounded border bg-card p-4 transition-colors"
 					data-testid="board-card-{b.id}"
 				>

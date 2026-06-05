@@ -3,6 +3,7 @@
 	// 显示: 错误标题 + 错误信息 (折叠) + "回到首页" + "刷新" 按钮
 	// 简化: 不在 dev 暴露 stack trace (生产隐藏)
 	import { page } from '$app/state';
+	import { base } from '$app/paths';
 	import { AlertTriangle, Home, RefreshCw } from '@lucide/svelte';
 
 	const status = $derived(page.status);
@@ -50,7 +51,7 @@
 
 		<div class="mt-4 flex flex-col gap-2 sm:flex-row">
 			<a
-				href="/llm"
+				href="{base}/llm"
 				class="border-input bg-background hover:bg-accent inline-flex flex-1 items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm"
 				data-testid="error-home-button"
 			>

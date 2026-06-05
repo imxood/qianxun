@@ -161,7 +161,7 @@
 			</CardHeader>
 			<CardContent>
 				<p class="font-mono text-2xl font-semibold" data-testid="metric-cpu">
-					{metrics.cpu_percent.toFixed(1)}%
+					{metrics.cpu_percent?.toFixed(1) ?? '—'}%
 				</p>
 			</CardContent>
 		</Card>
@@ -173,7 +173,7 @@
 			</CardHeader>
 			<CardContent>
 				<p class="font-mono text-2xl font-semibold" data-testid="metric-mem">
-					{metrics.mem_mb.toFixed(0)}
+					{metrics.mem_mb?.toFixed(0) ?? '—'}
 				</p>
 			</CardContent>
 		</Card>

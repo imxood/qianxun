@@ -27,6 +27,7 @@
 		ExternalLink
 	} from '@lucide/svelte';
 	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
 
 	import Card from '$lib/components/ui/card/Card.svelte';
 	import CardHeader from '$lib/components/ui/card/CardHeader.svelte';
@@ -143,9 +144,10 @@
 		const ok = window.confirm(t('settings.token.logout_confirm'));
 		if (!ok) return;
 		await authStore.logout();
-		// 2026-06-05 fix: 改回 base-relative `/` (跟 +page.svelte 一致).
-		// SvelteKit 2 + paths.base='/ui' 自动拼 → navigate `/ui/`.
-		void goto('/');
+		// 2026-06-05 fix v2: 跟 +page.svelte 一致, 用 `base` 拼路径.
+		// `goto('/')` 跳绝对路径 `/` (无 base prefix) → daemon 23900/ → 404.
+		// `goto(base + '/')` = `goto('/ui/')` 走 SvelteKit 路由表 `/` 路由.
+		void goto(base + '/');
 	}
 
 	async function handleChangePassword(): Promise<void> {

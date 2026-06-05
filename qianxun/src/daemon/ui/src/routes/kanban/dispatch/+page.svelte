@@ -1,6 +1,7 @@
 <script lang="ts">
 	// /kanban/dispatch — 手动派发 (2026-06-04 阶段 3)
 	import { onMount } from 'svelte';
+	import { base } from '$app/paths';
 	import { Zap, ArrowLeft } from '@lucide/svelte';
 	import { dispatchNow, listBoards } from '$lib/api/kanban';
 	import { authStore } from '$lib/stores/auth.svelte';
@@ -56,7 +57,7 @@
 
 <div class="mx-auto flex max-w-2xl flex-col gap-4 p-6">
 	<header class="flex items-center gap-2">
-		<a href="/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
+		<a href="{base}/kanban" class="hover:bg-accent rounded p-1" data-testid="back-link">
 			<ArrowLeft class="size-4" />
 		</a>
 		<h1 class="text-lg font-semibold">手动派发 (Dispatch)</h1>
@@ -103,7 +104,7 @@
 					run_id: {result.run_id}<br />
 					profile: {result.profile_name}
 				</div>
-				<a href="/kanban" class="text-primary mt-2 inline-block underline">→ 跳到 Kanban</a>
+				<a href="{base}/kanban" class="text-primary mt-2 inline-block underline">→ 跳到 Kanban</a>
 			{:else}
 				<div class="font-semibold text-amber-700 dark:text-amber-300">⚠️ 未派发</div>
 				<div class="mt-1">{result.reason}</div>

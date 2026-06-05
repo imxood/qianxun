@@ -26,6 +26,15 @@
 	let tokenDialogOpen = $state(false);
 	let boundaryError = $state<Error | null>(null);
 
+	// 2026-06-05 fix v9: authStore.init() 提到 script 顶层, 在所有 child
+	// component mount 之前跑. 之前在 onMount 内跑, 但 Svelte 5 mount 顺序
+	// child-first, child 的 onMount (e.g. /skills +page.svelte 的 refresh())
+	// 先于 layout onMount 跑, 此时 authStore.token=null, fetchWithAuth 不带
+	// Authorization 头 → 401. module 顶层 code 在 component 初始化时跑 (在
+	// 任何 onMount 之前), 完美.
+	authStore.init();
+	themeStore.init();
+
 	function onAuthFailed() {
 		tokenDialogOpen = true;
 	}
@@ -35,10 +44,6 @@
 	}
 
 	onMount(() => {
-		authStore.init();
-		themeStore.init();
-		uiStore.autoCloseOnNav();
-
 		// 没 token 且已初始化 → 弹框
 		if (!authStore.isAuthenticated) {
 			tokenDialogOpen = true;

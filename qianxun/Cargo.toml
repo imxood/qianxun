@@ -42,6 +42,11 @@ tokio-stream = { workspace = true }
 bcrypt = { workspace = true }
 base64 = "0.22"
 getrandom = "0.2"
+bytes = "1"
+# Stage 12: WS HMR 透传. daemon 反代 vite WebSocket 让 HMR 自动刷新
+# (改 svelte 文件后浏览器自动 reload, 无需 Cmd-R). 跟 axum WebSocket
+# extractor 配合做双向 pipe. 0.x 稳定, 0.5s 编译.
+tokio-tungstenite = "0.21"
 
 [build-dependencies]
 # build.rs 用 std + Command 即可, 不引新 crate

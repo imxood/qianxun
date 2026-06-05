@@ -5,6 +5,7 @@
 	// 包含连接状态指示 (Stage 9c 离线检测接入)
 
 	import { page } from '$app/state';
+	import { base } from '$app/paths';
 	import { Brain, Sparkles, Server, Wrench, Database, MessagesSquare, FileCog, Activity, MessageSquare, Settings as SettingsIcon, KanbanSquare, FolderKanban, Users } from '@lucide/svelte';
 	import { t } from '$lib/i18n';
 	import { uiStore } from '$lib/stores/ui.svelte';
@@ -17,14 +18,12 @@
 		icon: typeof Brain;
 	};
 
-	// 2026-06-05 fix: 改回 base-relative 路径 (`/llm` 而不是 `/ui/llm`).
-	// SvelteKit 2 client router 看到 `<a href="/llm">` + `paths.base='/ui'` →
-	// 自动拼成 `/ui/llm` (vite dev 期望, daemon nest `/ui` 期望). 之前 commit 1
-	// 加 `/ui` 前缀反而让 SvelteKit 报 "Not found: /ui" (base 双拼解析错).
-	// 用 `BASE_PATH` 常量做基础路径, href 走 base-relative.
-	const BASE_PATH = '/ui';
-	// 2026-06-05 fix: testid 改用 `slice(1)` 跳前导 `/`. 之前 `BASE_PATH.length + 1`
-	// 是 commit 1 加 /ui 前缀时算的, 现在改回 base-relative href 之后只 1 字符前导 `/`.
+	// 2026-06-05 fix v2: paths.base='/ui' 时 `<a href="/llm">` 是绝对路径,
+	// SvelteKit 2 不会自动拼 base, 浏览器跳到 /llm (没 /ui prefix) → 404.
+	// 改用 `base` 拼: `<a href="{base}/llm">` = `<a href="/ui/llm">`.
+	// `BASE_PATH` 留作路径前缀构造 (不参与 router), `isActive()` 用 raw href 跟
+	// `page.url.pathname` 比 (page.url.pathname 是 raw, 仍带 /ui prefix).
+	// data-testid 用 `slice(1)` 跳过 raw href 前导 `/` 拼 e.g. `nav-llm`.
 	const mgmtItems: NavItem[] = [
 		{ href: '/chat', label: 'Chat', i18n: 'nav.chat', icon: MessageSquare },
 		{ href: '/llm', label: 'LLM Providers', i18n: 'nav.llm', icon: Brain },
@@ -53,8 +52,11 @@
 	];
 
 	function isActive(href: string): boolean {
+		// page.url.pathname 是 raw (带 /ui prefix), item.href 是路由 (无 prefix).
+		// 例如: pathname='/ui/llm', href='/llm' → startsWith('/llm') on '/ui/llm' = false.
+		// 改: 用 pathname 剥 base 后跟 href 比, 简化为 endsWith 即可.
 		const p = page.url.pathname;
-		return p === href || p.startsWith(href + '/');
+		return p === base + href || p.startsWith(base + href + '/');
 	}
 </script>
 
@@ -98,7 +100,7 @@
 			{@const Icon = item.icon}
 			{@const active = isActive(item.href)}
 			<a
-				href={item.href}
+				href="{base}{item.href}"
 				class="group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors"
 				class:bg-accent={active}
 				class:text-accent-foreground={active}
@@ -125,7 +127,7 @@
 			{@const Icon = item.icon}
 			{@const active = isActive(item.href)}
 			<a
-				href={item.href}
+				href="{base}{item.href}"
 				class="group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors"
 				class:bg-accent={active}
 				class:text-accent-foreground={active}
@@ -152,7 +154,7 @@
 			{@const Icon = item.icon}
 			{@const active = isActive(item.href)}
 			<a
-				href={item.href}
+				href="{base}{item.href}"
 				class="group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors"
 				class:bg-accent={active}
 				class:text-accent-foreground={active}

@@ -214,7 +214,13 @@ pub fn build_router(
             "[router] fallback reverse proxy → {} (dev mode, all non-/v1 paths)",
             dev_url
         );
-        router.fallback(axum::routing::any(ui_dev_proxy).with_state(dev_url.to_string()))
+        // dev 模式 fallback: 一个 `any` handler 内部分流 — Connection header
+        // 含 'upgrade' 走 WS 透传 (HMR), 否则走 HTTP 反代. 之前用两个 .fallback
+        // 链, axum 0.7 fallback() 后调会**覆盖**前一个, 普通 HTTP GET 也落到
+        // WS handler, axum extractor 报 "Connection header did not include
+        // 'upgrade'". 合并后, WS 路径只 catch 真正升级握手.
+        router
+            .fallback(axum::routing::any(ui_dev_fallback).with_state(dev_url.to_string()))
     } else {
         match ui_dist {
             Some(dir) if dir.is_dir() => {
@@ -222,6 +228,12 @@ pub fn build_router(
                 if index_html.is_file() {
                     // SPA fallback: 文件不存在 → 返 index.html (vite/adam 行为)
                 let svc = ServeDir::new(&dir).fallback(ServeFile::new(&index_html));
+                // 2026-06-05 fix v8: nest_service + 后续 layer 拼接 redirect.
+                // nest 本身 catch `/ui/*`, 但 `/ui` (无尾斜杠) 也算 `/ui/*` (前缀)
+                // → nest 把 path 剥成 `/` 找 index.html. 实际拿 HTML 后 SvelteKit
+                // 客户端 router base='' + URL='/ui' → 404.
+                // 修法: 用 layer 加中间件强制 `/ui` → `/ui/` redirect, 在 nest
+                // 之前生效. (用 .route() 跟 .nest() 冲突, 必须用 middleware.)
                 router.nest_service("/ui", svc)
             } else {
                 // 没 index.html → 直接 ServeDir, 不做 fallback (404 由 ServeDir 返)
@@ -238,6 +250,13 @@ pub fn build_router(
         }
     }
     };
+
+    // 2026-06-05 fix v8: 中间件强制 `/ui` (无尾斜杠) redirect 到 `/ui/`.
+    // SvelteKit 2.61 client router `__sveltekit_dev.base` 是公式
+    // `new URL(".", location).pathname.slice(0, -1)`, location='/ui' 返 "" →
+    // 找不到路由 → 404. 强制 redirect 后 → '/ui/' → base='/ui' → 路由 root='/'.
+    // layer 顺序: 在 nest_service 之前, 让 redirect 先 catch.
+    router = router.layer(middleware::from_fn(redirect_ui_no_slash));
 
     // Stage 6a: 全局 JWT auth middleware (在 handler 之前执行)
     // Stage 10a: 用 `from_fn_with_state` 把 AppState 注入, 让 middleware
@@ -262,17 +281,37 @@ pub fn build_router(
     // 官方文档 (https://kit.svelte.dev/docs/page-options#csp) 也建议
     // adapter-static 用 'unsafe-inline' 因为该 init 脚本 hash 随构建变, 算
     // 不上可预知. 后续如改用 adapter-node/server 配 nonce, 删掉 'unsafe-inline'.
-    let csp = concat!(
-        "default-src 'self'; ",
-        "script-src 'self' 'unsafe-inline'; ",
-        "style-src 'self' 'unsafe-inline'; ",
-        "connect-src 'self'; ",
-        "img-src 'self' data:; ",
-        "font-src 'self' data:; ",
-        "object-src 'none'; ",
-        "base-uri 'self'; ",
-        "form-action 'self'"
-    );
+    //
+    // 2026-06-05 fix: dev 模式 (`ui_dev.is_some()`) 放宽 `connect-src` 让
+    // `ws://localhost:*` 跟 `http://localhost:*` 也能连. 原因: 万一 WS 透传
+    // 失败 (vite 异常关闭等), 浏览器 fallback 直连 vite dev server 的 WS HMR
+    // 不能被 CSP 挡. 防御性: dev 放宽, release 仍严格 'self' (release 没
+    // vite 反代, 严格 CSP 是默认 + 期望).
+    let csp = if ui_dev.is_some() {
+        concat!(
+            "default-src 'self'; ",
+            "script-src 'self' 'unsafe-inline'; ",
+            "style-src 'self' 'unsafe-inline'; ",
+            "connect-src 'self' ws://localhost:* wss://localhost:* http://localhost:*; ",
+            "img-src 'self' data:; ",
+            "font-src 'self' data:; ",
+            "object-src 'none'; ",
+            "base-uri 'self'; ",
+            "form-action 'self'"
+        )
+    } else {
+        concat!(
+            "default-src 'self'; ",
+            "script-src 'self' 'unsafe-inline'; ",
+            "style-src 'self' 'unsafe-inline'; ",
+            "connect-src 'self'; ",
+            "img-src 'self' data:; ",
+            "font-src 'self' data:; ",
+            "object-src 'none'; ",
+            "base-uri 'self'; ",
+            "form-action 'self'"
+        )
+    };
     let csp_header: HeaderName = "content-security-policy".parse().expect("valid header name");
     let csp_value: HeaderValue = csp.parse().expect("valid CSP header value");
     router = router.layer(SetResponseHeaderLayer::overriding(csp_header, csp_value));
@@ -280,7 +319,22 @@ pub fn build_router(
     router
 }
 
-/// 当 `ui_dist` 路径不存在或未配置时, 兜底返 503.
+/// 2026-06-05 fix v8: 中间件强制 `/ui` (无尾斜杠) redirect 到 `/ui/`.
+/// SvelteKit 2.61 client router `__sveltekit_dev.base` 公式
+/// `new URL(".", location).pathname.slice(0, -1)` 在 location='/ui' 时返 "" →
+/// 找不到路由 → 404. 强制 redirect 后 → '/ui/' → base='/ui' → 路由 root='/'.
+/// 注: 中间件 return redirect 时, 必须构造 `Response` 而不是直接返 `Redirect`,
+/// 因为 `from_fn` 期望 `Response` 作为 next() 返值.
+async fn redirect_ui_no_slash(
+    req: Request,
+    next: middleware::Next,
+) -> Response {
+    if req.uri().path() == "/ui" {
+        return axum::response::Redirect::permanent("/ui/").into_response();
+    }
+    next.run(req).await
+}
+
 async fn ui_dist_missing() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -371,6 +425,187 @@ async fn ui_dev_proxy(
                 .into_response()
         }
     }
+}
+
+/// dev 模式 WebSocket HMR 透传 (Stage 12).
+///
+/// 浏览器试 `ws://127.0.0.1:23900/?token=...` (vite client.js HMR), daemon 收到
+/// Upgrade request 后用 `tokio-tungstenite` 连 `ws://127.0.0.1:5174/?token=...` (vite),
+/// 双向 pipe 字节. 改 svelte 后 vite HMR 自动 reload, 浏览器不用 Cmd-R.
+///
+/// 双向 WS 类型不兼容 (axum 用 `axum::extract::ws::Message`, vite 用
+/// `tungstenite::Message`) — 用 `bytes::Bytes` 作为中间格式, 文本帧跟二进制帧
+/// 一视同仁, 避免 ping/pong/close frame 序列化错.
+///
+/// 任何一端关闭 → spawn task 退出, 资源自动清理.
+/// dev 模式全 fallback. 检查 Connection header, 是 WS Upgrade 走 WS 透传
+/// (vite HMR), 否则退化为 HTTP 反代. axum 0.7 `Router::fallback()` 后调会
+/// **替换**前一个, 不能用两个 .fallback 链分发, 只能在一个 handler 内部分流.
+///
+/// WS 透传: 不走 `WebSocketUpgrade` extractor (它会 400 reject 非 WS 请求).
+/// 自己从 `Request::headers()` 检查 Connection, 是 WS upgrade 再用
+/// `WebSocketUpgrade::from_request_parts` extract, 然后 on_upgrade 透传.
+async fn ui_dev_fallback(
+    State(dev_url): State<String>,
+    req: Request,
+) -> Response {
+    let is_ws = req
+        .headers()
+        .get(axum::http::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            // Connection header 可能多个值 (e.g. "keep-alive, Upgrade"), 任意一个
+            // 含 "upgrade" (大小写不敏感) 即视为 WS 升级握手.
+            v.split(',').any(|s| s.trim().eq_ignore_ascii_case("upgrade"))
+        })
+        .unwrap_or(false);
+    if is_ws {
+        ui_dev_ws_proxy_inner(State(dev_url), req).await
+    } else {
+        ui_dev_proxy(State(dev_url), req).await
+    }
+}
+
+async fn ui_dev_ws_proxy_inner(
+    State(dev_url): State<String>,
+    req: Request,
+) -> Response {
+    use axum::extract::FromRequestParts;
+    // 自己 extract WebSocketUpgrade (避免 extractor 自动 reject 非 WS 请求)
+    let (mut parts, body) = req.into_parts();
+    let ws = match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        Ok(ws) => ws,
+        Err(rej) => return rej.into_response(),
+    };
+    let _ = body; // WS upgrade 忽略 body
+    ui_dev_ws_pipe(dev_url, ws, parts).await
+}
+
+async fn ui_dev_ws_pipe(
+    dev_url: String,
+    ws: axum::extract::ws::WebSocketUpgrade,
+    parts: axum::http::request::Parts,
+) -> Response {
+    // 拆 parts: uri + headers 用来构造 upstream WS request, body 在 WS upgrade
+    // 时不用 (握手段不含 body).
+    use axum::extract::ws::Message as AxumMsg;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{
+        client::IntoClientRequest,
+        http::HeaderName as TwHeaderName,
+        http::HeaderValue as TwHeaderValue,
+        Message as TwMsg,
+    };
+
+    // dev_url = "http://127.0.0.1:5174" → "ws://127.0.0.1:5174"
+    let ws_base = if dev_url.starts_with("https://") {
+        dev_url.replacen("https://", "wss://", 1)
+    } else {
+        dev_url.replacen("http://", "ws://", 1)
+    };
+    let path = parts.uri.path();
+    let query = parts
+        .uri
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let upstream = format!("{ws_base}{path}{query}");
+
+    // 连 vite WS. 用 `IntoClientRequest` 让 tungstenite 帮我们构造 request
+    // (含 Host / Upgrade 头). 透传所有原始 request headers (排除 hop-by-hop + WS 握手段).
+    let mut upstream_req = match upstream.clone().into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("[ui_dev_ws_proxy] build upstream request failed: {e}");
+            return (StatusCode::BAD_GATEWAY, format!("vite WS request build failed: {e}"))
+                .into_response();
+        }
+    };
+    for (k, v) in &parts.headers {
+        if k.as_str().eq_ignore_ascii_case("host")
+            || k.as_str().eq_ignore_ascii_case("upgrade")
+            || k.as_str().eq_ignore_ascii_case("connection")
+            || k.as_str().eq_ignore_ascii_case("sec-websocket-key")
+            || k.as_str().eq_ignore_ascii_case("sec-websocket-version")
+        {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            TwHeaderName::from_bytes(k.as_str().as_bytes()),
+            TwHeaderValue::from_bytes(v.as_bytes()),
+        ) {
+            upstream_req.headers_mut().insert(name, value);
+        }
+    }
+
+    // ConnectAsync — wait 完拿到 WS stream
+    let vite_stream = match tokio_tungstenite::connect_async(upstream_req).await {
+        Ok((s, _)) => s,
+        Err(e) => {
+            tracing::warn!("[ui_dev_ws_proxy] vite WS connect failed: {e} (upstream={upstream})");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "ui_dev_ws_proxy_failed",
+                    "message": format!("vite WS server unreachable at {ws_base}: {e}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // axum 0.7 WebSocketUpgrade 正确用法: 调 on_upgrade(|socket| ...) 拿
+    // WebSocket 套接字 (split 出 tx + rx), 在 spawn 里做双向 pipe. on_upgrade
+    // 返回 Response<101 Switching Protocols> 自动发握手段.
+    let (mut vite_tx, mut vite_rx) = vite_stream.split();
+    ws.on_upgrade(move |socket| async move {
+        let (mut client_tx, mut client_rx) = socket.split();
+
+        // 双向 pipe. 类型转换: axum 用 `Utf8Bytes`/`Bytes`, tungstenite 用
+        // `String`/`Vec<u8>`. match pattern 各自构造对应 Message. Close → 停.
+        // client → vite
+        let c2v = async {
+            while let Some(Ok(msg)) = client_rx.next().await {
+                let tw_msg = match msg {
+                    AxumMsg::Text(s) => TwMsg::Text(s.to_string()),
+                    AxumMsg::Binary(b) => TwMsg::Binary(b.to_vec()),
+                    AxumMsg::Ping(b) => TwMsg::Ping(b.to_vec()),
+                    AxumMsg::Pong(b) => TwMsg::Pong(b.to_vec()),
+                    AxumMsg::Close(_) => {
+                        let _ = vite_tx.send(TwMsg::Close(None)).await;
+                        break;
+                    }
+                };
+                if vite_tx.send(tw_msg).await.is_err() {
+                    break;
+                }
+            }
+        };
+        // vite → client
+        let v2c = async {
+            while let Some(Ok(msg)) = vite_rx.next().await {
+                let ax_msg = match msg {
+                    TwMsg::Text(s) => AxumMsg::Text(s.into()),
+                    TwMsg::Binary(b) => AxumMsg::Binary(b.into()),
+                    TwMsg::Ping(b) => AxumMsg::Ping(b.into()),
+                    TwMsg::Pong(b) => AxumMsg::Pong(b.into()),
+                    TwMsg::Close(_) => {
+                        let _ = client_tx.send(AxumMsg::Close(None)).await;
+                        break;
+                    }
+                    // 跳过 Frame (continuation), 透传没意义
+                    TwMsg::Frame(_) => continue,
+                };
+                if client_tx.send(ax_msg).await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            _ = c2v => {}
+            _ = v2c => {}
+        }
+    })
 }
 
 // ─── JWT Auth Middleware (Stage 6a) ───────────────────────────

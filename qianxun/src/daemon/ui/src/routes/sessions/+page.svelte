@@ -177,7 +177,7 @@
 								<td class="px-3 py-2 text-xs">{formatTimestamp(s.last_active)}</td>
 								<td class="px-3 py-2 text-right">{s.message_count}</td>
 								<td class="px-3 py-2 text-right font-mono text-xs">
-									{s.token_usage.total.toLocaleString()}
+									{s.token_usage?.total?.toLocaleString() ?? '0'}
 								</td>
 								<td class="px-3 py-2">
 									<div class="flex items-center justify-end gap-1">
@@ -255,7 +255,7 @@
 					<span>Status: <Badge variant={statusVariant(detail.status)}>{detail.status}</Badge></span>
 					<span>Created: {formatTimestamp(detail.created_at)}</span>
 					<span>Last: {formatTimestamp(detail.last_active)}</span>
-					<span>Tokens: {detail.token_usage.total.toLocaleString()}</span>
+					<span>Tokens: {detail.token_usage?.total?.toLocaleString() ?? '0'}</span>
 				</div>
 				<pre
 					class="bg-muted max-h-96 overflow-auto rounded p-2 font-mono text-xs whitespace-pre-wrap"
