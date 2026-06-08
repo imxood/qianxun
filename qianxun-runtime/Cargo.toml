@@ -1,0 +1,26 @@
+[package]
+name = "qianxun-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "千寻运行时 — Agent 引擎 + Session + Plan + 持久化 (复用给 desktop / daemon / 未来 client)"
+
+[dependencies]
+# 核心 lib
+qianxun-core = { path = "../qianxun-core" }
+qianxun-memory = { path = "../qianxun-memory" }
+
+# runtime 共享
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4"] }
+futures = { workspace = true }
+
+# SessionStore SQLite
+rusqlite = { workspace = true }

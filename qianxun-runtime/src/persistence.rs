@@ -106,8 +106,7 @@ impl SessionStore {
         })
     }
 
-    /// 打开内存数据库 (用于测试).
-    #[cfg(test)]
+    /// 打开内存数据库 (用于测试, 也供桌面端/集成测试用).
     pub fn in_memory() -> Result<Self, SessionStoreError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;

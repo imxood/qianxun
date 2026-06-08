@@ -26,8 +26,8 @@ use qianxun_core::tools::ToolRegistry;
 
 use qianxun_memory::MemoryCore;
 
-use crate::runtime::persistence::SessionStore;
-use crate::runtime::session_runtime::{SessionId, SessionRuntime};
+use crate::SessionStore;
+use crate::{SessionId, SessionRuntime};
 
 /// 共享子系统集合, 由 `AppState` 持有, 注入到 `AgentLoopHost`.
 ///
@@ -151,12 +151,12 @@ impl AgentLoopHost {
         })
         .to_string();
         if let Err(e) = self.store.create(&session_id, None, &config_json) {
-            tracing::error!("[daemon] session store.create failed: {e}");
+            tracing::error!("[runtime] session store.create failed: {e}");
             return Err(format!("session persistence failed: {e}"));
         }
 
         tracing::info!(
-            "[daemon] created session {session_id} (total: {})",
+            "[runtime] created session {session_id} (total: {})",
             self.session_count()
         );
         Ok(runtime)
@@ -194,9 +194,9 @@ impl AgentLoopHost {
         // Stage 3: 同步删除持久化记录
         if removed {
             if let Err(e) = self.store.delete(id) {
-                tracing::warn!("[daemon] session store.delete failed: {e}");
+                tracing::warn!("[runtime] session store.delete failed: {e}");
             }
-            tracing::info!("[daemon] deleted session {id}");
+            tracing::info!("[runtime] deleted session {id}");
         }
         removed
     }
@@ -212,7 +212,7 @@ impl AgentLoopHost {
         let runtime = self
             .get_session(id)
             .ok_or_else(|| format!("session {id} not found"))?;
-        tracing::info!("[daemon] cancel session {id}");
+        tracing::info!("[runtime] cancel session {id}");
         // 当前无活跃 stream (Stage 2 prompt_handler spawn 的 task 不可直接
         // 引用). 我们设置 paused = true 作为软信号; Stage 7c 接入完整
         // 取消令牌 (tokio CancellationToken) 后, 这里调 token.cancel().
@@ -234,7 +234,7 @@ impl AgentLoopHost {
         }
         runtime.set_paused(true);
         runtime.touch();
-        tracing::info!("[daemon] paused session {id}");
+        tracing::info!("[runtime] paused session {id}");
         Ok(())
     }
 
@@ -249,7 +249,7 @@ impl AgentLoopHost {
         }
         runtime.set_paused(false);
         runtime.touch();
-        tracing::info!("[daemon] resumed session {id}");
+        tracing::info!("[runtime] resumed session {id}");
         Ok(())
     }
 
@@ -287,7 +287,7 @@ impl AgentLoopHost {
         }
         if cancelled > 0 {
             tracing::info!(
-                "[daemon] shutdown_all: marked {cancelled}/{total} sessions as paused (cancelled)"
+                "[runtime] shutdown_all: marked {cancelled}/{total} sessions as paused (cancelled)"
             );
         }
         cancelled
@@ -325,7 +325,7 @@ impl AgentLoopHost {
                 Some(s) => s,
                 None => {
                     tracing::warn!(
-                        "[daemon] session {id} has no snapshot, skipping",
+                        "[runtime] session {id} has no snapshot, skipping",
                         id = meta.id
                     );
                     continue;
@@ -334,7 +334,7 @@ impl AgentLoopHost {
 
             let msg_count = conversation.messages().len();
             tracing::info!(
-                "[daemon] restoring session {id} from snapshot ordinal={ord} messages={n}",
+                "[runtime] restoring session {id} from snapshot ordinal={ord} messages={n}",
                 id = meta.id,
                 ord = ordinal,
                 n = msg_count
@@ -366,7 +366,7 @@ impl AgentLoopHost {
             let mut sessions = self.sessions.write().expect("AgentLoopHost lock poisoned");
             if sessions.len() >= self.max_sessions {
                 tracing::warn!(
-                    "[daemon] max_sessions reached while restoring, dropping {id}",
+                    "[runtime] max_sessions reached while restoring, dropping {id}",
                     id = meta.id
                 );
                 break;
@@ -399,13 +399,13 @@ impl AgentLoopHost {
                 let elapsed = now.signed_duration_since(runtime.last_active()).to_std().unwrap_or(timeout);
                 let keep = elapsed < timeout;
                 if !keep {
-                    tracing::info!("[daemon] reaping stale session {id}");
+                    tracing::info!("[runtime] reaping stale session {id}");
                 }
                 keep
             });
             let reaped = before - sessions.len();
             if reaped > 0 {
-                tracing::info!("[daemon] reaped {reaped} stale sessions");
+                tracing::info!("[runtime] reaped {reaped} stale sessions");
             }
         }
     }

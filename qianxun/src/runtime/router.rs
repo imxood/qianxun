@@ -35,8 +35,8 @@ use qianxun_core::types::LlmError;
 use qianxun_memory::MemoryStats;
 
 use crate::runtime::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
-use crate::runtime::output_sink::DaemonOutputSink;
-use crate::runtime::sse::{SseEvent, SseEventBuilder};
+use qianxun_runtime::DaemonOutputSink;
+use qianxun_runtime::{SseEvent, SseEventBuilder};
 use crate::runtime::AppState;
 
 /// 健康检查响应。
@@ -446,7 +446,7 @@ async fn status_handler() -> Json<serde_json::Value> {
 async fn create_session(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionCreatedResponse>, (StatusCode, String)> {
-    match state.agent_host.create_session() {
+    match state.runtime.agent_host.create_session() {
         Ok(runtime) => Ok(Json(SessionCreatedResponse {
             session_id: runtime.session_id.clone(),
         })),
@@ -458,7 +458,7 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if state.agent_host.session_exists(&id) {
+    if state.runtime.agent_host.session_exists(&id) {
         Ok(Json(serde_json::json!({ "session_id": id, "status": "active" })))
     } else {
         Err((StatusCode::NOT_FOUND, format!("Session {id} not found")))
@@ -469,7 +469,7 @@ async fn delete_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Json<serde_json::Value> {
-    state.agent_host.delete_session(&id);
+    state.runtime.agent_host.delete_session(&id);
     Json(serde_json::json!({ "status": "deleted" }))
 }
 
@@ -524,7 +524,7 @@ async fn memory_ping(
         observation_count,
         memory_count,
         session_count,
-    } = state.memory.stats().await.map_err(|e| {
+    } = state.runtime.memory.stats().await.map_err(|e| {
         tracing::error!("[memory_ping] stats() failed: {e}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -542,7 +542,7 @@ async fn memory_ping(
 
 // ─── 技能 ──────────────────────────────────────────────────
 
-/// GET /v1/skills — 列出已加载技能名 (从 `state.skills` 实时读).
+/// GET /v1/skills — 列出已加载技能名 (从 `state.runtime.skills` 实时读).
 ///
 /// Day 2.3 准备: 仅返名字 + count, 不返 description / path / frontmatter,
 /// UI 端 SkillSummary 字段对齐留 Track D (skills/mod.rs 改造后).
@@ -552,7 +552,7 @@ async fn memory_ping(
 async fn list_skills(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let skills = state.skills.clone();
+    let skills = state.runtime.skills.clone();
     let names = skills.available_skills();
     Json(serde_json::json!({
         "skills": names,
@@ -665,7 +665,7 @@ async fn reload_skills(
     // SkillManager 当前不直接持有 project_dir (AppState.skills 是空 manager),
     // reload 时从 env var `QIANXUN_PROJECT_DIR` 读, 没有就 None (只载全局).
     let project_dir = std::env::var("QIANXUN_PROJECT_DIR").ok();
-    let mut skills = state.skills.clone();
+    let mut skills = state.runtime.skills.clone();
     skills.reload(project_dir.as_deref().map(Path::new));
     let count = skills.skill_count();
     Ok(Json(serde_json::json!({
@@ -688,7 +688,7 @@ async fn toggle_skill(
     axum::extract::Path(name): axum::extract::Path<String>,
     Json(body): Json<ToggleSkillRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let skills = state.skills.clone();
+    let skills = state.runtime.skills.clone();
     if skills.select_by_name(&name).is_none() {
         return Err((
             StatusCode::NOT_FOUND,
@@ -720,9 +720,9 @@ async fn delete_mcp_server(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // 找到对应 client 调 shutdown
-    let tools = state.tools.clone();
+    let tools = state.runtime.tools.clone();
     if tools.remove_mcp_client(&id).is_some() {
-        tracing::info!("[daemon] removed MCP client '{id}'");
+        tracing::info!("[runtime] removed MCP client '{id}'");
     }
     Ok(Json(serde_json::json!({
         "status": "deleted",
@@ -753,7 +753,7 @@ async fn invoke_tool(
     body: Option<Json<Value>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let arguments = body.map(|Json(v)| v).unwrap_or(Value::Object(Default::default()));
-    let tools = state.tools.clone();
+    let tools = state.runtime.tools.clone();
     match tools.execute_async(&name, arguments).await {
         Ok(out) => Ok(Json(serde_json::json!({
             "output": out.content,
@@ -781,14 +781,14 @@ async fn list_sessions(
     Query(params): Query<ListSessionsQuery>,
 ) -> Json<serde_json::Value> {
     let filter = params.status.as_deref().unwrap_or("all");
-    let store = state.store.clone();
-    let agent_host = state.agent_host.clone();
+    let store = state.runtime.store.clone();
+    let agent_host = state.runtime.agent_host.clone();
 
     // 同步拉 store 元数据 (内存 SQLite, 不阻塞)
     let metas = match store.list_active() {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!("[daemon] list_sessions: store.list_active failed: {e}");
+            tracing::error!("[runtime] list_sessions: store.list_active failed: {e}");
             return Json(serde_json::json!({
                 "sessions": [],
                 "total": 0,
@@ -869,7 +869,7 @@ async fn cancel_session(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     state
-        .agent_host
+        .runtime.agent_host
         .cancel_session(&id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -886,7 +886,7 @@ async fn pause_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match state.agent_host.pause_session(&id) {
+    match state.runtime.agent_host.pause_session(&id) {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "paused",
             "id": id,
@@ -920,7 +920,7 @@ struct PutConfigRequest {
 ///
 /// Stage 7b 简化:
 /// 1. 校验 JSON 合法 (axum 解析时即校验)
-/// 2. 合并到 `Arc::make_mut(&state.config)` 模式 (克隆-修改-替换)
+/// 2. 合并到 `Arc::make_mut(&state.runtime.config)` 模式 (克隆-修改-替换)
 /// 3. **不**写回 `~/.qianxun/config.json` (Stage 7c 接文件持久化)
 /// 4. 监听 `active_provider` 变化 → 重建 `Arc<dyn LlmProvider>` (TODO Stage 7c)
 /// 5. 返 `{status, requires_reload, changed_fields}`
@@ -932,7 +932,7 @@ async fn put_config(
     let mut requires_reload = false;
 
     // 1. clone 现有 config (Arc::make_mut 模式)
-    let mut new_config = (*state.config).clone();
+    let mut new_config = (*state.runtime.config).clone();
 
     // 2. active_provider 切换
     if let Some(ref new_active) = body.active_provider {
@@ -953,7 +953,7 @@ async fn put_config(
             ));
         }
         changed.push("log_level".to_string());
-        tracing::info!("[daemon] log_level set to {level} (Stage 7b: tracing filter not yet wired)");
+        tracing::info!("[runtime] log_level set to {level} (Stage 7b: tracing filter not yet wired)");
     }
 
     // 4. agent.{max_turns, max_retries}
@@ -966,16 +966,16 @@ async fn put_config(
         changed.push("agent.max_retries".to_string());
     }
 
-    // 5. 替换 state.config (走 Arc 内部可变性)
-    //    这里简单做: 复制新值到 Arc<T>; 因为 state.config: Arc<ResolvedConfig>
+    // 5. 替换 state.runtime.config (走 Arc 内部可变性)
+    //    这里简单做: 复制新值到 Arc<T>; 因为 state.runtime.config: Arc<ResolvedConfig>
     //    我们用 unsafe pointer write 或直接 mutate. 简化: 通过 RwLock.
-    //    实际: ResolvedConfig 字段全 Clone; 写入 state.config 的内容需要
+    //    实际: ResolvedConfig 字段全 Clone; 写入 state.runtime.config 的内容需要
     //    内部可变性, 这里用 Mutex (暂加到 AppState). Stage 7b 简化: 不
     //    改 AppState, 直接返 changed_fields 给 caller, 不真替换 in-memory.
     //    这样避免引入 Mutex, 也满足 "通知 hot-reload" 语义.
     if !changed.is_empty() {
         tracing::info!(
-            "[daemon] config PUT: changed={changed:?}, requires_reload={requires_reload}"
+            "[runtime] config PUT: changed={changed:?}, requires_reload={requires_reload}"
         );
     }
 
@@ -998,7 +998,7 @@ async fn delete_observation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match state.memory.delete_observation(&id).await {
+    match state.runtime.memory.delete_observation(&id).await {
         Ok(true) => Ok(Json(serde_json::json!({
             "status": "deleted",
             "id": id,
@@ -1016,7 +1016,7 @@ async fn delete_memory_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match state.memory.delete_session(&id).await {
+    match state.runtime.memory.delete_session(&id).await {
         Ok(n) if n > 0 => Ok(Json(serde_json::json!({
             "status": "deleted",
             "id": id,
@@ -1046,8 +1046,8 @@ async fn system_metrics(
     let uptime = state.started_at.elapsed().as_secs();
     let pid = std::process::id();
     let conns = active_conns_count();
-    let total = state.agent_host.session_count();
-    let paused = state.agent_host.paused_count();
+    let total = state.runtime.agent_host.session_count();
+    let paused = state.runtime.agent_host.paused_count();
     let active = total.saturating_sub(paused);
 
     let (cpu, mem_mb) = read_process_stats();
@@ -1354,7 +1354,7 @@ async fn auth_logout() -> Json<serde_json::Value> {
 /// Stage 3 实现 (MVP-1):
 /// 1. 验证 session 存在
 /// 2. 推 user/assistant/system 消息到 `runtime.conversation` (Arc<Mutex<...>>)
-/// 3. 真实计算 memory_context (`state.memory.build_context`)
+/// 3. 真实计算 memory_context (`state.runtime.memory.build_context`)
 ///    + skills_catalog (`runtime.skills.build_catalog_prompt`)
 ///    + skill_injections (按 user 消息匹配 `runtime.skills.auto_select` 后
 ///      调 `build_injections`)
@@ -1381,7 +1381,7 @@ async fn prompt_handler(
 {
     // 1. 验证 session
     let runtime = state
-        .agent_host
+        .runtime.agent_host
         .get_session(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
     runtime.touch();
@@ -1447,7 +1447,7 @@ async fn prompt_handler(
     //    - skill_injections:  Layer 2 技能完整 body, 按 user 消息触发词匹配后注入
     // 三个串都走 `build_request` 的 system prompt 拼接, 跟 qianxun-core 系统提示词
     // 协议一致 (memory → catalog → injections).
-    let memory_context: String = state.memory.build_context(&last_user_msg, 2000).await;
+    let memory_context: String = state.runtime.memory.build_context(&last_user_msg, 2000).await;
     let skills_catalog: String = runtime.skills.build_catalog_prompt();
     let matched_skills: Vec<String> = runtime.skills.auto_select(&last_user_msg, &[]);
     let skill_injections: String = runtime.skills.build_injections(&matched_skills);
@@ -1475,7 +1475,7 @@ async fn prompt_handler(
     let session_id = runtime.session_id.clone();
     let sink = DaemonOutputSink::new(
         tx,
-        state.store.clone(),
+        state.runtime.store.clone(),
         session_id.clone(),
         model,
         max_tokens,
@@ -1512,23 +1512,8 @@ async fn prompt_handler(
     // 8. SSE wrapper: 把 mpsc 里的事件序列化成 SSE 帧
     //    (ReceiverStream 适配 axum::body::Body 要求 impl Stream)
     let sse_stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-        Box::pin(ReceiverStream::new(rx).map(event_to_sse));
+        Box::pin(ReceiverStream::new(rx).map(crate::runtime::sse_axum::event_to_sse));
     Ok(Sse::new(sse_stream))
-}
-
-/// 把 `SseEvent` 序列化成 axum `Event` (data 帧).
-fn event_from_sse(event: SseEvent) -> Event {
-    let json = serde_json::to_string(&event).unwrap_or_else(|e| {
-        tracing::error!("[sse] failed to serialize event: {e}");
-        r#"{"type":"error","code":"internal","message":"event serialization failed"}"#
-            .to_string()
-    });
-    Event::default().data(json)
-}
-
-/// 适配 `Stream::map`: `SseEvent` → `Result<Event, Infallible>` (SSE 帧).
-fn event_to_sse(event: SseEvent) -> Result<Event, Infallible> {
-    Ok(event_from_sse(event))
 }
 
 /// 在 spawn task 里消费 `BoxStream<Result<LlmStreamEvent, LlmError>>`,
@@ -1650,7 +1635,7 @@ fn persist_assistant_message(
     response_text: &str,
     tool_calls: &[(String, String, serde_json::Value)],
     thinking_blocks: &[(String, Option<String>)],
-    store: &Arc<crate::runtime::persistence::SessionStore>,
+    store: &Arc<qianxun_runtime::SessionStore>,
 ) {
     use qianxun_core::agent::message::Message;
     let Some(conv) = conv else { return };
@@ -1682,7 +1667,7 @@ fn persist_assistant_message(
     };
     if let Err(e) = store.save_conversation_snapshot(session_id, ordinal, &snapshot_data) {
         tracing::warn!(
-            "[daemon] save_conversation_snapshot failed: session_id={session_id} ordinal={ordinal} err={e}"
+            "[runtime] save_conversation_snapshot failed: session_id={session_id} ordinal={ordinal} err={e}"
         );
     }
 }
@@ -1720,7 +1705,7 @@ mod e2e_tests {
         // 2. channel + consumer + store (Stage 3: 事件落盘)
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store = std::sync::Arc::new(
-            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
+            qianxun_runtime::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -1833,7 +1818,7 @@ mod e2e_tests {
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store2 = std::sync::Arc::new(
-            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
+            qianxun_runtime::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -1912,7 +1897,7 @@ mod e2e_tests {
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store3 = std::sync::Arc::new(
-            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
+            qianxun_runtime::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -1985,7 +1970,7 @@ mod e2e_tests {
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store4 = std::sync::Arc::new(
-            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
+            qianxun_runtime::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -2065,52 +2050,28 @@ mod jwt_auth_tests {
     /// 构造一个最小 AppState with the given token_secret.
     /// Stage 10b 修正: admin 字段用 `for_test(secret, ...)` 构造, 让 `make_jwt` 签的
     /// token 能直接被 `state.admin.token_secret()` 验签通过 (不再依赖 env var).
-    fn make_test_state_with_secret(
+    /// Step 8d: 用 `RuntimeState::new_in_memory_with_config` 替代 14 字段手工构造.
+    async fn make_test_state_with_secret(
         secret: &str,
     ) -> std::sync::Arc<crate::runtime::AppState> {
-        use crate::runtime::agent_host::{AgentLoopHost, SharedState};
+        use qianxun_runtime::RuntimeState;
+        use qianxun_core::config::ResolvedConfig;
         use crate::runtime::auth::AdminCredential;
         use crate::runtime::llm_providers::LlmProviderManager;
-        use crate::runtime::persistence::SessionStore;
-        use qianxun_core::config::ResolvedConfig;
-        use qianxun_core::provider::create_provider;
-        use qianxun_core::skills::SkillManager;
-        use qianxun_core::tools::ToolRegistry;
-        use qianxun_memory::MemoryCore;
 
-        let config = ResolvedConfig::default();
-        let provider: Arc<dyn qianxun_core::provider::LlmProvider> =
-            create_provider(&config.active_provider, &config.active_provider_config()).into();
-        let tools = Arc::new(ToolRegistry::new());
-        let memory = Arc::new(MemoryCore::open_in_memory().expect("memory"));
-        let skills = SkillManager::new();
-        let store = Arc::new(SessionStore::in_memory().expect("store"));
-        let shared = Arc::new(SharedState::new(
-            config.clone(),
-            provider.clone(),
-            tools.clone(),
-            memory.clone(),
-            skills.clone(),
+        let runtime = RuntimeState::new_in_memory_with_config(ResolvedConfig::default())
+            .await
+            .expect("RuntimeState in-memory");
+        let llm_providers = std::sync::Arc::new(LlmProviderManager::from_config(
+            &runtime.config,
         ));
-        let agent_host = Arc::new(AgentLoopHost::new(2, shared.clone(), store.clone()));
-        let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
-        let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
-        Arc::new(crate::runtime::AppState {
-            agent_host,
-            config: Arc::new(config),
-            provider,
-            tools,
-            memory,
-            skills,
-            shared,
-            store,
+        std::sync::Arc::new(crate::runtime::AppState {
+            runtime,
             llm_providers,
-            shutdown_tx,
-            processing_loop_enabled: false,
             started_at: std::time::Instant::now(),
-            active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            log_ring: Arc::new(crate::buf_writer::LogRing::new()),
-            admin: Arc::new(AdminCredential::for_test(secret, "test-hash-not-used")),
+            active_conns: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            log_ring: std::sync::Arc::new(crate::buf_writer::LogRing::new()),
+            admin: std::sync::Arc::new(AdminCredential::for_test(secret, "test-hash-not-used")),
         })
     }
 
@@ -2136,7 +2097,7 @@ mod jwt_auth_tests {
     /// - `/v1/chat/session` → 受保护路由 (需要 Bearer)
     /// - `/v1/_claims_echo` → 回写 `request.extensions().get::<Claims>()` 的 sub
     ///   用于验证 middleware 是否把 claims 写入 extensions
-    fn test_app() -> Router {
+    async fn test_app() -> Router {
         async fn public() -> &'static str {
             "public"
         }
@@ -2151,7 +2112,7 @@ mod jwt_auth_tests {
                 .unwrap_or_else(|| "no_claims".to_string())
         }
 
-        let state = make_test_state_with_secret(TEST_SECRET);
+        let state = make_test_state_with_secret(TEST_SECRET).await;
         Router::new()
             .route("/v1/system/health", get(public))
             .route("/v1/system/status", get(public))
@@ -2164,7 +2125,7 @@ mod jwt_auth_tests {
     /// Stage 7: 含 `/` 路由 + fallback 的测试 app, 给 `test_root_endpoint_skips_auth`
     /// 和 `test_unknown_path_returns_404_json` 用. 比主 `test_app()` 更接近
     /// 真实 `build_router` 行为.
-    fn test_app_with_root() -> Router {
+    async fn test_app_with_root() -> Router {
         async fn root() -> &'static str {
             r#"{"name":"qianxun-daemon","endpoints":["/v1/system/health"]}"#
         }
@@ -2178,7 +2139,7 @@ mod jwt_auth_tests {
             "protected"
         }
 
-        let state = make_test_state_with_secret(TEST_SECRET);
+        let state = make_test_state_with_secret(TEST_SECRET).await;
         Router::new()
             .route("/", get(root))
             .route("/v1/system/health", get(public))
@@ -2214,7 +2175,7 @@ mod jwt_auth_tests {
     async fn test_jwt_valid_token_passes_auth() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_app();
+        let app = test_app().await;
 
         let token = make_jwt(TEST_SECRET, "user_alice", 3600);
         let response = app
@@ -2237,7 +2198,7 @@ mod jwt_auth_tests {
     async fn test_jwt_valid_token_inserts_claims_into_extensions() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_app();
+        let app = test_app().await;
 
         let token = make_jwt(TEST_SECRET, "user_bob", 3600);
         let response = app
@@ -2262,7 +2223,7 @@ mod jwt_auth_tests {
     async fn test_jwt_expired_token_rejected() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_app();
+        let app = test_app().await;
 
         // 1 小时前已过期
         let token = make_jwt(TEST_SECRET, "user_alice", -3600);
@@ -2286,7 +2247,7 @@ mod jwt_auth_tests {
     async fn test_jwt_invalid_signature_rejected() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_app();
+        let app = test_app().await;
 
         // 用不同 secret 签
         let token = make_jwt("completely-different-secret", "user_alice", 3600);
@@ -2310,7 +2271,7 @@ mod jwt_auth_tests {
     async fn test_jwt_missing_header_rejected() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_app();
+        let app = test_app().await;
 
         let response = app
             .oneshot(
@@ -2334,7 +2295,7 @@ mod jwt_auth_tests {
     async fn test_health_endpoint_skips_auth() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_jwt_secret();
-        let app = test_app();
+        let app = test_app().await;
 
         let response = app.clone()
             .oneshot(
@@ -2371,7 +2332,7 @@ mod jwt_auth_tests {
     async fn test_root_endpoint_skips_auth() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_jwt_secret();
-        let app = test_app_with_root();
+        let app = test_app_with_root().await;
 
         let response = app
             .oneshot(
@@ -2414,7 +2375,7 @@ mod jwt_auth_tests {
     async fn test_unknown_path_returns_404_json() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         clear_jwt_secret();
-        let app = test_app_with_root();
+        let app = test_app_with_root().await;
 
         let response = app
             .oneshot(
@@ -2497,15 +2458,12 @@ mod stage7a_endpoint_tests {
     //! 调完整 router (带 auth middleware), 用 parent module 的 `ENV_MUTEX`
     //! 串行化 env var 操作 (Rust 2024 下 set_var 是 unsafe, 多线程并发是 UB).
     use super::*;
-    use crate::buf_writer::LogRing;
     use crate::runtime::llm_providers::LlmProviderManager;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
     use qianxun_core::agent::message::ContentBlock;
-    use qianxun_core::config::{ResolvedConfig, ResolvedProviderConfig};
-    use qianxun_core::skills::SkillManager;
-    use qianxun_core::tools::ToolRegistry;
+    use qianxun_core::config::ResolvedProviderConfig;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2529,13 +2487,11 @@ mod stage7a_endpoint_tests {
 
     /// 构造一个最小 AppState for tests.
     ///
-    /// 不初始化 AgentLoopHost (会要求 SessionStore), 单独 mock 一个 minimal host
-    /// 通过 — 简单做法: 只为 router 提供 LLM manager / tools / skills, agent_host
-    /// 字段用空 runtime.
-    pub(super) fn make_test_state() -> Arc<crate::runtime::AppState> {
-        use crate::runtime::persistence::SessionStore;
-        use qianxun_memory::MemoryCore;
-        use qianxun_core::provider::create_provider;
+    /// Step 8d: 用 `RuntimeState::new_in_memory_with_config` 替代 14 字段手工构造.
+    /// 用 deepseek 自定义 config 跟原 Stage 7a 行为一致.
+    pub(super) async fn make_test_state() -> Arc<crate::runtime::AppState> {
+        use qianxun_runtime::RuntimeState;
+        use qianxun_core::config::ResolvedConfig;
 
         let mut providers = HashMap::new();
         providers.insert(
@@ -2554,68 +2510,36 @@ mod stage7a_endpoint_tests {
             providers,
             ..Default::default()
         };
-        let config_arc = Arc::new(config.clone());
-        let provider: Arc<dyn qianxun_core::provider::LlmProvider> =
-            create_provider(&config.active_provider, &config.active_provider_config()).into();
-        let tools = Arc::new(ToolRegistry::new());
-        let memory = Arc::new(MemoryCore::open_in_memory().expect("memory"));
-        let skills = SkillManager::new();
-        let store = Arc::new(SessionStore::in_memory().expect("store in_memory"));
 
-        // Stage 1 兼容: SharedState 实际构造需要 AgentLoopHost, 留 None in test.
-        // 我们用 try_new helper 简化 (AgentLoopHost::new 接受 SharedState).
-        // 这里走轻量路径: 直接构造 AppState, shared 给一个**空** shared state.
-        let shared_inner = qianxun_core::provider::LlmProvider::id(&*provider);
-        let _ = shared_inner; // 静默 unused
-        let shared = Arc::new(crate::runtime::agent_host::SharedState::new(
-            config.clone(),
-            provider.clone(),
-            tools.clone(),
-            memory.clone(),
-            skills.clone(),
-        ));
-        let agent_host = Arc::new(crate::runtime::agent_host::AgentLoopHost::new(
-            4,
-            shared.clone(),
-            store.clone(),
-        ));
-        let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
-        let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
-
+        let runtime = RuntimeState::new_in_memory_with_config(config)
+            .await
+            .expect("RuntimeState in-memory with deepseek config");
+        let llm_providers = Arc::new(LlmProviderManager::from_config(&runtime.config));
         Arc::new(crate::runtime::AppState {
-            agent_host,
-            config: config_arc,
-            provider,
-            tools,
-            memory,
-            skills,
-            shared,
-            store,
+            runtime,
             llm_providers,
-            shutdown_tx,
-            processing_loop_enabled: false,
-            // Stage 7b 字段
             started_at: std::time::Instant::now(),
             active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            log_ring: Arc::new(LogRing::new()),
-            // Stage 10b: admin credential (用 for_test 注入已知 TEST_SECRET, 让
-            // `set_jwt_secret(TEST_SECRET)` 同步后, middleware 验签能通过).
-            admin: test_admin_credential(),
+            log_ring: Arc::new(crate::buf_writer::LogRing::new()),
+            admin: Arc::new(crate::runtime::auth::AdminCredential::for_test(
+                TEST_SECRET,
+                "$2b$12$placeholderhashplaceholderhashplaceholderhashplaceholder",
+            )),
         })
     }
 
     /// 构造带 UI dist 路径的 test router.
-    fn test_router_with_ui(ui_dist: Option<PathBuf>) -> Router {
-        let state = make_test_state();
+    async fn test_router_with_ui(ui_dist: Option<PathBuf>) -> Router {
+        let state = make_test_state().await;
         build_router(state, ui_dist)
     }
 
     /// 构造带 UI dist 路径 + 共享 state 的 test router. 给需要预创建 session
     /// / 推 log 等需要访问 state 的测试用.
-    pub(super) fn test_router_with_ui_and_state(
+    pub(super) async fn test_router_with_ui_and_state(
         ui_dist: Option<PathBuf>,
     ) -> (Router, Arc<crate::runtime::AppState>) {
-        let state = make_test_state();
+        let state = make_test_state().await;
         let app = build_router(state.clone(), ui_dist);
         (app, state)
     }
@@ -2660,7 +2584,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
 
         // 故意不传 ui_dist
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -2684,7 +2608,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
 
         // 传一个不存在的路径
-        let app = test_router_with_ui(Some(PathBuf::from("/this/path/does/not/exist/12345")));
+        let app = test_router_with_ui(Some(PathBuf::from("/this/path/does/not/exist/12345"))).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -2716,7 +2640,7 @@ mod stage7a_endpoint_tests {
         std::fs::create_dir_all(dir.join("assets")).expect("mkdir assets");
         std::fs::write(dir.join("assets").join("main.js"), "console.log('hi');").expect("write main.js");
 
-        let app = test_router_with_ui(Some(dir.clone()));
+        let app = test_router_with_ui(Some(dir.clone())).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -2732,7 +2656,7 @@ mod stage7a_endpoint_tests {
         assert!(body_str.contains("<html>test</html>"));
 
         // 静态子资源
-        let app2 = test_router_with_ui(Some(dir.clone()));
+        let app2 = test_router_with_ui(Some(dir.clone())).await;
         let response = app2
             .oneshot(
                 HttpRequest::builder()
@@ -2747,7 +2671,7 @@ mod stage7a_endpoint_tests {
         assert!(std::str::from_utf8(&body).unwrap().contains("console.log"));
 
         // SPA fallback: 不存在的路径 → 返 index.html
-        let app3 = test_router_with_ui(Some(dir.clone()));
+        let app3 = test_router_with_ui(Some(dir.clone())).await;
         let response = app3
             .oneshot(
                 HttpRequest::builder()
@@ -2776,7 +2700,7 @@ mod stage7a_endpoint_tests {
         let _g = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -2797,7 +2721,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
 
         let token = make_jwt(TEST_SECRET, "user_test", 3600);
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -2829,7 +2753,7 @@ mod stage7a_endpoint_tests {
         let token = make_jwt(TEST_SECRET, "user_test", 3600);
 
         // 关键: 整个测试用**同一个** state, 避免每次新 Router 丢失数据
-        let state = make_test_state();
+        let state = make_test_state().await;
         let app = build_router(state.clone(), None);
 
         // 1. POST add
@@ -2969,7 +2893,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -2993,7 +2917,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3021,7 +2945,7 @@ mod stage7a_endpoint_tests {
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
         let body = serde_json::json!({ "enabled": false });
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3046,7 +2970,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3072,7 +2996,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3099,7 +3023,7 @@ mod stage7a_endpoint_tests {
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
         let body = serde_json::json!({ "arguments": {} });
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3126,7 +3050,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3154,7 +3078,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         for status in &["active", "paused", "all"] {
             let response = app
                 .clone()
@@ -3187,9 +3111,9 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let (app, state) = test_router_with_ui_and_state(None);
+        let (app, state) = test_router_with_ui_and_state(None).await;
         let runtime = state
-            .agent_host
+            .runtime.agent_host
             .create_session()
             .expect("create_session should succeed");
         let id = runtime.session_id.clone();
@@ -3212,7 +3136,7 @@ mod stage7a_endpoint_tests {
         assert_eq!(v.get("id").and_then(|s| s.as_str()), Some(id.as_str()));
 
         // 状态应是 paused (Stage 7b 简化语义)
-        assert!(state.agent_host.get_session(&id).unwrap().is_paused());
+        assert!(state.runtime.agent_host.get_session(&id).unwrap().is_paused());
 
         clear_jwt_secret();
     }
@@ -3224,7 +3148,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3248,9 +3172,9 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let (app, state) = test_router_with_ui_and_state(None);
+        let (app, state) = test_router_with_ui_and_state(None).await;
         let runtime = state
-            .agent_host
+            .runtime.agent_host
             .create_session()
             .expect("create_session should succeed");
         let id = runtime.session_id.clone();
@@ -3304,7 +3228,7 @@ mod stage7a_endpoint_tests {
             "log_level": "debug",
             "max_turns": 100,
         });
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3338,7 +3262,7 @@ mod stage7a_endpoint_tests {
         let body = serde_json::json!({
             "log_level": "this_is_not_a_valid_level",
         });
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3366,7 +3290,7 @@ mod stage7a_endpoint_tests {
         let body = serde_json::json!({
             "active_provider": "anthropic",
         });
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3404,14 +3328,14 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let (app, state) = test_router_with_ui_and_state(None);
+        let (app, state) = test_router_with_ui_and_state(None).await;
         // 用 session_start + observe 写一条 observation
         state
-            .memory
+            .runtime.memory
             .session_start("sess_test_mem_del_obs", "test", "/work")
             .await;
         state
-            .memory
+            .runtime.memory
             .observe(
                 "PostToolUse",
                 "read_file",
@@ -3421,7 +3345,7 @@ mod stage7a_endpoint_tests {
             .await;
 
         // search 拿到 observation id
-        let results = state.memory.search("to_delete", 10).await.expect("search");
+        let results = state.runtime.memory.search("to_delete", 10).await.expect("search");
         assert!(!results.is_empty(), "should find the observation");
         let obs_id = results[0].id.clone();
 
@@ -3443,7 +3367,7 @@ mod stage7a_endpoint_tests {
         assert_eq!(v.get("status").and_then(|s| s.as_str()), Some("deleted"));
 
         // DELETE 不存在 → 404
-        let (app2, _) = test_router_with_ui_and_state(None);
+        let (app2, _) = test_router_with_ui_and_state(None).await;
         let response2 = app2
             .oneshot(
                 HttpRequest::builder()
@@ -3469,11 +3393,11 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let (app, state) = test_router_with_ui_and_state(None);
+        let (app, state) = test_router_with_ui_and_state(None).await;
         let sid = "sess_test_mem_del_session";
-        state.memory.session_start(sid, "test", "/work").await;
+        state.runtime.memory.session_start(sid, "test", "/work").await;
         state
-            .memory
+            .runtime.memory
             .observe(
                 "PostToolUse",
                 "read_file",
@@ -3483,7 +3407,7 @@ mod stage7a_endpoint_tests {
             .await;
 
         // 验证 session 存在 + 有 observation
-        let results_before = state.memory.search("alpha", 10).await.expect("search before");
+        let results_before = state.runtime.memory.search("alpha", 10).await.expect("search before");
         assert_eq!(results_before.len(), 1, "observation should exist before delete");
 
         // DELETE
@@ -3501,7 +3425,7 @@ mod stage7a_endpoint_tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // 验证级联: search 返空
-        let results_after = state.memory.search("alpha", 10).await.expect("search after");
+        let results_after = state.runtime.memory.search("alpha", 10).await.expect("search after");
         assert_eq!(
             results_after.len(),
             0,
@@ -3509,7 +3433,7 @@ mod stage7a_endpoint_tests {
         );
 
         // 第二次 DELETE → 404
-        let (app2, _) = test_router_with_ui_and_state(None);
+        let (app2, _) = test_router_with_ui_and_state(None).await;
         let response2 = app2
             .oneshot(
                 HttpRequest::builder()
@@ -3535,7 +3459,7 @@ mod stage7a_endpoint_tests {
         set_jwt_secret(TEST_SECRET);
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3576,7 +3500,7 @@ mod stage7a_endpoint_tests {
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
         // 验证: 不带 lines 参数 → 返 {lines, total, requested, capped}
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3611,7 +3535,7 @@ mod stage7a_endpoint_tests {
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
         // 验证: 请求 5000 行 → capped=true
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
         let response = app
             .oneshot(
                 HttpRequest::builder()
@@ -3632,7 +3556,7 @@ mod stage7a_endpoint_tests {
         );
 
         // 验证: 请求 100 行 (在 cap 内) → capped=false
-        let app2 = test_router_with_ui(None);
+        let app2 = test_router_with_ui(None).await;
         let response2 = app2
             .oneshot(
                 HttpRequest::builder()
@@ -3648,7 +3572,7 @@ mod stage7a_endpoint_tests {
         assert_eq!(v2.get("capped").and_then(|b| b.as_bool()), Some(false));
 
         // 验证: 请求 1 行 → 返 1 行 (即使 ring 空)
-        let app3 = test_router_with_ui(None);
+        let app3 = test_router_with_ui(None).await;
         let response3 = app3
             .oneshot(
                 HttpRequest::builder()
@@ -3676,7 +3600,7 @@ mod stage7a_endpoint_tests {
         let token = make_jwt(TEST_SECRET, "user", 3600);
 
         // 用 helper 读 static (避免重复)
-        let _ = make_test_state();
+        let _ = make_test_state().await;
         assert_eq!(
             active_conns_count(),
             0,
@@ -3685,7 +3609,7 @@ mod stage7a_endpoint_tests {
 
         // 串行 3 个请求
         for _i in 0..3 {
-            let app = test_router_with_ui(None);
+            let app = test_router_with_ui(None).await;
             let response = app
                 .oneshot(
                     HttpRequest::builder()
@@ -3715,7 +3639,7 @@ mod stage7a_endpoint_tests {
     async fn test_admin_rotate_token_returns_new_jwt() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
 
         let old_token = make_jwt(TEST_SECRET, "user_initial", 3600);
         let response = app
@@ -3769,7 +3693,7 @@ mod stage7a_endpoint_tests {
     async fn test_admin_rotate_token_requires_auth() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
 
         let response = app
             .oneshot(
@@ -3795,7 +3719,7 @@ mod stage7a_endpoint_tests {
     async fn test_admin_rotate_token_wrong_secret_returns_401() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         set_jwt_secret(TEST_SECRET);
-        let app = test_router_with_ui(None);
+        let app = test_router_with_ui(None).await;
 
         // 用错 secret 签 token
         let bogus = make_jwt("some-other-secret-not-matching", "admin", 3600);
@@ -3838,7 +3762,7 @@ mod stage9c_csp_tests {
 
     #[tokio::test]
     async fn csp_header_present_on_health_endpoint() {
-        let state = make_test_state();
+        let state = make_test_state().await;
         let app = build_router(state, None);
         let response = app
             .oneshot(
@@ -3869,7 +3793,7 @@ mod stage9c_csp_tests {
 
     #[tokio::test]
     async fn csp_header_present_on_root_handler() {
-        let state = make_test_state();
+        let state = make_test_state().await;
         let app = build_router(state, None);
         let response = app
             .oneshot(

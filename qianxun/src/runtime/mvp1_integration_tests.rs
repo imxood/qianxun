@@ -53,20 +53,15 @@ fn env_mutex() -> &'static StdMutex<()> {
 
 /// 构造最小可用的 `Arc<AppState>` for tests. 不依赖 `stage7a_endpoint_tests`
 /// (它是 router.rs 私有 mod, 跨文件不可见).
-fn make_test_state() -> Arc<crate::runtime::AppState> {
+/// Step 8d: 用 `RuntimeState::new_in_memory_with_config` 替代 14 字段手工构造.
+async fn make_test_state() -> Arc<crate::runtime::AppState> {
     use std::collections::HashMap;
 
     use qianxun_core::config::{ResolvedConfig, ResolvedProviderConfig};
-    use qianxun_core::provider::create_provider;
-    use qianxun_core::skills::SkillManager;
-    use qianxun_core::tools::ToolRegistry;
-    use qianxun_memory::MemoryCore;
+    use qianxun_runtime::RuntimeState;
 
-    use crate::buf_writer::LogRing;
-    use crate::runtime::agent_host::{AgentLoopHost, SharedState};
     use crate::runtime::auth::AdminCredential;
     use crate::runtime::llm_providers::LlmProviderManager;
-    use crate::runtime::persistence::SessionStore;
 
     // 1. ResolvedConfig (deepseek fake api_key — LLM 真实调用会失败, 符合预期)
     let mut providers = HashMap::new();
@@ -86,24 +81,11 @@ fn make_test_state() -> Arc<crate::runtime::AppState> {
         providers,
         ..Default::default()
     };
-    let config_arc = Arc::new(config.clone());
-    let provider: Arc<dyn qianxun_core::provider::LlmProvider> =
-        create_provider(&config.active_provider, &config.active_provider_config()).into();
 
-    let tools = Arc::new(ToolRegistry::new());
-    let memory = Arc::new(MemoryCore::open_in_memory().expect("memory"));
-    let skills = SkillManager::new();
-    let store = Arc::new(SessionStore::in_memory().expect("store in_memory"));
-    let shared = Arc::new(SharedState::new(
-        config.clone(),
-        provider.clone(),
-        tools.clone(),
-        memory.clone(),
-        skills.clone(),
-    ));
-    let agent_host = Arc::new(AgentLoopHost::new(4, shared.clone(), store.clone()));
-    let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
-    let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
+    let runtime = RuntimeState::new_in_memory_with_config(config)
+        .await
+        .expect("RuntimeState in-memory with deepseek config");
+    let llm_providers = Arc::new(LlmProviderManager::from_config(&runtime.config));
 
     // Stage 10b: admin credential 用 `for_test` 注入已知 TEST_SECRET, 让
     // 我们的 `make_jwt(TEST_SECRET, ...)` 签的 token 能被 `state.admin.token_secret()` 验签.
@@ -113,33 +95,24 @@ fn make_test_state() -> Arc<crate::runtime::AppState> {
     let admin = Arc::new(AdminCredential::for_test(TEST_SECRET, placeholder_hash));
 
     Arc::new(crate::runtime::AppState {
-        agent_host,
-        config: config_arc,
-        provider,
-        tools,
-        memory,
-        skills,
-        shared,
-        store,
+        runtime,
         llm_providers,
-        shutdown_tx,
-        processing_loop_enabled: false,
         started_at: std::time::Instant::now(),
         active_conns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        log_ring: Arc::new(LogRing::new()),
+        log_ring: Arc::new(crate::buf_writer::LogRing::new()),
         admin,
     })
 }
 
 // ─── JWT helpers ───
 
-fn set_jwt_secret(val: &str) {
+async fn set_jwt_secret(val: &str) {
     // SAFETY: 测试用 ENV_MUTEX 序列化访问, 测试进程内不并发
     unsafe {
         std::env::set_var("QIANXUN_JWT_SECRET", val);
     }
     // Stage 10a: middleware 实际验签走 admin.token_secret, 同步 set
-    let admin = make_test_state().admin.clone();
+    let admin = make_test_state().await.admin.clone();
     admin.set_token_secret_for_test(val);
 }
 
@@ -187,7 +160,7 @@ async fn post_prompt_and_collect(
     collect_timeout: Duration,
 ) -> (StatusCode, Vec<Value>, Vec<u8>) {
     let runtime = state
-        .agent_host
+        .runtime.agent_host
         .create_session()
         .expect("create_session");
     let session_id = runtime.session_id.clone();
@@ -285,10 +258,10 @@ fn event_types(events: &[Value]) -> Vec<String> {
 #[tokio::test]
 async fn test_prompt_handler_calls_processing_loop() {
     let _g = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
-    set_jwt_secret(TEST_SECRET);
+    set_jwt_secret(TEST_SECRET).await;
     let jwt = make_jwt(TEST_SECRET, TEST_SUB, 3600);
 
-    let state = make_test_state();
+    let state = make_test_state().await;
     let (status, events, _body) = post_prompt_and_collect(
         &state,
         "Hello world",
@@ -379,8 +352,8 @@ async fn test_prompt_handler_calls_processing_loop() {
 /// unicode61 tokenize 切碎, 单 token 查询经常 0 hit. 用多词 path 保证 hit.
 #[tokio::test]
 async fn test_memory_context_injected() {
-    let state = make_test_state();
-    let memory = state.memory.clone();
+    let state = make_test_state().await;
+    let memory = state.runtime.memory.clone();
 
     // 0. session_start — observe 内部需要 active session, 没设就 drop 掉
     memory
@@ -420,7 +393,7 @@ async fn test_memory_context_injected() {
     );
 
     // 3. build_context 真的把这条 observation 注入上下文 (prompt_handler 调
-    //    `state.memory.build_context(&last_user_msg, 2000)` 那一步).
+    //    `state.runtime.memory.build_context(&last_user_msg, 2000)` 那一步).
     let ctx = memory.build_context(query, 2000).await;
     eprintln!(
         "[test_memory_context_injected] build_context returned {} chars",
@@ -440,12 +413,12 @@ async fn test_memory_context_injected() {
 async fn test_conversation_persistence_roundtrip() {
     use qianxun_core::agent::message::Message;
 
-    let state = make_test_state();
-    let store = state.store.clone();
+    let state = make_test_state().await;
+    let store = state.runtime.store.clone();
 
     // 1. 建 session + snapshot 占位 (create_session 已经写 ordinal=0 占位)
     let runtime = state
-        .agent_host
+        .runtime.agent_host
         .create_session()
         .expect("create_session");
     let session_id = runtime.session_id.clone();
@@ -523,10 +496,10 @@ async fn test_conversation_persistence_roundtrip() {
 #[tokio::test]
 async fn test_sse_event_sequence() {
     let _g = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
-    set_jwt_secret(TEST_SECRET);
+    set_jwt_secret(TEST_SECRET).await;
     let jwt = make_jwt(TEST_SECRET, TEST_SUB, 3600);
 
-    let state = make_test_state();
+    let state = make_test_state().await;
 
     // 1. 发 prompt, 收 SSE 帧
     let (status, events, _body) = post_prompt_and_collect(
@@ -608,7 +581,7 @@ async fn test_sse_event_sequence() {
         "[test_sse_event_sequence] session_id in message_start: {session_id_in_msg}"
     );
     let persisted_tail = state
-        .store
+        .runtime.store
         .load_events(&session_id_in_msg, 0)
         .expect("load_events tail");
     eprintln!(

@@ -267,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         tracing::info!(
-            "[daemon] admin credential loaded (path={}, hash_len={}B, secret_len={}B)",
+            "[runtime] admin credential loaded (path={}, hash_len={}B, secret_len={}B)",
             cred_path.display(),
             admin.password_hash().len(),
             admin.token_secret().len()
@@ -275,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
         // 兼容: 如果用户设了 QIANXUN_JWT_SECRET env var, 提示一下已不再使用.
         if std::env::var("QIANXUN_JWT_SECRET").is_ok() {
             tracing::warn!(
-                "[daemon] QIANXUN_JWT_SECRET env var is set but ignored — \
+                "[runtime] QIANXUN_JWT_SECRET env var is set but ignored — \
                  token secret now stored in admin.cred file. \
                  Run `qx --daemon` once to bootstrap; subsequent boots will use the file."
             );

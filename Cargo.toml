@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["qianxun-core", "qianxun", "qianxun-memory"]
+members = ["qianxun-core", "qianxun", "qianxun-memory", "qianxun-runtime"]
 
 [workspace.package]
 edition = "2024"

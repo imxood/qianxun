@@ -60,54 +60,24 @@ async fn spawn_test_daemon(
 ) -> (u16, String, tokio::sync::watch::Sender<()>) {
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
-    use qianxun_core::provider::create_provider;
-    use qianxun_core::skills::SkillManager;
-    use qianxun_core::tools::ToolRegistry;
-    use qianxun_memory::MemoryCore;
+    use qianxun_runtime::RuntimeState;
     use crate::buf_writer::LogRing;
-    use crate::runtime::agent_host::{AgentLoopHost, SharedState};
     use crate::runtime::llm_providers::LlmProviderManager;
-    use crate::runtime::persistence::SessionStore;
     use crate::runtime::AppState;
 
-    // 1. Provider
-    let provider: Arc<dyn qianxun_core::provider::LlmProvider> = create_provider(
-        &resolved.active_provider,
-        &resolved.active_provider_config(),
-    )
-    .into();
-    // 2. Tools / Memory / Skills (空, 跟真实启动一致)
-    let tools = Arc::new(ToolRegistry::new());
-    let memory = Arc::new(MemoryCore::open_in_memory().expect("memory"));
-    let skills = SkillManager::new();
-    // 3. SessionStore (in_memory, 避免污染 ~/.qianxun/daemon.db)
-    let store = Arc::new(SessionStore::in_memory().expect("in_memory store"));
-    // 4. Shared state + Agent host
-    let shared = Arc::new(SharedState::new(
-        resolved.clone(),
-        provider.clone(),
-        tools.clone(),
-        memory.clone(),
-        skills.clone(),
-    ));
-    let agent_host = Arc::new(AgentLoopHost::new(8, shared.clone(), store.clone()));
-    // 5. LLM provider manager
+    // 1. RuntimeState (真 config + 真 provider + in_memory store 避免污染 ~/.qianxun/daemon.db)
+    let runtime = RuntimeState::new_in_memory_with_config(resolved.clone())
+        .await
+        .expect("RuntimeState in-memory with config");
+    let shutdown_tx = runtime.shutdown_tx.clone();
+
+    // 2. LLM provider manager
     let llm_providers = Arc::new(LlmProviderManager::from_config(&resolved));
-    // 6. AppState
-    let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
-    let config_arc = Arc::new(resolved.clone());
+
+    // 3. AppState (嵌入 runtime)
     let state = Arc::new(AppState {
-        agent_host,
-        config: config_arc,
-        provider,
-        tools,
-        memory,
-        skills,
-        shared,
-        store,
+        runtime,
         llm_providers,
-        shutdown_tx: shutdown_tx.clone(),
-        processing_loop_enabled: false,
         started_at: Instant::now(),
         active_conns: Arc::new(AtomicUsize::new(0)),
         log_ring: Arc::new(LogRing::new()),
@@ -584,7 +554,7 @@ async fn test_real_provider_active_switch_via_api() {
     );
 
     // 3. 验证 /v1/llm/providers 反映切换 (Stage 7b 简化: list 接口可能不实时反映
-    //    PUT 改的 config; manager.active_id 与 state.config 是独立状态).
+    //    PUT 改的 config; manager.active_id 与 state.runtime.config 是独立状态).
     //    所以这一步**不**强求列表 active_id 改变; 只验证 list 不报 5xx.
     let list_resp2: Value = client
         .get(format!("{base_url}/v1/llm/providers"))

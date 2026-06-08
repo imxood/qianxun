@@ -2023,6 +2023,7 @@ dependencies = [
  "keyring",
  "qianxun-core",
  "qianxun-memory",
+ "qianxun-runtime",
  "ratatui",
  "reqwest",
  "rusqlite",
@@ -2072,6 +2073,25 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "qianxun-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "qianxun-core",
+ "qianxun-memory",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",

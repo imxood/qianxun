@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 qianxun-core = { path = "../qianxun-core" }
 qianxun-memory = { path = "../qianxun-memory" }
+qianxun-runtime = { path = "../qianxun-runtime" }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
