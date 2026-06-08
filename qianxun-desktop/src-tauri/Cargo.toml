@@ -43,6 +43,12 @@ tracing = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots"] }
 # 直接复用主项目核心库 (path = src-tauri/ -> qianxun-desktop/ -> qianxun/ -> qianxun-core/)
 qianxun-core = { path = "../../qianxun-core" }
+# Stage 4a-2 (04b sub-task #2): 接入真 runtime.
+# qianxun-runtime: 复用 daemon 5 核心 (agent_host / service / persistence / session_runtime / output_sink / sse)
+#                  + RuntimeState (9 字段跨桌面 / daemon 共享)
+# qianxun-memory: SessionStore 跟 MemoryCore 都需要 (RuntimeState dep 树里也有, desktop 直接 dep 复用)
+qianxun-runtime = { path = "../../qianxun-runtime" }
+qianxun-memory = { path = "../../qianxun-memory" }
 
 [profile.release]
 panic = "abort"
