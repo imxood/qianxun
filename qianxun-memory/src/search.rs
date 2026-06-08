@@ -5,18 +5,25 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 /// 混合搜索 —— FTS5 全文搜索 + 向量语义搜索。
-#[allow(dead_code)] // 权重字段: hybrid ranking 待实现, 留作 Phase 3a 骨架
+///
+/// Phase C 收尾: 改为 stateless 设计 — `Connection` 由调用方提供（已加锁）,
+/// `HybridSearch` 只持有 in-memory vector index + 权重配置. 这样可以
+/// 跟 MemoryCore 的 `Arc<Mutex<Connection>>` 配合, 不用重复持锁.
+///
+/// 用法 (跟 MemoryCore.search 集成):
+///   let conn = db.lock()?;
+///   let hybrid = HybridSearch::new();
+///   let results = hybrid.search(&conn, query, limit);
+#[allow(dead_code)] // bm25_weight / vector_weight 留 Phase 后续 RRF 融合时读
 pub struct HybridSearch {
-    db: Arc<Connection>,
     vector: Arc<RwLock<Option<VectorIndex>>>,
     bm25_weight: f64,
     vector_weight: f64,
 }
 
 impl HybridSearch {
-    pub fn new(db: Arc<Connection>) -> Self {
+    pub fn new() -> Self {
         Self {
-            db,
             vector: Arc::new(RwLock::new(None)),
             bm25_weight: 0.4,
             vector_weight: 0.6,
@@ -29,9 +36,11 @@ impl HybridSearch {
     }
 
     /// 执行混合搜索。
-    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+    ///
+    /// `conn` 由调用方持有 (MemoryCore 走 `Arc<Mutex<Connection>>` 模式, 锁内调).
+    pub fn search(&self, conn: &Connection, query: &str, limit: usize) -> Vec<SearchResult> {
         // 1. FTS5 搜索（主路径）
-        let fts_results = self.fts_search(query, limit * 2);
+        let fts_results = self.fts_search(conn, query, limit * 2);
 
         // 2. 向量搜索（可选，预留）
         let _vector_results: Vec<(String, f64)> = Vec::new();
@@ -48,7 +57,7 @@ impl HybridSearch {
     }
 
     /// FTS5 全文搜索。
-    fn fts_search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+    fn fts_search(&self, conn: &Connection, query: &str, limit: usize) -> Vec<SearchResult> {
         // 对中文查询不做特殊处理，unicode61 tokenizer 会做字符级切分
         let fts_query = query
             .split_whitespace()
@@ -60,7 +69,7 @@ impl HybridSearch {
             return vec![];
         }
 
-        let mut stmt = match self.db.prepare(
+        let mut stmt = match conn.prepare(
             "SELECT o.id, o.session_id, o.timestamp,
                     json_extract(o.data, '$.title') as title,
                     json_extract(o.data, '$.narrative') as narrative,
@@ -95,7 +104,8 @@ impl HybridSearch {
 
                 let concepts: Vec<String> =
                     serde_json::from_str(&concepts_json).unwrap_or_default();
-                let files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
+                let files: Vec<String> =
+                    serde_json::from_str(&files_json).unwrap_or_default();
 
                 Ok(SearchResult {
                     id,
@@ -129,5 +139,11 @@ impl HybridSearch {
                 *count <= max_per_session
             })
             .collect()
+    }
+}
+
+impl Default for HybridSearch {
+    fn default() -> Self {
+        Self::new()
     }
 }

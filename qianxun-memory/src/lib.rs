@@ -49,6 +49,11 @@ struct CurrentSession {
 /// 持有 SQLite 连接，实现 `MemoryObserver` trait。
 /// 所有 SQLite 操作通过 `spawn_blocking` 派发到 blocking 线程池，
 /// 避免在 async 上下文中持 std::sync::Mutex 锁阻塞 tokio reactor。
+///
+/// `Clone` 仅复制 `Arc<...>` 句柄（不复制 SQLite 连接），多个 `MemoryCore`
+/// 实例共享同一连接和 current_session 状态。供 RuntimeState 持有方
+/// 复制给 TUI/ACP/CLI 等 binary 入口共享用。
+#[derive(Clone)]
 pub struct MemoryCore {
     db: Arc<Mutex<Connection>>,
     current_session: Arc<Mutex<Option<CurrentSession>>>,
@@ -360,7 +365,7 @@ impl MemoryObserver for MemoryCore {
             return;
         };
 
-        // 2. 更新 sessions 表
+        // 2. 更新 sessions 表 + 触发 consolidation (在同一个锁块内, 避免并发写)
         let db = self.db.clone();
         let now = chrono::Utc::now().to_rfc3339();
         let sid = session.session_id.clone();
@@ -371,6 +376,11 @@ impl MemoryObserver for MemoryCore {
                 "UPDATE sessions SET ended_at = ?1, status = 'ended' WHERE id = ?2",
                 params![now, sid],
             )?;
+            // Phase C 收尾: 同步触发 consolidation — 把当前 session 的 observation
+            // 聚类生成持久 memory. consolidation 内部 spawn_blocking 拿锁, 嵌套
+            // 锁会死锁, 所以调 run_consolidation_locked (已加锁版).
+            // spawn_blocking 闭包内同步执行, 不再 spawn 新的 task.
+            consolidation::run_consolidation_locked(&conn, &sid);
             Ok(())
         })
         .await;
@@ -462,66 +472,18 @@ fn build_context_sync(db: &Arc<Mutex<Connection>>, query: &str, _token_budget: u
 }
 
 /// FTS5 搜索 observations，返回 BM25 排序的 SearchResult。
+///
+/// Phase C 收尾: 委托给 `HybridSearch::search` (stateless, 接 `&Connection`).
+/// 跟之前直走 FTS5 行为一致, 多了 session dedup (max 3 per session)
+/// + 未来 vector search 集成入口.
 fn search_sync(
     db: &Arc<Mutex<Connection>>,
     query: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<SearchResult>> {
     let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-
-    let fts_query: String = query
-        .split_whitespace()
-        .filter(|w| w.chars().count() > 1)
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if fts_query.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT o.id, o.session_id, o.timestamp, \
-                json_extract(o.data, '$.title'), \
-                json_extract(o.data, '$.narrative'), \
-                json_extract(o.data, '$.concepts'), \
-                json_extract(o.data, '$.files'), \
-                json_extract(o.data, '$.importance'), \
-                rank \
-         FROM obs_fts f JOIN observations o ON o.rowid = f.rowid \
-         WHERE obs_fts MATCH ?1 ORDER BY rank LIMIT ?2",
-    )?;
-
-    let results: Vec<SearchResult> = stmt
-        .query_map(params![fts_query, limit as i64], |row| {
-            let id: String = row.get(0)?;
-            let session_id: String = row.get(1)?;
-            let timestamp: String = row.get(2)?;
-            let title: String = row.get(3).unwrap_or_default();
-            let narrative: String = row.get(4).unwrap_or_default();
-            let concepts_json: String = row.get(5).unwrap_or_else(|_| "[]".into());
-            let files_json: String = row.get(6).unwrap_or_else(|_| "[]".into());
-            let importance: u8 = row.get(7).unwrap_or(0);
-            let score: f64 = row.get(8).unwrap_or(0.0);
-
-            let concepts: Vec<String> = serde_json::from_str(&concepts_json).unwrap_or_default();
-            let files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
-
-            Ok(SearchResult {
-                id,
-                session_id,
-                timestamp,
-                title: title.trim_matches('"').to_string(),
-                narrative: narrative.trim_matches('"').to_string(),
-                concepts,
-                files,
-                importance,
-                score,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    Ok(results)
+    let hybrid = search::HybridSearch::new();
+    Ok(hybrid.search(&conn, query, limit))
 }
 
 #[cfg(test)]
@@ -702,5 +664,67 @@ mod tests {
         assert!(r_a[0].narrative.contains("a_unique"));
         assert_eq!(r_b.len(), 1, "session B should find its own obs");
         assert!(r_b[0].narrative.contains("b_unique"));
+    }
+
+    /// Phase C 收尾: 验证 compressor 把 tool_output 收进 narrative.
+    /// PostToolUse 时 FTS5 应该能搜到输出里的关键词 (例: "magic_keyword").
+    /// PreToolUse 时 narrative 不含输出关键词, 只能搜 path.
+    #[tokio::test]
+    async fn compressor_includes_tool_output_in_narrative_for_post_hook() {
+        let core = fresh().await;
+        let input = json!({"path": "/test/file.rs"});
+        let output_text = "magic_keyword_xyz42 from tool output";
+
+        // PostToolUse → 输出进 narrative
+        core.observe("PostToolUse", "read_file", Some(input.clone()), Some(output_text))
+            .await;
+
+        // FTS5 搜 magic_keyword_xyz42 — 之前搜不到, 现在应该能搜到
+        let results = core.search("magic_keyword_xyz42", 10).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "PostToolUse observation's narrative should include tool output"
+        );
+        assert!(results[0].narrative.contains("magic_keyword_xyz42"));
+    }
+
+    /// Phase C 收尾: 验证 session_end 触发 consolidation 生成 memory.
+    /// 条件: ≥3 observations 共享 concepts (Jaccard > 0.5) → 聚类 → size >= 3 生成 memory.
+    /// 用 edit_file (importance=6) 同 path 写 3 条, 共享 concepts = {rs, magic_topic}
+    /// (Jaccard = 1.0) + 平均 importance 6 ≥ 6 → 双重满足.
+    #[tokio::test]
+    async fn session_end_triggers_consolidation() {
+        let core = fresh().await;
+        let path = "/test/magic_topic.rs";
+        for _ in 0..3 {
+            core.observe(
+                "PostToolUse",
+                "edit_file",
+                Some(json!({"path": path, "old": "old line"})),
+                Some("edit output"),
+            )
+            .await;
+        }
+        // 触发 session_end — 同步触发 consolidation
+        core.session_end().await;
+
+        // 验证 memories 表有 pattern 类型的 memory
+        let db = core.db.clone();
+        let mem_count: i64 = tokio::task::spawn_blocking(move || {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE mem_type = 'pattern'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap();
+
+        // consolidation 条件: avg_importance >= 6 || size >= 3 → 生成 memory
+        // edit_file importance=6, 3 个 size >= 3 → 双重满足
+        assert!(mem_count >= 1, "consolidation should generate at least 1 memory, got {mem_count}");
     }
 }

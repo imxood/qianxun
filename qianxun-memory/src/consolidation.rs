@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Consolidation 管线 —— 将 Observation 聚类生成持久 Memory。
 ///
@@ -9,9 +9,26 @@ use std::sync::Arc;
 /// 2. 按 concepts 集合 Jaccard > 0.5 聚类
 /// 3. 平均 importance > 6 → 生成 Memory
 /// 4. Jaccard > 0.7 → 版本升级
-pub fn run_consolidation(db: &Arc<Connection>, session_id: &str) {
+///
+/// Phase C 收尾: 加顶层 `run_consolidation(db: &Arc<Mutex<Connection>>, ...)`,
+/// 内部获取锁, 让 MemoryCore.session_end() 可以无脑调.
+/// 内部 helper `run_consolidation_locked(conn: &Connection, ...)` 接受已加锁连接
+/// 供测试 / 嵌套调用用.
+pub fn run_consolidation(db: &Arc<Mutex<Connection>>, session_id: &str) {
+    let conn = match db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("[memory] consolidation db lock poisoned: {e}");
+            return;
+        }
+    };
+    run_consolidation_locked(&conn, session_id);
+}
+
+/// 已加锁连接的 consolidation 入口.
+pub fn run_consolidation_locked(conn: &Connection, session_id: &str) {
     // 获取 session 的所有 observation
-    let observations = match load_observations(db, session_id) {
+    let observations = match load_observations(conn, session_id) {
         Some(o) => o,
         None => return,
     };
@@ -26,7 +43,7 @@ pub fn run_consolidation(db: &Arc<Connection>, session_id: &str) {
     // 评估每个簇
     for cluster in clusters {
         if cluster.avg_importance() >= 6.0 || cluster.size() >= 3 {
-            if let Err(e) = save_memory(db, &cluster, session_id) {
+            if let Err(e) = save_memory(conn, &cluster, session_id) {
                 tracing::warn!("[memory] consolidation save failed: {e}");
             }
         }
@@ -174,32 +191,27 @@ fn cluster_observations(observations: &[ClusterObservation]) -> Vec<Cluster> {
 }
 
 /// 二次扫描：合并相似簇。
+///
+/// Phase C 收尾: 修 pre-existing 迭代中 mutate vec 的 bug. 原实现用
+/// `for i in (0..len).rev()` + `clusters.remove(j)`, 当 i > j 移除 j 后,
+/// i 索引漂移但 for loop range 不变, 下次访问 `clusters[i]` 时越界 panic.
+/// 改成 while 循环 + j 跟随 shift 重置 (删除 j 后, 新元素到 j 位置, j 不递增).
 fn merge_similar_clusters(clusters: &mut Vec<Cluster>) {
-    let mut merged = true;
-    while merged {
-        merged = false;
-        for i in (0..clusters.len()).rev() {
-            for j in (0..clusters.len()).rev() {
-                if i == j {
-                    continue;
-                }
-                let sim = jaccard_similarity(&clusters[i].concepts, &clusters[j].concepts);
-                if sim > 0.3 {
-                    // 合并 j 到 i
-                    let other = clusters.remove(j);
-                    let target = &mut clusters[i];
-                    for c in &other.concepts {
-                        target.concepts.insert(c.clone());
-                    }
-                    target.observations.extend(other.observations);
-                    merged = true;
-                    break;
-                }
-            }
-            if merged {
-                break;
+    let mut i = 0;
+    while i < clusters.len() {
+        let mut j = i + 1;
+        while j < clusters.len() {
+            let sim = jaccard_similarity(&clusters[i].concepts, &clusters[j].concepts);
+            if sim > 0.3 {
+                // 合并 j 到 i. j 位置被新元素 (原 j+1) 占据, j 不递增.
+                let other = clusters.remove(j);
+                clusters[i].concepts.extend(other.concepts);
+                clusters[i].observations.extend(other.observations);
+            } else {
+                j += 1;
             }
         }
+        i += 1;
     }
 }
 
