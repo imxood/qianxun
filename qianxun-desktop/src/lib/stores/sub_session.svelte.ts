@@ -1,12 +1,25 @@
 // qianxun-desktop/src/lib/stores/sub_session.svelte.ts
 // SubSession store
+//
+// Stage 4a (sub-task #4): 删 buildSeed 依赖.
+//   - SubSession 是 plan 执行的子任务状态, 后端 RuntimeApi 暂没完整 plan execution 接口
+//     (sub-task #3 范围之外, 后续 sub-task 接)
+//   - 当前: 空数组, 等 plan_update 事件 / 后端 push 真实 sub_session 时填充
+//   - API 表面保持不变, sendToSubSession 等方法仍可用, 业务容错
+//
+// 关联:
+//   - $lib/ipc/runtime.ts (后续 sub-task 接 createPlan + plan_update 事件)
+//   - qianxun-runtime/src/api/types.rs (PlanInfo DTO)
+//   - docs/30_子项目规划/04b-tauri-runtime-integration.md §"Sub-task 5/6"
 
-import { buildSeed } from '$lib/mock/seed';
 import { uiStore } from './ui.svelte';
 import type { SubSession, SubSessionStatus, Message } from '$lib/types/entity';
 
 function createSubSessionStore() {
-	const subSessions = $state<SubSession[]>(buildSeed().sub_sessions);
+	const subSessions = $state<SubSession[]>([]);
+	let initialized = $state(false);
+	let loading = $state(false);
+	let lastError = $state<string | null>(null);
 
 	const activeSubSession = $derived(
 		uiStore.activeView.kind === 'sub_session'
@@ -14,9 +27,42 @@ function createSubSessionStore() {
 			: null,
 	);
 
+	/// 启动时调. 当前 noop (后端暂没 list_sub_sessions RuntimeApi).
+	/// 真实 sub_session 由 plan execution 推过来, 后续 sub-task 加 'plan_update' 事件监听.
+	async function loadAll() {
+		if (initialized || loading) return;
+		loading = true;
+		lastError = null;
+		try {
+			// TODO: 等后端 RuntimeApi 加 list_sub_sessions 或 plan_update 事件
+			initialized = true;
+		} catch (e) {
+			lastError = (e as Error).message ?? String(e);
+		} finally {
+			loading = false;
+		}
+	}
+
+	/// 内部: plan execution 推新 sub_session 时调 (后续 sub-task 接).
+	/// 当前 sub-task 范围: 保留 API 但不被外部调.
+	function add(opts: Omit<SubSession, 'messages' | 'output'>): SubSession {
+		const sub: SubSession = { ...opts, messages: [], output: null };
+		subSessions.push(sub);
+		return sub;
+	}
+
 	return {
 		get all() {
 			return subSessions;
+		},
+		get initialized() {
+			return initialized;
+		},
+		get loading() {
+			return loading;
+		},
+		get lastError() {
+			return lastError;
 		},
 		get(id: string): SubSession | undefined {
 			return subSessions.find((s) => s.id === id);
@@ -67,6 +113,8 @@ function createSubSessionStore() {
 			// 任何状态都可以发消息 (追问模式), 仅 'ReadOnly' 状态完全冻结
 			return s.status !== 'ReadOnly';
 		},
+		loadAll,
+		add,
 	};
 }
 
