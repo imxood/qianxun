@@ -10,6 +10,11 @@ export default defineConfig({
 		alias: {
 			$lib: fileURLToPath(new URL("./src/lib", import.meta.url)),
 			"$lib/*": fileURLToPath(new URL("./src/lib/*", import.meta.url)),
+			// SvelteKit 模块在 vitest 里不存在, 用 mock 文件替代
+			// (vi.mock 在 setup 里 hoist 不稳定, alias 方式更稳)
+			"$app/environment": fileURLToPath(
+				new URL("./tests/mocks/app/environment.ts", import.meta.url)
+			),
 		},
 		// Svelte 5 mount()/unmount() 在 jsdom 环境下走 client 入口, 不要
 		// 默认的 node 条件 (会命中 index-server.js → lifecycle_function_unavailable)
@@ -20,6 +25,7 @@ export default defineConfig({
 		environment: "jsdom",
 		globals: false,
 		include: ["src/**/*.{test,spec}.{js,ts}"],
+		setupFiles: ["./vitest.setup.ts"],
 		// jsdom + Svelte 5 mount 兼容: 让 svelte 包用 browser 条件
 		server: {
 			deps: {

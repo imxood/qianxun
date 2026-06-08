@@ -8,3 +8,6 @@ debug.log
 .opencode
 node_modules
 .mavis
+__pycache__
+scratch
+.results

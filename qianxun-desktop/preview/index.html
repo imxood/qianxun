@@ -1,0 +1,1707 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>千寻 · Chat-First 重构预览</title>
+
+  <!-- Tailwind Play CDN (开发预览用, 生产请走 Svelte 项目) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+  <script>
+    // Tailwind 配置 (千寻 brand tokens)
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            // 千寻 主色: amber (温暖, 寻的旅程感)
+            brand: {
+              50:  '#fffbeb',
+              100: '#fef3c7',
+              200: '#fde68a',
+              300: '#fcd34d',
+              400: '#fbbf24',
+              500: '#f59e0b',  // 主色
+              600: '#d97706',
+              700: '#b45309',
+              800: '#92400e',
+              900: '#78350f',
+            },
+            // Plan 状态色
+            plan: {
+              running: '#38bdf8',  // sky-400
+              done:    '#10b981',  // emerald-500
+              failed:  '#f43f5e',  // rose-500
+              pending: '#71717a',  // zinc-500
+            },
+          },
+          fontFamily: {
+            sans: ['"Inter"', 'system-ui', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
+            mono: ['"JetBrains Mono"', '"Fira Code"', 'ui-monospace', 'monospace'],
+          },
+          animation: {
+            'pulse-soft': 'pulse-soft 2s ease-in-out infinite',
+            'shimmer': 'shimmer 2s linear infinite',
+          },
+          keyframes: {
+            'pulse-soft': {
+              '0%, 100%': { opacity: '1' },
+              '50%': { opacity: '0.6' },
+            },
+            'shimmer': {
+              '0%': { backgroundPosition: '-200% 0' },
+              '100%': { backgroundPosition: '200% 0' },
+            },
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    /* 基础 */
+    html { font-family: 'Inter', system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+    body { -webkit-font-smoothing: antialiased; }
+
+    /* 拖动分隔线 */
+    .divider-h {
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      transition: background 200ms;
+      flex-shrink: 0;
+    }
+    .divider-h:hover, .divider-h.dragging {
+      background: rgb(245 158 11 / 0.5);
+    }
+    .divider-h::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 2px;
+      height: 32px;
+      background: rgb(63 63 70 / 0.6);
+      border-radius: 1px;
+    }
+    .divider-h:hover::after {
+      background: rgb(245 158 11);
+    }
+
+    /* 滚动条美化 */
+    .scroll-area::-webkit-scrollbar { width: 8px; height: 8px; }
+    .scroll-area::-webkit-scrollbar-track { background: transparent; }
+    .scroll-area::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.5); border-radius: 4px; }
+    .scroll-area::-webkit-scrollbar-thumb:hover { background: rgb(82 82 91 / 0.8); }
+
+    /* Shimmer (用于 streaming 中) */
+    .shimmer {
+      background: linear-gradient(90deg, transparent 0%, rgb(245 158 11 / 0.2) 50%, transparent 100%);
+      background-size: 200% 100%;
+      animation: shimmer 2s linear infinite;
+    }
+
+    /* 场景容器 */
+    .scene {
+      min-height: 720px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.5);
+      background: #09090b;
+    }
+
+    /* mock 内容不可点 */
+    .mock-app, .mock-app * {
+      user-select: none;
+      pointer-events: none;
+    }
+    .mock-app .interactive { pointer-events: auto; }
+    .mock-app a, .mock-app button { cursor: default; }
+
+    /* Plan 状态徽章 */
+    .badge-running { background: rgb(56 189 248 / 0.15); color: rgb(125 211 252); border: 1px solid rgb(56 189 248 / 0.3); }
+    .badge-done    { background: rgb(16 185 129 / 0.15); color: rgb(110 231 183); border: 1px solid rgb(16 185 129 / 0.3); }
+    .badge-failed  { background: rgb(244 63 94 / 0.15); color: rgb(252 165 165); border: 1px solid rgb(244 63 94 / 0.3); }
+    .badge-pending { background: rgb(113 113 122 / 0.15); color: rgb(161 161 170); border: 1px solid rgb(113 113 122 / 0.3); }
+
+    /* 章节标题 */
+    .scene-tag {
+      display: inline-block;
+      padding: 4px 12px;
+      background: rgb(245 158 11 / 0.1);
+      color: rgb(252 211 77);
+      border: 1px solid rgb(245 158 11 / 0.3);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    /* Print: hidden by default, show on print */
+    @media print {
+      .no-print { display: none !important; }
+    }
+  </style>
+</head>
+
+<body class="bg-zinc-950 text-zinc-100 min-h-screen">
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       顶部导航 (sticky)
+       ═══════════════════════════════════════════════════════════════════ -->
+  <nav class="sticky top-0 z-50 backdrop-blur-md bg-zinc-950/80 border-b border-zinc-800">
+    <div class="max-w-[1600px] mx-auto px-6 py-3 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center">
+          <i data-lucide="compass" class="w-5 h-5 text-zinc-950"></i>
+        </div>
+        <div>
+          <h1 class="text-sm font-semibold text-zinc-100">千寻 · Chat-First 重构</h1>
+          <p class="text-xs text-zinc-500">设计预览 v1 · 2026-06-07</p>
+        </div>
+      </div>
+
+      <div class="hidden md:flex items-center gap-1 text-xs">
+        <a href="#scene-1" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">1. 进行中</a>
+        <a href="#scene-2" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">2. 已完成</a>
+        <a href="#scene-3" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">3. 任务中心</a>
+        <a href="#scene-4" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">4. 子会话</a>
+        <a href="#scene-5" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">5. 空状态</a>
+        <a href="#scene-6" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">6. 亮色模式</a>
+        <a href="#tokens" class="px-3 py-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100">设计令牌</a>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="themeToggle" class="p-2 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100" aria-label="切换主题">
+          <i data-lucide="moon" class="w-4 h-4"></i>
+        </button>
+        <a href="../docs/chat-first-redesign.md" class="text-xs px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200">
+          设计文档 ↗
+        </a>
+      </div>
+    </div>
+  </nav>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       头部说明
+       ═══════════════════════════════════════════════════════════════════ -->
+  <header class="max-w-[1600px] mx-auto px-6 pt-12 pb-8">
+    <div class="flex flex-wrap items-baseline gap-3 mb-3">
+      <span class="scene-tag">设计预览</span>
+      <span class="text-xs text-zinc-500">Tailwind CSS · Lucide · 静态 HTML 演示</span>
+    </div>
+    <h2 class="text-3xl md:text-4xl font-semibold text-zinc-50 mb-3">
+      把 Chat 放回主工作区
+    </h2>
+    <p class="text-zinc-400 max-w-3xl leading-relaxed">
+      千寻不再是 VSCode IDE 也不是 Kanban 看板. 它是一个 <span class="text-brand-400">以 Chat 为中心</span> 的工作台:
+      项目是有记忆的容器, 会话是一次次主题对话, 主 Agent 在需要时拉一群子 Agent 干活 (Plan),
+      子 Agent 上下文持久化可点入, 项目经验跟会话纪要自动沉淀.
+    </p>
+  </header>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       场景 1 · 主场景 — Active Plan running
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="scene-1" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">场景 1</span>
+      <h3 class="text-xl font-semibold text-zinc-100">主场景 · Plan 进行中</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      三列布局的完整状态. Col 1 扁平任务侧栏 (新建任务是小链接 + 搜索 + 任务历史 + 定时任务 + 项目 (可展开看任务) + Agent 团队 + 用户信息),
+      Col 2 Chat 流 (含 Plan 工具调用块, 完整 3 task 列表 + 打开子会话), Col 3 上下文检查器 (契约 + 变更文件).
+    </p>
+
+    <div class="mock-app scene flex h-[720px]">
+      <!-- ─── Col 1: 任务侧栏 (扁平, 不按项目分组) ─── -->
+      <aside class="w-[260px] bg-zinc-900 border-r border-zinc-800 flex flex-col text-sm">
+        <!-- 顶部: 新建任务 (小链接, 不是大按钮) + 搜索 -->
+        <div class="p-2 space-y-1.5 border-b border-zinc-800">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-zinc-200 hover:bg-zinc-800 rounded text-[13px]">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-zinc-400"></i>
+            <span>新建任务</span>
+          </button>
+          <div class="relative">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+            <input
+              type="text"
+              placeholder="搜索任务 / 文件 / 命令"
+              class="w-full pl-8 pr-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs text-zinc-200 placeholder-zinc-500 focus:border-zinc-700 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <!-- 滚动区: 各分段 -->
+        <div class="flex-1 overflow-y-auto scroll-area py-2 space-y-3">
+          <!-- 定时任务 -->
+          <div>
+            <div class="px-3 py-1 text-[11px] text-zinc-500 font-medium tracking-wide">定时任务</div>
+            <div class="px-1.5 space-y-0.5">
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-300 hover:bg-zinc-800 rounded">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-500 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">记忆维护</span>
+                <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse-soft flex-shrink-0"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 任务历史 (平铺, 当前的 active) -->
+          <div>
+            <div class="px-3 py-1 text-[11px] text-zinc-500 font-medium tracking-wide flex items-center justify-between">
+              <span>任务历史</span>
+              <span class="text-zinc-600">14</span>
+            </div>
+            <div class="px-1.5 space-y-0.5">
+              <!-- active: 实现 JWT 用户认证 -->
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] bg-zinc-800 text-zinc-100 rounded">
+                <i data-lucide="folder-open" class="w-3.5 h-3.5 text-brand-400 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">实现 JWT 用户认证</span>
+                <span class="w-1.5 h-1.5 rounded-full bg-plan-running animate-pulse-soft flex-shrink-0"></span>
+              </button>
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-400 hover:bg-zinc-800/50 rounded">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">EIP 测试程序确认</span>
+              </button>
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-400 hover:bg-zinc-800/50 rounded">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">验证 POST 接口</span>
+              </button>
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-400 hover:bg-zinc-800/50 rounded">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">Apple Token SN 唯一性检查</span>
+              </button>
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-400 hover:bg-zinc-800/50 rounded">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">上报参数重构分析</span>
+              </button>
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-400 hover:bg-zinc-800/50 rounded">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">修复 Rust 字段缺失错误</span>
+              </button>
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-500 hover:bg-zinc-800/50 rounded">
+                <i data-lucide="more-horizontal" class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0"></i>
+                <span class="flex-1 text-left">更多 (8)</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Agent 团队 -->
+          <div>
+            <div class="px-3 py-1 text-[11px] text-zinc-500 font-medium tracking-wide flex items-center justify-between">
+              <span>Agent 团队</span>
+              <i data-lucide="plus" class="w-3 h-3 text-zinc-600 cursor-pointer"></i>
+            </div>
+            <div class="px-3 py-2 text-[11px] text-zinc-600">无团队, 点 + 新建</div>
+          </div>
+
+          <!-- 项目 (可点击展开, 展开后显示任务列表) -->
+          <div>
+            <div class="px-3 py-1 text-[11px] text-zinc-500 font-medium tracking-wide flex items-center justify-between">
+              <span>项目</span>
+              <i data-lucide="plus" class="w-3 h-3 text-zinc-600 cursor-pointer" title="新建项目"></i>
+            </div>
+            <div class="px-1.5 space-y-0.5">
+              <!-- 千寻桌面端 (展开) -->
+              <div>
+                <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-200 hover:bg-zinc-800 rounded">
+                  <i data-lucide="chevron-down" class="w-3 h-3 text-zinc-500"></i>
+                  <i data-lucide="folder-open" class="w-3.5 h-3.5 text-brand-400 flex-shrink-0"></i>
+                  <span class="flex-1 text-left truncate">千寻桌面端</span>
+                  <span class="text-zinc-600 text-[11px]">3</span>
+                </button>
+                <!-- 任务列表 (展开) -->
+                <div class="ml-4 mt-0.5 space-y-0.5 border-l border-zinc-800 pl-1.5">
+                  <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[12px] bg-zinc-800/50 text-zinc-100 rounded">
+                    <i data-lucide="message-square" class="w-3 h-3 text-brand-400 flex-shrink-0"></i>
+                    <span class="flex-1 text-left truncate">实现 JWT 用户认证</span>
+                    <span class="w-1.5 h-1.5 rounded-full bg-plan-running animate-pulse-soft flex-shrink-0"></span>
+                  </button>
+                  <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[12px] text-zinc-400 hover:bg-zinc-800/30 rounded">
+                    <i data-lucide="message-square" class="w-3 h-3 text-zinc-600 flex-shrink-0"></i>
+                    <span class="flex-1 text-left truncate">EIP 测试程序确认</span>
+                  </button>
+                  <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[12px] text-zinc-400 hover:bg-zinc-800/30 rounded">
+                    <i data-lucide="message-square" class="w-3 h-3 text-zinc-600 flex-shrink-0"></i>
+                    <span class="flex-1 text-left truncate">验证 POST 接口</span>
+                  </button>
+                </div>
+              </div>
+              <!-- 千寻 daemon (折叠) -->
+              <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-300 hover:bg-zinc-800 rounded">
+                <i data-lucide="chevron-right" class="w-3 h-3 text-zinc-500"></i>
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-500 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">千寻 daemon</span>
+                <span class="text-zinc-600 text-[11px]">2</span>
+              </button>
+              <!-- qianxun-test (折叠) -->
+              <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-300 hover:bg-zinc-800 rounded">
+                <i data-lucide="chevron-right" class="w-3 h-3 text-zinc-500"></i>
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-500 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">qianxun-test</span>
+                <span class="text-zinc-600 text-[11px]">1</span>
+              </button>
+              <!-- scratch (折叠) -->
+              <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-300 hover:bg-zinc-800 rounded">
+                <i data-lucide="chevron-right" class="w-3 h-3 text-zinc-500"></i>
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-zinc-500 flex-shrink-0"></i>
+                <span class="flex-1 text-left truncate">scratch</span>
+                <span class="text-zinc-600 text-[11px]">1</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部: Provider / 设置 / daemon 状态 (原始设计样式) -->
+        <div class="p-2 border-t border-zinc-800 space-y-0.5">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>Provider · DeepSeek</span>
+          </button>
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+            <span>设置</span>
+          </button>
+          <div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-plan-running"></span>
+            <span class="text-zinc-500">daemon 已连接</span>
+          </div>
+        </div>
+      </aside>
+
+      <div class="divider-h relative"></div>
+
+      <!-- ─── Col 2: Chat 主工作区 ─── -->
+      <main class="flex-1 flex flex-col bg-zinc-950 min-w-0">
+        <!-- Chat header -->
+        <div class="h-12 px-4 border-b border-zinc-800 flex items-center justify-between flex-shrink-0">
+          <div class="flex items-center gap-2">
+            <h4 class="text-sm font-medium text-zinc-100 truncate">实现 JWT 用户认证</h4>
+            <span class="text-xs text-zinc-500">·</span>
+            <span class="text-xs text-zinc-500">deepseek-v4-flash</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400">
+              <i data-lucide="git-branch" class="w-4 h-4"></i>
+            </button>
+            <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400">
+              <i data-lucide="more-horizontal" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="flex-1 overflow-y-auto scroll-area px-4 py-6 space-y-4">
+          <!-- User message -->
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="user" class="w-3.5 h-3.5 text-zinc-300"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <div class="text-xs text-zinc-500 mb-1">maxu</div>
+              <p class="text-sm text-zinc-100 leading-relaxed">
+                帮我加个 JWT 登录, 用 bcrypt 加密. 记得加测试.
+              </p>
+            </div>
+          </div>
+
+          <!-- Assistant message 1: 思考 -->
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 text-zinc-950"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <div class="text-xs text-zinc-500 mb-1">小寻 (主 Agent)</div>
+              <p class="text-sm text-zinc-200 leading-relaxed">
+                好的. 这涉及 schema 变更、API 跟单测, 我先拉个 Plan 拆 3 个子任务, 串行跑.
+              </p>
+            </div>
+          </div>
+
+          <!-- Plan tool-call 块 (完整展开: tasks + 打开子会话 + 附件) -->
+          <div class="ml-10 max-w-3xl">
+            <div class="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+              <!-- Plan 头部 -->
+              <div class="px-4 py-3 flex items-center gap-3 border-b border-zinc-800">
+                <div class="w-8 h-8 rounded-md bg-zinc-800 flex items-center justify-center">
+                  <i data-lucide="layers" class="w-4 h-4 text-brand-400"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <h5 class="text-sm font-medium text-zinc-100">Plan: 实现 JWT 用户认证</h5>
+                    <span class="badge-running text-[10px] px-1.5 py-0.5 rounded">running · 2/3</span>
+                  </div>
+                  <p class="text-xs text-zinc-500 mt-0.5">3 tasks · 2 done · 1 running · 已 20 min</p>
+                </div>
+                <button class="text-[11px] px-2 py-0.5 rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">取消</button>
+              </div>
+
+              <!-- 任务列表 (每个 task 1 个 sub-session, 打开子会话 inline) -->
+              <div class="px-4 py-2 space-y-0.5">
+                <!-- Task 1: done -->
+                <div class="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-zinc-800/30 group">
+                  <i data-lucide="check-circle-2" class="w-4 h-4 text-plan-done flex-shrink-0"></i>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="text-sm text-zinc-300">设计 users 表 + 索引</span>
+                      <span class="text-[10px] text-zinc-500 px-1.5 py-0.5 bg-zinc-800 rounded">coder</span>
+                      <span class="text-[10px] text-emerald-400 flex items-center gap-0.5">
+                        <i data-lucide="check" class="w-2.5 h-2.5"></i> PASS
+                      </span>
+                    </div>
+                    <p class="text-xs text-zinc-500 mt-0.5">+ 2 files · 12 min</p>
+                  </div>
+                  <a class="text-xs text-brand-400 hover:underline opacity-60 group-hover:opacity-100">打开子会话</a>
+                </div>
+                <!-- Task 2: done -->
+                <div class="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-zinc-800/30 group">
+                  <i data-lucide="check-circle-2" class="w-4 h-4 text-plan-done flex-shrink-0"></i>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="text-sm text-zinc-300">实现 JWT 签发与校验</span>
+                      <span class="text-[10px] text-zinc-500 px-1.5 py-0.5 bg-zinc-800 rounded">coder</span>
+                      <span class="text-[10px] text-emerald-400 flex items-center gap-0.5">
+                        <i data-lucide="check" class="w-2.5 h-2.5"></i> PASS
+                      </span>
+                    </div>
+                    <p class="text-xs text-zinc-500 mt-0.5">+ 3 files · 8 min</p>
+                  </div>
+                  <a class="text-xs text-brand-400 hover:underline opacity-60 group-hover:opacity-100">打开子会话</a>
+                </div>
+                <!-- Task 3: running (打开子会话永远可见) -->
+                <div class="flex items-center gap-3 px-2 py-1.5 rounded bg-zinc-800/30 group">
+                  <i data-lucide="loader" class="w-4 h-4 text-plan-running flex-shrink-0 animate-spin"></i>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="text-sm text-zinc-100">写认证流程单测</span>
+                      <span class="text-[10px] text-zinc-500 px-1.5 py-0.5 bg-zinc-800 rounded">tester</span>
+                    </div>
+                    <p class="text-xs text-zinc-500 mt-0.5">+ 1 file · 已 4 min · 等待 verifier</p>
+                  </div>
+                  <a class="text-xs text-brand-400 hover:underline">打开子会话</a>
+                </div>
+              </div>
+
+              <!-- 底部 summary -->
+              <div class="px-4 py-2.5 border-t border-zinc-800 flex items-center gap-2 bg-zinc-900/30">
+                <span class="text-xs text-zinc-500">已修改 6 文件</span>
+                <span class="text-zinc-700">·</span>
+                <span class="text-xs text-zinc-500">任务进度 2/3</span>
+                <span class="text-zinc-700">·</span>
+                <span class="text-xs text-zinc-500">verifier 待就绪</span>
+                <div class="flex-1"></div>
+                <button class="text-xs px-2.5 py-1 rounded text-zinc-400 hover:bg-zinc-800">查看日志</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Assistant message 2: 持续输出 -->
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 text-zinc-950"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <p class="text-sm text-zinc-200 leading-relaxed">
+                用户表已建好, JWT 工具函数就位. tester 正在跑 8 个测试用例 (含 3 个边界 case)...
+              </p>
+              <span class="inline-block w-2 h-4 bg-brand-500 ml-0.5 align-middle animate-pulse"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 输入框 -->
+        <div class="p-3 border-t border-zinc-800 flex-shrink-0">
+          <div class="rounded-lg border border-zinc-800 bg-zinc-900 focus-within:border-brand-500/50 transition">
+            <textarea
+              rows="2"
+              placeholder="发消息 · 输入 / 唤起命令 · @ 引用项目"
+              class="w-full bg-transparent text-sm text-zinc-100 placeholder-zinc-500 px-3 pt-2.5 pb-1 resize-none focus:outline-none scroll-area"
+            ></textarea>
+            <div class="px-2 pb-2 flex items-center gap-1">
+              <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400">
+                <i data-lucide="at-sign" class="w-4 h-4"></i>
+              </button>
+              <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400">
+                <i data-lucide="paperclip" class="w-4 h-4"></i>
+              </button>
+              <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400">
+                <i data-lucide="command" class="w-4 h-4"></i>
+              </button>
+              <div class="flex-1"></div>
+              <span class="text-xs text-zinc-500 mr-2">deepseek-v4-flash</span>
+              <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400">
+                <i data-lucide="square" class="w-3.5 h-3.5 fill-current"></i>
+              </button>
+              <button class="p-1.5 rounded bg-brand-500 hover:bg-brand-600 text-zinc-950">
+                <i data-lucide="send" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <div class="divider-h relative"></div>
+
+      <!-- ─── Col 3: Context 检查器 ─── -->
+      <aside class="w-[320px] bg-zinc-900 border-l border-zinc-800 flex flex-col">
+        <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+          <h5 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Inspector</h5>
+          <div class="flex items-center gap-1">
+            <button class="p-1 rounded hover:bg-zinc-800 text-zinc-400">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            </button>
+            <button class="p-1 rounded hover:bg-zinc-800 text-zinc-400">
+              <i data-lucide="panel-right-close" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto scroll-area">
+          <!-- Plan 概要 (只放 Col 2 没有的契约信息, 不再列 task) -->
+          <div class="p-3 border-b border-zinc-800">
+            <div class="flex items-center gap-2 mb-2">
+              <i data-lucide="layers" class="w-4 h-4 text-brand-400"></i>
+              <h6 class="text-sm font-medium text-zinc-100">实现 JWT 登录</h6>
+            </div>
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">启动于</span>
+                <span class="text-zinc-300">19 min ago</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">超时</span>
+                <span class="text-zinc-300">30 min</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">verifier</span>
+                <span class="text-zinc-300">tester + code-reviewer</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">依赖</span>
+                <span class="text-zinc-300 font-mono text-[10px]">t0 → t1 → t2</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 变更文件 -->
+          <div class="p-3">
+            <h6 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Changed files</h6>
+            <div class="space-y-0.5 text-xs font-mono">
+              <div class="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-zinc-800/30">
+                <span class="text-emerald-400 font-bold w-3">+</span>
+                <span class="text-zinc-300 truncate">src/auth/jwt.ts</span>
+              </div>
+              <div class="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-zinc-800/30">
+                <span class="text-emerald-400 font-bold w-3">+</span>
+                <span class="text-zinc-300 truncate">src/auth/users.ts</span>
+              </div>
+              <div class="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-zinc-800/30">
+                <span class="text-emerald-400 font-bold w-3">+</span>
+                <span class="text-zinc-300 truncate">src/auth/bcrypt.ts</span>
+              </div>
+              <div class="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-zinc-800/30">
+                <span class="text-amber-400 font-bold w-3">~</span>
+                <span class="text-zinc-300 truncate">src/routes/login.ts</span>
+              </div>
+              <div class="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-zinc-800/30">
+                <span class="text-amber-400 font-bold w-3">~</span>
+                <span class="text-zinc-300 truncate">src/middleware/auth.ts</span>
+              </div>
+              <div class="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-zinc-800/30">
+                <span class="text-emerald-400 font-bold w-3">+</span>
+                <span class="text-zinc-300 truncate">tests/auth.test.ts</span>
+                <span class="text-[10px] text-zinc-500">running</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 设计说明 -->
+    <div class="mt-4 grid md:grid-cols-3 gap-3 text-xs text-zinc-400">
+      <div class="p-3 rounded-md bg-zinc-900/50 border border-zinc-800">
+        <div class="text-zinc-200 font-medium mb-1">Col 1 · 项目与会话</div>
+        项目树 + 会话列表, 当前 active 会话有状态点 (running). "未分类" 组收容游离 session.
+      </div>
+      <div class="p-3 rounded-md bg-zinc-900/50 border border-zinc-800">
+        <div class="text-zinc-200 font-medium mb-1">Col 2 · Chat 流 (Plan 完整展开)</div>
+        Plan 块是 Chat 里的核心节点: 含 3 个 task 列表 (状态 + role + verifier + 打开子会话). 多个 Plan 在 Chat 流里按时间顺序并排, 跟消息一样自然展开.
+      </div>
+      <div class="p-3 rounded-md bg-zinc-900/50 border border-zinc-800">
+        <div class="text-zinc-200 font-medium mb-1">Col 3 · Inspector (周边上下文)</div>
+        只放 Col 2 没有的: Plan 契约 (启动/超时/verifier/依赖) + Changed files. 不再列 Tasks / Sub-sessions, 那是 Col 2 的事.
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       场景 2 · Plan 完成
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="scene-2" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">场景 2</span>
+      <h3 class="text-xl font-semibold text-zinc-100">Plan 完成 · 交付态</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      Plan 完成后, Chat 流里出现交付摘要 + 附件列表 + "沉淀经验" 提示. Col 3 显示 deliverable 摘要.
+    </p>
+
+    <div class="mock-app scene flex h-[720px]">
+      <!-- Col 1 (跟 Scene 1 一致的扁平侧栏) -->
+      <aside class="w-[260px] bg-zinc-900 border-r border-zinc-800 flex flex-col text-sm">
+        <div class="p-2 space-y-1.5 border-b border-zinc-800">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-zinc-200 hover:bg-zinc-800 rounded text-[13px]">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-zinc-400"></i>
+            <span>新建任务</span>
+          </button>
+          <div class="relative">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+            <input type="text" placeholder="搜索任务 / 文件 / 命令" class="w-full pl-8 pr-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs text-zinc-200 placeholder-zinc-500 focus:border-zinc-700 focus:outline-none" />
+          </div>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll-area py-2 space-y-3">
+          <div class="px-1.5">
+            <div class="px-2 py-1 text-[11px] text-zinc-500 font-medium tracking-wide">项目</div>
+            <div class="space-y-0.5">
+              <div>
+                <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-200 hover:bg-zinc-800 rounded">
+                  <i data-lucide="chevron-down" class="w-3 h-3 text-zinc-500"></i>
+                  <i data-lucide="folder-open" class="w-3.5 h-3.5 text-brand-400 flex-shrink-0"></i>
+                  <span class="flex-1 text-left truncate">千寻桌面端</span>
+                </button>
+                <div class="ml-4 mt-0.5 space-y-0.5 border-l border-zinc-800 pl-1.5">
+                  <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[12px] bg-zinc-800/50 text-zinc-100 rounded">
+                    <i data-lucide="message-square" class="w-3 h-3 text-brand-400 flex-shrink-0"></i>
+                    <span class="flex-1 text-left truncate">实现 JWT 用户认证</span>
+                    <i data-lucide="check-circle-2" class="w-3 h-3 text-plan-done"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="p-2 border-t border-zinc-800 space-y-0.5">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>Provider · DeepSeek</span>
+          </button>
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+            <span>设置</span>
+          </button>
+          <div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-plan-running"></span>
+            <span class="text-zinc-500">daemon 已连接</span>
+          </div>
+        </div>
+      </aside>
+
+      <div class="divider-h relative"></div>
+
+      <!-- Col 2 -->
+      <main class="flex-1 flex flex-col bg-zinc-950 min-w-0">
+        <div class="h-12 px-4 border-b border-zinc-800 flex items-center gap-2 flex-shrink-0">
+          <h4 class="text-sm font-medium text-zinc-100 truncate">实现 JWT 用户认证</h4>
+          <span class="text-xs text-zinc-500">·</span>
+          <span class="text-xs text-zinc-500">deepseek-v4-flash</span>
+          <div class="flex-1"></div>
+          <span class="text-xs text-zinc-500">已完成 4 min ago</span>
+        </div>
+
+        <div class="flex-1 overflow-y-auto scroll-area px-4 py-6 space-y-4">
+          <!-- 之前的消息省略, 直接展示 Plan 完成态 -->
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 text-zinc-950"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <p class="text-sm text-zinc-200 leading-relaxed mb-3">
+                Plan 跑完了, 全部 3 个子任务 done. 改动如下:
+              </p>
+
+              <!-- Plan 完成卡片 -->
+              <div class="rounded-lg border border-plan-done/30 bg-emerald-950/20 overflow-hidden mb-3">
+                <div class="px-4 py-3 flex items-center gap-3 border-b border-plan-done/20">
+                  <div class="w-8 h-8 rounded-md bg-plan-done/20 flex items-center justify-center">
+                    <i data-lucide="check-circle-2" class="w-4 h-4 text-plan-done"></i>
+                  </div>
+                  <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                      <h5 class="text-sm font-medium text-zinc-100">Plan: 实现 JWT 用户认证</h5>
+                      <span class="badge-done text-[10px] px-1.5 py-0.5 rounded">done · 24 min</span>
+                    </div>
+                    <p class="text-xs text-zinc-500 mt-0.5">3/3 tasks · 6 files · +214 / -12</p>
+                  </div>
+                </div>
+
+                <div class="px-4 py-3 space-y-2 text-xs">
+                  <div class="text-zinc-300 font-medium">Deliverable</div>
+                  <ul class="text-zinc-400 space-y-1 pl-4 list-disc">
+                    <li>新建 <code class="text-brand-400 bg-zinc-800 px-1 rounded">users</code> 表 (含 password_hash, created_at 索引)</li>
+                    <li>JWT 签发 / 校验工具 (jose 库, RS256, 24h 过期)</li>
+                    <li>bcrypt 加密 (rounds=12) + 登录 / 刷新 / 登出 3 个端点</li>
+                    <li>8 个测试用例 (含 3 个边界 case), 覆盖率 92%</li>
+                  </ul>
+                </div>
+
+                <div class="px-4 py-2.5 border-t border-plan-done/20 flex items-center gap-2 flex-wrap">
+                  <span class="text-xs text-zinc-500">附件:</span>
+                  <button class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center gap-1">
+                    <i data-lucide="file-code" class="w-3 h-3"></i> jwt.ts
+                  </button>
+                  <button class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center gap-1">
+                    <i data-lucide="file-code" class="w-3 h-3"></i> users.ts
+                  </button>
+                  <button class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center gap-1">
+                    <i data-lucide="file-text" class="w-3 h-3"></i> auth.test.ts
+                  </button>
+                  <button class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center gap-1">
+                    <i data-lucide="git-pull-request" class="w-3 h-3"></i> MR #42
+                  </button>
+                </div>
+              </div>
+
+              <p class="text-sm text-zinc-200 leading-relaxed">
+                要不要我把这次的关键决策沉淀到项目经验? (jose / bcrypt rounds=12 / RS256)
+              </p>
+            </div>
+          </div>
+
+          <!-- 经验沉淀提示气泡 -->
+          <div class="ml-10 max-w-3xl">
+            <div class="rounded-lg border border-brand-500/30 bg-brand-500/5 overflow-hidden">
+              <div class="px-4 py-3 flex items-center gap-2 border-b border-brand-500/20">
+                <i data-lucide="lightbulb" class="w-4 h-4 text-brand-400"></i>
+                <h5 class="text-sm font-medium text-brand-300">建议沉淀到项目经验</h5>
+              </div>
+              <div class="px-4 py-3 space-y-2">
+                <div class="flex items-start gap-2 text-xs">
+                  <i data-lucide="plus" class="w-3.5 h-3.5 text-brand-400 mt-0.5 flex-shrink-0"></i>
+                  <span class="text-zinc-300">本项目用 <code class="text-brand-400">jose</code> 库做 JWT, 不用 <code class="text-zinc-500 line-through">jsonwebtoken</code></span>
+                </div>
+                <div class="flex items-start gap-2 text-xs">
+                  <i data-lucide="plus" class="w-3.5 h-3.5 text-brand-400 mt-0.5 flex-shrink-0"></i>
+                  <span class="text-zinc-300">bcrypt rounds=12, 平衡性能跟安全</span>
+                </div>
+                <div class="flex items-start gap-2 text-xs">
+                  <i data-lucide="plus" class="w-3.5 h-3.5 text-brand-400 mt-0.5 flex-shrink-0"></i>
+                  <span class="text-zinc-300">JWT 用 RS256 非对称签名, 公钥可下发到多端</span>
+                </div>
+              </div>
+              <div class="px-4 py-2.5 border-t border-brand-500/20 flex items-center gap-2">
+                <button class="text-xs px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-600 text-zinc-950 font-medium">沉淀 3 条</button>
+                <button class="text-xs px-3 py-1.5 rounded text-zinc-400 hover:bg-zinc-800">修改</button>
+                <button class="text-xs px-3 py-1.5 rounded text-zinc-400 hover:bg-zinc-800">跳过</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <div class="divider-h relative"></div>
+
+      <!-- Col 3: 完成态 context -->
+      <aside class="w-[320px] bg-zinc-900 border-l border-zinc-800 flex flex-col">
+        <div class="px-3 py-2 border-b border-zinc-800">
+          <h5 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Inspector</h5>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll-area">
+          <div class="p-3 border-b border-zinc-800">
+            <div class="flex items-center gap-2 mb-2">
+              <i data-lucide="check-circle-2" class="w-4 h-4 text-plan-done"></i>
+              <h6 class="text-sm font-medium text-zinc-100">Plan 完成</h6>
+            </div>
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">耗时</span>
+                <span class="text-zinc-300">24 min</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">变更</span>
+                <span class="text-emerald-400">+214</span>
+                <span class="text-rose-400">-12</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">测试</span>
+                <span class="text-zinc-300">8/8 ✓</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">覆盖率</span>
+                <span class="text-zinc-300">92%</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="p-3 border-b border-zinc-800">
+            <h6 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Verdict</h6>
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center gap-2">
+                <i data-lucide="check" class="w-3.5 h-3.5 text-plan-done"></i>
+                <span class="text-zinc-300">tester: 8 tests pass</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <i data-lucide="check" class="w-3.5 h-3.5 text-plan-done"></i>
+                <span class="text-zinc-300">code-reviewer: 无重大问题</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="p-3">
+            <h6 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">下一步建议</h6>
+            <div class="space-y-1 text-xs text-zinc-400">
+              <div>• 在 main 分支合 MR</div>
+              <div>• 部署到 staging</div>
+              <div>• 更新 API 文档</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       场景 3 · 新会话 · 空白 Chat
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="scene-3" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">场景 3</span>
+      <h3 class="text-xl font-semibold text-zinc-100">新会话 · 空白 Chat</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      点击侧栏 "<strong class="text-zinc-200">+ 新建任务</strong>" (或按 <kbd class="text-[10px] px-1 py-0.5 bg-zinc-800 rounded text-zinc-400 font-mono">⌘ N</kbd>):
+      <strong class="text-zinc-200">不是弹窗, 不是居中页, 就是直接开一个新 Chat</strong>.
+      Col 2 切到空白 Chat, 输入框聚焦, 你打字就发. <strong class="text-zinc-200">没有 logo / slogan / 5 个模板</strong> 那种过度设计.
+    </p>
+
+    <div class="mock-app scene flex h-[640px]">
+      <!-- Col 1: 跟 Scene 1 一致的扁平侧栏 -->
+      <aside class="w-[260px] bg-zinc-900 border-r border-zinc-800 flex flex-col text-sm">
+        <div class="p-2 space-y-1.5 border-b border-zinc-800">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-zinc-200 bg-zinc-800/50 rounded text-[13px]">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-brand-400"></i>
+            <span>新建任务</span>
+            <span class="ml-auto text-[10px] text-zinc-500">⌘N</span>
+          </button>
+          <div class="relative">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+            <input
+              type="text"
+              placeholder="搜索任务 / 文件 / 命令"
+              class="w-full pl-8 pr-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs text-zinc-200 placeholder-zinc-500 focus:border-zinc-700 focus:outline-none"
+            />
+          </div>
+        </div>
+        <div class="flex-1 flex items-center justify-center text-center text-xs text-zinc-600 px-4">
+          <div>
+            <i data-lucide="message-square-dashed" class="w-6 h-6 mx-auto mb-1.5 text-zinc-700"></i>
+            新会话 · 还没开始<br>点 + 新建任务 开新 Chat
+          </div>
+        </div>
+        <div class="p-2 border-t border-zinc-800 space-y-0.5">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>Provider · DeepSeek</span>
+          </button>
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+            <span>设置</span>
+          </button>
+          <div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-plan-running"></span>
+            <span class="text-zinc-500">daemon 已连接</span>
+          </div>
+        </div>
+      </aside>
+
+      <div class="divider-h relative"></div>
+
+      <!-- Col 2: 空白 Chat, 输入框聚焦 -->
+      <main class="flex-1 flex flex-col bg-zinc-950 min-w-0">
+        <!-- Chat header: 空的, 不显示 session 标题 (还没建) -->
+        <div class="h-12 px-4 border-b border-zinc-800 flex items-center flex-shrink-0">
+          <span class="text-xs text-zinc-500">新会话 · 还没开始</span>
+        </div>
+
+        <!-- 空白区: 仅一个低饱和度提示 + 输入框 -->
+        <div class="flex-1 flex flex-col items-center justify-center px-6 pb-12">
+          <p class="text-zinc-600 text-sm mb-1">开始一个新任务</p>
+          <p class="text-zinc-700 text-xs">第一个消息发出后自动归类到项目或 Chat</p>
+        </div>
+
+        <!-- 输入框 (跟普通 Chat 一样, 简洁) -->
+        <div class="p-3 border-t border-zinc-800 flex-shrink-0">
+          <!-- 上下文 chip 行 (在输入框上方) -->
+          <div class="mb-2 flex items-center gap-1.5 px-1">
+            <button class="text-[11px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-400 flex items-center gap-1">
+              <i data-lucide="folder" class="w-3 h-3 text-zinc-500"></i>
+              <span>未选</span>
+              <i data-lucide="chevron-down" class="w-2.5 h-2.5 text-zinc-600"></i>
+            </button>
+            <button class="text-[11px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-400 flex items-center gap-1">
+              <i data-lucide="cpu" class="w-3 h-3 text-zinc-500"></i>
+              <span>MiniMax-M3</span>
+            </button>
+            <span class="text-[10px] text-zinc-700 ml-1">选文件夹 → 自动归类到项目</span>
+          </div>
+
+          <div class="rounded-lg border border-brand-500/40 bg-zinc-900 focus-within:border-brand-500/70 transition shadow-lg">
+            <textarea
+              rows="2"
+              placeholder="输入消息开始..."
+              class="w-full bg-transparent text-sm text-zinc-100 placeholder-zinc-500 px-3 pt-2.5 pb-1 resize-none focus:outline-none scroll-area"
+            >帮我把 src/auth/jwt.ts 重构一下, 用 jose 库, 顺便加 8 个测试用例</textarea>
+            <div class="px-2 pb-2 flex items-center gap-1">
+              <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400"><i data-lucide="at-sign" class="w-3.5 h-3.5"></i></button>
+              <button class="p-1.5 rounded hover:bg-zinc-800 text-zinc-400"><i data-lucide="paperclip" class="w-3.5 h-3.5"></i></button>
+              <div class="flex-1"></div>
+              <button class="p-1.5 rounded bg-brand-500 hover:bg-brand-600 text-zinc-950"><i data-lucide="arrow-up" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <div class="divider-h relative"></div>
+
+      <!-- Col 3: 极简 - 仅项目 / 上下文小贴士 -->
+      <aside class="w-[260px] bg-zinc-900 border-l border-zinc-800 flex flex-col text-sm">
+        <div class="px-3 py-2 border-b border-zinc-800">
+          <h5 class="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">提示</h5>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll-area p-3 space-y-4">
+          <div>
+            <div class="text-[11px] text-zinc-400 font-medium mb-1.5">如何归类?</div>
+            <ul class="text-[11px] text-zinc-500 space-y-1.5 leading-relaxed">
+              <li>· 选了文件夹 → 落入对应项目</li>
+              <li>· 不选 (未选) → 落入 Chat</li>
+              <li>· 之后在侧栏可拖动归类</li>
+            </ul>
+          </div>
+          <div>
+            <div class="text-[11px] text-zinc-400 font-medium mb-1.5">主 Agent 能做什么?</div>
+            <ul class="text-[11px] text-zinc-500 space-y-1.5 leading-relaxed">
+              <li>· 直接回答 / 写代码</li>
+              <li>· 拆 Plan 拉子 Agent 干活</li>
+              <li>· 沉淀项目经验 / 会话纪要</li>
+            </ul>
+          </div>
+          <div>
+            <div class="text-[11px] text-zinc-400 font-medium mb-1.5">快捷键</div>
+            <div class="text-[11px] text-zinc-500 space-y-1">
+              <div><kbd class="px-1 py-0.5 bg-zinc-800 rounded text-zinc-400 font-mono text-[10px]">⌘ N</kbd> 新建</div>
+              <div><kbd class="px-1 py-0.5 bg-zinc-800 rounded text-zinc-400 font-mono text-[10px]">⌘ K</kbd> 命令面板</div>
+              <div><kbd class="px-1 py-0.5 bg-zinc-800 rounded text-zinc-400 font-mono text-[10px]">⌘ /</kbd> 切换主题</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 关键设计说明 -->
+    <div class="mt-4 grid md:grid-cols-3 gap-3 text-xs text-zinc-400">
+      <div class="p-3 rounded-md bg-zinc-900/50 border border-zinc-800">
+        <div class="text-zinc-200 font-medium mb-1">新任务 = 新 Chat, 不是新页面</div>
+        不弹窗, 不居中页, 不搞 logo / slogan / 5 个模板. 跟现有 Chat UI 一样, 只是空白 + 输入框聚焦.
+      </div>
+      <div class="p-3 rounded-md bg-zinc-900/50 border border-zinc-800">
+        <div class="text-zinc-200 font-medium mb-1">侧栏入口是配角</div>
+        "+ 新建任务" 在侧栏是 <code class="text-brand-400 bg-zinc-800 px-1 rounded">小链接</code>, 跟搜索 / 任务历史 / 项目 平级. 焦点在任务列表.
+      </div>
+      <div class="p-3 rounded-md bg-zinc-900/50 border border-zinc-800">
+        <div class="text-zinc-200 font-medium mb-1">发消息后才建 session</div>
+        第一个消息发出 → 落 项目 / Chat. Col 3 给低饱和度提示 (怎么归类 / 能做什么), 不抢主工作区.
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       场景 4 · 子会话详情
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="scene-4" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">场景 4</span>
+      <h3 class="text-xl font-semibold text-zinc-100">子会话详情 · Tab 切换</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      在 Col 3 点击 "打开子会话" 后, Col 2 顶部出现 tab bar. 选中子会话 tab, Col 2 切到子 Agent 的消息流 (自己的上下文, 持久化, 终止后只读).
+    </p>
+
+    <div class="mock-app scene flex h-[720px]">
+      <!-- Col 1 (跟 Scene 1 一致的扁平侧栏) -->
+      <aside class="w-[260px] bg-zinc-900 border-r border-zinc-800 flex flex-col text-sm">
+        <div class="p-2 space-y-1.5 border-b border-zinc-800">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-zinc-200 hover:bg-zinc-800 rounded text-[13px]">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-zinc-400"></i>
+            <span>新建任务</span>
+          </button>
+          <div class="relative">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+            <input type="text" placeholder="搜索任务 / 文件 / 命令" class="w-full pl-8 pr-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs text-zinc-200 placeholder-zinc-500 focus:border-zinc-700 focus:outline-none" />
+          </div>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll-area py-2 space-y-3">
+          <div class="px-1.5">
+            <div class="px-2 py-1 text-[11px] text-zinc-500 font-medium tracking-wide">项目</div>
+            <div class="space-y-0.5">
+              <div>
+                <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-200 hover:bg-zinc-800 rounded">
+                  <i data-lucide="chevron-down" class="w-3 h-3 text-zinc-500"></i>
+                  <i data-lucide="folder-open" class="w-3.5 h-3.5 text-brand-400 flex-shrink-0"></i>
+                  <span class="flex-1 text-left truncate">千寻桌面端</span>
+                </button>
+                <div class="ml-4 mt-0.5 space-y-0.5 border-l border-zinc-800 pl-1.5">
+                  <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[12px] bg-zinc-800/50 text-zinc-100 rounded">
+                    <i data-lucide="message-square" class="w-3 h-3 text-brand-400 flex-shrink-0"></i>
+                    <span class="flex-1 text-left truncate">实现 JWT 用户认证</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="p-2 border-t border-zinc-800 space-y-0.5">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>Provider · DeepSeek</span>
+          </button>
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+            <span>设置</span>
+          </button>
+          <div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-plan-running"></span>
+            <span class="text-zinc-500">daemon 已连接</span>
+          </div>
+        </div>
+      </aside>
+
+      <div class="divider-h relative"></div>
+
+      <main class="flex-1 flex flex-col bg-zinc-950 min-w-0">
+        <!-- Tab bar -->
+        <div class="h-12 px-2 border-b border-zinc-800 flex items-center gap-1 flex-shrink-0">
+          <button class="h-9 px-3 flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 rounded-t-md">
+            <i data-lucide="message-square" class="w-3.5 h-3.5"></i>
+            <span>主会话: JWT 认证</span>
+            <i data-lucide="x" class="w-3 h-3 opacity-50 hover:opacity-100"></i>
+          </button>
+          <button class="h-9 px-3 flex items-center gap-2 text-xs bg-zinc-900 text-zinc-100 border-t border-x border-zinc-800 rounded-t-md">
+            <i data-lucide="bot" class="w-3.5 h-3.5 text-plan-running"></i>
+            <span>子会话: 写单测</span>
+            <span class="w-1.5 h-1.5 rounded-full bg-plan-running animate-pulse-soft"></span>
+            <i data-lucide="x" class="w-3 h-3 opacity-50 hover:opacity-100"></i>
+          </button>
+          <button class="h-9 px-2 flex items-center text-zinc-500 hover:text-zinc-300 rounded">
+            <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+
+        <!-- Sub-session content -->
+        <div class="flex-1 overflow-y-auto scroll-area px-4 py-6 space-y-4">
+          <!-- Sub-session header -->
+          <div class="flex items-center gap-2 px-3 py-2 rounded-md bg-zinc-900/50 border border-zinc-800 text-xs">
+            <i data-lucide="info" class="w-3.5 h-3.5 text-zinc-500"></i>
+            <span class="text-zinc-400">子会话由主 Agent 在 Plan <code class="text-brand-400 bg-zinc-800 px-1 rounded">plan_jwt_42</code> 中发起</span>
+            <span class="text-zinc-600">·</span>
+            <span class="text-zinc-400">role: tester</span>
+            <div class="flex-1"></div>
+            <button class="text-brand-400 hover:underline">跳回主会话</button>
+          </div>
+
+          <!-- 子 Agent 消息 -->
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-sky-900/50 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="bot" class="w-3.5 h-3.5 text-sky-400"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs text-zinc-400">tester (子 Agent)</span>
+                <span class="text-[10px] text-zinc-600 px-1.5 py-0.5 bg-zinc-800 rounded">sub-test · running</span>
+              </div>
+              <p class="text-sm text-zinc-200 leading-relaxed">
+                收到. 我会写 8 个测试用例覆盖: 正常登录 / 错误密码 / 过期 token / 签名错误 / 用户不存在 / 并发登录 / 登出失效 / 刷新 token. 先看一下现有的测试结构.
+              </p>
+            </div>
+          </div>
+
+          <!-- 工具调用 -->
+          <div class="ml-10 max-w-3xl">
+            <div class="rounded-md border border-zinc-800 bg-zinc-900/30 text-xs">
+              <div class="px-3 py-2 flex items-center gap-2 border-b border-zinc-800">
+                <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500"></i>
+                <span class="text-zinc-400">grep</span>
+                <code class="text-zinc-300">"describe\\(|it\\(" tests/**/*.test.ts</code>
+                <i data-lucide="check" class="w-3.5 h-3.5 text-plan-done ml-auto"></i>
+              </div>
+              <div class="px-3 py-1.5 text-zinc-500 font-mono text-[11px]">
+                tests/<br>
+                ├── auth.test.ts (existing, login flow)<br>
+                ├── users.test.ts (existing)<br>
+                └── jwt.test.ts (new)
+              </div>
+            </div>
+          </div>
+
+          <div class="ml-10 max-w-3xl">
+            <div class="rounded-md border border-zinc-800 bg-zinc-900/30 text-xs">
+              <div class="px-3 py-2 flex items-center gap-2 border-b border-zinc-800">
+                <i data-lucide="file-plus" class="w-3.5 h-3.5 text-zinc-500"></i>
+                <span class="text-zinc-400">write</span>
+                <code class="text-zinc-300">tests/auth.test.ts</code>
+                <i data-lucide="loader" class="w-3.5 h-3.5 text-plan-running ml-auto animate-spin"></i>
+              </div>
+              <div class="px-3 py-2 text-zinc-500 text-[11px]">
+                正在写入 8 个测试用例 (172 行)...
+              </div>
+            </div>
+          </div>
+
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-sky-900/50 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="bot" class="w-3.5 h-3.5 text-sky-400"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <p class="text-sm text-zinc-200 leading-relaxed">
+                写完了 8 个 case, 准备跑测试验证...
+              </p>
+              <span class="inline-block w-2 h-4 bg-sky-400 ml-0.5 align-middle animate-pulse"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 输入框 (子会话也可继续交互) -->
+        <div class="p-3 border-t border-zinc-800 flex-shrink-0">
+          <div class="rounded-lg border border-zinc-800 bg-zinc-900">
+            <div class="px-3 py-2 text-xs text-zinc-500 border-b border-zinc-800 flex items-center gap-1.5">
+              <i data-lucide="info" class="w-3 h-3"></i>
+              子会话可继续交互. 终止后变只读.
+            </div>
+            <textarea
+              rows="1"
+              placeholder="追问子 Agent (例如: 加一个 SQL 注入的测试用例)"
+              class="w-full bg-transparent text-sm text-zinc-100 placeholder-zinc-500 px-3 py-2 resize-none focus:outline-none scroll-area"
+            ></textarea>
+          </div>
+        </div>
+      </main>
+
+      <div class="divider-h relative"></div>
+
+      <!-- Col 3: 子会话 context -->
+      <aside class="w-[320px] bg-zinc-900 border-l border-zinc-800 flex flex-col">
+        <div class="px-3 py-2 border-b border-zinc-800">
+          <h5 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sub-session</h5>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll-area p-3 space-y-4">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <i data-lucide="bot" class="w-4 h-4 text-sky-400"></i>
+              <h6 class="text-sm font-medium text-zinc-100">tester · sub-test</h6>
+            </div>
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">状态</span>
+                <span class="text-plan-running">running</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">已运行</span>
+                <span class="text-zinc-300">4 min</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-zinc-500">上下文</span>
+                <span class="text-zinc-300">独立</span>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h6 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">父 Plan</h6>
+            <div class="px-3 py-2 rounded-md border border-zinc-800 bg-zinc-950 text-xs">
+              <div class="text-zinc-300">实现 JWT 用户认证</div>
+              <div class="text-zinc-500 mt-0.5">3 tasks · 2/3 done</div>
+              <button class="text-brand-400 hover:underline mt-1.5 text-xs">跳到 Plan 块 ↗</button>
+            </div>
+          </div>
+
+          <div>
+            <h6 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">兄弟 Sub-sessions</h6>
+            <div class="space-y-1">
+              <button class="w-full px-2 py-1.5 rounded hover:bg-zinc-800 flex items-center gap-2 text-left">
+                <i data-lucide="bot" class="w-3.5 h-3.5 text-zinc-500"></i>
+                <span class="text-xs text-zinc-300 flex-1 truncate">sub-schema</span>
+                <i data-lucide="check-circle-2" class="w-3 h-3 text-plan-done"></i>
+              </button>
+              <button class="w-full px-2 py-1.5 rounded hover:bg-zinc-800 flex items-center gap-2 text-left">
+                <i data-lucide="bot" class="w-3.5 h-3.5 text-zinc-500"></i>
+                <span class="text-xs text-zinc-300 flex-1 truncate">sub-jwt</span>
+                <i data-lucide="check-circle-2" class="w-3 h-3 text-plan-done"></i>
+              </button>
+              <button class="w-full px-2 py-1.5 rounded bg-zinc-800/50 flex items-center gap-2 text-left">
+                <i data-lucide="bot" class="w-3.5 h-3.5 text-plan-running"></i>
+                <span class="text-xs text-zinc-100 flex-1 truncate">sub-test (当前)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       场景 5 · 空状态
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="scene-5" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">场景 5</span>
+      <h3 class="text-xl font-semibold text-zinc-100">空状态 · 首次启动</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      首次启动或全新安装时的引导态. Col 1 跟其他场景同构 (新建任务链接 + 搜索 + 项目段), 中间是空状态提示 "还没有任务". Col 2 是居中的欢迎卡片, Col 3 提示功能.
+    </p>
+
+    <div class="mock-app scene flex h-[720px]">
+      <!-- Col 1 (跟 Scene 1 一致的扁平侧栏) -->
+      <aside class="w-[260px] bg-zinc-900 border-r border-zinc-800 flex flex-col text-sm">
+        <div class="p-2 space-y-1.5 border-b border-zinc-800">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-zinc-200 hover:bg-zinc-800 rounded text-[13px]">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-zinc-400"></i>
+            <span>新建任务</span>
+          </button>
+          <div class="relative">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+            <input type="text" placeholder="搜索任务 / 文件 / 命令" class="w-full pl-8 pr-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs text-zinc-200 placeholder-zinc-500 focus:border-zinc-700 focus:outline-none" />
+          </div>
+        </div>
+        <div class="flex-1 flex items-center justify-center text-center text-xs text-zinc-600 px-4">
+          <div>
+            <i data-lucide="message-square-plus" class="w-6 h-6 mx-auto mb-1.5 text-zinc-700"></i>
+            还没有任务<br>点 + 新建任务 开始
+          </div>
+        </div>
+        <div class="p-2 border-t border-zinc-800 space-y-0.5">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>Provider · DeepSeek</span>
+          </button>
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 rounded">
+            <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+            <span>设置</span>
+          </button>
+          <div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-plan-running"></span>
+            <span class="text-zinc-500">daemon 已连接</span>
+          </div>
+        </div>
+      </aside>
+
+      <div class="divider-h relative"></div>
+
+      <main class="flex-1 flex items-center justify-center bg-zinc-950">
+        <div class="text-center max-w-md">
+          <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center">
+            <i data-lucide="compass" class="w-9 h-9 text-zinc-950"></i>
+          </div>
+          <h3 class="text-xl font-semibold text-zinc-100 mb-2">欢迎使用千寻</h3>
+          <p class="text-sm text-zinc-400 mb-6 leading-relaxed">
+            你的个人 AI 编程助手.<br>
+            跟 AI 一起干活, 需要时拉一群子 Agent 并行处理子任务.
+          </p>
+          <div class="space-y-2">
+            <button class="w-full px-4 py-2.5 rounded-md bg-brand-500 hover:bg-brand-600 text-zinc-950 text-sm font-medium flex items-center justify-center gap-2">
+              <i data-lucide="plus" class="w-4 h-4"></i>
+              新建第一个任务
+            </button>
+          </div>
+          <div class="mt-6 text-[11px] text-zinc-600 space-y-1">
+            <div>快捷键</div>
+            <div><kbd class="px-1.5 py-0.5 bg-zinc-900 rounded text-zinc-400 font-mono">⌘ N</kbd> 新建任务 · <kbd class="px-1.5 py-0.5 bg-zinc-900 rounded text-zinc-400 font-mono">⌘ K</kbd> 命令面板 · <kbd class="px-1.5 py-0.5 bg-zinc-900 rounded text-zinc-400 font-mono">⌘ /</kbd> 切换主题</div>
+          </div>
+        </div>
+      </main>
+
+      <div class="divider-h relative"></div>
+
+      <aside class="w-[320px] bg-zinc-900 border-l border-zinc-800 flex flex-col p-4">
+        <h5 class="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">千寻能做什么</h5>
+        <div class="space-y-3 text-sm">
+          <div class="flex gap-2.5">
+            <i data-lucide="message-circle" class="w-4 h-4 text-brand-400 flex-shrink-0 mt-0.5"></i>
+            <div>
+              <div class="text-zinc-200 text-xs font-medium">跟 AI 持续对话</div>
+              <p class="text-[11px] text-zinc-500 mt-0.5">项目下挂多个会话, 可随时切回</p>
+            </div>
+          </div>
+          <div class="flex gap-2.5">
+            <i data-lucide="layers" class="w-4 h-4 text-brand-400 flex-shrink-0 mt-0.5"></i>
+            <div>
+              <div class="text-zinc-200 text-xs font-medium">拉子 Agent 干活</div>
+              <p class="text-[11px] text-zinc-500 mt-0.5">主 Agent 自动拆任务, 子 Agent 独立上下文</p>
+            </div>
+          </div>
+          <div class="flex gap-2.5">
+            <i data-lucide="book-open" class="w-4 h-4 text-brand-400 flex-shrink-0 mt-0.5"></i>
+            <div>
+              <div class="text-zinc-200 text-xs font-medium">项目经验沉淀</div>
+              <p class="text-[11px] text-zinc-500 mt-0.5">每次学到的都自动入库, 下次直接复用</p>
+            </div>
+          </div>
+          <div class="flex gap-2.5">
+            <i data-lucide="scroll-text" class="w-4 h-4 text-brand-400 flex-shrink-0 mt-0.5"></i>
+            <div>
+              <div class="text-zinc-200 text-xs font-medium">会话纪要</div>
+              <p class="text-[11px] text-zinc-500 mt-0.5">自动总结, 长会话不丢上下文</p>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       场景 6 · 亮色模式
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="scene-6" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">场景 6</span>
+      <h3 class="text-xl font-semibold text-zinc-100">亮色模式</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      同一主场景在亮色模式下的对照. 注意: 暗色是默认 (开发者偏好), 亮色用于白天 / 演示场景.
+    </p>
+
+    <!-- 强制亮色 -->
+    <div class="mock-app scene flex h-[720px]" style="background: #fafafa;">
+      <!-- Col 1 (亮色版, 跟暗色侧栏同构) -->
+      <aside class="w-[260px] bg-white border-r border-zinc-200 flex flex-col text-sm">
+        <div class="p-2 space-y-1.5 border-b border-zinc-200">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-zinc-900 hover:bg-zinc-100 rounded text-[13px]">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-zinc-500"></i>
+            <span>新建任务</span>
+          </button>
+          <div class="relative">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+            <input type="text" placeholder="搜索任务 / 文件 / 命令" class="w-full pl-8 pr-2 py-1.5 bg-white border border-zinc-200 rounded-md text-xs text-zinc-900 placeholder-zinc-400 focus:border-zinc-300 focus:outline-none" />
+          </div>
+        </div>
+        <div class="flex-1 overflow-y-auto scroll-area py-2 space-y-3">
+          <div class="px-1.5">
+            <div class="px-2 py-1 text-[11px] text-zinc-500 font-medium tracking-wide">项目</div>
+            <div class="space-y-0.5">
+              <div>
+                <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-zinc-900 hover:bg-zinc-100 rounded">
+                  <i data-lucide="chevron-down" class="w-3 h-3 text-zinc-500"></i>
+                  <i data-lucide="folder-open" class="w-3.5 h-3.5 text-brand-600 flex-shrink-0"></i>
+                  <span class="flex-1 text-left truncate">千寻桌面端</span>
+                </button>
+                <div class="ml-4 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-1.5">
+                  <button class="w-full flex items-center gap-2 px-2 py-1.5 text-[12px] bg-zinc-100 text-zinc-900 rounded">
+                    <i data-lucide="message-square" class="w-3 h-3 text-brand-600 flex-shrink-0"></i>
+                    <span class="flex-1 text-left truncate">实现 JWT 用户认证</span>
+                    <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse-soft flex-shrink-0"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="p-2 border-t border-zinc-200 space-y-0.5">
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 rounded">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-500"></i>
+            <span>Provider · DeepSeek</span>
+          </button>
+          <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 rounded">
+            <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+            <span>设置</span>
+          </button>
+          <div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>
+            <span class="text-zinc-500">daemon 已连接</span>
+          </div>
+        </div>
+      </aside>
+        <div class="flex-1 overflow-y-auto scroll-area py-2">
+          <div class="px-2 mb-1">
+            <button class="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-zinc-700">
+              <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+              <i data-lucide="folder-open" class="w-3.5 h-3.5 text-brand-600"></i>
+              <span class="flex-1 text-left">千寻桌面端</span>
+            </button>
+            <div class="ml-3 mt-0.5 space-y-0.5 border-l border-zinc-200 pl-1">
+              <button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs bg-zinc-100 text-zinc-900 rounded">
+                <i data-lucide="message-square" class="w-3.5 h-3.5 text-brand-600 fill-brand-600"></i>
+                <span class="flex-1 text-left truncate">实现 JWT 用户认证</span>
+                <span class="flex items-center gap-1">
+                  <span class="w-1.5 h-1.5 rounded-full bg-plan-running animate-pulse-soft"></span>
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div class="w-1 cursor-col-resize bg-zinc-200"></div>
+
+      <main class="flex-1 flex flex-col bg-zinc-50 min-w-0">
+        <div class="h-12 px-4 border-b border-zinc-200 flex items-center gap-2 flex-shrink-0">
+          <h4 class="text-sm font-medium text-zinc-900 truncate">实现 JWT 用户认证</h4>
+        </div>
+
+        <div class="flex-1 overflow-y-auto scroll-area px-4 py-6 space-y-4">
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-zinc-200 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="user" class="w-3.5 h-3.5 text-zinc-600"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <p class="text-sm text-zinc-900 leading-relaxed">
+                帮我加个 JWT 登录, 用 bcrypt 加密. 记得加测试.
+              </p>
+            </div>
+          </div>
+
+          <div class="flex gap-3 max-w-3xl">
+            <div class="w-7 h-7 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center flex-shrink-0">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 text-zinc-950"></i>
+            </div>
+            <div class="flex-1 pt-1">
+              <p class="text-sm text-zinc-800 leading-relaxed">
+                好的. 我先拉个 Plan 拆 3 个子任务.
+              </p>
+            </div>
+          </div>
+
+          <div class="ml-10 max-w-3xl">
+            <div class="rounded-lg border border-zinc-200 bg-white overflow-hidden">
+              <div class="px-4 py-3 flex items-center gap-3 border-b border-zinc-200">
+                <div class="w-8 h-8 rounded-md bg-brand-50 flex items-center justify-center">
+                  <i data-lucide="layers" class="w-4 h-4 text-brand-600"></i>
+                </div>
+                <div class="flex-1">
+                  <h5 class="text-sm font-medium text-zinc-900">Plan: 实现 JWT 用户认证</h5>
+                  <p class="text-xs text-zinc-500 mt-0.5">2/3 done · 1 running</p>
+                </div>
+                <span class="badge-running text-[10px] px-1.5 py-0.5 rounded">running</span>
+              </div>
+              <div class="px-4 py-3 text-xs text-zinc-700 space-y-1">
+                <div class="flex items-center gap-2">
+                  <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-plan-done"></i>
+                  设计 users 表 + 索引
+                </div>
+                <div class="flex items-center gap-2">
+                  <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-plan-done"></i>
+                  实现 JWT 签发与校验
+                </div>
+                <div class="flex items-center gap-2 text-zinc-900">
+                  <i data-lucide="loader" class="w-3.5 h-3.5 text-plan-running animate-spin"></i>
+                  写认证流程单测
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <div class="w-1 cursor-col-resize bg-zinc-200"></div>
+
+      <aside class="w-[320px] bg-white border-l border-zinc-200 flex flex-col">
+        <div class="px-3 py-2 border-b border-zinc-200">
+          <h5 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Inspector</h5>
+        </div>
+        <div class="flex-1 p-3 space-y-3 text-xs">
+          <div>
+            <h6 class="text-zinc-500 uppercase text-[10px] font-semibold tracking-wider mb-1.5">Plan</h6>
+            <div class="text-zinc-900">实现 JWT 用户认证</div>
+            <div class="text-zinc-500 mt-0.5">running · 2/3 · 20 min</div>
+          </div>
+          <div>
+            <h6 class="text-zinc-500 uppercase text-[10px] font-semibold tracking-wider mb-1.5">Changed files</h6>
+            <div class="font-mono space-y-0.5 text-zinc-700">
+              <div><span class="text-emerald-600">+</span> src/auth/jwt.ts</div>
+              <div><span class="text-emerald-600">+</span> src/auth/users.ts</div>
+              <div><span class="text-amber-600">~</span> src/routes/login.ts</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       设计令牌参考
+       ═══════════════════════════════════════════════════════════════════ -->
+  <section id="tokens" class="max-w-[1600px] mx-auto px-6 py-8 scroll-mt-20">
+    <div class="flex items-baseline gap-3 mb-4">
+      <span class="scene-tag">设计令牌</span>
+      <h3 class="text-xl font-semibold text-zinc-100">Design Tokens</h3>
+    </div>
+    <p class="text-sm text-zinc-400 mb-6 max-w-3xl">
+      千寻 brand token. 跟 Svelte 项目的 shadcn-svelte OKLCH 变量对齐. 见 <code class="text-brand-400 bg-zinc-800 px-1 rounded">layout.css</code>.
+    </p>
+
+    <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <!-- Brand -->
+      <div class="p-4 rounded-lg bg-zinc-900 border border-zinc-800">
+        <h4 class="text-sm font-semibold text-zinc-100 mb-3">Brand (amber)</h4>
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-brand-500"></div><span class="text-xs text-zinc-400 font-mono">brand-500</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-brand-400"></div><span class="text-xs text-zinc-400 font-mono">brand-400</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-brand-600"></div><span class="text-xs text-zinc-400 font-mono">brand-600</span></div>
+        </div>
+      </div>
+
+      <!-- Plan states -->
+      <div class="p-4 rounded-lg bg-zinc-900 border border-zinc-800">
+        <h4 class="text-sm font-semibold text-zinc-100 mb-3">Plan 状态</h4>
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-plan-running"></div><span class="text-xs text-zinc-400 font-mono">running · sky</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-plan-done"></div><span class="text-xs text-zinc-400 font-mono">done · emerald</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-plan-failed"></div><span class="text-xs text-zinc-400 font-mono">failed · rose</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-plan-pending"></div><span class="text-xs text-zinc-400 font-mono">pending · zinc</span></div>
+        </div>
+      </div>
+
+      <!-- Surface -->
+      <div class="p-4 rounded-lg bg-zinc-900 border border-zinc-800">
+        <h4 class="text-sm font-semibold text-zinc-100 mb-3">Surface (暗色)</h4>
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-zinc-950 border border-zinc-800"></div><span class="text-xs text-zinc-400 font-mono">bg · zinc-950</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-zinc-900 border border-zinc-800"></div><span class="text-xs text-zinc-400 font-mono">panel · zinc-900</span></div>
+          <div class="flex items-center gap-2"><div class="w-6 h-6 rounded bg-zinc-800"></div><span class="text-xs text-zinc-400 font-mono">elevated · zinc-800</span></div>
+        </div>
+      </div>
+
+      <!-- Typography -->
+      <div class="p-4 rounded-lg bg-zinc-900 border border-zinc-800">
+        <h4 class="text-sm font-semibold text-zinc-100 mb-3">Typography</h4>
+        <div class="space-y-1.5">
+          <div class="text-sm text-zinc-100">正文 · Inter 14px / 1.6</div>
+          <div class="text-xs text-zinc-400">次要 · 12px / zinc-400</div>
+          <div class="text-[10px] text-zinc-500 font-mono">代码 · JetBrains Mono</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 交互规则 -->
+    <div class="mt-6 p-5 rounded-lg bg-zinc-900 border border-zinc-800">
+      <h4 class="text-sm font-semibold text-zinc-100 mb-3">关键交互规则 (从 mavis-team 借来)</h4>
+      <ul class="space-y-2 text-sm text-zinc-300">
+        <li class="flex items-start gap-2">
+          <i data-lucide="check" class="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0"></i>
+          <span>1 个 PlanTask = 1 个可验证交付物 (跟 mavis-team SKILL.md:217 一致)</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <i data-lucide="check" class="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0"></i>
+          <span>verifier 独立 re-derive, 不读 producer diff 盖章</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <i data-lucide="check" class="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0"></i>
+          <span>单任务 30 分钟硬上限, 整体 30 分钟上限</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <i data-lucide="check" class="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0"></i>
+          <span>skip verify 必须有 user-written reason (结构层硬约束)</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <i data-lucide="check" class="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0"></i>
+          <span>子会话终止后只读, 追问回主会话</span>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Footer
+       ═══════════════════════════════════════════════════════════════════ -->
+  <footer class="max-w-[1600px] mx-auto px-6 py-12 mt-8 border-t border-zinc-800">
+    <div class="flex flex-wrap items-center justify-between gap-4 text-xs text-zinc-500">
+      <div>
+        千寻 Chat-First 重构预览 · v1 · 2026-06-07 ·
+        <a href="../docs/chat-first-redesign.md" class="text-brand-400 hover:underline">设计文档 ↗</a>
+      </div>
+      <div>
+        6 个场景 · Tailwind CDN · Lucide · 静态 HTML
+      </div>
+    </div>
+  </footer>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Scripts
+       ═══════════════════════════════════════════════════════════════════ -->
+  <script>
+    // 初始化 Lucide 图标
+    lucide.createIcons();
+
+    // 主题切换
+    const themeToggle = document.getElementById('themeToggle');
+    const html = document.documentElement;
+    themeToggle?.addEventListener('click', () => {
+      html.classList.toggle('dark');
+      const icon = themeToggle.querySelector('[data-lucide]');
+      const isDark = html.classList.contains('dark');
+      icon.setAttribute('data-lucide', isDark ? 'moon' : 'sun');
+      lucide.createIcons();
+    });
+
+    // 平滑滚动到锚点
+    document.querySelectorAll('a[href^="#"]').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        const target = document.querySelector(a.getAttribute('href'));
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+
+    // Divider 拖动 (Col 1 ↔ Col 2, Col 2 ↔ Col 3)
+    document.querySelectorAll('.mock-app').forEach(app => {
+      const cols = app.querySelectorAll(':scope > aside, :scope > main');
+      const dividers = app.querySelectorAll('.divider-h');
+
+      dividers.forEach((divider, idx) => {
+        let startX = 0;
+        let startWidth = 0;
+        let targetCol = null;
+        let nextCol = null;
+
+        divider.addEventListener('mousedown', (e) => {
+          divider.classList.add('dragging');
+          startX = e.clientX;
+          // 左侧的 col (aside/main)
+          targetCol = cols[idx];
+          nextCol = cols[idx + 1];
+          if (targetCol) startWidth = targetCol.getBoundingClientRect().width;
+          document.body.style.cursor = 'col-resize';
+          e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+          if (!targetCol) return;
+          const dx = e.clientX - startX;
+          const newWidth = Math.max(180, Math.min(560, startWidth + dx));
+          targetCol.style.width = newWidth + 'px';
+          targetCol.style.flexShrink = '0';
+        });
+
+        document.addEventListener('mouseup', () => {
+          if (!targetCol) return;
+          divider.classList.remove('dragging');
+          targetCol = null;
+          nextCol = null;
+          document.body.style.cursor = '';
+        });
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Tailwind v4: 默认用 @media (prefers-color-scheme: dark), 不响应 class 切换.
+ * 改用 class 模式让 <html class="dark"> 触发 dark: utility.
+ * (shadcn-svelte 标准配置) */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ───────────────────────────────────────────────────────────────────────────
  * shadcn-svelte theme variables (neutral base, Tailwind v4 CSS-first config)
  * 由 `pnpm dlx shadcn-svelte@latest init` 写入, 这里直接贴全.
