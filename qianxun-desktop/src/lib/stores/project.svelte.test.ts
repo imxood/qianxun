@@ -17,12 +17,14 @@ vi.mock("$lib/ipc/runtime", () => ({
 import { projectStore } from "$lib/stores/project.svelte";
 
 describe("ProjectStore (Stage 4a sub-task #4)", () => {
-	beforeEach(() => {
-		listProjectsMock.mockReset();
-		projectStore.all.length = 0;
-		(projectStore as unknown as { initialized: boolean }).initialized = false;
-		(projectStore as unknown as { loading: boolean }).loading = false;
-	});
+function resetProjectStore() {
+	projectStore.__resetForTesting();
+}
+
+beforeEach(() => {
+	listProjectsMock.mockReset();
+	resetProjectStore();
+});
 
 	it("loadAll_is_currently_noop: 后端 RuntimeApi 暂没 list_projects", async () => {
 		await projectStore.loadAll();

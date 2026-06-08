@@ -56,6 +56,13 @@ function createProjectStore() {
 			return projects.find((p) => p.id === id);
 		},
 		loadAll,
+		/// 测试专用: 重置内部状态. 业务代码不应该调.
+		__resetForTesting() {
+			projects.length = 0;
+			initialized = false;
+			loading = false;
+			lastError = null;
+		},
 	};
 }
 

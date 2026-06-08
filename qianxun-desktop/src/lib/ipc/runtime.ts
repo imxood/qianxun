@@ -72,18 +72,47 @@ export interface SendResponse {
 	status: "streaming";
 }
 
-/// Plan 状态.
-export type PlanStatus = "running" | "done" | "aborted";
+/// Plan 状态 (Phase D 收尾: 加 pending/failed 跟后端 5 态 1:1).
+export type PlanStatus = "pending" | "running" | "done" | "failed" | "aborted";
 
-/// create_plan 请求.
+/// 单个 task 规格 (跟 Svelte 端 PlanTaskSpec 字段对齐, 跟后端 PlanTaskSpec 1:1).
+export interface PlanTaskSpec {
+	id: string;
+	title: string;
+	prompt: string;
+	assigned_to?: string;
+	depends_on?: string[];
+	timeout_ms?: number;
+}
+
+/// 单个 task 执行结果.
+export interface PlanTaskResult {
+	id: string;
+	status: PlanStatus;
+	output: string;
+	error?: string | null;
+	started_at?: string | null;
+	ended_at?: string | null;
+}
+
+/// Plan contract.
+export interface PlanContract {
+	name: string;
+	description?: string;
+	tasks: PlanTaskSpec[];
+	timeout_ms?: number;
+}
+
+/// create_plan 请求 (Phase D 收尾: tasks 字段).
 export interface PlanInput {
 	session_id: string;
 	name: string;
 	description?: string;
 	timeout_ms?: number;
+	tasks?: PlanTaskSpec[];
 }
 
-/// create_plan / list_plans 响应元素.
+/// create_plan / list_plans 响应元素 (Phase D 收尾: 加 task_results / contract).
 export interface PlanInfo {
 	id: string;
 	session_id: string;
@@ -91,6 +120,8 @@ export interface PlanInfo {
 	status: PlanStatus;
 	started_at: string;
 	ended_at: string | null;
+	task_results?: PlanTaskResult[];
+	contract?: PlanContract;
 }
 
 /// load_session 响应.
@@ -259,6 +290,20 @@ export async function loadSession(sessionId: string): Promise<SessionState> {
 	}
 }
 
+/// 取消 plan (Phase D 收尾: 后端 RuntimeApi 加 cancel_plan).
+/// Tauri 模式: invoke<cancel_plan, ()>('cancel_plan', { planId }).
+/// Web fallback: noop.
+export async function cancelPlan(planId: string): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	try {
+		await invoke<void>("cancel_plan", { planId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
 // ─── session_event 监听 (全局唯一 listener) ─────────────────────────────
 
 /// Listen 'session_event' Tauri 事件. caller 自己过滤 session_id.
@@ -296,6 +341,17 @@ function webFallbackCreatePlan(input: PlanInput): PlanInfo {
 		status: "running",
 		started_at: now,
 		ended_at: null,
+		task_results: (input.tasks ?? []).map((t) => ({
+			id: t.id,
+			status: "pending",
+			output: "",
+		})),
+		contract: {
+			name: input.name,
+			description: input.description ?? "",
+			tasks: input.tasks ?? [],
+			timeout_ms: input.timeout_ms ?? 0,
+		},
 	};
 }
 

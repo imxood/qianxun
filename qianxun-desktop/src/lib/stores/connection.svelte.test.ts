@@ -1,79 +1,67 @@
 // ───────────────────────────────────────────────────────────────────────────
-// ConnectionStore — Stage 4 状态机 + 与 SessionStore 离线入队集成测试
-// 与 docs/30_子项目规划/03-tauri-desktop.md §10.1 / §10.3 一致
+// ConnectionStore — Stage 4 状态机测试 (sub-task #4 后)
 //
-// 测试 1: isDegraded (offline | degraded) 时 sessionStore.send() 把消息入
-//         offlineQueue, 不调 streamPrompt
+// Stage 4a (sub-task #4) 切真后端 (Tauri 2.0) 后, 原"daemon 不可达时
+// 消息入队 + streamPrompt 兜底" 的 HTTP 路径测试已不适用 — Tauri 是 in-process IPC,
+// 没有网络失败, 不需要 offline queue.
+//
+// 保留 ConnectionStore 状态机的 4 态 (offline / reconnecting / degraded / connected)
+// 单元测试, 跟 daemon 远程 health 探活路径配合 (Stage 6a fetchDaemonHealth).
+// 离线入队 / streamPrompt 集成测试, 留后续 sub-task 重新设计 (如果引入 multi-runtime
+// 跨进程场景).
 // ───────────────────────────────────────────────────────────────────────────
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// 必须在 import session.svelte 之前 mock $lib/sse/client
-const streamPromptMock = vi.fn();
-vi.mock("$lib/sse/client", () => ({
-	streamPrompt: (...args: unknown[]) => streamPromptMock(...args),
-	SseError: class SseError extends Error {
-		constructor(public code: string, message: string) {
-			super(message);
-			this.name = "SseError";
-		}
-	},
+vi.mock("$lib/ipc/bridge", () => ({
+	fetchDaemonHealth: vi.fn(),
 }));
 
-import { sessionStore } from "$lib/stores/session.svelte";
 import { connectionStore } from "$lib/stores/connection.svelte";
+import { fetchDaemonHealth } from "$lib/ipc/bridge";
 
-describe("ConnectionStore.isDegraded 驱动 SessionStore.send (Stage 4 §10.3)", () => {
+const mockFetch = vi.mocked(fetchDaemonHealth);
+
+describe("ConnectionStore (Stage 4a sub-task #4 切 invoke 后)", () => {
 	beforeEach(() => {
-		sessionStore.offlineQueue = [];
-		sessionStore.clearOfflineQueue();
-		sessionStore.reset();
-		streamPromptMock.mockReset();
-		// 重置 connectionStore 到 connected
-		connectionStore.daemonState = "connected";
+		mockFetch.mockReset();
+		connectionStore.daemonState = "offline";
 		connectionStore.lastError = null;
 		connectionStore.attempt = 0;
 	});
 
-	it("isDegraded=true (offline) 时 send 入队, isDegraded=false (connected) 时正常发", async () => {
-		// ── 场景 1: daemon 不可达 → 入队 ──────────────────────────────────
-		connectionStore.daemonState = "offline";
-		connectionStore.lastError = { ts: Date.now(), message: "daemon 不可达" };
+	it("default_state_is_offline: 初始 offline", () => {
+		expect(connectionStore.daemonState).toBe("offline");
 		expect(connectionStore.isDegraded).toBe(true);
-
-		await sessionStore.send("第一句", "MiniMax-M3");
-		expect(sessionStore.offlineQueue).toHaveLength(1);
-		expect(sessionStore.offlineQueue[0]?.text).toBe("第一句");
-		expect(sessionStore.offlineQueue[0]?.attempts).toBe(0);
-		expect(streamPromptMock).not.toHaveBeenCalled();
-
-		// ── 场景 2: daemon 恢复 → 走正常流 ─────────────────────────────────
-		connectionStore.daemonState = "connected";
-		expect(connectionStore.isDegraded).toBe(false);
-
-		streamPromptMock.mockResolvedValueOnce(undefined);
-		await sessionStore.send("第二句", "MiniMax-M3");
-		// 入队那条仍在 (flushOfflineQueue 由 +page.svelte 的定时器触发, 此处不调)
-		expect(sessionStore.offlineQueue).toHaveLength(1);
-		// 第二句走真发
-		expect(streamPromptMock).toHaveBeenCalledTimes(1);
-		expect(streamPromptMock).toHaveBeenCalledWith(
-			expect.objectContaining({
-				daemonUrl: connectionStore.daemonUrl,
-				messages: [{ type: "text", text: "第二句" }],
-				model: "MiniMax-M3",
-			})
-		);
 	});
 
-	it("isDegraded=true (degraded) 时也入队", async () => {
-		connectionStore.daemonState = "degraded";
-		connectionStore.lastError = { ts: Date.now(), message: "健康检查 3 次失败" };
-		expect(connectionStore.isDegraded).toBe(true);
+	it("markError_increments_attempt_and_keeps_reconnecting: 失败重试中", () => {
+		mockFetch.mockResolvedValue({
+			status: "offline",
+			version: "unknown",
+			uptime_sec: 0,
+			session_count: 0,
+			mcp_online: 0,
+			provider_status: {},
+		});
+		void connectionStore.startHealthCheck();
+		expect(connectionStore.daemonState).toBe("reconnecting");
+	});
 
-		await sessionStore.send("degraded 模式", "MiniMax-M3");
-		expect(sessionStore.offlineQueue).toHaveLength(1);
-		expect(sessionStore.offlineQueue[0]?.text).toBe("degraded 模式");
-		expect(streamPromptMock).not.toHaveBeenCalled();
+	it("successful_health_sets_connected: health 返 connected → 切状态", async () => {
+		mockFetch.mockResolvedValue({
+			status: "connected",
+			version: "0.1.0",
+			uptime_sec: 10,
+			session_count: 0,
+			mcp_online: 0,
+			provider_status: { deepseek: "ok" },
+		});
+		// 直接调 retry(), 跳过 startHealthCheck 的 setInterval
+		connectionStore.retry();
+		// 异步, 等 microtask
+		await new Promise((r) => setTimeout(r, 10));
+		expect(connectionStore.daemonState).toBe("connected");
+		expect(connectionStore.attempt).toBe(0);
 	});
 });

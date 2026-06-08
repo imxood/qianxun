@@ -53,18 +53,18 @@ const FAKE_INFOS: SessionInfo[] = [
 ];
 
 describe("SessionStore (Stage 4a sub-task #4 切 invoke)", () => {
-	beforeEach(() => {
-		listSessionsMock.mockReset();
-		loadSessionMock.mockReset();
-		// 重置 sessionStore 状态 (单例, 跨测试要清)
-		sessionStore.all.length = 0;
-		// 用类型 any 强穿私有字段 (测试场景可接受)
-		(sessionStore as unknown as { initialized: boolean }).initialized = false;
-		(sessionStore as unknown as { loading: boolean }).loading = false;
-		(sessionStore as unknown as { lastError: string | null }).lastError = null;
-		// ui 重置
-		uiStore.setActiveView({ kind: "empty" });
-	});
+// 重置 sessionStore 内部状态 (调 __resetForTesting 测试专用方法)
+function resetSessionStore() {
+	sessionStore.__resetForTesting();
+}
+
+beforeEach(() => {
+	listSessionsMock.mockReset();
+	loadSessionMock.mockReset();
+	resetSessionStore();
+	// ui 重置
+	uiStore.setActiveView({ kind: "empty" });
+});
 
 	it("init_pulls_from_runtime_and_converts_info_to_session: 拉真后端 + lowercase→PascalCase 状态映射", async () => {
 		listSessionsMock.mockResolvedValueOnce({
@@ -89,7 +89,8 @@ describe("SessionStore (Stage 4a sub-task #4 切 invoke)", () => {
 		expect(sessionStore.all[0]?.provider).toBe("deepseek");
 		expect(sessionStore.all[0]?.owner_id).toBe("u_1");
 		expect(sessionStore.all[0]?.project_id).toBeNull();
-		expect(sessionStore.all[0]?.title).toBe("sess_20260608_001_aaa");
+		// title 兜底: id > 20 字符截断 + ellipsis (id 22 字符)
+		expect(sessionStore.all[0]?.title).toBe("sess_20260608_001_aa…");
 		expect(sessionStore.initialized).toBe(true);
 		expect(sessionStore.lastError).toBeNull();
 	});

@@ -32,12 +32,15 @@ const FAKE_SUB: SubSession = {
 };
 
 describe("SubSessionStore (Stage 4a sub-task #4)", () => {
-	beforeEach(() => {
-		listSubSessionsMock.mockReset();
-		subSessionStore.all.length = 0;
-		(subSessionStore as unknown as { initialized: boolean }).initialized = false;
-		uiStore.setActiveView({ kind: "empty" });
-	});
+function resetSubSessionStore() {
+	subSessionStore.__resetForTesting();
+}
+
+beforeEach(() => {
+	listSubSessionsMock.mockReset();
+	resetSubSessionStore();
+	uiStore.setActiveView({ kind: "empty" });
+});
 
 	it("loadAll_is_currently_noop: 后端 RuntimeApi 暂没 list_sub_sessions", async () => {
 		await subSessionStore.loadAll();

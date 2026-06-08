@@ -63,6 +63,7 @@ pub fn run() {
             commands::runtime::sessions::list_sessions,
             commands::runtime::send::send_message,
             commands::runtime::plans::create_plan,
+            commands::runtime::plans::cancel_plan,
             commands::runtime::cancel::cancel_session,
             commands::runtime::load::load_session,
         ])

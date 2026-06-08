@@ -48,11 +48,12 @@ function createSessionStore() {
 	let loading = $state(false);
 	let lastError = $state<string | null>(null);
 
-	const activeSession = $derived(
-		uiStore.activeView.kind === 'session'
-			? sessions.find((s) => s.id === uiStore.activeView.session_id) ?? null
-			: null,
-	);
+	const activeSession = $derived.by(() => {
+		const view = uiStore.activeView;
+		return view.kind === 'session'
+			? sessions.find((s) => s.id === view.session_id) ?? null
+			: null;
+	});
 
 	const activeMessages = $derived(activeSession ? messages[activeSession.id] ?? [] : []);
 
@@ -182,6 +183,15 @@ function createSessionStore() {
 		init,
 		refresh,
 		loadFullSession,
+		/// 测试专用: 重置内部状态 (call in beforeEach).
+		/// 业务代码不应该调. 包装内部 $state 重新赋值.
+		__resetForTesting() {
+			sessions.length = 0;
+			for (const k of Object.keys(messages)) delete messages[k];
+			initialized = false;
+			loading = false;
+			lastError = null;
+		},
 	};
 }
 

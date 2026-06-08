@@ -21,11 +21,12 @@ function createSubSessionStore() {
 	let loading = $state(false);
 	let lastError = $state<string | null>(null);
 
-	const activeSubSession = $derived(
-		uiStore.activeView.kind === 'sub_session'
-			? subSessions.find((s) => s.id === uiStore.activeView.sub_session_id) ?? null
-			: null,
-	);
+	const activeSubSession = $derived.by(() => {
+		const view = uiStore.activeView;
+		return view.kind === 'sub_session'
+			? subSessions.find((s) => s.id === view.sub_session_id) ?? null
+			: null;
+	});
 
 	/// 启动时调. 当前 noop (后端暂没 list_sub_sessions RuntimeApi).
 	/// 真实 sub_session 由 plan execution 推过来, 后续 sub-task 加 'plan_update' 事件监听.
@@ -115,6 +116,13 @@ function createSubSessionStore() {
 		},
 		loadAll,
 		add,
+		/// 测试专用: 重置内部状态. 业务代码不应该调.
+		__resetForTesting() {
+			subSessions.length = 0;
+			initialized = false;
+			loading = false;
+			lastError = null;
+		},
 	};
 }
 
