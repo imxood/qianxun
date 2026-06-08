@@ -763,12 +763,42 @@ async fn handle_text_frame(
 
     let response: Option<WsFrame> = match frame {
         WsFrame::Auth { .. } => Some(handle_auth_frame(hub, conn_id, &frame).await),
-        WsFrame::Register { .. } => Some(hub.register_device(conn_id, &frame).await),
+        WsFrame::AppAuth { .. } => {
+            // Phase B 收尾: App 鉴权 — 跟 device Auth 路径并列.
+            // authenticate_app 内部调 transition_to_app 把 conn 转 App 类型,
+            // 后续 Prompt 帧 RBAC 才能取到 user_id.
+            match hub.authenticate_app(conn_id, &frame).await {
+                Ok(app_auth_ok) => Some(app_auth_ok),
+                Err(app_auth_err) => Some(app_auth_err),
+            }
+        }
+        WsFrame::Register { .. } => {
+            // Phase B 收尾: Register 成功后广播 NodeStatus { status: "online" } 给所有 App.
+            let resp = hub.register_device(conn_id, &frame).await;
+            if let WsFrame::RegisterOk { ref node_id } = resp {
+                // 拿到 device_meta + team_id (Stage 6 简化: team_id 来自 device_meta 注册时附带,
+                // 暂无 → 用 empty 兜底). 真实接 team_id 字段在 Stage 7.
+                if let Some(meta) = hub.device_meta_for(conn_id).await {
+                    let _ = hub
+                        .broadcast_node_status(
+                            node_id,
+                            "online",
+                            &meta.device_id,
+                            &meta.name,
+                            &meta.host_type,
+                            "", // team_id 留 Stage 7 注入
+                        )
+                        .await;
+                }
+            }
+            Some(resp)
+        }
         WsFrame::Heartbeat { .. } => Some(hub.handle_heartbeat(conn_id, &frame).await),
         WsFrame::Prompt { .. } => handle_prompt_frame(state, hub, conn_id, &frame, tx).await,
         other => {
-            // Stage 2 暂不处理: AuthOk/AuthError/RegisterOk/RegisterError (VPS→Device)
-            // / Event/EventDone/EventError/HeartbeatAck. 收到就忽略.
+            // Stage 2 暂不处理: AuthOk/AuthError/AppAuthOk/AppAuthError/RegisterOk/RegisterError
+            // (VPS→Device) / NodeStatus (VPS→App) / Event/EventDone/EventError/HeartbeatAck.
+            // 收到就忽略.
             tracing::debug!(
                 connection_id = %conn_id,
                 frame_type = %other.type_name(),

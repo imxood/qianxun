@@ -35,6 +35,20 @@ pub enum WsFrame {
         machine_id: String,
     },
 
+    /// App 鉴权握手. 来自 App / Web 客户端.
+    ///
+    /// Phase B 收尾: 加 `AppAuth` 帧, 跟 `Auth` 帧并列. VPS `handle_text_frame`
+    /// 派发到 `WsHub::authenticate_app`, 成功 → App 连接. App 连接能发
+    /// `Prompt` 帧 (经 RBAC + rate-limit) 给 device.
+    #[serde(rename = "app_auth")]
+    AppAuth {
+        /// App 用户 JWT (从 POST /api/auth/login 拿).
+        jwt_token: String,
+        /// 显式携带 user_id — JWT 可解码但 Stage 6 简化: 信任客户端上报, 服务端
+        /// 再交叉验证. 防止 token/user 不匹配.
+        user_id: String,
+    },
+
     /// 设备注册 (auth 成功后). 上报主机能力/资源.
     #[serde(rename = "register")]
     Register {
@@ -64,6 +78,38 @@ pub enum WsFrame {
     /// 鉴权失败. 关闭连接. (Stage 2 补齐, 与 `_shared-contract.md` §3.3 对齐.)
     #[serde(rename = "auth_error")]
     AuthError { code: String, message: String },
+
+    /// App 鉴权成功. 下发 session_token.
+    #[serde(rename = "app_auth_ok")]
+    AppAuthOk {
+        session_token: String,
+        user_id: String,
+        server_time: String,
+        server_version: String,
+        heartbeat_interval_ms: u32,
+    },
+
+    /// App 鉴权失败. 关闭连接.
+    #[serde(rename = "app_auth_error")]
+    AppAuthError { code: String, message: String },
+
+    /// 节点状态广播. VPS→App 方向, 设备上下线 / 状态变更时推.
+    ///
+    /// Phase B 收尾: 让 App 端"看"到节点的实时状态. 设备 RegisterOk / 断开
+    /// / heartbeat 超时时 VPS 主动推 NodeStatus 给同 team 的所有 app 连接.
+    /// App 维护本地 node 列表 (替代轮询).
+    #[serde(rename = "node_status")]
+    NodeStatus {
+        node_id: String,
+        /// "online" | "offline" | "busy" | "away"
+        status: String,
+        machine_id: String,
+        name: String,
+        host_type: String,
+        /// 设备所属 team — App 收到后比对本地 team 决定是否显示.
+        team_id: String,
+        last_seen: String,
+    },
 
     /// 注册成功. 下发分配的 node_id.
     #[serde(rename = "register_ok")]
@@ -138,11 +184,15 @@ impl WsFrame {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Auth { .. } => "auth",
+            Self::AppAuth { .. } => "app_auth",
             Self::Register { .. } => "register",
             Self::AuthOk { .. } => "auth_ok",
             Self::AuthError { .. } => "auth_error",
+            Self::AppAuthOk { .. } => "app_auth_ok",
+            Self::AppAuthError { .. } => "app_auth_error",
             Self::RegisterOk { .. } => "register_ok",
             Self::RegisterError { .. } => "register_error",
+            Self::NodeStatus { .. } => "node_status",
             Self::Prompt { .. } => "prompt",
             Self::Event { .. } => "event",
             Self::EventDone { .. } => "event_done",
@@ -167,7 +217,7 @@ impl WsFrame {
 
     /// 是否是 app→vps 方向.
     pub fn is_app_to_vps(&self) -> bool {
-        matches!(self, Self::Prompt { .. } | Self::Heartbeat { .. })
+        matches!(self, Self::AppAuth { .. } | Self::Prompt { .. } | Self::Heartbeat { .. })
     }
 }
 
@@ -243,12 +293,64 @@ mod tests {
         assert!(matches!(back, WsFrame::Prompt { .. }));
     }
 
+    /// Phase B 收尾: AppAuth 帧 roundtrip 验证.
+    #[test]
+    fn app_auth_frame_roundtrip() {
+        let frame = WsFrame::AppAuth {
+            jwt_token: "eyJhbGciOiJIUzI1NiJ9.test".into(),
+            user_id: "user_001".into(),
+        };
+        let s = serde_json::to_string(&frame).unwrap();
+        assert!(s.contains(r#""type":"app_auth""#));
+        assert!(s.contains(r#""user_id":"user_001""#));
+        let back: WsFrame = serde_json::from_str(&s).unwrap();
+        match back {
+            WsFrame::AppAuth { jwt_token, user_id } => {
+                assert_eq!(jwt_token, "eyJhbGciOiJIUzI1NiJ9.test");
+                assert_eq!(user_id, "user_001");
+            }
+            _ => panic!("expected AppAuth"),
+        }
+    }
+
+    /// Phase B 收尾: NodeStatus 帧 roundtrip + is_app_to_vps 标记.
+    #[test]
+    fn node_status_frame_roundtrip() {
+        let frame = WsFrame::NodeStatus {
+            node_id: "node_abc".into(),
+            status: "online".into(),
+            machine_id: "m_123".into(),
+            name: "office-pc".into(),
+            host_type: "linux".into(),
+            team_id: "team_dev".into(),
+            last_seen: "2026-06-08T10:00:00Z".into(),
+        };
+        let s = serde_json::to_string(&frame).unwrap();
+        assert!(s.contains(r#""type":"node_status""#));
+        assert!(s.contains(r#""team_id":"team_dev""#));
+        let back: WsFrame = serde_json::from_str(&s).unwrap();
+        match &back {
+            WsFrame::NodeStatus { node_id, status, team_id, .. } => {
+                assert_eq!(node_id, "node_abc");
+                assert_eq!(status, "online");
+                assert_eq!(team_id, "team_dev");
+            }
+            _ => panic!("expected NodeStatus"),
+        }
+        // NodeStatus 是 VPS→App 方向, 不属于 device→vps
+        assert!(!back.is_device_to_vps());
+    }
+
     #[test]
     fn type_name_covers_all_variants() {
         let frames = vec![
             WsFrame::Auth {
                 device_token: "x".into(),
                 machine_id: "y".into(),
+            },
+            WsFrame::AppAuth {
+                jwt_token: "jwt".into(),
+                user_id: "u".into(),
             },
             WsFrame::Register {
                 device_id: "d".into(),
@@ -272,12 +374,32 @@ mod tests {
                 code: "c".into(),
                 message: "m".into(),
             },
+            WsFrame::AppAuthOk {
+                session_token: "s".into(),
+                user_id: "u".into(),
+                server_time: "t".into(),
+                server_version: "v".into(),
+                heartbeat_interval_ms: 30000,
+            },
+            WsFrame::AppAuthError {
+                code: "c".into(),
+                message: "m".into(),
+            },
             WsFrame::RegisterOk {
                 node_id: "n".into(),
             },
             WsFrame::RegisterError {
                 code: "c".into(),
                 message: "m".into(),
+            },
+            WsFrame::NodeStatus {
+                node_id: "n".into(),
+                status: "online".into(),
+                machine_id: "m".into(),
+                name: "name".into(),
+                host_type: "h".into(),
+                team_id: "t".into(),
+                last_seen: "ts".into(),
             },
             WsFrame::Prompt {
                 request_id: "r".into(),
@@ -309,10 +431,11 @@ mod tests {
             WsFrame::HeartbeatAck { ts: 0 },
         ];
         let names: Vec<&'static str> = frames.iter().map(|f| f.type_name()).collect();
-        // 12 variants expected (Stage 2 补 AuthError); no duplicates.
+        // 16 variants expected (Stage 2 补 AuthError, Phase B 收尾 +AppAuth/AppAuthOk/
+        // AppAuthError/NodeStatus); no duplicates.
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 12, "expected 12 unique type names, got: {:?}", names);
+        assert_eq!(sorted.len(), 16, "expected 16 unique type names, got: {:?}", names);
     }
 }

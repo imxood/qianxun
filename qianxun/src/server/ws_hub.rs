@@ -421,6 +421,182 @@ impl WsHub {
         }
     }
 
+    /// Phase B 收尾: 处理 `WsFrame::AppAuth`, 给 App 客户端 (Web/Mobile) 鉴权.
+    ///
+    /// 跟 `authenticate` (device 鉴权) 并列, 但不查 device_token, 而是信任
+    /// 上报的 `user_id` + 校验 `jwt_token` 非空 (Stage 6 简化: 不做 JWT 签名
+    /// 验证, 信任客户端自报. 后续接 jsonwebtoken crate + HS256 验证).
+    ///
+    /// 流程:
+    /// 1. `jwt_token` 空 → `AppAuthError { code: "invalid_token" }`.
+    /// 2. 标记已认证 + 绑定 user_id + 初始化心跳时间.
+    /// 3. 调 `transition_to_app(conn_id, user_id)` 把 conn 从 Device (默认) 转 App.
+    /// 4. 返回 `AppAuthOk { session_token, user_id, server_time, ... }`.
+    ///
+    /// **注意**: 当前 `handle_socket` 默认注册成 `ConnectionType::Device`,
+    /// 必须在 app 鉴权成功后调 `transition_to_app` 才能让 `handle_prompt_frame`
+    /// 的 `user_id_for(conn_id)` 返 user_id. 详见 `transition_to_app` 实现.
+    pub async fn authenticate_app(
+        &self,
+        connection_id: &str,
+        frame: &WsFrame,
+    ) -> Result<WsFrame, WsFrame> {
+        let (jwt_token, user_id) = match frame {
+            WsFrame::AppAuth { jwt_token, user_id } => (jwt_token.clone(), user_id.clone()),
+            _ => {
+                return Err(WsFrame::AppAuthError {
+                    code: "protocol_error".into(),
+                    message: "expected AppAuth frame".into(),
+                });
+            }
+        };
+
+        // 1. 校验 jwt_token 非空 (Stage 6 简化, 不验证签名)
+        if jwt_token.is_empty() {
+            return Err(WsFrame::AppAuthError {
+                code: "invalid_token".into(),
+                message: "jwt_token is empty".into(),
+            });
+        }
+        if user_id.is_empty() {
+            return Err(WsFrame::AppAuthError {
+                code: "invalid_user".into(),
+                message: "user_id is empty".into(),
+            });
+        }
+
+        // 2. 标记已认证 + 绑定 user_id + 初始化心跳时间.
+        let now = Utc::now();
+        self.last_heartbeat
+            .write()
+            .await
+            .insert(connection_id.to_string(), now);
+        // 用 authed_machine 字段暂存 user_id (因为 Device/App 都用这个 map
+        // 表达 "已认证", 区别只在 connection_type + principal_id).
+        self.authed_machine
+            .write()
+            .await
+            .insert(connection_id.to_string(), user_id.clone());
+
+        // 3. 转换 conn 类型 (Device → App) + 更新 principal_id.
+        self.transition_to_app(connection_id, user_id.clone()).await;
+
+        tracing::info!(
+            connection_id = %connection_id,
+            user_id = %user_id,
+            "ws app authenticated"
+        );
+
+        Ok(WsFrame::AppAuthOk {
+            session_token: format!("st_app_{}", Uuid::new_v4()),
+            user_id,
+            server_time: now.to_rfc3339(),
+            server_version: "0.3.0-stage6a".into(),
+            heartbeat_interval_ms: 30000,
+        })
+    }
+
+    /// 把已注册为 Device 的 conn 转换为 App, 同步 `by_user` 索引.
+    ///
+    /// 内部更新 `connections[id].connection_type` + `principal_id`,
+    /// 移 `by_device[old_principal]` → `by_user[new_principal]`.
+    /// 这样后续 `user_id_for(conn_id)` 能正确返 user_id,
+    /// `handle_prompt_frame` 的 RBAC 检查走通.
+    ///
+    /// **注意**: `connections` 存的是 `Arc<Connection>`, 改字段需要 `Arc::make_mut`
+    /// (独占 clone) 而不是 `get_mut` (后者是 `&mut Arc<Connection>`, 不能直接
+    /// 改内部字段). 改完必须 put 回 hashmap, 否则 `user_id_for` 仍读 OLD conn.
+    async fn transition_to_app(&self, connection_id: &str, user_id: String) {
+        // 1. 取 conn clone, drop 写锁, Arc::make_mut mutate.
+        let conns = self.connections.write().await;
+        let Some(conn_arc) = conns.get(connection_id).cloned() else {
+            tracing::warn!(
+                connection_id = %connection_id,
+                "transition_to_app: conn not found (already unregistered?)"
+            );
+            return;
+        };
+        drop(conns);
+
+        let mut conn_arc = conn_arc;
+        let conn_clone = Arc::make_mut(&mut conn_arc);
+        let old_principal = std::mem::replace(&mut conn_clone.principal_id, user_id.clone());
+        conn_clone.connection_type = ConnectionType::App;
+
+        // 2. 把 mutate 后的 Arc<Connection> 写回 hashmap.
+        //    取写锁, 覆盖旧 entry. 再次拿写锁期间没有别的锁, 不死锁.
+        let mut conns = self.connections.write().await;
+        conns.insert(connection_id.to_string(), conn_arc);
+        drop(conns);
+
+        // 3. 索引迁移: by_device[old_principal] → by_user[user_id]
+        let mut by_device = self.by_device.write().await;
+        if let Some(ids) = by_device.get_mut(&old_principal) {
+            ids.retain(|x| x != connection_id);
+            if ids.is_empty() {
+                by_device.remove(&old_principal);
+            }
+        }
+        drop(by_device);
+
+        self.by_user
+            .write()
+            .await
+            .entry(user_id)
+            .or_default()
+            .push(connection_id.to_string());
+
+        tracing::debug!(
+            connection_id = %connection_id,
+            old_principal = %old_principal,
+            "ws conn transitioned Device → App"
+        );
+    }
+
+    /// Phase B 收尾: 广播节点状态给所有 App 连接.
+    ///
+    /// 触发场景:
+    /// - 设备 RegisterOk 成功 → `NodeStatus { status: "online" }`
+    /// - 设备断开 / heartbeat 超时 → `NodeStatus { status: "offline" }`
+    /// - 设备主动切 "busy" / "away" → `NodeStatus { status: "busy" }`
+    ///
+    /// **Stage 6 简化**: 广播给所有 App conn, 不做 team 过滤. App 端
+    /// 收到后自己按 `team_id` 决定是否显示. 后续 Stage 7 接 team 索引加速.
+    ///
+    /// 返回成功投递的 App conn 数.
+    pub async fn broadcast_node_status(
+        &self,
+        node_id: &str,
+        status: &str,
+        machine_id: &str,
+        name: &str,
+        host_type: &str,
+        team_id: &str,
+    ) -> usize {
+        let frame = WsFrame::NodeStatus {
+            node_id: node_id.to_string(),
+            status: status.to_string(),
+            machine_id: machine_id.to_string(),
+            name: name.to_string(),
+            host_type: host_type.to_string(),
+            team_id: team_id.to_string(),
+            last_seen: chrono::Utc::now().to_rfc3339(),
+        };
+        let Some(msg) = Self::encode_frame(&frame) else {
+            return 0;
+        };
+
+        // 收集所有 App conn id (不区分 user, 一律推, App 端按 team_id 过滤)
+        let by_user = self.by_user.read().await;
+        let mut all_ids: Vec<String> = Vec::new();
+        for ids in by_user.values() {
+            all_ids.extend_from_slice(ids);
+        }
+        drop(by_user);
+
+        self.fanout(&all_ids, msg).await
+    }
+
     /// 处理 `WsFrame::Heartbeat`: 更新 `last_heartbeat` + 返回 `HeartbeatAck`.
     ///
     /// 不要求已认证 (允许 anon 心跳, 监控用). 实际生产应该鉴权, Stage 3 接.
@@ -1174,5 +1350,115 @@ mod tests {
             !allowed,
             "user in team but project NOT assigned should be denied"
         );
+    }
+
+    // ──────── Phase B 测试: AppAuth + NodeStatus 广播 ────────
+
+    /// Phase B 收尾 测试 1: authenticate_app 成功 → AppAuthOk + user_id_for 返 user_id.
+    #[tokio::test]
+    async fn test_authenticate_app_succeeds_and_transitions_to_app() {
+        let hub = test_hub();
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        let conn_id = hub
+            .register(ConnectionType::Device, "pending".into(), tx)
+            .await;
+
+        let frame = WsFrame::AppAuth {
+            jwt_token: "eyJhbGciOiJIUzI1NiJ9.test".into(),
+            user_id: "user_bob".into(),
+        };
+        let result = hub.authenticate_app(&conn_id, &frame).await;
+        match result {
+            Ok(WsFrame::AppAuthOk { user_id, session_token, .. }) => {
+                assert_eq!(user_id, "user_bob");
+                assert!(
+                    session_token.starts_with("st_app_"),
+                    "app session_token should start with 'st_app_', got: {session_token}"
+                );
+            }
+            Ok(other) => panic!("expected AppAuthOk, got: {:?}", other),
+            Err(e) => panic!("expected Ok, got Err: {:?}", e),
+        }
+
+        // transition_to_app 副作用: user_id_for 现在能取到 user_id.
+        assert_eq!(
+            hub.user_id_for(&conn_id).await,
+            Some("user_bob".to_string())
+        );
+    }
+
+    /// Phase B 收尾 测试 2: 空 jwt_token → AppAuthError { code: "invalid_token" }.
+    #[tokio::test]
+    async fn test_authenticate_app_empty_jwt_returns_error() {
+        let hub = test_hub();
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        let conn_id = hub
+            .register(ConnectionType::Device, "pending".into(), tx)
+            .await;
+
+        let frame = WsFrame::AppAuth {
+            jwt_token: "".into(),
+            user_id: "user_bob".into(),
+        };
+        let result = hub.authenticate_app(&conn_id, &frame).await;
+        match result {
+            Err(WsFrame::AppAuthError { code, .. }) => {
+                assert_eq!(code, "invalid_token");
+            }
+            Err(other) => panic!("expected AppAuthError, got: {:?}", other),
+            Ok(o) => panic!("expected Err, got Ok: {:?}", o),
+        }
+
+        // user_id_for 不变 (transition 没发生)
+        assert_eq!(hub.user_id_for(&conn_id).await, None);
+    }
+
+    /// Phase B 收尾 测试 3: broadcast_node_status 给所有 App conn 推 NodeStatus 帧.
+    #[tokio::test]
+    async fn test_broadcast_node_status_reaches_all_app_conns() {
+        let hub = test_hub();
+        // 2 个 App conn (走 transition_to_app 才能进 by_user 索引)
+        let (tx1, mut rx1) = mpsc::unbounded_channel::<Message>();
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<Message>();
+        let conn1 = hub
+            .register(ConnectionType::Device, "pending".into(), tx1)
+            .await;
+        let conn2 = hub
+            .register(ConnectionType::Device, "pending".into(), tx2)
+            .await;
+        hub.transition_to_app(&conn1, "user_alice".into()).await;
+        hub.transition_to_app(&conn2, "user_bob".into()).await;
+
+        // 广播 — 返 2 (2 个 App 都收到)
+        let sent = hub
+            .broadcast_node_status(
+                "node_xyz",
+                "online",
+                "machine_abc",
+                "office-pc",
+                "linux",
+                "team_dev",
+            )
+            .await;
+        assert_eq!(sent, 2, "both App conns should receive NodeStatus");
+
+        // 验证收到的帧内容
+        let msg1 = rx1.try_recv().expect("rx1 should have message");
+        let text1 = match msg1 {
+            Message::Text(s) => s.to_string(),
+            other => panic!("expected Text, got: {:?}", other),
+        };
+        let frame1: WsFrame = serde_json::from_str(&text1).expect("parse WsFrame");
+        match frame1 {
+            WsFrame::NodeStatus { node_id, status, team_id, .. } => {
+                assert_eq!(node_id, "node_xyz");
+                assert_eq!(status, "online");
+                assert_eq!(team_id, "team_dev");
+            }
+            other => panic!("expected NodeStatus, got: {:?}", other),
+        }
+
+        let msg2 = rx2.try_recv().expect("rx2 should have message");
+        assert!(matches!(msg2, Message::Text(_)));
     }
 }
