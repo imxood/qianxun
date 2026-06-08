@@ -86,26 +86,75 @@ pub struct SendResponse {
     pub status: &'static str, // 永远是 "streaming"
 }
 
-/// Plan 状态 (简单三态, 跟 Svelte 端 Plan['status'] 1:1).
+/// Plan 状态 (Phase D 收尾: 加 Pending/Failed 跟 Svelte 端 PlanStatus 5 态 1:1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlanStatus {
+    /// 调度中, 还没开始第一个 task.
+    Pending,
     Running,
     Done,
+    /// 任一 task 失败 → 整个 plan 失败.
+    Failed,
     Aborted,
 }
 
-/// create_plan 入参 (sub-task #3 简化: 只收 session_id + name + description).
-/// 后续 sub-task 接完整 contract (tasks / assigned_to / verify_prompt 等).
+/// Plan 任务 (Phase D 收尾: 跟 Svelte 端 PlanTaskSpec 字段对齐).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanTaskSpec {
+    pub id: String,
+    pub title: String,
+    pub prompt: String,
+    /// 角色 ("coder" / "tester" / "researcher" 等), 后续按角色配 LLM 行为.
+    #[serde(default)]
+    pub assigned_to: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// 单 task 超时 ms (0 = 不超时).
+    #[serde(default)]
+    pub timeout_ms: u64,
+}
+
+/// Plan contract (跟 Svelte 端 PlanContract 1:1 字段名).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanContract {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// 任务列表 (Phase D 必填, 之前是 0 任务时业务空跑).
+    pub tasks: Vec<PlanTaskSpec>,
+    #[serde(default)]
+    pub timeout_ms: u64,
+}
+
+/// 单个 task 的执行结果 (Phase D 收尾: 给前端展示).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanTaskResult {
+    pub id: String,
+    pub status: PlanStatus,
+    /// LLM 最后一条 assistant 消息内容 (简版; 后续可换多消息).
+    pub output: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+}
+
+/// create_plan 入参 (Phase D 收尾: 必填 contract.tasks).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanInput {
     pub session_id: String,
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// 可选: 超时 ms (默认 30 min). sub-task #3 不真用, 留 PlanInfo 透传.
+    /// 可选: 整个 plan 超时 ms. 0 = 不超时.
     #[serde(default)]
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: u64,
+    /// Phase D: 任务列表. 之前是 0 任务时业务空跑, 现在每个 task 走 LLM 真实执行.
+    #[serde(default)]
+    pub tasks: Vec<PlanTaskSpec>,
 }
 
 /// create_plan / list_plans 返回的 plan 摘要.
@@ -117,6 +166,12 @@ pub struct PlanInfo {
     pub status: PlanStatus,
     pub started_at: String,
     pub ended_at: Option<String>,
+    /// Phase D 收尾: 任务的执行结果 (按 tasks 顺序).
+    #[serde(default)]
+    pub task_results: Vec<PlanTaskResult>,
+    /// Phase D 收尾: contract 透传 (前端拿到后能 join plan 跟 task 关系).
+    #[serde(default)]
+    pub contract: PlanContract,
 }
 
 /// load_session 返回的完整 session 状态 (含 conversation snapshot).

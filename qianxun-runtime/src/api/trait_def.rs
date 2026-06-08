@@ -57,14 +57,19 @@ pub trait RuntimeApi: Send + Sync {
         req: SendRequest,
     ) -> RuntimeApiResult<(SendResponse, mpsc::Receiver<SseEvent>)>;
 
-    /// 在指定 session 上建一个 plan (Running 状态).
+    /// 在指定 session 上建一个 plan, 立即返 Pending 状态.
+    ///
+    /// Phase D 收尾: 真实执行 — spawn 后台 task 顺序跑每个 task (LLM + tools),
+    /// plan status 从 Pending → Running → Done/Failed, task_results 累积.
     ///
     /// 业务 (sub-task #3 简化): in-memory HashMap, 锁保护.
-    /// 后续 sub-task 接 contract (tasks / assigned_to / verify_prompt) 跟持久化.
     async fn create_plan(&self, input: PlanInput) -> RuntimeApiResult<PlanInfo>;
 
     /// 列所有 plan (Tauri Settings 面板用, daemon 暂不接).
     async fn list_plans(&self) -> RuntimeApiResult<Vec<PlanInfo>>;
+
+    /// 取消正在跑的 plan (Phase D 收尾加). 把 status 置 Aborted, 写 ended_at.
+    async fn cancel_plan(&self, plan_id: &str) -> RuntimeApiResult<()>;
 
     /// 取消正在跑的 session (软取消, agent_host 设置 paused flag).
     async fn cancel_session(&self, session_id: &str) -> RuntimeApiResult<()>;
