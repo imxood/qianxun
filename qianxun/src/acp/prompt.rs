@@ -10,6 +10,7 @@ use qianxun_core::agent::engine::AgentLoop;
 use qianxun_core::agent::engine::processing_loop;
 use qianxun_core::agent::message::ContentBlock;
 use qianxun_core::config::ResolvedCompactionConfig;
+use qianxun_core::context::MemoryObserver;
 use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::SkillManager;
 use qianxun_core::tools::{ToolCategoryFilter, ToolRegistry};
@@ -52,7 +53,6 @@ impl AcpRequestHandler {
                 conversation,
                 prompt_text,
                 memory_context,
-                memory,
                 tools,
                 skills_catalog,
                 skill_injections,
@@ -66,7 +66,6 @@ impl AcpRequestHandler {
                     conversation,
                     prompt_text,
                     memory_context,
-                    memory,
                     tools,
                     skills_catalog,
                     skill_injections,
@@ -83,6 +82,8 @@ impl AcpRequestHandler {
     }
 
     /// 准备 prompt 执行的参数（校验 + 提取 session）
+    ///
+    /// Phase 4a 收尾: memory 不再 per-session 传递, 直接从 `self.state.memory` 拿.
     #[allow(clippy::type_complexity)]
     async fn prepare_prompt(
         &self,
@@ -94,7 +95,6 @@ impl AcpRequestHandler {
             Conversation,
             String,
             String,
-            Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
             Arc<ToolRegistry>,
             String,
             String,
@@ -118,17 +118,17 @@ impl AcpRequestHandler {
         }
         session.is_running = true;
 
-        // 提取记忆上下文
-        let memory_context = match &session.memory {
-            Some(m) => m.build_context("", 1000).await,
-            None => String::new(),
-        };
-        let memory = std::mem::take(&mut session.memory);
+        // 提取记忆上下文 — 走 state.memory (全局), 不再 per-session 持有.
+        let memory_context = self.state.memory.build_context("", 1000).await;
 
-        // 提取会话级工具注册表（如有），否则使用基础注册表
-        let session_tools = session.tools.take().unwrap_or_else(|| self.tools.clone());
+        // 提取会话级工具注册表（如有），否则使用 forwarding_tools 作为 fallback.
+        let session_tools = session
+            .tools
+            .take()
+            .unwrap_or_else(|| Arc::new((*self.forwarding_tools).clone()));
 
-        let empty_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
+        let compact_config = Some(self.state.config.compaction.clone());
+        let empty_loop = new_agent_loop(self.state.config.agent.clone(), &compact_config);
         let empty_conv = Conversation::new(None);
         let agent_loop = std::mem::replace(&mut session.agent_loop, empty_loop);
         let conversation = std::mem::replace(&mut session.conversation, empty_conv);
@@ -199,7 +199,6 @@ impl AcpRequestHandler {
             conversation,
             user_text,
             memory_context,
-            memory,
             session_tools,
             skills_catalog,
             skill_injections,
@@ -209,6 +208,8 @@ impl AcpRequestHandler {
     }
 
     /// 在后台任务中执行 prompt，完成后通过 output_tx 发送 JSON-RPC 响应
+    ///
+    /// Phase 4a 收尾: memory 走 state.memory (全局); provider 走 state.provider.
     #[allow(clippy::too_many_arguments)]
     async fn run_prompt_task(
         &self,
@@ -218,7 +219,6 @@ impl AcpRequestHandler {
         mut conversation: Conversation,
         prompt_text: String,
         memory_context: String,
-        memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
         tools: Arc<ToolRegistry>,
         skills_catalog: String,
         skill_injections: String,
@@ -228,11 +228,14 @@ impl AcpRequestHandler {
         conversation.push_user_message(vec![ContentBlock::text(&prompt_text)]);
 
         let sink = AcpOutputSink::new(session_id.clone(), self.output_tx.clone());
-        let provider: Arc<dyn LlmProvider> = self.provider.clone();
+        let provider: Arc<dyn LlmProvider> = self.state.provider.clone();
         let tools_for_spawn = tools.clone();
         let skills_catalog_for_spawn = skills_catalog;
         let skill_injections_for_spawn = skill_injections;
         let sid = session_id.clone();
+        // memory observer for remember() — 共享 state.memory (Arc<MemoryCore>).
+        let memory_observer: Box<dyn qianxun_core::context::MemoryObserver + Send> =
+            Box::new((*self.state.memory).clone());
 
         // 第一层：处理循环（可能 panic）
         let processing_handle = tokio::spawn(async move {
@@ -259,7 +262,7 @@ impl AcpRequestHandler {
             match processing_handle.await {
                 Ok((agent_loop, conversation)) => {
                     // 处理正常完成，保存会话状态
-                    // 写入记忆
+                    // 写入记忆 (用闭包捕获的 memory_observer — state.memory clone, 全局共享)
                     let summary = if prompt_text.len() > 200 {
                         let end = (0..=200)
                             .rev()
@@ -269,15 +272,12 @@ impl AcpRequestHandler {
                     } else {
                         &prompt_text
                     };
-                    if let Some(m) = &memory {
-                        let _ = m.remember(summary, "conversation").await;
-                    }
+                    let _ = memory_observer.remember(summary, "conversation").await;
 
                     let mut sessions = sessions_arc2.lock().await;
                     if let Some(s) = sessions.get(&sid) {
                         drop(std::mem::replace(&mut s.conversation, conversation));
                         drop(std::mem::replace(&mut s.agent_loop, agent_loop));
-                        s.memory = memory;
                         s.tools = Some(tools);
                         s.skill_manager = skill_manager;
                         s.is_running = false;
@@ -290,7 +290,6 @@ impl AcpRequestHandler {
                     tracing::error!("Processing task panicked: {:?}", panic_err);
                     let mut sessions = sessions_arc2.lock().await;
                     if let Some(s) = sessions.get(&sid) {
-                        s.memory = memory;
                         s.skill_manager = skill_manager;
                         s.is_running = false;
                     }

@@ -6,13 +6,10 @@ use crate::acp::prompt::new_agent_loop;
 use crate::acp::session::SessionManager;
 use crate::acp::transport::AcpTransport;
 use crate::acp::types::*;
-use qianxun_core::config::ResolvedCompactionConfig;
 use qianxun_core::mcp::McpServerConfig;
 use qianxun_core::mcp::client::McpClient;
-use qianxun_core::provider::LlmProvider;
 use qianxun_core::skills::{SkillManager, SkillWatcher};
 use qianxun_core::tools::ToolRegistry;
-use qianxun_core::types::AgentConfig;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -20,16 +17,25 @@ use tracing;
 
 // ─── 请求处理器 ─────────────────────────────────────────
 
+/// Phase 4a 收尾: AcpRequestHandler 持有 `Arc<RuntimeState>` 统一来源.
+///
+/// 跟 desktop/daemon/TUI 共享同一份 RuntimeState 初始化逻辑 (单点维护).
+/// 不再单独持有 provider / agent_config / compact_config / budget_* —
+/// 全部从 `state.config` / `state.provider` 派生.
+///
+/// `forwarding_tools` 保留 — 它是 ACP 特有的 (文件读/写走 transport RPC),
+/// 跟 `state.tools` (builtin + workspace MCP) 是两个不同的 registry.
 pub struct AcpRequestHandler {
     pub transport: Arc<AcpTransport>,
-    pub provider: Arc<dyn LlmProvider>,
-    pub tools: Arc<ToolRegistry>,
+    /// RuntimeState 提供 provider / tools / memory / skills / config 统一访问.
+    pub state: Arc<qianxun_runtime::RuntimeState>,
+    /// ACP forwarding 工具 (文件读/写转 RPC) — 跟原 `tools` 字段语义一致.
+    /// 跟 `state.tools` 互补: forwarding 走 RPC, state.tools 走 builtin/MCP.
+    pub forwarding_tools: Arc<ToolRegistry>,
+    /// Session 仍走 AcpSession (per-session conversation / agent_loop / tools).
+    /// 后续 Phase 4b/4c 评估迁移到 state.agent_host.
     pub sessions: Arc<Mutex<SessionManager>>,
     pub output_tx: mpsc::UnboundedSender<AcpOutputEvent>,
-    pub agent_config: AgentConfig,
-    pub compact_config: Option<ResolvedCompactionConfig>,
-    pub budget_input: Option<u64>,
-    pub budget_output: Option<u64>,
 }
 
 impl AcpRequestHandler {
@@ -106,7 +112,8 @@ impl AcpRequestHandler {
             });
 
         let session_id = format!("sess_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S_%6f"));
-        let agent_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
+        let compact_config = Some(self.state.config.compaction.clone());
+        let agent_loop = new_agent_loop(self.state.config.agent.clone(), &compact_config);
         let ws = p
             .cwd
             .as_ref()
@@ -133,15 +140,15 @@ impl AcpRequestHandler {
                 )
             })
             .unwrap_or((None, String::new(), None));
-        let memory = ws.as_ref().and_then(build_memory);
+        // Memory 走 state.memory (全局共享) — 不再 per-session 单独持有.
         let ws_root = ws.as_ref().map(|w| w.root.clone());
         let skill_watcher = ws_root
             .as_ref()
             .map(|root| SkillWatcher::new(Some(root.as_path())));
 
-        // 构建会话级 ToolRegistry：从基础注册表克隆，添加 MCP 工具
+        // 构建会话级 ToolRegistry：从 forwarding_tools 克隆，添加 MCP 工具
         let mcp_servers = parse_mcp_server_configs(p.mcp_servers.as_ref());
-        let session_tools = connect_mcp_servers(&mcp_servers, &self.tools, "acp params").await;
+        let session_tools = connect_mcp_servers(&mcp_servers, &self.forwarding_tools, "acp params").await;
 
         let mut sessions = self.sessions.lock().await;
         sessions
@@ -149,7 +156,6 @@ impl AcpRequestHandler {
                 session_id.clone(),
                 system_prompt,
                 agent_loop,
-                memory,
                 Some(session_tools),
                 skills_catalog,
                 skill_manager,
@@ -161,7 +167,7 @@ impl AcpRequestHandler {
         // 应用 budget 到新创建的会话
         if let Some(s) = sessions.get(&session_id) {
             s.conversation
-                .set_budget(self.budget_input, self.budget_output);
+                .set_budget(self.state.config.budget.max_input_tokens, self.state.config.budget.max_output_tokens);
         }
 
         tracing::info!("Session created: {session_id}");
@@ -207,13 +213,14 @@ impl AcpRequestHandler {
                 )
             })
             .unwrap_or((None, String::new(), None));
-        let memory = ws.as_ref().and_then(build_memory);
+        // Memory 走 state.memory (全局共享).
         let ws_root = ws.as_ref().map(|w| w.root.clone());
         let skill_watcher = ws_root
             .as_ref()
             .map(|root| SkillWatcher::new(Some(root.as_path())));
 
-        let agent_loop = new_agent_loop(self.agent_config.clone(), &self.compact_config);
+        let compact_config = Some(self.state.config.compaction.clone());
+        let agent_loop = new_agent_loop(self.state.config.agent.clone(), &compact_config);
         let session_tools = match ws {
             Some(ref ws) => {
                 match qianxun_core::mcp::config::McpConfigFile::find_in_workspace(&ws.root) {
@@ -223,7 +230,7 @@ impl AcpRequestHandler {
                             None
                         } else {
                             Some(
-                                connect_mcp_servers(&configs, &self.tools, "workspace mcp.json")
+                                connect_mcp_servers(&configs, &self.forwarding_tools, "workspace mcp.json")
                                     .await,
                             )
                         }
@@ -238,7 +245,6 @@ impl AcpRequestHandler {
                 session_id.clone(),
                 system_prompt,
                 agent_loop,
-                memory,
                 session_tools,
                 skills_catalog,
                 skill_manager,
@@ -249,7 +255,7 @@ impl AcpRequestHandler {
 
         if let Some(s) = sessions.get(&session_id) {
             s.conversation
-                .set_budget(self.budget_input, self.budget_output);
+                .set_budget(self.state.config.budget.max_input_tokens, self.state.config.budget.max_output_tokens);
         }
 
         // 尝试从磁盘恢复历史会话数据
@@ -297,7 +303,7 @@ impl AcpRequestHandler {
         // 应用 budget
         if let Some(s) = sessions.get(&new_id) {
             s.conversation
-                .set_budget(self.budget_input, self.budget_output);
+                .set_budget(self.state.config.budget.max_input_tokens, self.state.config.budget.max_output_tokens);
         }
 
         tracing::info!("Session forked: {} → {}", p.session_id, new_id);
@@ -345,8 +351,12 @@ impl AcpRequestHandler {
     }
 }
 
-/// 从工作区根路径构建 memory engine。
-fn build_memory(
+/// 从工作区根路径构建 memory engine.
+///
+/// Phase 4a 收尾: ACP 不再 per-session 持有 memory. 改用 `state.memory` (全局).
+/// 本 helper 暂留, 未来如需 per-session memory 子集时再用.
+#[allow(dead_code)]
+fn _build_memory_legacy(
     _ws: &qianxun_core::workspace::ProjectRoot,
 ) -> Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> {
     let db_path = qianxun_core::workspace::qianxun_dir()?.join("mem.db");

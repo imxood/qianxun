@@ -311,18 +311,10 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.acp_mode {
         tracing::info!("以 ACP 协议模式启动 (provider={})", resolved.active_provider);
-        let provider = qianxun_core::provider::create_provider(
-            &resolved.active_provider,
-            &resolved.active_provider_config(),
-        );
-        crate::acp::run_acp_server(
-            provider,
-            resolved.agent.clone(),
-            Some(resolved.compaction.clone()),
-            resolved.budget.max_input_tokens,
-            resolved.budget.max_output_tokens,
-        )
-        .await?;
+        // Phase 4a 收尾: ACP 入口走 qianxun-runtime 统一 RuntimeState.
+        // 跟 desktop/daemon/TUI 共享同一份 RuntimeState 初始化 (单点维护).
+        let state = qianxun_runtime::RuntimeState::new(resolved).await?;
+        crate::acp::run_acp_server(state).await?;
     } else {
         tracing::info!("以独立 CLI 模式启动");
 

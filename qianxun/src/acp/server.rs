@@ -4,27 +4,23 @@ use crate::acp::handler::AcpRequestHandler;
 use crate::acp::session::SessionManager;
 use crate::acp::transport::AcpTransport;
 use crate::acp::types::{rpc_success, IncomingMessage};
-use qianxun_core::provider::LlmProvider;
-use qianxun_core::config::ResolvedCompactionConfig;
-use qianxun_core::types::AgentConfig;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
 
-/// 运行 ACP 服务器主循环
+/// Phase 4a 收尾: ACP 入口走 qianxun-runtime 统一 RuntimeState.
 ///
-/// 通过 stdio JSON-RPC 2.0 与编辑器通信。
-/// 生命周期: initialize → sessions/new → session/prompt (流式) → sessions/close
+/// 跟 desktop/daemon/TUI 共享同一份 RuntimeState 初始化逻辑 (单点维护).
+/// RuntimeState 提供 provider / tools / memory / skills / config 全部统一访问.
+///
+/// ACP forwarding tools (文件读/写转 RPC) 仍独立持有 — 它们依赖 transport
+/// 把请求发到编辑器, 不在 state.tools (state.tools 走 builtin + workspace MCP).
+/// 跟原行为等价: forwarding tools 是 ACP 会话级 MCP 工具的 base registry.
 pub async fn run_acp_server(
-    provider: Box<dyn LlmProvider>,
-    agent_config: AgentConfig,
-    compact_config: Option<ResolvedCompactionConfig>,
-    budget_input: Option<u64>,
-    budget_output: Option<u64>,
+    state: Arc<qianxun_runtime::RuntimeState>,
 ) -> anyhow::Result<()> {
     let (transport, mut inbox) = AcpTransport::new();
     let transport = Arc::new(transport);
-    let provider: Arc<dyn LlmProvider> = Arc::from(provider);
 
     // 会话持久化目录: ~/.qianxun/sessions/
     let sessions = {
@@ -34,19 +30,17 @@ pub async fn run_acp_server(
             None => SessionManager::new(10),
         }))
     };
-    let tools = Arc::new(build_acp_tool_registry(transport.clone()));
+    // ACP forwarding 工具: 文件读/写通过 transport 转发到编辑器 (走 RPC).
+    // 跟原行为一致: forwarding tools 是 ACP base registry, session MCP 工具叠加其上.
+    let forwarding_tools = Arc::new(build_acp_tool_registry(transport.clone()));
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
 
     let handler = AcpRequestHandler {
         transport: transport.clone(),
-        provider,
-        tools,
+        state: state.clone(),
+        forwarding_tools,
         sessions,
         output_tx,
-        agent_config,
-        compact_config,
-        budget_input,
-        budget_output,
     };
 
     tracing::info!("ACP server started, waiting for messages...");

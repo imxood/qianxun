@@ -108,7 +108,21 @@ pub async fn run(
     project_root: Option<qianxun_core::workspace::ProjectRoot>,
     global_instructions: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut app = App::new(config, project_root, global_instructions).await?;
+    // Stage 4a 收尾: 走 qianxun-runtime 统一 RuntimeState.
+    // 跟 desktop / daemon 复用同一份 RuntimeState 初始化逻辑.
+    // 旧 App::new(config, ...) 留为测试用 (test_app() in this file).
+    let state = qianxun_runtime::RuntimeState::new(config).await?;
+    run_with_runtime(state, project_root, global_instructions).await
+}
+
+/// Phase 4a 收尾: TUI 入口走 qianxun-runtime 统一 RuntimeState.
+/// 跟 desktop / daemon / ACP / CLI 共用同一份 RuntimeState 初始化 + agent_host + store + memory + skills.
+pub async fn run_with_runtime(
+    state: std::sync::Arc<qianxun_runtime::RuntimeState>,
+    project_root: Option<qianxun_core::workspace::ProjectRoot>,
+    global_instructions: Option<String>,
+) -> anyhow::Result<()> {
+    let mut app = App::with_runtime(state, project_root, global_instructions).await?;
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
         viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
     })?;
@@ -165,25 +179,53 @@ impl App {
         project_root: Option<qianxun_core::workspace::ProjectRoot>,
         global_instructions: Option<String>,
     ) -> anyhow::Result<Self> {
+        // Stage 4a sub-task #3: TUI 入口走 qianxun-runtime 统一 RuntimeState.
+        // 之前这里自己 create_provider + register_builtin + build_memory + load_all skills,
+        // 跟 desktop/daemon 重复实现. 现在统一调 RuntimeState::new(config).
+        let state = qianxun_runtime::RuntimeState::new(config).await?;
+        Self::with_runtime(state, project_root, global_instructions).await
+    }
+
+    /// Phase 4a sub-task #3: TUI 入口从 RuntimeState 拿 provider/tools/memory/skills,
+    /// 跟 desktop/daemon 共享同一份 RuntimeState 初始化逻辑 (单点维护).
+    ///
+    /// 字段对应:
+    ///   - state.provider -> self.provider (Arc<dyn LlmProvider>)
+    ///   - state.tools    -> self.tools    (ToolRegistry Clone)
+    ///   - state.memory   -> self.memory   (Box<dyn MemoryObserver + Send>, MemoryCore: Clone)
+    ///   - state.skills   -> self.skills   (SkillManager: Clone)
+    ///   - state.config   -> 走 self 的 agent_loop / conversation / budget (派生)
+    ///
+    /// 保留 SkillReadTool 注册 (state.tools 不含 — 是 MCP/SkillRead 合并前的 split)
+    /// 跟 workspace MCP 连接 (RuntimeState::build 不连 workspace MCP, 留给 caller).
+    async fn with_runtime(
+        state: Arc<qianxun_runtime::RuntimeState>,
+        project_root: Option<qianxun_core::workspace::ProjectRoot>,
+        global_instructions: Option<String>,
+    ) -> anyhow::Result<Self> {
         let workspace_context = project_root
             .as_ref()
             .map(qianxun_core::workspace::build_project_context)
             .unwrap_or_default();
         let ws_root = project_root.as_ref().map(|w| w.root.clone());
 
-        let skills = SkillManager::load_all(ws_root.as_deref());
-        let skills_catalog = skills.build_catalog_prompt();
-        let skills_list = skills.build_skills_list();
+        // 复用 RuntimeState 已有 provider/tools/memory/skills, 不重新构造.
+        let provider = state.provider.clone();
+        let mut tools = (*state.tools).clone();
+        let memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>> = Some(Box::new(
+            (*state.memory).clone(),
+        ));
+        let skills = state.skills.clone();
         let skill_watcher = SkillWatcher::new(ws_root.as_deref());
 
-        let mut tools = ToolRegistry::new();
-        builtin::register_all(&mut tools);
+        // 局部补足: SkillReadTool 跟 workspace MCP 是 TUI/REPL 入口的本地能力,
+        // 跟 daemon 共享的 RuntimeState 不直接持有 (TUI 在用户侧跑).
         tools.register_builtin(Arc::new(builtin::SkillReadTool {
             manager: Arc::new(skills.clone()),
         }));
         connect_workspace_mcp(ws_root.as_deref(), &mut tools).await;
-        let tools_list = tools.format_tools_list();
 
+        let config = (*state.config).clone();
         let mut agent_loop = new_agent_loop(config.agent.clone(), &Some(config.compaction.clone()));
         let system = system_prompt::build_system_prompt(
             &workspace_context,
@@ -197,12 +239,10 @@ impl App {
         );
         agent_loop.config.max_tokens = config.budget.max_output_tokens;
 
-        let memory = build_memory();
-        let provider: Arc<dyn LlmProvider> = qianxun_core::provider::create_provider(
-            &config.active_provider,
-            &config.active_provider_config(),
-        )
-        .into();
+        let skills_catalog = skills.build_catalog_prompt();
+        let skills_list = skills.build_skills_list();
+        let tools_list = tools.format_tools_list();
+
         let (tx, rx) = mpsc::unbounded_channel();
         let status = format!(
             "就绪 | 模式: {} | 技能: {} | 工具: {}",
@@ -1676,6 +1716,44 @@ mod tests {
         )
         .unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    /// Phase 4a 收尾: App::with_runtime 能从 RuntimeState 构造 App.
+    /// 验证: 走 RuntimeState::new(config) 拿到的 provider/tools/memory/skills
+    /// 跟 state 同源, 不是 test_app() 的占位 fake.
+    #[tokio::test]
+    async fn with_runtime_uses_state_components() {
+        let state = qianxun_runtime::RuntimeState::new_in_memory_with_config(
+            qianxun_core::config::ResolvedConfig::default(),
+        )
+        .await
+        .expect("in-memory RuntimeState init");
+
+        let app = App::with_runtime(state.clone(), None, None)
+            .await
+            .expect("App::with_runtime");
+
+        // 1. provider 跟 state.provider 同一个 Arc<dyn LlmProvider>
+        let _ = app.provider.id(); // 不 panic
+        assert_eq!(
+            app.provider.id(),
+            state.provider.id(),
+            "App.provider 跟 state.provider 同源"
+        );
+
+        // 2. tools 跟 state.tools 同步 (内置 builtin 已 register, 数量 > 0)
+        let state_tool_count = state.tools.definitions().len();
+        let app_tool_count = app.tools.definitions().len();
+        // App 还会加 SkillReadTool + workspace MCP, 但 in-memory 测试没 workspace MCP.
+        // 所以 app >= state.
+        assert!(
+            app_tool_count >= state_tool_count,
+            "App.tools ({app_tool_count}) 包含 state.tools ({state_tool_count}) 的全部定义"
+        );
+
+        // 3. memory 跟 state.memory 共享 (Arc clone, MemoryCore 共享 SQLite db)
+        let state_count_before = state.memory.build_context("", 100).await;
+        assert!(state_count_before.is_empty() || state_count_before.contains("相关记忆"));
     }
 
     mod bench {

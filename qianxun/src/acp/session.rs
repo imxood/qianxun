@@ -11,13 +11,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /// 单个 ACP 会话
+///
+/// Phase 4a 收尾: `memory` 字段从 AcpSession 移除, 改用 RuntimeState.memory (全局共享).
+/// Session-level 仍保留: tools (MCP per-session) / skills_catalog / skill_manager /
+/// skill_watcher (hot reload) / cancel_flag.
 pub struct AcpSession {
     pub id: String,
     pub conversation: Conversation,
     pub agent_loop: AgentLoop,
     pub created_at: String,
     pub is_running: bool,
-    pub memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
     /// 会话级工具注册表（含 MCP 工具），None 表示使用基础注册表
     pub tools: Option<Arc<ToolRegistry>>,
     /// 会话级技能目录，在 prompt 时注入
@@ -65,7 +68,6 @@ impl SessionManager {
         id: String,
         system_prompt: Option<String>,
         agent_loop: AgentLoop,
-        memory: Option<Box<dyn qianxun_core::context::MemoryObserver + Send>>,
         tools: Option<Arc<ToolRegistry>>,
         skills_catalog: String,
         skill_manager: Option<SkillManager>,
@@ -87,7 +89,6 @@ impl SessionManager {
                 agent_loop,
                 created_at: now,
                 is_running: false,
-                memory,
                 tools,
                 skills_catalog,
                 ws_root,
@@ -179,7 +180,7 @@ impl SessionManager {
 
     /// 从现有会话 fork 出一个新会话（复制会话状态到新 ID）。
     /// 新会话获得独立的 conversation/agent_loop，共享 tools（Arc）。
-    /// memory 和 skill_watcher 不支持 clone，fork 后设为 None。
+    /// skill_watcher 不支持 clone，fork 后设为 None。
     pub fn fork(&mut self, new_id: &str, source_id: &str) -> Result<&mut AcpSession, String> {
         if self.sessions.len() as u32 >= self.max_sessions {
             return Err("max sessions reached".into());
@@ -195,7 +196,6 @@ impl SessionManager {
                 agent_loop: source.agent_loop.clone(),
                 created_at: now,
                 is_running: false,
-                memory: None,
                 tools: source.tools.clone(),
                 skills_catalog: source.skills_catalog.clone(),
                 ws_root: source.ws_root.clone(),

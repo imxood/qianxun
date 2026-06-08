@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::api::cancel::cancel_session_impl;
 use crate::api::error::RuntimeApiResult;
 use crate::api::load::load_session_impl;
-use crate::api::plans::{create_plan_impl, list_plans_impl};
+use crate::api::plans::{cancel_plan_impl, create_plan_impl, list_plans_impl};
 use crate::api::send::send_message_impl;
 use crate::api::sessions::list_sessions_impl;
 use crate::api::trait_def::RuntimeApi;
@@ -60,6 +60,10 @@ impl RuntimeApi for Arc<RuntimeState> {
 
     async fn list_plans(&self) -> RuntimeApiResult<Vec<PlanInfo>> {
         list_plans_impl(self.clone()).await
+    }
+
+    async fn cancel_plan(&self, plan_id: &str) -> RuntimeApiResult<()> {
+        cancel_plan_impl(self.clone(), plan_id).await
     }
 
     async fn cancel_session(&self, session_id: &str) -> RuntimeApiResult<()> {
