@@ -53,7 +53,7 @@ fn env_mutex() -> &'static StdMutex<()> {
 
 /// 构造最小可用的 `Arc<AppState>` for tests. 不依赖 `stage7a_endpoint_tests`
 /// (它是 router.rs 私有 mod, 跨文件不可见).
-fn make_test_state() -> Arc<crate::daemon::AppState> {
+fn make_test_state() -> Arc<crate::runtime::AppState> {
     use std::collections::HashMap;
 
     use qianxun_core::config::{ResolvedConfig, ResolvedProviderConfig};
@@ -63,10 +63,10 @@ fn make_test_state() -> Arc<crate::daemon::AppState> {
     use qianxun_memory::MemoryCore;
 
     use crate::buf_writer::LogRing;
-    use crate::daemon::agent_host::{AgentLoopHost, SharedState};
-    use crate::daemon::auth::AdminCredential;
-    use crate::daemon::llm_providers::LlmProviderManager;
-    use crate::daemon::persistence::SessionStore;
+    use crate::runtime::agent_host::{AgentLoopHost, SharedState};
+    use crate::runtime::auth::AdminCredential;
+    use crate::runtime::llm_providers::LlmProviderManager;
+    use crate::runtime::persistence::SessionStore;
 
     // 1. ResolvedConfig (deepseek fake api_key — LLM 真实调用会失败, 符合预期)
     let mut providers = HashMap::new();
@@ -112,7 +112,7 @@ fn make_test_state() -> Arc<crate::daemon::AppState> {
         "$2b$12$placeholderhashplaceholderhashplaceholderhashplaceholder";
     let admin = Arc::new(AdminCredential::for_test(TEST_SECRET, placeholder_hash));
 
-    Arc::new(crate::daemon::AppState {
+    Arc::new(crate::runtime::AppState {
         agent_host,
         config: config_arc,
         provider,
@@ -181,7 +181,7 @@ fn make_jwt(secret: &str, sub: &str, exp_offset_secs: i64) -> String {
 /// 一次走完: 建 session → 拼请求 → 走 router → 读 SSE 帧.
 /// 容忍 LLM 真实调用失败 (sink 会发 error 事件, 我们只验结构).
 async fn post_prompt_and_collect(
-    state: &Arc<crate::daemon::AppState>,
+    state: &Arc<crate::runtime::AppState>,
     user_text: &str,
     jwt: &str,
     collect_timeout: Duration,
@@ -192,7 +192,7 @@ async fn post_prompt_and_collect(
         .expect("create_session");
     let session_id = runtime.session_id.clone();
 
-    let app = crate::daemon::router::build_router(state.clone(), None);
+    let app = crate::runtime::router::build_router(state.clone(), None);
 
     let body = serde_json::json!({
         "messages": [{ "role": "user", "content": user_text }],

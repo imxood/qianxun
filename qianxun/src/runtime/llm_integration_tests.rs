@@ -65,10 +65,10 @@ async fn spawn_test_daemon(
     use qianxun_core::tools::ToolRegistry;
     use qianxun_memory::MemoryCore;
     use crate::buf_writer::LogRing;
-    use crate::daemon::agent_host::{AgentLoopHost, SharedState};
-    use crate::daemon::llm_providers::LlmProviderManager;
-    use crate::daemon::persistence::SessionStore;
-    use crate::daemon::AppState;
+    use crate::runtime::agent_host::{AgentLoopHost, SharedState};
+    use crate::runtime::llm_providers::LlmProviderManager;
+    use crate::runtime::persistence::SessionStore;
+    use crate::runtime::AppState;
 
     // 1. Provider
     let provider: Arc<dyn qianxun_core::provider::LlmProvider> = create_provider(
@@ -113,7 +113,7 @@ async fn spawn_test_daemon(
         log_ring: Arc::new(LogRing::new()),
         // Stage 10a: admin credential (测试用临时路径, 避免污染 ~/.qianxun/)
         admin: Arc::new(
-            crate::daemon::auth::AdminCredential::load_or_create(
+            crate::runtime::auth::AdminCredential::load_or_create(
                 &std::env::temp_dir()
                     .join(format!("qianxun_itest_admin_{}.json", std::process::id())),
             )
@@ -122,7 +122,7 @@ async fn spawn_test_daemon(
     });
 
     // 7. Build router (不带 UI dist, 走 None)
-    let app = crate::daemon::router::build_router(state, None);
+    let app = crate::runtime::router::build_router(state, None);
 
     // 8. Bind ephemeral port
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

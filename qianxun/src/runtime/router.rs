@@ -34,10 +34,10 @@ use qianxun_core::tools::ToolCategoryFilter;
 use qianxun_core::types::LlmError;
 use qianxun_memory::MemoryStats;
 
-use crate::daemon::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
-use crate::daemon::output_sink::DaemonOutputSink;
-use crate::daemon::sse::{SseEvent, SseEventBuilder};
-use crate::daemon::AppState;
+use crate::runtime::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
+use crate::runtime::output_sink::DaemonOutputSink;
+use crate::runtime::sse::{SseEvent, SseEventBuilder};
+use crate::runtime::AppState;
 
 /// 健康检查响应。
 #[derive(Serialize)]
@@ -1650,7 +1650,7 @@ fn persist_assistant_message(
     response_text: &str,
     tool_calls: &[(String, String, serde_json::Value)],
     thinking_blocks: &[(String, Option<String>)],
-    store: &Arc<crate::daemon::persistence::SessionStore>,
+    store: &Arc<crate::runtime::persistence::SessionStore>,
 ) {
     use qianxun_core::agent::message::Message;
     let Some(conv) = conv else { return };
@@ -1720,7 +1720,7 @@ mod e2e_tests {
         // 2. channel + consumer + store (Stage 3: 事件落盘)
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store = std::sync::Arc::new(
-            crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
+            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -1833,7 +1833,7 @@ mod e2e_tests {
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store2 = std::sync::Arc::new(
-            crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
+            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -1912,7 +1912,7 @@ mod e2e_tests {
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store3 = std::sync::Arc::new(
-            crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
+            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -1985,7 +1985,7 @@ mod e2e_tests {
 
         let (tx, mut rx) = mpsc::channel::<SseEvent>(64);
         let store4 = std::sync::Arc::new(
-            crate::daemon::persistence::SessionStore::in_memory().expect("in_memory"),
+            crate::runtime::persistence::SessionStore::in_memory().expect("in_memory"),
         );
         let sink = DaemonOutputSink::new(
             tx,
@@ -2067,11 +2067,11 @@ mod jwt_auth_tests {
     /// token 能直接被 `state.admin.token_secret()` 验签通过 (不再依赖 env var).
     fn make_test_state_with_secret(
         secret: &str,
-    ) -> std::sync::Arc<crate::daemon::AppState> {
-        use crate::daemon::agent_host::{AgentLoopHost, SharedState};
-        use crate::daemon::auth::AdminCredential;
-        use crate::daemon::llm_providers::LlmProviderManager;
-        use crate::daemon::persistence::SessionStore;
+    ) -> std::sync::Arc<crate::runtime::AppState> {
+        use crate::runtime::agent_host::{AgentLoopHost, SharedState};
+        use crate::runtime::auth::AdminCredential;
+        use crate::runtime::llm_providers::LlmProviderManager;
+        use crate::runtime::persistence::SessionStore;
         use qianxun_core::config::ResolvedConfig;
         use qianxun_core::provider::create_provider;
         use qianxun_core::skills::SkillManager;
@@ -2095,7 +2095,7 @@ mod jwt_auth_tests {
         let agent_host = Arc::new(AgentLoopHost::new(2, shared.clone(), store.clone()));
         let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
         let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
-        Arc::new(crate::daemon::AppState {
+        Arc::new(crate::runtime::AppState {
             agent_host,
             config: Arc::new(config),
             provider,
@@ -2498,7 +2498,7 @@ mod stage7a_endpoint_tests {
     //! 串行化 env var 操作 (Rust 2024 下 set_var 是 unsafe, 多线程并发是 UB).
     use super::*;
     use crate::buf_writer::LogRing;
-    use crate::daemon::llm_providers::LlmProviderManager;
+    use crate::runtime::llm_providers::LlmProviderManager;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
@@ -2519,8 +2519,8 @@ mod stage7a_endpoint_tests {
     /// 测试用 admin credential — 用已知 token_secret 构造, 让 `make_jwt` 签的
     /// token 能通过 `state.admin.token_secret()` 验签. 走 `for_test` constructor
     /// (不写文件, 不打 random password 到 stderr).
-    pub(super) fn test_admin_credential() -> std::sync::Arc<crate::daemon::auth::AdminCredential> {
-        use crate::daemon::auth::AdminCredential;
+    pub(super) fn test_admin_credential() -> std::sync::Arc<crate::runtime::auth::AdminCredential> {
+        use crate::runtime::auth::AdminCredential;
         // bcrypt hash of "stage7a-test-password" (12-char min, 4+ allowed) — placeholder
         // for tests that need verify_password. 大多数测试不走 verify_password, 只验签.
         let placeholder_hash = "$2b$12$placeholderhashplaceholderhashplaceholderhashplaceholder";
@@ -2532,8 +2532,8 @@ mod stage7a_endpoint_tests {
     /// 不初始化 AgentLoopHost (会要求 SessionStore), 单独 mock 一个 minimal host
     /// 通过 — 简单做法: 只为 router 提供 LLM manager / tools / skills, agent_host
     /// 字段用空 runtime.
-    pub(super) fn make_test_state() -> Arc<crate::daemon::AppState> {
-        use crate::daemon::persistence::SessionStore;
+    pub(super) fn make_test_state() -> Arc<crate::runtime::AppState> {
+        use crate::runtime::persistence::SessionStore;
         use qianxun_memory::MemoryCore;
         use qianxun_core::provider::create_provider;
 
@@ -2567,14 +2567,14 @@ mod stage7a_endpoint_tests {
         // 这里走轻量路径: 直接构造 AppState, shared 给一个**空** shared state.
         let shared_inner = qianxun_core::provider::LlmProvider::id(&*provider);
         let _ = shared_inner; // 静默 unused
-        let shared = Arc::new(crate::daemon::agent_host::SharedState::new(
+        let shared = Arc::new(crate::runtime::agent_host::SharedState::new(
             config.clone(),
             provider.clone(),
             tools.clone(),
             memory.clone(),
             skills.clone(),
         ));
-        let agent_host = Arc::new(crate::daemon::agent_host::AgentLoopHost::new(
+        let agent_host = Arc::new(crate::runtime::agent_host::AgentLoopHost::new(
             4,
             shared.clone(),
             store.clone(),
@@ -2582,7 +2582,7 @@ mod stage7a_endpoint_tests {
         let (shutdown_tx, _rx) = tokio::sync::watch::channel(());
         let llm_providers = Arc::new(LlmProviderManager::from_config(&config));
 
-        Arc::new(crate::daemon::AppState {
+        Arc::new(crate::runtime::AppState {
             agent_host,
             config: config_arc,
             provider,
@@ -2614,7 +2614,7 @@ mod stage7a_endpoint_tests {
     /// / 推 log 等需要访问 state 的测试用.
     pub(super) fn test_router_with_ui_and_state(
         ui_dist: Option<PathBuf>,
-    ) -> (Router, Arc<crate::daemon::AppState>) {
+    ) -> (Router, Arc<crate::runtime::AppState>) {
         let state = make_test_state();
         let app = build_router(state.clone(), ui_dist);
         (app, state)

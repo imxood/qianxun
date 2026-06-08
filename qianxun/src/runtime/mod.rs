@@ -28,10 +28,10 @@ use tokio::sync::watch;
 use qianxun_memory::MemoryCore;
 
 use crate::buf_writer::LogRing;
-use crate::daemon::agent_host::{AgentLoopHost, SharedState};
-use crate::daemon::auth::AdminCredential;
-use crate::daemon::llm_providers::LlmProviderManager;
-use crate::daemon::persistence::SessionStore;
+use crate::runtime::agent_host::{AgentLoopHost, SharedState};
+use crate::runtime::auth::AdminCredential;
+use crate::runtime::llm_providers::LlmProviderManager;
+use crate::runtime::persistence::SessionStore;
 
 /// Daemon 共享状态 (Stage 1 最小集).
 ///
@@ -378,18 +378,18 @@ mod graceful_shutdown_tests {
                 .as_nanos()
         ));
         let store = Arc::new(SessionStore::new(&tmp).expect("open store"));
-        let shared = Arc::new(crate::daemon::agent_host::SharedState::new(
+        let shared = Arc::new(crate::runtime::agent_host::SharedState::new(
             resolved.clone(),
             provider.clone(),
             tools.clone(),
             memory.clone(),
             skills.clone(),
         ));
-        let agent_host = Arc::new(crate::daemon::agent_host::AgentLoopHost::for_test(
+        let agent_host = Arc::new(crate::runtime::agent_host::AgentLoopHost::for_test(
             10,
             resolved.clone(),
         ));
-        let llm_providers = Arc::new(crate::daemon::llm_providers::LlmProviderManager::from_config(&resolved));
+        let llm_providers = Arc::new(crate::runtime::llm_providers::LlmProviderManager::from_config(&resolved));
         let (shutdown_tx, _rx) = watch::channel(());
         Arc::new(AppState {
             agent_host,
@@ -406,7 +406,7 @@ mod graceful_shutdown_tests {
             started_at: Instant::now(),
             active_conns: Arc::new(AtomicUsize::new(0)),
             log_ring: Arc::new(LogRing::new()),
-            admin: Arc::new(crate::daemon::auth::AdminCredential::for_test(
+            admin: Arc::new(crate::runtime::auth::AdminCredential::for_test(
                 "test_secret_for_graceful_shutdown_tests_xx",
                 "placeholder_hash",
             )),

@@ -37,8 +37,8 @@ use qianxun_core::types::{LlmError, StopReason, TokenUsage};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::daemon::persistence::SessionStore;
-use crate::daemon::sse::{SseEvent, SseEventBuilder};
+use crate::runtime::persistence::SessionStore;
+use crate::runtime::sse::{SseEvent, SseEventBuilder};
 
 // ─── 内部状态 ─────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@ mod acp;
 mod buf_writer;
 mod cli;
 mod client;
-mod daemon;
+mod runtime;
 mod server;
 mod tui;
 
@@ -259,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
         let cred_path = qianxun_core::workspace::qianxun_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot determine ~/.qianxun home dir"))?
             .join("admin.cred");
-        let admin = match daemon::auth::AdminCredential::load_or_create(&cred_path) {
+        let admin = match runtime::auth::AdminCredential::load_or_create(&cred_path) {
             Ok(a) => std::sync::Arc::new(a),
             Err(e) => {
                 eprintln!("错误: 加载 admin credential 失败 ({}): {e}", cred_path.display());
@@ -280,7 +280,7 @@ async fn main() -> anyhow::Result<()> {
                  Run `qx --daemon` once to bootstrap; subsequent boots will use the file."
             );
         }
-        daemon::run(cli.port, resolved, ui_dist, admin).await?;
+        runtime::run(cli.port, resolved, ui_dist, admin).await?;
         return Ok(());
     }
 
