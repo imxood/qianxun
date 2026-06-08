@@ -8,7 +8,7 @@
 // 留在 qianxun binary 内的 AppState, 嵌入 `Arc<RuntimeState>`
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
@@ -19,9 +19,14 @@ use qianxun_core::tools::ToolRegistry;
 use qianxun_memory::MemoryCore;
 
 use crate::agent_host::{AgentLoopHost, SharedState};
+use crate::api::plans::PlanStore;
 use crate::persistence::SessionStore;
 
-/// 千寻运行时核心状态 — 9 核心字段, 跨桌面 / daemon 共享.
+/// 千寻运行时核心状态 — 10 核心字段, 跨桌面 / daemon 共享.
+///
+/// 字段变更 (Stage 4a sub-task #3):
+///   - 新增 `plans: Arc<PlanStore>` — in-memory plan store (RuntimeApi plans impl 用)
+///   - 之前 9 字段不变
 pub struct RuntimeState {
     pub agent_host: Arc<AgentLoopHost>,
     pub config: Arc<ResolvedConfig>,
@@ -31,6 +36,7 @@ pub struct RuntimeState {
     pub skills: SkillManager,
     pub shared: Arc<SharedState>,
     pub store: Arc<SessionStore>,
+    pub plans: Arc<PlanStore>,
     pub shutdown_tx: watch::Sender<()>,
 }
 
@@ -121,6 +127,7 @@ impl RuntimeState {
             skills,
             shared,
             store,
+            plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shutdown_tx,
         }))
     }
@@ -164,6 +171,7 @@ impl RuntimeState {
             skills,
             shared,
             store,
+            plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shutdown_tx,
         })
     }

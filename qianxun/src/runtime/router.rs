@@ -18,26 +18,40 @@ use serde_json::Value;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[allow(unused_imports)] // 仅测试代码用 (consume_stream_to_sse 单元测试)
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use qianxun_core::agent::conversation::Conversation;
-use qianxun_core::agent::engine::{processing_loop, AgentLoop};
 use qianxun_core::agent::message::ContentBlock;
-use qianxun_core::context::MemoryObserver;
 use qianxun_core::provider::types::LlmStreamEvent;
-use qianxun_core::tools::ToolCategoryFilter;
 use qianxun_core::types::LlmError;
 use qianxun_memory::MemoryStats;
 
 use crate::runtime::llm_providers::{LlmProviderConfig as ManagerProviderConfig, TestResult};
+use qianxun_runtime::api::types::{SendMessage as ApiSendMessage, SendRequest as ApiSendRequest};
+use qianxun_runtime::api::RuntimeApi;
 use qianxun_runtime::DaemonOutputSink;
+#[allow(unused_imports)] // 仅测试代码用 (SseEvent 在 stage7a endpoint_tests 跟 consume_stream_to_sse 出现)
 use qianxun_runtime::{SseEvent, SseEventBuilder};
 use crate::runtime::AppState;
+
+/// Stage 4a sub-task #3: RuntimeApiError → HTTP (StatusCode, String) 转换助手.
+fn api_err_to_http(
+    e: qianxun_runtime::api::error::RuntimeApiError,
+) -> (StatusCode, String) {
+    let status = match e.http_status() {
+        "404" => StatusCode::NOT_FOUND,
+        "400" => StatusCode::BAD_REQUEST,
+        "503" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, e.to_string())
+}
 
 /// 健康检查响应。
 #[derive(Serialize)]
@@ -457,12 +471,13 @@ async fn create_session(
 async fn get_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if state.runtime.agent_host.session_exists(&id) {
-        Ok(Json(serde_json::json!({ "session_id": id, "status": "active" })))
-    } else {
-        Err((StatusCode::NOT_FOUND, format!("Session {id} not found")))
-    }
+) -> Result<Json<qianxun_runtime::api::types::SessionState>, (StatusCode, String)> {
+    state
+        .runtime
+        .load_session(&id)
+        .await
+        .map(Json)
+        .map_err(api_err_to_http)
 }
 
 async fn delete_session(
@@ -768,90 +783,27 @@ async fn invoke_tool(
 
 // ─── Stage 7b: Sessions 管理 (3 endpoint) ────────────────────────
 
-/// `GET /v1/chat/sessions?status=active|paused|all` — 列所有 session.
+/// `GET /v1/chat/sessions?status=active|paused|stored|all` — 列所有 session.
 ///
-/// 数据源:
-/// - `agent_host.session_count()` + `agent_host.paused_count()` → 内存中活跃
-/// - `agent_host` 没有 list_all (无 id 索引), 当前实现只能从 `SessionStore::list_active()`
-///   拿元数据. 已 deleted 的内存 session 不在 store 中, 这里返 store 列表为主.
-///
-/// 简化: `paused` 过滤通过 `agent_host` 内存状态二次过滤; `all` 返 store 全部.
+/// Stage 4a sub-task #3: 走 RuntimeApi::list_sessions (业务在 qianxun-runtime/api/sessions.rs).
+/// HTTP layer 只做 query 解析 + JSON 序列化, 跟 Tauri command 共用同一份业务.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListSessionsQuery>,
-) -> Json<serde_json::Value> {
-    let filter = params.status.as_deref().unwrap_or("all");
-    let store = state.runtime.store.clone();
-    let agent_host = state.runtime.agent_host.clone();
-
-    // 同步拉 store 元数据 (内存 SQLite, 不阻塞)
-    let metas = match store.list_active() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!("[runtime] list_sessions: store.list_active failed: {e}");
-            return Json(serde_json::json!({
-                "sessions": [],
-                "total": 0,
-                "error": format!("store error: {e}"),
-            }));
-        }
+) -> Result<Json<qianxun_runtime::api::types::ListSessionsResponse>, (StatusCode, String)> {
+    use qianxun_runtime::api::types::SessionFilter;
+    let filter = match params.status.as_deref() {
+        Some("active") => SessionFilter::Active,
+        Some("paused") => SessionFilter::Paused,
+        Some("stored") => SessionFilter::Stored,
+        _ => SessionFilter::All,
     };
-
-    let active_in_mem = agent_host.session_count();
-    let paused_in_mem = agent_host.paused_count();
-
-    let mut sessions = Vec::with_capacity(metas.len());
-    for meta in metas {
-        // 当前 paused 状态: 优先看 in-memory runtime (最新), fallback store.status
-        let runtime = agent_host.get_session(&meta.id);
-        let is_paused = runtime.as_ref().map(|r| r.is_paused()).unwrap_or(false);
-        let in_memory = runtime.is_some();
-
-        // status filter
-        let include = match filter {
-            "active" => in_memory && !is_paused,
-            "paused" => in_memory && is_paused,
-            _ => true, // "all" 或未知值都按 all 处理
-        };
-        if !include {
-            continue;
-        }
-
-        let model = runtime
-            .as_ref()
-            .map(|r| r.config.model.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let status = if !in_memory {
-            "stored".to_string()
-        } else if is_paused {
-            "paused".to_string()
-        } else {
-            "active".to_string()
-        };
-
-        sessions.push(serde_json::json!({
-            "id": meta.id,
-            "model": model,
-            "created_at": meta.created_at,
-            "last_active": meta.last_active_at,
-            "message_count": meta.message_count,
-            "status": status,
-            "token_usage": {
-                // Stage 7b 简化: 不从 store 反序列化 runtime.accumulated_usage
-                "input": 0u64,
-                "output": 0u64,
-            },
-        }));
-    }
-
-    Json(serde_json::json!({
-        "sessions": sessions,
-        "total": sessions.len(),
-        "filter": filter,
-        "active_in_memory": active_in_mem,
-        "paused_in_memory": paused_in_mem,
-    }))
+    state
+        .runtime
+        .list_sessions(filter)
+        .await
+        .map(Json)
+        .map_err(api_err_to_http)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -862,17 +814,16 @@ struct ListSessionsQuery {
 
 /// `POST /v1/chat/session/{id}/cancel` — 取消正在跑的 prompt.
 ///
-/// Stage 7b 简化: 设置 `runtime.paused = true` 作为软信号 (Stage 7c 接完整
-/// tokio CancellationToken). 任何 session 都接受 (存在性由 agent_host 验证).
+/// Stage 4a sub-task #3: 走 RuntimeApi::cancel_session (业务 1:1 搬).
 async fn cancel_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     state
-        .runtime.agent_host
+        .runtime
         .cancel_session(&id)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+        .map_err(api_err_to_http)?;
     Ok(Json(serde_json::json!({
         "status": "cancelled",
         "id": id,
@@ -1379,138 +1330,26 @@ async fn prompt_handler(
     Json(req): Json<PromptRequest>,
 ) -> Result<Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, (StatusCode, String)>
 {
-    // 1. 验证 session
-    let runtime = state
-        .runtime.agent_host
-        .get_session(&id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Session {id} not found")))?;
-    runtime.touch();
+    // Stage 4a sub-task #3: 业务 1:1 搬自旧 prompt_handler (142 行), 现在在
+    // qianxun-runtime::api::send::send_message_impl. HTTP layer 只做 3 件事:
+    //   1. Json<PromptRequest> -> ApiSendRequest (RuntimeApi 用的 request 类型)
+    //   2. 调 state.runtime.send_message(&id, send_req) 拿 Receiver<SseEvent>
+    //   3. 包 Receiver 成 axum Sse 帧
+    let send_req = ApiSendRequest {
+        messages: req
+            .messages
+            .into_iter()
+            .map(|m| ApiSendMessage { role: m.role, content: m.content })
+            .collect(),
+        model: req.model,
+    };
 
-    // 2. 推 user 消息到 runtime.conversation (Arc<Mutex<Conversation>>).
-    //    Stage 4: 持久化路径, user 消息也进 conversation history,
-    //    consumer 末尾会 push assistant 消息, 一起 save snapshot.
-    //
-    //    容错: req.messages 里如果同时含 "user"/"assistant"/"system",
-    //    Stage 4 简化: 全部按 role 推 (assistant 入 history 但不进 LLM request,
-    //    因为 build_request 只用 runtime.conversation.messages() 的全部 ——
-    //    后续 Stage 接完整 multi-turn 时再细化).
-    {
-        let mut conv_guard = runtime
-            .conversation
-            .lock()
-            .expect("SessionRuntime conversation lock poisoned");
-        for msg in &req.messages {
-            let role = msg.role.as_str();
-            match role {
-                "user" => {
-                    let block = ContentBlock::text(&msg.content);
-                    conv_guard.push_user_message(vec![block]);
-                }
-                "assistant" | "system" => {
-                    // Stage 4 简化: assistant / system 也入 history (供 multi-turn 还原),
-                    // 但 build_request 当前只用 messages (不分 role), 实际效果是历史消息
-                    // 都会作为上下文发给 LLM. 这是 Stage 4 行为, 留 Stage 5 接 system_prompt
-                    // 注入时再细化 (把 system role 单独抽出来).
-                    use qianxun_core::agent::message::Message;
-                    let block = ContentBlock::text(&msg.content);
-                    conv_guard.push_message(match role {
-                        "assistant" => Message::assistant(vec![block]),
-                        _ => Message::user(vec![block]), // system → 当 user 入 (兜底)
-                    });
-                    tracing::debug!(
-                        "[prompt] role={role} content.len={} (into history)",
-                        msg.content.len()
-                    );
-                }
-                other => {
-                    tracing::warn!("[prompt] unknown role {other}, skipping");
-                }
-            }
-        }
-    }
+    let (_resp, rx) = state
+        .runtime
+        .send_message(&id, send_req)
+        .await
+        .map_err(api_err_to_http)?;
 
-    // 3. 提取最后一条 user 消息 (作 memory/skills 注入的 query, 跟 Stage 2
-    //    "构造空 conversation 跑单轮" 不同, 我们要利用 runtime.conversation 里的
-    //    历史做 context 检索).
-    let last_user_msg: String = req
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-
-    // 4. 真实计算注入的 context 字符串 (替代 Stage 2 的 "" 占位)
-    //    - memory_context:    调 MemoryObserver::build_context, 走 BM25 检索
-    //                         当前 session + 全局 observations, 按 token 预算裁剪
-    //    - skills_catalog:    Layer 1 技能目录 (名称 + 描述 + 触发词), 永远注入
-    //    - skill_injections:  Layer 2 技能完整 body, 按 user 消息触发词匹配后注入
-    // 三个串都走 `build_request` 的 system prompt 拼接, 跟 qianxun-core 系统提示词
-    // 协议一致 (memory → catalog → injections).
-    let memory_context: String = state.runtime.memory.build_context(&last_user_msg, 2000).await;
-    let skills_catalog: String = runtime.skills.build_catalog_prompt();
-    let matched_skills: Vec<String> = runtime.skills.auto_select(&last_user_msg, &[]);
-    let skill_injections: String = runtime.skills.build_injections(&matched_skills);
-
-    // 5. 准备本 prompt 用的 AgentLoop + Conversation 快照.
-    //    - AgentLoop 每次新建 (runtime.agent_loop 是 owned 字段, 不可通过
-    //      Arc<SessionRuntime> 借用, 也不值得为此把 SessionRuntime 全锁)
-    //    - Conversation 从 runtime.conversation 克隆, 保留 user 历史;
-    //      handle_user_message 改 &mut conv, 不写回 runtime (Stage 4 跨
-    //      await 持锁改进点, 留 4a 处理)
-    let mut agent_loop = AgentLoop::new(runtime.resolved.agent.clone());
-    let mut conv: Conversation = runtime
-        .conversation
-        .lock()
-        .expect("SessionRuntime conversation lock poisoned")
-        .clone();
-
-    // 6. 通道 + DaemonOutputSink (emit_message_start=true 让 sink 内部自己发
-    //    MessageStart, 跟 Stage 2 路径 "外层先发" 行为不同). processing_loop_enabled
-    //    写死为 true — 本期只走 processing_loop 路径, 旧直连 stream_completion 已废弃.
-    let _processing_loop_enabled = true;
-    let (tx, rx) = mpsc::channel::<SseEvent>(64);
-    let model = runtime.config.model.clone();
-    let max_tokens = runtime.resolved.agent.max_tokens.unwrap_or(16384) as u32;
-    let session_id = runtime.session_id.clone();
-    let sink = DaemonOutputSink::new(
-        tx,
-        state.runtime.store.clone(),
-        session_id.clone(),
-        model,
-        max_tokens,
-        true, // emit_message_start: true — sink 调 begin_message() 自动发 MessageStart
-    );
-
-    // 7. spawn 后台任务: sink.begin_message() + processing_loop::handle_user_message
-    //    之后 sink drop → mpsc 关闭 → SSE wrapper 自然结束.
-    let provider = runtime.provider.clone();
-    let tools = runtime.tools.clone();
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    tokio::spawn(async move {
-        // 7a. 同步先发 MessageStart (sink 内部 started 标志位, 幂等)
-        sink.begin_message().await;
-        // 7b. 调处理循环 (handle_user_message 内部会循环, 工具执行后回送结果,
-        //     直到 end_turn / max_tokens / cancel 才 return). 内部会调 sink 的
-        //     trait 方法 (on_text / on_tool_call / on_tool_result / on_turn_finished
-        //     / ...), sink 路由到内部 SseEventBuilder 状态机.
-        processing_loop::handle_user_message(
-            &mut agent_loop,
-            &mut conv,
-            provider.as_ref(),
-            tools.as_ref(),
-            ToolCategoryFilter::all(),
-            &sink,
-            &memory_context,
-            &skills_catalog,
-            &skill_injections,
-            cancel_flag,
-        )
-        .await;
-    });
-
-    // 8. SSE wrapper: 把 mpsc 里的事件序列化成 SSE 帧
-    //    (ReceiverStream 适配 axum::body::Body 要求 impl Stream)
     let sse_stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         Box::pin(ReceiverStream::new(rx).map(crate::runtime::sse_axum::event_to_sse));
     Ok(Sse::new(sse_stream))
