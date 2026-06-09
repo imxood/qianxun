@@ -1,16 +1,15 @@
 // qianxun-desktop/src/lib/stores/project.svelte.ts
 // Project store
 //
-// Stage 4a (sub-task #4): 删 buildSeed 依赖.
-//   - 后端 RuntimeApi 暂没 project CRUD 方法 (sub-task #3 范围之外)
-//   - 业务: project 由用户手动建 (绑工作目录), 后续 sub-task 接 RuntimeApi
-//   - 当前: 空数组 + loadAll() 异步方法 (留接口, 暂时返空)
+// 2026-06-09 重构: 之前 loadAll 是 noop + ProjectSection.svelte 用 buildSeed() mock.
+// 现状: projectStore.loadAll 调 listSessions('all') 按 SessionInfo.project_root
+// 去重, derive 出 Project[]. 零后端改动, 数据源是真实 SQLite (daemon.db).
 //
-// 关联:
-//   - docs/30_子项目规划/04b-tauri-runtime-integration.md §"Sub-task 6"
-//   - qianxun-runtime/src/api/trait_def.rs (RuntimeApi 5 方法, project 不在内)
+// 未来 (P1 中期): 后端加 RuntimeApi::list_projects / create_project, 支持"先建项目 → 再绑 session"工作流.
+// 当前是派生方案, 简单可靠, 不需要新概念.
 
 import type { Project } from '$lib/types/entity';
+import { listSessions, type SessionInfo } from '$lib/ipc/runtime';
 
 function createProjectStore() {
 	const projects = $state<Project[]>([]);
@@ -18,22 +17,64 @@ function createProjectStore() {
 	let loading = $state(false);
 	let lastError = $state<string | null>(null);
 
-	/// 启动时调. 当前 noop, 后续 sub-task 接 RuntimeApi 拉真实 project 列表.
+	/// 启动时调. 拉 listSessions('all') 按 project_root 去重, derive Project[].
 	/// 重复调用安全.
 	async function loadAll() {
 		if (initialized || loading) return;
 		loading = true;
 		lastError = null;
 		try {
-			// TODO: 等后端 RuntimeApi 加 list_projects / create_project
-			// const r = await listProjects();
-			// projects.push(...r.projects);
+			const r = await listSessions('all');
+			projects.length = 0;
+			projects.push(...deriveProjectsFromSessions(r.sessions));
 			initialized = true;
 		} catch (e) {
-			lastError = (e as Error).message ?? String(e);
+			const msg = (e as Error).message ?? String(e);
+			lastError = msg;
+			console.warn('[projectStore] loadAll failed:', msg);
 		} finally {
 			loading = false;
 		}
+	}
+
+	/// 从 SessionInfo[] 派生 Project[]. 按 project_root 去重, 统计 session_count.
+	/// 没有 project_root 的 session 不计 (顶层 Chat 入口).
+	function deriveProjectsFromSessions(sessions: SessionInfo[]): Project[] {
+		const byRoot = new Map<string, Project>();
+		for (const s of sessions) {
+			if (!s.project_root) continue; // 跳过未绑项目的 session
+			const existing = byRoot.get(s.project_root);
+			if (existing) {
+				existing.session_count += 1;
+				if (s.last_active_at > existing.last_active_at) {
+					existing.last_active_at = s.last_active_at;
+				}
+			} else {
+				byRoot.set(s.project_root, {
+					id: s.project_root,
+					name: projectNameFromPath(s.project_root),
+					session_count: 1,
+					created_at: s.created_at,
+					last_active_at: s.last_active_at,
+				});
+			}
+		}
+		// 按 last_active_at DESC 排序 (最近活跃在前)
+		return Array.from(byRoot.values()).sort((a, b) =>
+			b.last_active_at.localeCompare(a.last_active_at)
+		);
+	}
+
+	/// 从绝对路径取最后一段作为项目名 (e.g. /home/maxu/qianxun → "qianxun")
+	function projectNameFromPath(path: string): string {
+		const m = path.match(/[/\\]([^/\\]+)[/\\]?$/);
+		return m ? m[1] : path;
+	}
+
+	/// 强制刷新 (绕开 initialized, 跟 create_session 后用). 后续 P1 加.
+	async function refresh() {
+		initialized = false;
+		await loadAll();
 	}
 
 	return {
@@ -56,6 +97,7 @@ function createProjectStore() {
 			return projects.find((p) => p.id === id);
 		},
 		loadAll,
+		refresh,
 		/// 测试专用: 重置内部状态. 业务代码不应该调.
 		__resetForTesting() {
 			projects.length = 0;

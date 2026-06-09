@@ -16,9 +16,11 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const listSessionsMock = vi.fn();
 const loadSessionMock = vi.fn();
+const createSessionMock = vi.fn();
 vi.mock("$lib/ipc/runtime", () => ({
 	listSessions: (...args: unknown[]) => listSessionsMock(...args),
 	loadSession: (...args: unknown[]) => loadSessionMock(...args),
+	createSession: (...args: unknown[]) => createSessionMock(...args),
 }));
 
 import { sessionStore } from "$lib/stores/session.svelte";
@@ -144,10 +146,21 @@ beforeEach(() => {
 		expect(sessionStore.all).toHaveLength(1);
 	});
 
-	it("create_creates_client_side_placeholder: 后端暂没 create_session, 客户端建 + UI 能用", () => {
-		const s = sessionStore.create({ project_id: null, title: "我的新会话" });
-		expect(s.id.startsWith("sess_")).toBe(true);
-		expect(s.title).toBe("我的新会话");
+	it("create_calls_invoke_and_pushes_store: create() 调 createSession invoke 拿后端 ID", async () => {
+		// mock createSession invoke 返后端生成的 sess_ ID
+		(createSessionMock as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+			id: "sess_20260609_120000_123456",
+			model: "deepseek-v4-flash",
+			status: "active",
+			created_at: new Date().toISOString(),
+			last_active_at: new Date().toISOString(),
+			message_count: 0,
+		});
+		const s = await sessionStore.create({ project_id: null, title: "我的新会话" });
+		expect(createSessionMock).toHaveBeenCalledTimes(1);
+		expect(s.id).toBe("sess_20260609_120000_123456");
+		// title 来自 sessionInfoToSession 兜底 (id 长度 > 20 截断), 跟旧"client-only 占位"行为变化
+		expect(s.title).toBe("sess_20260609_120000…");
 		expect(sessionStore.get(s.id)).toBeDefined();
 		expect(sessionStore.getMessages(s.id)).toEqual([]);
 	});

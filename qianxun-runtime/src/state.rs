@@ -8,6 +8,7 @@
 // 留在 qianxun binary 内的 AppState, 嵌入 `Arc<RuntimeState>`
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
@@ -28,7 +29,10 @@ use crate::persistence::SessionStore;
 ///   - 新增 `plans: Arc<PlanStore>` — in-memory plan store (RuntimeApi plans impl 用)
 ///   - 之前 9 字段不变
 pub struct RuntimeState {
-    pub agent_host: Arc<AgentLoopHost>,
+    /// 内部 session 生命周期管理. **pub(crate)** — 外部禁止直接访问, 必须走 RuntimeApi trait.
+    /// 内部 6 个字段 (provider / config / tools / memory / skills / shared) 仍 pub,
+    /// 因为 RuntimeApi impl + DaemonOutputSink 等内部组件需要读它们.
+    pub(crate) agent_host: Arc<AgentLoopHost>,
     pub config: Arc<ResolvedConfig>,
     pub provider: Arc<dyn LlmProvider>,
     pub tools: Arc<ToolRegistry>,
@@ -38,9 +42,59 @@ pub struct RuntimeState {
     pub store: Arc<SessionStore>,
     pub plans: Arc<PlanStore>,
     pub shutdown_tx: watch::Sender<()>,
+    /// 2026-06-09 加: restore_from_disk 懒初始化标志 (OnceCell 模式).
+    /// build() 同步不调 restore_from_disk (它跑 5-15s 同步 SQLite, 阻塞 webview 启动).
+    /// 后台 task 调 ensure_restored() 异步跑, 完成后置 true. 首次 send_message / list_sessions
+    /// 前若没 restored, 自动调一次.
+    restored: Arc<AtomicBool>,
 }
 
 impl RuntimeState {
+    /// 内部 session 数 (供 graceful shutdown / metrics 用).
+    /// 外部不应直接调 — 用 RuntimeApi::list_sessions 返 ListSessionsResponse.active_in_memory.
+    pub fn session_count(&self) -> usize {
+        self.agent_host.session_count()
+    }
+
+    /// 2026-06-09 加: 懒恢复 session (后台首次调, 之后 idempotent).
+    ///
+    /// 桌面端启动不再 block_on 等 restore, 而是:
+    /// 1. build() 同步返骨架 (new_for_test, in-memory, <100ms)
+    /// 2. 后台 task 调 ensure_restored() 异步跑, 加载 store 里的 session 到 agent_host
+    /// 3. 首次 send_message / list_sessions 前若没 restored, 同步等一次
+    ///
+    /// 优点: desktop 启动从 5-15s 降到 <1s.
+    pub async fn ensure_restored(&self) {
+        if self.restored.load(Ordering::Acquire) {
+            return;
+        }
+        match self.agent_host.restore_from_disk().await {
+            Ok(n) => {
+                tracing::info!("[runtime] ensure_restored: loaded {n} sessions from disk");
+                self.restored.store(true, Ordering::Release);
+            }
+            Err(e) => {
+                tracing::warn!("[runtime] ensure_restored failed: {e} (will retry on next call)");
+                // 不置 true, 下次 send_message 还会再试
+            }
+        }
+    }
+
+    /// 优雅关闭所有 in-memory session (graceful shutdown 用).
+    /// 标记每个未 paused 的 runtime 为 paused, 触发 SSE 流 stop signal.
+    pub fn shutdown_all_sessions(&self) -> usize {
+        self.agent_host.shutdown_all()
+    }
+
+    /// 启动后台 reap_stale 任务 (清理 1 小时未活跃的 session).
+    /// RuntimeState::new 自动调用, qianxun binary 不需要手动启动.
+    /// 暴露 pub 是给 mod.rs 显式触发的 fallback (Stage 4 之前), 后续可改 private.
+    pub fn spawn_reap_stale(&self) {
+        let host = self.agent_host.clone();
+        tokio::spawn(async move {
+            host.reap_stale().await;
+        });
+    }
     /// 完整初始化: provider / tools / memory / skills / SessionStore / AgentLoopHost
     /// 跟 `qianxun/src/runtime/mod.rs::run()` 初始化逻辑 1:1
     /// (Stage 1 最小集, 真实 provider + builtin tools + 真 SQLite memory/skills)
@@ -110,8 +164,10 @@ impl RuntimeState {
             skills.clone(),
         ));
 
-        // agent_host: 10 sessions 上限
-        let agent_host = Arc::new(AgentLoopHost::new(10, shared.clone(), store.clone()));
+        // agent_host: usize::MAX sessions (无上限, 2026-06-09 修正)
+        // session 是持久化状态, 不限制数量. 实际"运行中 LLM 调用"由
+        // processing_loop 内的并发控制 (后续 PR 加 Semaphore).
+        let agent_host = Arc::new(AgentLoopHost::new(usize::MAX, shared.clone(), store.clone()));
 
         // 启动恢复: 加载上次未关闭的 session (失败 warn 继续)
         let _ = agent_host.restore_from_disk().await;
@@ -129,6 +185,7 @@ impl RuntimeState {
             store,
             plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shutdown_tx,
+            restored: Arc::new(AtomicBool::new(false)),
         }))
     }
 
@@ -173,6 +230,7 @@ impl RuntimeState {
             store,
             plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shutdown_tx,
+            restored: Arc::new(AtomicBool::new(false)),
         })
     }
 }

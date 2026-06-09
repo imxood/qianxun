@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
+use crate::agent_host::CreateSessionOpts;
 use crate::api::error::{RuntimeApiError, RuntimeApiResult};
 use crate::api::types::{
-    ListSessionsResponse, SessionFilter, SessionInfo, SessionStatus,
+    CreateSessionRequest, ListSessionsResponse, SessionFilter, SessionInfo, SessionStatus,
+    UpdateProviderRequest,
 };
 use crate::RuntimeState;
 
@@ -22,6 +24,11 @@ pub async fn list_sessions_impl(
     state: Arc<RuntimeState>,
     filter: SessionFilter,
 ) -> RuntimeApiResult<ListSessionsResponse> {
+    // 2026-06-09 修: 不在 list_sessions_impl 调 ensure_restored!
+    // 原因: restore_from_disk 内部用 store 数据**新建** SessionRuntime 覆盖 agent_host 已有
+    // 实例, 会丢失 cancel_session_impl 设的 paused=true 状态. 客户端调 cancel 后立刻 list_sessions
+    // 验 paused 就会失败. 改成: ensure_restored 只在 send_message 入口调 (Tauri command 层),
+    // 那时 cancel 还没发生. list_sessions 走 in-memory 当前状态, 不重新 load.
     // 1. 拉 store 元数据 (内存 SQLite, 不阻塞)
     let metas = state.store.list_active().map_err(|e| {
         tracing::error!("[api] list_sessions: store.list_active failed: {e}");
@@ -70,6 +77,7 @@ pub async fn list_sessions_impl(
             created_at: meta.created_at,
             last_active_at: meta.last_active_at,
             message_count: meta.message_count,
+            project_root: meta.project_root,
         });
     }
 
@@ -90,4 +98,157 @@ fn filter_label(filter: &SessionFilter) -> String {
         SessionFilter::Stored => "stored".to_string(),
         SessionFilter::All => "all".to_string(),
     }
+}
+
+/// create_session 业务实现 (供 trait + 单测共用).
+///
+/// 1. 构造 `CreateSessionOpts` (从 `CreateSessionRequest.project_root` 透传)
+/// 2. 调 `state.agent_host.create_session(opts)` (后端生成 session_id, 持久化)
+/// 3. 构造 `SessionInfo` 返前端
+///
+/// 错误:
+/// - `RuntimeApiError::Internal` — store.create 失败 / agent_host panic
+/// - `RuntimeApiError::Unavailable` — max_sessions 满
+pub async fn create_session_impl(
+    state: Arc<RuntimeState>,
+    req: CreateSessionRequest,
+) -> RuntimeApiResult<SessionInfo> {
+    let opts = CreateSessionOpts {
+        project_root: req.project_root,
+        model: req.model,
+    };
+
+    let runtime = state.agent_host.create_session(opts).map_err(|e| {
+        if e.contains("Max sessions reached") {
+            RuntimeApiError::Unavailable(e)
+        } else {
+            tracing::error!("[api] create_session: agent_host.create_session failed: {e}");
+            RuntimeApiError::Internal(e)
+        }
+    })?;
+
+    // 构造 SessionInfo 返前端
+    Ok(SessionInfo {
+        id: runtime.session_id.clone(),
+        model: runtime.config.model.clone(),
+        status: SessionStatus::Active,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        last_active_at: chrono::Utc::now().to_rfc3339(),
+        message_count: 0,
+        project_root: runtime.project_root.clone(),
+    })
+}
+
+/// delete_session 业务实现. 同步删除内存 + 持久化记录 (FK CASCADE).
+pub async fn delete_session_impl(
+    state: Arc<RuntimeState>,
+    session_id: &str,
+) -> RuntimeApiResult<()> {
+    if !state.agent_host.delete_session(session_id) {
+        return Err(RuntimeApiError::NotFound(format!(
+            "session {session_id} not found"
+        )));
+    }
+    tracing::info!("[api] delete_session: id={session_id}");
+    Ok(())
+}
+
+/// pause_session 业务实现. 同步设置 paused flag.
+pub async fn pause_session_impl(
+    state: Arc<RuntimeState>,
+    session_id: &str,
+) -> RuntimeApiResult<()> {
+    state
+        .agent_host
+        .pause_session(session_id)
+        .map_err(|e| {
+            if e.contains("not found") {
+                RuntimeApiError::NotFound(e)
+            } else if e.contains("already paused") {
+                RuntimeApiError::Conflict(e)
+            } else {
+                RuntimeApiError::Internal(e)
+            }
+        })?;
+    tracing::info!("[api] pause_session: id={session_id}");
+    Ok(())
+}
+
+/// resume_session 业务实现. 同步清除 paused flag.
+pub async fn resume_session_impl(
+    state: Arc<RuntimeState>,
+    session_id: &str,
+) -> RuntimeApiResult<()> {
+    state
+        .agent_host
+        .resume_session(session_id)
+        .map_err(|e| {
+            if e.contains("not found") {
+                RuntimeApiError::NotFound(e)
+            } else if e.contains("is not paused") {
+                RuntimeApiError::Conflict(e)
+            } else {
+                RuntimeApiError::Internal(e)
+            }
+        })?;
+    tracing::info!("[api] resume_session: id={session_id}");
+    Ok(())
+}
+
+/// update_active_provider 业务实现 (2026-06-09 加).
+///
+/// 步骤:
+/// 1. 校验 active_provider 名字合法 (非空 + ASCII)
+/// 2. 读 `~/.qianxun/config.json` 旧内容
+/// 3. 改 active_provider 字段 (+ 可选 provider_config 改对应 entry)
+/// 4. 写回 config.json (原子, 通过 Config::save_to_file)
+///
+/// 错误:
+/// - InvalidRequest — active_provider 为空
+/// - Internal — 读 / 写 config.json 失败
+pub async fn update_active_provider_impl(
+    state: Arc<RuntimeState>,
+    req: UpdateProviderRequest,
+) -> RuntimeApiResult<()> {
+    use qianxun_core::config::Config;
+
+    // 1. 校验
+    if req.active_provider.trim().is_empty() {
+        return Err(RuntimeApiError::InvalidRequest(
+            "active_provider must not be empty".to_string(),
+        ));
+    }
+    let name = req.active_provider.trim().to_string();
+
+    // 2. 算 config.json 路径 (跟 state/runtime.rs::try_load_config 一致)
+    let path = qianxun_core::workspace::qianxun_dir()
+        .map(|d| d.join("config.json"))
+        .ok_or_else(|| {
+            RuntimeApiError::Internal("cannot determine ~/.qianxun home dir".to_string())
+        })?;
+
+    // 3. 读旧 config
+    let mut config = Config::from_file(&path)
+        .map_err(|e| RuntimeApiError::Internal(format!("read config: {e}")))?;
+
+    // 4. 改 active_provider 字段
+    config.active_provider = Some(name.clone());
+
+    // 5. 可选: 改 provider config entry
+    if let Some(pcfg) = req.provider_config {
+        let providers = config.providers.get_or_insert_with(Default::default);
+        providers.insert(name.clone(), pcfg);
+    }
+
+    // 6. 写回 (原子, 走 Config::save_to_file)
+    config
+        .save_to_file(&path)
+        .map_err(|e| RuntimeApiError::Internal(format!("save config: {e}")))?;
+
+    // 7. 提示 (用 tracing info, 桌面端会从 state 知道 — 但 runtime 不热替换)
+    tracing::warn!(
+        "[api] update_active_provider: id={} (重启 desktop 生效)",
+        name
+    );
+    Ok(())
 }

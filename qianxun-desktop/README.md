@@ -1,80 +1,64 @@
-# 千寻 Tauri 桌面端 (Stage 1 脚手架)
+# 千寻 Tauri 桌面端
 
 > 千寻 (Qianxun) 三大前端形态之一: Tauri 桌面 (Track C).
-> 设计详见 `docs/30_子项目规划/03-tauri-desktop.md`.
+> 设计详见 `docs/30_子项目规划/04b-tauri-runtime-integration.md`.
+> 状态: `docs/10_事实源/desktop-state.md`
 
-## 当前状态: **Stage 1 — 前端脚手架 (不接 Tauri 2.0)**
+## 当前状态: **4a-1 收尾** (2026-06-08)
 
-本 Stage 只完成 SvelteKit + Svelte 5 + Tailwind v4 + shadcn-svelte 的脚手架,
-可在浏览器中独立运行, 验证三栏布局与设计系统. Stage 2 才接入 Tauri 2.0
-与本地 Daemon (`http://127.0.0.1:23900`).
+Tauri 2.x + Svelte 5 桌面端,通过 Tauri IPC invoke 调 `qianxun-runtime` API (in-process, 零网络)。
+具体状态见 [desktop-state.md](../docs/10_事实源/desktop-state.md),包括 10 个 Tauri command、11 个 Svelte store、端到端链路、P0/P1 缺口。
 
-## 技术栈 (与 03-tauri-desktop.md §2.3 决策一致)
+## 技术栈
 
-| 维度 | 选择 | 实际版本 |
-|---|---|---|
-| 前端框架 | Svelte 5 (runes) | 5.56.0 |
-| 构建工具 | SvelteKit + Vite | 2.61.1 / 8.0.16 |
-| 样式 | Tailwind CSS | 4.3.0 (CSS-first) |
-| 组件库 | shadcn-svelte | 1.3.0 (button + card) |
-| 图标 | @lucide/svelte | 1.17.0 |
-| 类型 | TypeScript strict | 6.0.3 |
-| 包管理 | pnpm | 10.11.0 |
+| 维度 | 选择 |
+|---|---|
+| 前端框架 | Svelte 5 (runes) + SvelteKit |
+| 构建工具 | Vite |
+| 桌面 runtime | Tauri 2.x (固定 patch version) |
+| IPC | Tauri invoke (in-process, 类型安全) |
+| 后端调用 | qianxun-runtime RuntimeApi (path dep) |
+| 包管理 | pnpm |
 
 ## 命令
 
 ```sh
-pnpm install      # 安装依赖
-pnpm dev          # 启动 dev server (默认 http://127.0.0.1:5173/)
-pnpm build        # 生产构建
-pnpm check        # svelte-check 类型检查
+pnpm install                                    # 安装依赖
+DEEPSEEK_API_KEY=sk-xxx pnpm tauri dev          # 启桌面端 (需 API key)
+pnpm tauri build                                # 生产构建 (7 平台)
+cd src-tauri && cargo test                      # Rust 后端测试
 ```
 
-## 项目结构
+## 端到端链路
 
 ```
-qianxun-desktop/
-├── components.json              # shadcn-svelte 配置 (Stage 1: button + card)
-├── package.json
-├── svelte.config.js             # kit.alias 配置 ($components / $utils / $ui / $hooks)
-├── tsconfig.json
-├── vite.config.ts               # @tailwindcss/vite + @sveltejs/kit/vite
-├── src/
-│   ├── app.html
-│   ├── app.d.ts
-│   ├── lib/
-│   │   ├── utils.ts             # cn() + WithElementRef<T>
-│   │   ├── types/
-│   │   │   └── ipc.ts           # HealthStatus / Project / Session / Team / ...
-│   │   ├── stores/
-│   │   │   └── connection.svelte.ts  # 4 态连接状态机
-│   │   └── components/
-│   │       ├── ui/
-│   │       │   ├── button/      # shadcn-svelte Button
-│   │       │   └── card/        # shadcn-svelte Card + sub-components
-│   │       └── layout/
-│   │           ├── ThreeColumnLayout.svelte
-│   │           ├── Sidebar.svelte
-│   │           ├── SessionList.svelte
-│   │           └── ChatView.svelte
-│   └── routes/
-│       ├── layout.css           # Tailwind v4 + shadcn 主题变量
-│       ├── +layout.svelte
-│       └── +page.svelte         # 三栏 + mock 数据
-└── static/
+Svelte 5 ChatView button
+  → chat.svelte.ts:send() invoke "send_message"
+    → Tauri command (commands/runtime/send.rs)
+      → RuntimeApi::send_message → send_message_impl
+        → qianxun-core AgentLoop
+          → LLM (DeepSeek / minimax)
+        ← mpsc::Receiver<SseEvent>
+      ← spawn_event_emitter → app.emit("session_event")
+    ← onSessionEvent → chat-stream.ts 12-event 状态机
+  ← Svelte 反应式重渲染
 ```
 
-## Stage 2 计划 (TODO)
+详见 [desktop-state.md](../docs/10_事实源/desktop-state.md) "端到端链路" 段。
 
-- [ ] 接入 Tauri 2.0 (`@tauri-apps/api`, Rust 端 `src-tauri/`)
-- [ ] 真实 IPC 桥接: `invoke('daemon_health')` / `invoke('daemon_list_sessions')` / ...
-- [ ] SSE 客户端: `src/lib/sse/client.ts` (POST /v1/chat/session/:id/prompt)
-- [ ] MessageBubble / ToolCallCard / ThinkingBlock / CodeBlock
-- [ ] settings.svelte.ts + persisted<T> + keyring
-- [ ] teams.svelte.ts + Team 管理 UI
-- [ ] svelte-i18n (zh-CN + en)
-- [ ] ThemeSwitcher (light / dark / system, mode-watcher 已就绪)
-- [ ] ConnectionBanner (§10.1 降级 UI)
-- [ ] 离线消息队列 (§10.3)
-- [ ] SQLite 缓存 (`tauri-plugin-sql`)
-- [ ] VPS Server 接入 (WebSocket Hub)
+## 关联文档
+
+- **状态**: [`docs/10_事实源/desktop-state.md`](../docs/10_事实源/desktop-state.md)
+- **集成规划**: [`docs/30_子项目规划/04b-tauri-runtime-integration.md`](../docs/30_子项目规划/04b-tauri-runtime-integration.md)
+- **契约**: [`docs/30_子项目规划/_shared-contract.md`](../docs/30_子项目规划/_shared-contract.md)
+- **当前决策**: [`docs/30_决策/ADR-0003_desktop_2mode.md`](../docs/30_决策/ADR-0003_desktop_2mode.md)
+- **实施经验**: [`docs/40_经验/2026-06-08_04b_subtask_{2,3,4}_*.md`](../docs/40_经验/)
+
+## 当前 P0 缺口
+
+1. 用户手动 E2E 验收 (6 步清单,见 `desktop-state.md` "已知缺口")
+2. `sub_session.sendToSubSession` 后端实现
+3. `list_plans` Tauri command 注册
+4. `project.svelte.ts:loadAll` 后端实现
+
+详见 `desktop-state.md` "已知缺口" 段。

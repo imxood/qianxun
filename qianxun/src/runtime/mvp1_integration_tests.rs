@@ -26,6 +26,8 @@
 // 测试串行, 锁持有时间短 (整个 test fn duration), 无 race.
 #![allow(clippy::await_holding_lock)]
 
+use qianxun_runtime::api::RuntimeApi;
+
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -160,10 +162,11 @@ async fn post_prompt_and_collect(
     collect_timeout: Duration,
 ) -> (StatusCode, Vec<Value>, Vec<u8>) {
     let runtime = state
-        .runtime.agent_host
-        .create_session()
+        .runtime
+        .create_session(qianxun_runtime::api::types::CreateSessionRequest::default())
+        .await
         .expect("create_session");
-    let session_id = runtime.session_id.clone();
+    let session_id = runtime.id.clone();
 
     let app = crate::runtime::router::build_router(state.clone(), None);
 
@@ -418,10 +421,11 @@ async fn test_conversation_persistence_roundtrip() {
 
     // 1. 建 session + snapshot 占位 (create_session 已经写 ordinal=0 占位)
     let runtime = state
-        .runtime.agent_host
-        .create_session()
+        .runtime
+        .create_session(qianxun_runtime::api::types::CreateSessionRequest::default())
+        .await
         .expect("create_session");
-    let session_id = runtime.session_id.clone();
+    let session_id = runtime.id.clone();
 
     // 2. 构造一个真实 conversation: system + 2 user + 1 assistant (含 tool_result 块)
     let mut conv = Conversation::new(Some("You are a helper.".to_string()));

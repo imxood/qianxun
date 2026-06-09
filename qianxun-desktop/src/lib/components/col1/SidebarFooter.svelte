@@ -2,14 +2,28 @@
 	import Icon from '../shared/Icon.svelte';
 	import StatusDot from '../shared/StatusDot.svelte';
 	import { uiStore } from '$lib/stores/ui.svelte';
+	import { settingsStore } from '$lib/stores/settings.svelte';
+
+	// 2026-06-09 加: Provider 名称动态显示 (跟 settingsStore.activeProvider)
+	// 旧版硬编码 "DeepSeek", 现在从 store 读
+	const providerLabel = $derived.by(() => {
+		const id = settingsStore.activeProvider;
+		if (id === 'deepseek') return 'DeepSeek';
+		if (id === 'minimax') return 'minimax';
+		// 自定义 provider: 首字母大写
+		return id.charAt(0).toUpperCase() + id.slice(1);
+	});
 </script>
 
 <div class="p-2 border-t border-zinc-200 dark:border-zinc-800 space-y-0.5">
 	<button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800 rounded">
 		<Icon name="zap" class="w-3.5 h-3.5 text-amber-500" />
-		<span>Provider · DeepSeek</span>
+		<span>Provider · {providerLabel}</span>
 	</button>
-	<button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800 rounded">
+	<button
+		class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800 rounded"
+		onclick={() => uiStore.openSettings()}
+	>
 		<Icon name="settings" class="w-3.5 h-3.5" />
 		<span>设置</span>
 	</button>

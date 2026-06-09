@@ -253,6 +253,13 @@ impl SseEventBuilder {
                 "stream ended unexpectedly".to_string(),
             ),
         };
+        // 2026-06-09 L3: 之前 0 行 tracing, 错误分类后只发 SSE, 后端无任何审计.
+        // 现在加 warn (front-end 立刻 toast, 后端 stderr 也留底, 排查时一查就着).
+        tracing::warn!(
+            code = %code,
+            "[sse] LlmError → SseEvent::Error: {}",
+            message
+        );
         SseEvent::Error { code, message }
     }
 

@@ -431,6 +431,25 @@ impl AnthropicCompatProvider {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs);
             let error_text = response.text().await.unwrap_or_default();
+            // 2026-06-09 L5: HTTP 4xx/5xx 之前完全 silent, 现在按状态码分级 log.
+            // 4xx warn (用户问题: 401/403/404), 5xx error (服务端问题).
+            if status.is_client_error() {
+                tracing::warn!(
+                    provider = %self.provider_id,
+                    status = status.as_u16(),
+                    body_len = error_text.len(),
+                    body_preview = %error_text.chars().take(200).collect::<String>(),
+                    "[anthropic] API 4xx"
+                );
+            } else {
+                tracing::error!(
+                    provider = %self.provider_id,
+                    status = status.as_u16(),
+                    body_len = error_text.len(),
+                    body_preview = %error_text.chars().take(200).collect::<String>(),
+                    "[anthropic] API 5xx"
+                );
+            }
             return match status.as_u16() {
                 401 => Err(LlmError::AuthenticationError {
                     provider: self.provider_id.clone(),

@@ -323,6 +323,13 @@ impl OutputSink for DaemonOutputSink {
     }
 
     async fn on_error(&self, error: &LlmError) {
+        // 2026-06-09 L4: 之前 trait 实现直接 self.error(e).await, 0 行 tracing.
+        // 加 warn 让 stderr 留底, 排查"用户看到 error toast 但后端无记录"的悬案.
+        tracing::warn!(
+            session = %self.session_id,
+            error = %error,
+            "[output_sink] on_error → SseEvent::Error"
+        );
         self.error(error).await;
     }
 

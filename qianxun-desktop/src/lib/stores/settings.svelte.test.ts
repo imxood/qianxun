@@ -39,13 +39,14 @@ describe("SettingsStore (Stage 5 §11.1)", () => {
 		expect(parsed.daemonUrl).toBe("http://127.0.0.1:23900");
 	});
 
-	it("4 字段 setXxx 后, 完整快照写入 localStorage", async () => {
+	it("5 字段 setXxx 后, 完整快照写入 localStorage", async () => {
 		const { settingsStore } = await import("$lib/stores/settings.svelte");
 
 		settingsStore.setTheme("light");
 		settingsStore.setLocale("en");
 		settingsStore.setDaemonUrl("http://10.0.0.1:9999");
 		settingsStore.setVpsUrl("https://vps.example.com");
+		settingsStore.activeProvider = "MiniMax";
 
 		await new Promise((r) => setTimeout(r, 10));
 		const raw = localStorage.getItem("qianxun-settings");
@@ -55,6 +56,7 @@ describe("SettingsStore (Stage 5 §11.1)", () => {
 			locale: "en",
 			daemonUrl: "http://10.0.0.1:9999",
 			vpsUrl: "https://vps.example.com",
+			activeProvider: "MiniMax",
 		});
 	});
 });

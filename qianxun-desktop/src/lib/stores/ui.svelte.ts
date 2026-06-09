@@ -17,6 +17,8 @@ function createUiStore() {
 		session_id: 'sess_jwt_auth',
 	});
 	const toasts = $state<Toast[]>([]);
+	// 2026-06-09 加: Settings 模态开关 (T5 配套).
+	let settingsModalOpen = $state(false);
 
 	return {
 		get theme() {
@@ -91,6 +93,15 @@ function createUiStore() {
 		},
 		get toasts() {
 			return toasts;
+		},
+		get settingsModalOpen() {
+			return settingsModalOpen;
+		},
+		openSettings() {
+			settingsModalOpen = true;
+		},
+		closeSettings() {
+			settingsModalOpen = false;
 		},
 		pushToast(toast: Omit<Toast, 'id'>) {
 			const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

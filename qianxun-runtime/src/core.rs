@@ -21,11 +21,14 @@ use crate::api::error::RuntimeApiResult;
 use crate::api::load::load_session_impl;
 use crate::api::plans::{cancel_plan_impl, create_plan_impl, list_plans_impl};
 use crate::api::send::send_message_impl;
-use crate::api::sessions::list_sessions_impl;
+use crate::api::sessions::{
+    create_session_impl, delete_session_impl, list_sessions_impl, pause_session_impl,
+    resume_session_impl, update_active_provider_impl,
+};
 use crate::api::trait_def::RuntimeApi;
 use crate::api::types::{
-    ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse, SessionFilter,
-    SessionState,
+    CreateSessionRequest, ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse,
+    SessionFilter, SessionInfo, SessionState, UpdateProviderRequest,
 };
 use crate::sse::SseEvent;
 use crate::state::RuntimeState;
@@ -44,6 +47,13 @@ impl RuntimeApi for Arc<RuntimeState> {
         filter: SessionFilter,
     ) -> RuntimeApiResult<ListSessionsResponse> {
         list_sessions_impl(self.clone(), filter).await
+    }
+
+    async fn create_session(
+        &self,
+        req: CreateSessionRequest,
+    ) -> RuntimeApiResult<SessionInfo> {
+        create_session_impl(self.clone(), req).await
     }
 
     async fn send_message(
@@ -72,6 +82,25 @@ impl RuntimeApi for Arc<RuntimeState> {
 
     async fn load_session(&self, session_id: &str) -> RuntimeApiResult<SessionState> {
         load_session_impl(self.clone(), session_id).await
+    }
+
+    async fn delete_session(&self, session_id: &str) -> RuntimeApiResult<()> {
+        delete_session_impl(self.clone(), session_id).await
+    }
+
+    async fn pause_session(&self, session_id: &str) -> RuntimeApiResult<()> {
+        pause_session_impl(self.clone(), session_id).await
+    }
+
+    async fn resume_session(&self, session_id: &str) -> RuntimeApiResult<()> {
+        resume_session_impl(self.clone(), session_id).await
+    }
+
+    async fn update_active_provider(
+        &self,
+        req: UpdateProviderRequest,
+    ) -> RuntimeApiResult<()> {
+        update_active_provider_impl(self.clone(), req).await
     }
 }
 

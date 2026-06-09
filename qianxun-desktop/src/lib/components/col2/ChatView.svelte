@@ -33,8 +33,9 @@
 	}
 
 	async function sendNew(text: string) {
-		// 'new' 状态: 没有 session, 不允许发 (UI 不显示输入框的话, 此函数走不到)
-		// 保留占位以防后续允许
+		// 2026-06-09: 'new' view 发送第一条消息时, 调 chatStore.send(null, text),
+		// chatStore.send 内部 lazy create session (后端生成真 ID) 后再 sendMessage.
+		await chatStore.send(null, text);
 	}
 </script>
 
@@ -51,11 +52,12 @@
 		mode={subMode}
 	/>
 {:else if view.kind === 'new'}
-	<!-- 新会话空白态 -->
-	<div class="flex-1 flex flex-col items-center justify-center px-6 pb-12 bg-zinc-50 dark:bg-zinc-950">
-		<p class="text-zinc-500 dark:text-zinc-400 text-sm mb-1">开始一个新任务</p>
-		<p class="text-zinc-400 dark:text-zinc-600 text-xs">第一个消息发出后自动归类到项目或 Chat</p>
-	</div>
+	<!-- 2026-06-09: 新建任务时显示空 ChatStream, 用户输入第一条消息触发 lazy create -->
+	<ChatStream
+		messages={[]}
+		onSend={sendNew}
+		placeholder="输入第一条消息开始... (Enter 发送 · Shift+Enter 换行)"
+	/>
 {:else}
 	<!-- 空状态 (无 session) -->
 	<div class="flex-1 flex flex-col items-center justify-center bg-zinc-50 dark:bg-zinc-950">

@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::api::error::RuntimeApiResult;
 use crate::api::types::{
-    ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse, SessionFilter,
-    SessionState,
+    CreateSessionRequest, ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse,
+    SessionFilter, SessionInfo, SessionState, UpdateProviderRequest,
 };
 use crate::sse::SseEvent;
 
@@ -42,6 +42,20 @@ pub trait RuntimeApi: Send + Sync {
         &self,
         filter: SessionFilter,
     ) -> RuntimeApiResult<ListSessionsResponse>;
+
+    /// 创建新 session, 后端生成 sess_YYYYMMDD_HHMMSS_微秒 格式 ID, 立即返回 SessionInfo.
+    ///
+    /// 业务 (跟 daemon router create_session 1:1):
+    /// 1. 调 `agent_host.create_session(opts)` (后端生成 ID, 持久化到 SQLite)
+    /// 2. 构造 SessionInfo 返前端
+    ///
+    /// 错误:
+    /// - `Unavailable` — max_sessions 已满
+    /// - `Internal` — store.create 失败 / 锁 poison
+    async fn create_session(
+        &self,
+        req: CreateSessionRequest,
+    ) -> RuntimeApiResult<SessionInfo>;
 
     /// 推 user 消息 + 起 agent loop, 返回 SSE 事件流.
     ///
@@ -76,4 +90,27 @@ pub trait RuntimeApi: Send + Sync {
 
     /// 加载 session 完整状态 (含 conversation snapshot).
     async fn load_session(&self, session_id: &str) -> RuntimeApiResult<SessionState>;
+
+    /// 删除 session (内存 + 持久化). 释放 max_sessions 槽位.
+    ///
+    /// 错误: session 不存在 → NotFound.
+    async fn delete_session(&self, session_id: &str) -> RuntimeApiResult<()>;
+
+    /// 暂停 session (跟 cancel_session 区别: cancel 中断当前 agent loop,
+    /// pause 保持 in-memory 但拒绝新 prompt, send_message 会返 InvalidRequest).
+    async fn pause_session(&self, session_id: &str) -> RuntimeApiResult<()>;
+
+    /// 解除暂停.
+    async fn resume_session(&self, session_id: &str) -> RuntimeApiResult<()>;
+
+    /// 更新 active provider + 可选 provider config. 写 ~/.qianxun/config.json 原子.
+    /// **不热替换 runtime.provider** — 调用方需提示用户重启 desktop.
+    ///
+    /// 错误:
+    /// - `InvalidRequest` — active_provider 为空或非 ASCII
+    /// - `Internal` — 写 config.json 失败 (磁盘满 / 权限不足 / 路径不存在)
+    async fn update_active_provider(
+        &self,
+        req: UpdateProviderRequest,
+    ) -> RuntimeApiResult<()>;
 }

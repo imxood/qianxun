@@ -11,6 +11,8 @@
 //   - thinking_delta     → 累加 thinking
 //   - tool_use_complete  → 推 toolCalls[] (id / name / arguments)
 //   - tool_result        → 找对应 toolCall 加 result (content / is_error / elapsed_ms)
+//   - error              → 追加错误信息到 content, 弹 toast (2026-06-09 加), finished = true
+//   - tool_result        → 找对应 toolCall 加 result (content / is_error / elapsed_ms)
 //   - content_block_stop → currentBlock = 'none'
 //   - message_stop       → finished = true (收尾)
 //   - error              → 追加错误信息到 content, finished = true
@@ -26,6 +28,7 @@
 // ───────────────────────────────────────────────────────────────────────────
 
 import type { SseEventFromBackend } from '$lib/ipc/runtime';
+import { uiStore } from './ui.svelte';
 
 export type BlockKind = 'none' | 'text' | 'thinking' | 'tool_use';
 
@@ -150,6 +153,13 @@ export function applyEvent(state: MessageStreamState, event: SseEventFromBackend
 			state.content += `\n\n[错误: ${event.code}] ${event.message}`;
 			state.finished = true;
 			state.onUpdate();
+			// 2026-06-09: 弹 toast 让用户立即看到错误, 不再静默
+			uiStore.pushToast({
+				kind: 'error',
+				title: `LLM 错误: ${event.code}`,
+				body: event.message,
+				timeout_ms: 8000,
+			});
 			break;
 
 		case 'tool_use_delta':

@@ -364,7 +364,8 @@ mod tests {
         // 1. 创 session (auto-gen id)
         let session = state
             .agent_host
-            .create_session()
+
+            .create_session(crate::agent_host::CreateSessionOpts::default())
             .expect("create_session");
         let session_id = session.session_id.clone();
 
@@ -457,7 +458,8 @@ mod tests {
 
         let session = state
             .agent_host
-            .create_session()
+
+            .create_session(crate::agent_host::CreateSessionOpts::default())
             .expect("create_session");
         let session_id = session.session_id.clone();
 

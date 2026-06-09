@@ -1,9 +1,10 @@
 # ADR-0003: 合并 Desktop + ACP 同进程 (2-Mode 互斥)
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-06-08
+- **Last Revised**: 2026-06-09
 - **Authors**: Mavis (按 maxu 决策写)
-- **Supersedes**: ADR-0002 (daemon design chat-first) 部分章节 (4a 路线)
+- **Supersedes**: ADR-0002 (daemon design chat-first) 整篇 (4a 路线), 2026-06-09 ADR-0002 文件已删除
 
 ---
 
@@ -18,11 +19,11 @@ qianxun-desktop (Tauri webview)
    qianxun-core engine (本机不跑, 只在 mock 模拟)
 ```
 
-加 `qianxun` binary (多模式: tui / acp / daemon / server) 是 ADR-0002 的设计, daemon 是 HTTP+SSE 跑在独立进程, 桌面端通过 HTTP 跟 daemon 通信. 部署需要 2 个进程, IPC 链长.
+旧设计: `qianxun` binary (多模式: tui / acp / daemon / server) 中 daemon 是 HTTP+SSE 跑在独立进程, 桌面端通过 HTTP 跟 daemon 通信. 部署需要 2 个进程, IPC 链长.
 
 **演进过程中发现**:
 
-1. `qianxun/src/daemon/ui/` 已经有完整 SvelteKit 内嵌 UI (跟 desktop mock 阶段重叠, ADR-0002 漏了)
+1. `qianxun/src/daemon/ui/` 已经有完整 SvelteKit 内嵌 UI (跟 desktop mock 阶段重叠, 旧决策漏判)
 2. `qianxun/src/acp/` 已经有完整 ACP 协议实现 (10 module: forwarding_tools, handler, lib, mod, output, prompt, server, session, transport, types)
 3. ACP 协议本身 (RFD streamable-http-websocket-transport, 2026-06-05 最新版) 同时支持 stdio + WebSocket + HTTP, 但 Zed 当前**只生产支持 stdio**
 4. desktop 用户核心场景 = **单 PC 个人 AI 助理 + Zed 集成**
@@ -153,11 +154,13 @@ qianxun-desktop (Tauri webview)
 
 ## References
 
-- ADR-0002: daemon design chat-first (本 ADR 部分覆盖, daemon 角色降级到"非桌面" 场景)
-- `_shared-contract.md` v2: 跨 Track 契约 (待更新, 反映 2-mode 互斥)
-- `docs/daemon-design.md` v1.0: 原始 daemon 设计 (保留, 给 `qianxun daemon` / `qianxun server` 用)
-- `docs/40_经验/2026-06-08_desktop_mock_phase.md`: mock 阶段经验
+- ADR-0002: daemon design chat-first (2026-06-09 整篇删除,本 ADR 完整取代)
+- `_shared-contract.md` v3 (2026-06-09 重写): 跨 Track 契约,RuntimeApi 6 方法 + SseEvent 12 变体
+- `docs/10_事实源/runtime-state.md`: qianxun-runtime 子系统状态
+- `docs/10_事实源/desktop-state.md`: qianxun-desktop 子系统状态
 - `docs/40_经验/2026-06-08_phase_4a-1_runbook.md`: 4a-1 跑通指南
+- `docs/30_子项目规划/04b-tauri-runtime-integration.md`: tauri + runtime 集成规划
+- `docs/30_子项目规划/04c-qianxun-runtime-extraction.md`: qianxun-runtime 抽取设计
 - ACP RFD: `https://agentclientprotocol.com/rfds/streamable-http-websocket-transport` (2026-06-05 最新)
 - `qianxun/src/acp/`: 现有 ACP 协议实现 (10 module, 复用)
 

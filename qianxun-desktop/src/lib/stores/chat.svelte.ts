@@ -78,22 +78,41 @@ function createChatStore() {
 		return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 	}
 
-	async function send(session_id: string, userMessage: string) {
+	async function send(session_id: string | null, userMessage: string) {
 		const now = new Date().toISOString();
+
+		// 0. 2026-06-09 lazy create: 如果 session_id === null (用户在 'new' view 发送),
+		//    先调 sessionStore.create 拿后端真 ID, 再切到该 session view.
+		if (session_id === null) {
+			const view = uiStore.activeView;
+			const project_id = view.kind === 'new' ? view.project_id : null;
+			try {
+				const newSession = await sessionStore.create({ project_id });
+				session_id = newSession.id;
+				uiStore.switchToSession(newSession.id);
+			} catch (e) {
+				// sessionStore.create 内部已 toast 错误, 这里直接 return (避免后续 sendMessage invoke 用 null)
+				console.warn('[chatStore] lazy create failed:', e);
+				return;
+			}
+		}
+
+		// 此时 session_id 必定是后端真 ID (不可能为 null)
+		const sid = session_id;
 
 		// 1. 追加 user 消息
 		const userMsg: Message = {
 			id: genId(),
-			session_id,
+			sid: sid,
 			sub_session_id: null,
 			role: 'user',
 			content: userMessage,
 			created_at: now,
 		};
-		sessionStore.appendMessage(session_id, userMsg);
+		sessionStore.appendMessage(sid, userMsg);
 
 		// 2. 更新 session title (首条消息)
-		const session = sessionStore.get(session_id);
+		const session = sessionStore.get(sid);
 		if (session && session.title === session.id.slice(0, 20)) {
 			// 仅当 title 还是兜底 (id slice) 才覆盖, 避免覆盖已自定义的 title
 			session.title = userMessage.slice(0, 30) + (userMessage.length > 30 ? '…' : '');
@@ -101,7 +120,7 @@ function createChatStore() {
 
 		// 3. Plan 触发判断 (前端关键词, TODO 后续移到后端 RuntimeApi 决策)
 		const needsPlan = /jwt|认证|登录|实现|重构|调研|写测试|修 bug/i.test(userMessage);
-		if (needsPlan && !planStore.bySession(session_id).some((p) => p.status === 'Running')) {
+		if (needsPlan && !planStore.bySession(sid).some((p) => p.status === 'Running')) {
 			const contract: PlanContract = {
 				name: userMessage.slice(0, 20),
 				description: userMessage,
@@ -139,53 +158,62 @@ function createChatStore() {
 					},
 				],
 			};
-			const plan = await planStore.create({ session_id, contract });
+			const plan = await planStore.create({ sid, contract });
 			// 追加一个 assistant 消息 (带 plan_ref)
 			const planMsg: Message = {
 				id: genId(),
-				session_id,
+				sid,
 				sub_session_id: null,
 				role: 'assistant',
 				content: '',
 				plan_ref: plan.id,
 				created_at: new Date().toISOString(),
 			};
-			sessionStore.appendMessage(session_id, planMsg);
+			sessionStore.appendMessage(sid, planMsg);
 			return;
 		}
 
 		// 4. 普通响应: 调 sendMessage invoke + 起流式 state
 		const assistantMsg: Message = {
 			id: genId(),
-			session_id,
+			sid,
 			sub_session_id: null,
 			role: 'assistant',
 			content: '',
 			created_at: new Date().toISOString(),
 			streaming: true,
 		};
-		sessionStore.appendMessage(session_id, assistantMsg);
+		sessionStore.appendMessage(sid, assistantMsg);
 		streaming.message_id = assistantMsg.id;
 
 		// 5. 创 stream state, onUpdate 同步到 sessionStore.message.content
 		const state = newStreamState(assistantMsg.id, () => {
-			const list = sessionStore.getMessages(session_id);
+			const list = sessionStore.getMessages(sid);
 			const m = list.find((x) => x.id === assistantMsg.id);
 			if (m) m.content = state.content;
 		});
-		streams.set(session_id, state);
+		streams.set(sid, state);
 
 		// 6. 调 invoke
 		try {
-			await sendMessage(session_id, {
+			await sendMessage(sid, {
 				messages: [{ role: 'user', content: userMessage }],
 			});
 			// 立即返, 流走 session_event 异步推
 		} catch (e) {
-			// 失败时本地标记
-			state.content = `[错误] ${(e as Error).message ?? String(e)}`;
+			// 失败时本地标记 + 弹 toast
+			const msg = (e as Error).message ?? String(e);
+			state.content = `[错误] ${msg}`;
 			state.finished = true;
-			finalizeStream(session_id, state);
+			finalizeStream(sid, state);
+			// 2026-06-09: invoke reject 走不到 chat-stream error 分支 (那时 listener 都还没收到任何事件),
+			// 必须在 catch 块主动 toast.
+			uiStore.pushToast({
+				kind: 'error',
+				title: '发送失败',
+				body: msg,
+				timeout_ms: 8000,
+			});
 		}
 	}
 

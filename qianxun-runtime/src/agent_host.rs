@@ -79,6 +79,17 @@ pub struct AgentLoopHost {
     pub store: Arc<SessionStore>,
 }
 
+/// `AgentLoopHost::create_session` 的入参.
+///
+/// `project_root` 是会话关联的工作目录 (Stage 2 daemon router 根据请求 body 传入).
+/// `model` 暂未使用 — SessionRuntime 内部从 `SharedState.resolved` 拿 active provider 的 model.
+#[derive(Debug, Clone, Default)]
+pub struct CreateSessionOpts {
+    pub project_root: Option<String>,
+    /// 暂未使用, 留作未来支持 per-session model 覆盖 (Stage 4 之后)
+    pub model: Option<String>,
+}
+
 impl AgentLoopHost {
     pub fn new(
         max_sessions: usize,
@@ -95,31 +106,26 @@ impl AgentLoopHost {
 
     /// 创建一个新 session, 注入全部共享依赖.
     ///
+    /// **设计原则 (2026-06-09 修正)**: session 是**持久化状态**(= SQLite 一行),
+    /// 不是"运行中的 LLM 调用"。**不限制 session 数量**——`max_sessions` 字段保留
+    /// 但上限设为 `usize::MAX`,后续可改成可配 (从 `~/.qianxun/config.json` 读)。
+    /// 实际限制"运行中请求数"应在 `processing_loop` 或 Tauri command 层加并发控制
+    /// (semaphore / tokio::sync::Semaphore), 跟 session 数量解耦。
+    ///
     /// Stage 3: 末尾调 `self.store.create()` 持久化元数据 + 空 snapshot.
-    /// `project_root` 暂时为 None (Stage 2 在 router 层根据请求 body 传入).
+    /// `project_root` 来自 opts, 旧 Stage 1 行为是 None.
     pub fn create_session(
         &self,
+        opts: CreateSessionOpts,
     ) -> Result<Arc<SessionRuntime>, String> {
-        // 1. 上限检查
-        {
-            let sessions = self.sessions.read().expect("AgentLoopHost lock poisoned");
-            if sessions.len() >= self.max_sessions {
-                return Err(format!(
-                    "Max sessions reached ({} / {})",
-                    sessions.len(),
-                    self.max_sessions
-                ));
-            }
-        }
-
-        // 2. 生成 session_id
+        // 1. 生成 session_id
         let now = Utc::now();
         let session_id = format!("sess_{}", now.format("%Y%m%d_%H%M%S_%6f"));
 
-        // 3. 构造 SessionRuntime (注入共享子系统)
+        // 2. 构造 SessionRuntime (注入共享子系统)
         let runtime = Arc::new(SessionRuntime::new(
             session_id.clone(),
-            None, // project_root: Stage 1 暂不传
+            opts.project_root,
             self.state.resolved.clone(),
             self.state.provider.clone(),
             self.state.tools.clone(),
@@ -127,15 +133,8 @@ impl AgentLoopHost {
             self.state.skills.clone(),
         ));
 
-        // 4. 二次检查后插入 HashMap
+        // 3. 插入 HashMap (无上限检查, 跟"运行中"解耦)
         let mut sessions = self.sessions.write().expect("AgentLoopHost lock poisoned");
-        if sessions.len() >= self.max_sessions {
-            return Err(format!(
-                "Max sessions reached ({} / {})",
-                sessions.len(),
-                self.max_sessions
-            ));
-        }
         sessions.insert(session_id.clone(), runtime.clone());
         drop(sessions);
 
@@ -150,7 +149,10 @@ impl AgentLoopHost {
             "max_tokens": runtime.config.max_tokens,
         })
         .to_string();
-        if let Err(e) = self.store.create(&session_id, None, &config_json) {
+        if let Err(e) = self
+            .store
+            .create(&session_id, runtime.project_root.as_deref(), &config_json)
+        {
             tracing::error!("[runtime] session store.create failed: {e}");
             return Err(format!("session persistence failed: {e}"));
         }
@@ -362,15 +364,8 @@ impl AgentLoopHost {
                 *conv_guard = conversation;
             }
 
-            // 4. 插入 HashMap
+            // 4. 插入 HashMap (无 max_sessions 限制, 2026-06-09 修正)
             let mut sessions = self.sessions.write().expect("AgentLoopHost lock poisoned");
-            if sessions.len() >= self.max_sessions {
-                tracing::warn!(
-                    "[runtime] max_sessions reached while restoring, dropping {id}",
-                    id = meta.id
-                );
-                break;
-            }
             sessions.insert(meta.id.clone(), runtime);
 
             restored += 1;
@@ -457,7 +452,7 @@ mod tests {
         assert!(!host.session_exists("sess_does_not_exist"));
 
         // 创建一个 session
-        let runtime = host.create_session().expect("create_session should succeed");
+        let runtime = host.create_session(CreateSessionOpts::default()).expect("create_session should succeed");
 
         // 字段正确
         assert!(runtime.session_id.starts_with("sess_"));
@@ -483,7 +478,7 @@ mod tests {
     fn test_delete_session_removes_runtime() {
         let host = AgentLoopHost::for_test(10, ResolvedConfig::default());
 
-        let runtime = host.create_session().expect("create_session should succeed");
+        let runtime = host.create_session(CreateSessionOpts::default()).expect("create_session should succeed");
         assert_eq!(host.session_count(), 1);
 
         let id = runtime.session_id.clone();
@@ -495,17 +490,17 @@ mod tests {
     }
 
     #[test]
-    fn test_max_sessions_limit_enforced() {
-        let host = AgentLoopHost::for_test(2, ResolvedConfig::default());
-
-        let _r1 = host.create_session().expect("first");
-        let _r2 = host.create_session().expect("second");
-        let r3 = host.create_session();
-        // SessionRuntime 没有 Debug (dyn LlmProvider 没法 derive), 用 match 替代 unwrap_err
-        match r3 {
-            Err(msg) => assert!(msg.contains("Max sessions reached"), "unexpected error: {msg}"),
-            Ok(_) => panic!("third session should be rejected"),
+    fn test_create_session_unlimited() {
+        // 2026-06-09: 取消 max_sessions 硬编码 (session 是持久化状态, 不是运行实例).
+        // 验证: 创建 100 个 session 不报错.
+        let host = AgentLoopHost::for_test(usize::MAX, ResolvedConfig::default());
+        for i in 0..100 {
+            let runtime = host
+                .create_session(CreateSessionOpts::default())
+                .unwrap_or_else(|e| panic!("session {i} should be created: {e}"));
+            assert!(runtime.session_id.starts_with("sess_"));
         }
+        assert_eq!(host.session_count(), 100);
     }
 
     /// Stage 4: 验证 restore_from_disk 能把 store 里的 conversation 反序列化

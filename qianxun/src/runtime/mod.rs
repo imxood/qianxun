@@ -115,11 +115,8 @@ pub async fn run(
         admin,
     });
 
-    // 启动 reap_stale 后台任务 (Stage 1 暂不 await, 实际不退出)
-    let reap_host = state.runtime.agent_host.clone();
-    tokio::spawn(async move {
-        reap_host.reap_stale().await;
-    });
+    // 启动 reap_stale 后台任务 (RuntimeState 内部 spawn, 1h 清理周期).
+    state.runtime.spawn_reap_stale();
 
     let app = router::build_router(state.clone(), ui_dist);
 
@@ -212,8 +209,8 @@ pub async fn graceful_shutdown_orchestrator(state: Arc<AppState>) {
 
     // ── step 4: cancel active sessions ────────────────────────
     tracing::info!("[runtime] step 4: cancelling active sessions");
-    let total = state.runtime.agent_host.session_count();
-    let cancelled = state.runtime.agent_host.shutdown_all();
+    let total = state.runtime.session_count();
+    let cancelled = state.runtime.shutdown_all_sessions();
     tracing::info!("[runtime] step 4: cancelled {cancelled}/{total} session(s)");
 
     // ── step 5: flush store ───────────────────────────────────
@@ -274,13 +271,13 @@ mod graceful_shutdown_tests {
     async fn test_graceful_shutdown_cancels_active_sessions() {
         let state = make_test_state();
         // for_test 模式可能不存 session in-memory, 改用直接验证 shutdown_all 不 panic
-        let _cancelled_before = state.runtime.agent_host.shutdown_all();
+        let _cancelled_before = state.runtime.shutdown_all_sessions();
 
         // 跑 orchestrator 不应 panic
         graceful_shutdown_orchestrator(state.clone()).await;
 
         // 再跑一次, 仍不 panic
-        let _cancelled_after = state.runtime.agent_host.shutdown_all();
+        let _cancelled_after = state.runtime.shutdown_all_sessions();
     }
 
     #[tokio::test]
@@ -310,8 +307,8 @@ mod graceful_shutdown_tests {
     async fn test_shutdown_all_marks_all_sessions_paused() {
         let state = make_test_state();
         // 模拟多个 active session (用 for_test 模式或直接调 create_session)
-        // 调 shutdown_all, 验证不 panic (返回 usize 总是 >= 0, 类型系统已保证)
-        let _n = state.runtime.agent_host.shutdown_all();
+        // 调 shutdown_all_sessions, 验证不 panic (返回 usize 总是 >= 0, 类型系统已保证)
+        let _n = state.runtime.shutdown_all_sessions();
     }
 
     #[tokio::test]

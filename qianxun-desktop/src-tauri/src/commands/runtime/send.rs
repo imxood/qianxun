@@ -41,10 +41,38 @@ pub async fn send_message(
     session_id: String,
     request: SendRequest,
 ) -> Result<SendResponse, String> {
+    // 2026-06-09 L2: entry log (用户首次能在 stderr 看到 invoke 进来).
+    let msg_count = request.messages.len();
+    let last_user_chars = request
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.len())
+        .unwrap_or(0);
+    tracing::info!(
+        session = %session_id,
+        msgs = msg_count,
+        user_chars = last_user_chars,
+        "[tauri] send_message entry"
+    );
+
     let (resp, rx) = state
         .send_message(&session_id, request)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            // 完整错误 (含 RuntimeApiError::Display 链) 写到 stderr.
+            tracing::warn!(
+                session = %session_id,
+                error = %e,
+                "[tauri] send_message rejected"
+            );
+            e.to_string()
+        })?;
+
+    // 2026-06-09 修: 桌面端启动时只同步返骨架, 真 init + restore 在后台跑.
+    // 这里 await 一次确保 restore 完, 防止旧 session 找不到 in-memory HashMap.
+    state.ensure_restored().await;
 
     spawn_event_emitter(app, resp.session_id.clone(), rx);
     Ok(resp)
@@ -53,15 +81,34 @@ pub async fn send_message(
 /// 消费 Receiver<SseEvent>, 逐个 emit Tauri event. 通道关闭后 task 自然退出.
 fn spawn_event_emitter(app: AppHandle, session_id: String, mut rx: mpsc::Receiver<qianxun_runtime::SseEvent>) {
     tauri::async_runtime::spawn(async move {
+        let mut event_count = 0usize;
         while let Some(event) = rx.recv().await {
+            event_count += 1;
+            // 抽样: 每 50 条事件 info 一次 (高频热路径, 全打会刷屏).
+            if event_count % 50 == 1 {
+                tracing::info!(
+                    session = %session_id,
+                    events = event_count,
+                    "[tauri] streaming progress (每 50 事件抽样)"
+                );
+            }
             let payload = SessionEventPayload {
                 session_id: session_id.clone(),
                 event: serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
             };
             if let Err(e) = app.emit(SESSION_EVENT, payload) {
-                tracing::warn!("[tauri] emit {SESSION_EVENT} failed: {e}");
+                tracing::warn!(
+                    session = %session_id,
+                    events = event_count,
+                    error = %e,
+                    "[tauri] emit {SESSION_EVENT} failed"
+                );
             }
         }
-        tracing::debug!("[tauri] send_message stream closed for {session_id}");
+        tracing::info!(
+            session = %session_id,
+            total_events = event_count,
+            "[tauri] send_message stream closed"
+        );
     });
 }

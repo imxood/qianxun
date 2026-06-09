@@ -43,6 +43,34 @@ export interface SessionInfo {
 	created_at: string;
 	last_active_at: string;
 	message_count: number;
+	/// 2026-06-09 加: 工作目录根 (后端 SessionInfo.project_root).
+	/// 前端 projectStore 用此字段去重 derive project 列表.
+	project_root?: string;
+}
+
+/// create_session 请求. 跟后端 CreateSessionRequest 1:1 (snake_case JSON).
+/// `model` 后端暂未使用, 跟 SendRequest.model 一致 (Stage 2 简化).
+/// `project_root` 透传给 AgentLoopHost (工作目录关联).
+export interface CreateSessionRequest {
+	model?: string;
+	project_root?: string;
+}
+
+/// Provider 配置 (跟后端 ProviderConfig 1:1).
+/// 2026-06-09 加: 桌面端 Provider 设置 UI 写 config.json 用.
+export interface ProviderConfig {
+	api_key?: string;
+	model?: string;
+	base_url?: string;
+	temperature?: number;
+	max_tokens?: number;
+}
+
+/// update_active_provider 请求 (2026-06-09 加).
+/// 行为: 后端写 ~/.qianxun/config.json, 不热替换. 调用方需提示用户重启 desktop.
+export interface UpdateProviderRequest {
+	active_provider: string;
+	provider_config?: ProviderConfig;
 }
 
 /// list_sessions 响应.
@@ -190,10 +218,10 @@ export const SESSION_EVENT_NAME = "session_event";
 // ─── RuntimeApiError (前端包装, 跟后端 RuntimeApiError 4 类 1:1) ────────
 
 /// RuntimeApi 调用错误. 后端 RuntimeApiError 是 thiserror enum, Tauri layer map 成 String.
-/// 前端重新 parse 出 code (前 3 字符) + message, 跟后端 NotFound/InvalidRequest/Internal/Unavailable 对齐.
+/// 前端重新 parse 出 code (前 3 字符) + message, 跟后端 NotFound/InvalidRequest/Conflict/Internal/Unavailable 对齐.
 export class RuntimeApiError extends Error {
 	constructor(
-		public code: "NotFound" | "InvalidRequest" | "Internal" | "Unavailable",
+		public code: "NotFound" | "InvalidRequest" | "Conflict" | "Internal" | "Unavailable",
 		message: string,
 	) {
 		super(`[${code}] ${message}`);
@@ -201,12 +229,14 @@ export class RuntimeApiError extends Error {
 	}
 
 	/// 从 Tauri 返回的 String 错误还原 RuntimeApiError.
-	/// 后端 format 是 "not found: xxx" / "invalid request: xxx" / "internal error: xxx" / "unavailable: xxx".
+	/// 后端 format 是 "not found: xxx" / "invalid request: xxx" / "conflict: xxx" / "internal error: xxx" / "unavailable: xxx".
 	static parse(raw: string): RuntimeApiError {
 		const lower = raw.toLowerCase();
 		if (lower.startsWith("not found:")) return new RuntimeApiError("NotFound", raw);
 		if (lower.startsWith("invalid request:"))
 			return new RuntimeApiError("InvalidRequest", raw);
+		if (lower.startsWith("conflict:"))
+			return new RuntimeApiError("Conflict", raw);
 		if (lower.startsWith("internal error:"))
 			return new RuntimeApiError("Internal", raw);
 		if (lower.startsWith("unavailable:"))
@@ -226,6 +256,21 @@ export async function listSessions(filter: SessionFilter = "all"): Promise<ListS
 	}
 	try {
 		return await invoke<ListSessionsResponse>("list_sessions", { filter });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 创建新 session. 后端生成 sess_ 格式 ID, 返 SessionInfo.
+///
+/// Tauri 模式: invoke<create_session, SessionInfo>('create_session', { request }).
+/// Web fallback: 客户端造 ID (web 模式无后端, 跟旧 mock 阶段一致).
+export async function createSession(request: CreateSessionRequest): Promise<SessionInfo> {
+	if (!isTauri()) {
+		return webFallbackCreateSession(request);
+	}
+	try {
+		return await invoke<SessionInfo>("create_session", { request });
 	} catch (e) {
 		throw RuntimeApiError.parse(String(e));
 	}
@@ -285,6 +330,58 @@ export async function loadSession(sessionId: string): Promise<SessionState> {
 	}
 	try {
 		return await invoke<SessionState>("load_session", { sessionId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 删除 session (内存 + 持久化). 释放 max_sessions 槽位.
+export async function deleteSession(sessionId: string): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	try {
+		await invoke<void>("delete_session", { sessionId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 暂停 session (拒绝新 send_message, 返 InvalidRequest).
+export async function pauseSession(sessionId: string): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	try {
+		await invoke<void>("pause_session", { sessionId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 解除暂停.
+export async function resumeSession(sessionId: string): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	try {
+		await invoke<void>("resume_session", { sessionId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 更新 active provider + 可选 provider config. 写 ~/.qianxun/config.json.
+/// 调用方需提示用户重启 desktop (后端不热替换).
+export async function updateActiveProvider(
+	request: UpdateProviderRequest,
+): Promise<void> {
+	if (!isTauri()) {
+		// Web 模式 noop
+		return;
+	}
+	try {
+		await invoke<void>("update_active_provider", { request });
 	} catch (e) {
 		throw RuntimeApiError.parse(String(e));
 	}
@@ -361,6 +458,19 @@ function webFallbackLoadSession(sessionId: string): SessionState {
 		exists_in_memory: false,
 		status: "stored",
 		conversation_json: null,
+		message_count: 0,
+	};
+}
+
+/// Web fallback: 客户端造 ID (跟旧 mock 阶段一致, 让 UI 仍能跑).
+function webFallbackCreateSession(request: CreateSessionRequest): SessionInfo {
+	const now = new Date().toISOString();
+	return {
+		id: `sess_${now.replace(/[-:T.Z]/g, "").slice(0, 17)}_${Math.random().toString(36).slice(2, 8)}`,
+		model: request.model ?? "deepseek-v4-flash",
+		status: "active",
+		created_at: now,
+		last_active_at: now,
 		message_count: 0,
 	};
 }

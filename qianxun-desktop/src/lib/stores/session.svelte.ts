@@ -18,16 +18,25 @@
 //   - qianxun-runtime/src/api/types.rs (SessionInfo / SessionState DTO)
 //   - docs/30_子项目规划/04b-tauri-runtime-integration.md §"数据流"
 
-import { listSessions, loadSession, type SessionInfo } from '$lib/ipc/runtime';
+import {
+	listSessions,
+	loadSession,
+	createSession,
+	deleteSession,
+	pauseSession,
+	resumeSession,
+	type SessionInfo,
+} from '$lib/ipc/runtime';
 import { uiStore } from './ui.svelte';
 import type { Session, Message } from '$lib/types/entity';
 
 /// SessionInfo (后端 summary) → Session (前端 entity) 转换.
-/// 后端没 project_id / title / provider / owner_id, 用兜底值.
+/// 后端没 title / provider / owner_id, 用兜底值.
+/// 2026-06-09 加 project_root 透传 (从 SessionInfo.project_root → Session.project_id).
 function sessionInfoToSession(info: SessionInfo): Session {
 	return {
 		id: info.id,
-		project_id: null,
+		project_id: info.project_root ?? null,
 		title: info.id.length > 20 ? info.id.slice(0, 20) + '…' : info.id,
 		provider: 'deepseek',
 		model: info.model,
@@ -135,26 +144,37 @@ function createSessionStore() {
 			title?: string;
 			provider?: string;
 			model?: string;
-		}): Session {
-			// 业务约束: 后端 RuntimeApi 暂没 create_session 方法 (sub-task #3 范围之外)
-			// → 客户端建占位, refresh() 跟后端同步 (后端会自己分配 id)
-			const now = new Date().toISOString();
-			const id = `sess_${now.replace(/[-:T.Z]/g, '').slice(0, 17)}_${Math.random().toString(36).slice(2, 8)}`;
-			const newSession: Session = {
-				id,
-				project_id: opts.project_id,
-				title: opts.title ?? '新会话',
-				provider: opts.provider ?? 'deepseek',
-				model: opts.model ?? 'deepseek-v4-flash',
-				status: 'Active',
-				message_count: 0,
-				owner_id: 'u_1',
-				created_at: now,
-				last_active_at: now,
-			};
-			sessions.push(newSession);
-			messages[id] = [];
-			return newSession;
+		}): Promise<Session> {
+			// 调 invoke 'create_session' 让后端生成 sess_ 格式 ID, 避免客户端/后端 ID 命名空间脱节
+			// (旧实现: 客户端造 ID, send_message 必 404 "session not found").
+			// 后端: RuntimeApi::create_session → agent_host.create_session + store.create.
+			//
+			// 错误处理 (2026-06-09): invoke 失败 (网络/鉴权/服务端 bug 等) 时,
+			// 错误存 lastError, UI 弹 toast 提示. 不向上抛, 避免 uncaught promise rejection.
+			return (async () => {
+				let info: Awaited<ReturnType<typeof createSession>>;
+				try {
+					info = await createSession({
+						model: opts.model,
+						project_root: opts.project_id ?? undefined,
+					});
+				} catch (e) {
+					const msg = (e as Error).message ?? String(e);
+					lastError = msg;
+					console.error('[sessionStore] create failed:', msg);
+					uiStore.pushToast({
+						kind: 'error',
+						title: '新建会话失败',
+						body: msg,
+						timeout_ms: 5000,
+					});
+					throw e; // 让调用方 (NewTaskButton) 仍能 try/catch 处理 UI 状态
+				}
+				const newSession = sessionInfoToSession(info);
+				sessions.push(newSession);
+				messages[newSession.id] = [];
+				return newSession;
+			})();
 		},
 		switchTo(id: string) {
 			const s = sessions.find((x) => x.id === id);
@@ -164,6 +184,33 @@ function createSessionStore() {
 				// 切 session 时拉完整状态 (失败 swallow, 不阻塞 UI)
 				void loadFullSession(id).catch(() => {});
 			}
+		},
+
+		/// 删除 session (调 invoke + 本地从 store 移除 + 清 messages).
+		async delete(id: string): Promise<void> {
+			await deleteSession(id);
+			const idx = sessions.findIndex((s) => s.id === id);
+			if (idx >= 0) sessions.splice(idx, 1);
+			delete messages[id];
+			// 如果删的是当前 active session, 切到空状态
+			const view = uiStore.activeView;
+			if (view.kind === 'session' && view.session_id === id) {
+				uiStore.switchToNew(null);
+			}
+		},
+
+		/// 暂停 session. 后续 send_message 会被后端拒 (InvalidRequest).
+		async pause(id: string): Promise<void> {
+			await pauseSession(id);
+			const s = sessions.find((x) => x.id === id);
+			if (s) s.status = 'Idle';
+		},
+
+		/// 解除暂停.
+		async resume(id: string): Promise<void> {
+			await resumeSession(id);
+			const s = sessions.find((x) => x.id === id);
+			if (s) s.status = 'Active';
 		},
 		getMessages(sessionId: string): Message[] {
 			return messages[sessionId] ?? [];

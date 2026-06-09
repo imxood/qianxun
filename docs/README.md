@@ -1,75 +1,80 @@
 # 千寻 (Qianxun) 文档
 
-> 最后更新: 2026-06-01
+> 状态: 生效 | 最后更新: 2026-06-09 | 核心需求: **tauri → core** 端到端跑通
+
+## 核心入口
+
+- **当前架构决策**: [ADR-0003: 桌面 + ACP 同进程 2-Mode 互斥](30_决策/ADR-0003_desktop_2mode.md)
+- **qianxun-runtime 子系统状态**: [10_事实源/runtime-state.md](10_事实源/runtime-state.md)
+- **qianxun-desktop 子系统状态**: [10_事实源/desktop-state.md](10_事实源/desktop-state.md)
+- **Tauri + Runtime 集成规划**: [30_子项目规划/04b-tauri-runtime-integration.md](30_子项目规划/04b-tauri-runtime-integration.md)
+- **qianxun-runtime 抽取设计**: [30_子项目规划/04c-qianxun-runtime-extraction.md](30_子项目规划/04c-qianxun-runtime-extraction.md)
+- **跨 Track 契约**: [30_子项目规划/_shared-contract.md](30_子项目规划/_shared-contract.md)
+- **运行指南**: [30_子项目规划/00-RUNNING-GUIDE.md](30_子项目规划/00-RUNNING-GUIDE.md)
+- **最近 4 阶段收尾**: [40_经验/2026-06-08_Phase_ABCD_收尾总览.md](40_经验/2026-06-08_Phase_ABCD_收尾总览.md)
+
+## 设计基线
+
+```
+Tauri Desktop (Svelte 5 webview)
+    ↓ Tauri IPC invoke (in-process, 类型安全)
+Tauri command (src-tauri/src/commands/runtime/*)
+    ↓ RuntimeApi trait
+qianxun-runtime (AgentLoopHost + DaemonOutputSink + SseEvent)
+    ↓ AgentLoop::new
+qianxun-core (Conversation + Message + AgentLoop)
+    ↓ reqwest + Anthropic 协议
+LLM (DeepSeek / minimax / 其他)
+```
+
+**关键约束**:
+- Tauri 调 runtime **不走 HTTP** (in-process library)
+- 桌面 binary 自带 core engine,daemon 仅作可选 VPS 远端
+- 流式响应走 `mpsc::Receiver<SseEvent>` → Tauri `emit("session_event")` → Svelte 12-event 状态机
+
+## 仓库结构
+
+```
+qianxun/                  # workspace 根
+├── CLAUDE.md              # 项目规则 (LLM 入口)
+├── qianxun-core/          # 核心引擎 (Agent 循环 + Provider + Tools + Skills + MCP)
+├── qianxun-memory/        # SQLite + FTS5 记忆层
+├── qianxun-runtime/       # Agent 运行时封装 (RuntimeApi + SseEvent)
+├── qianxun/               # 主二进制 (cli/daemon/server/acp/tui 5 模式)
+├── qianxun-desktop/       # Tauri + Svelte 5 桌面端 (独立 workspace)
+├── qianxun-test/          # Python e2e 测试 harness
+└── docs/                  # 文档
+```
 
 ## 文档结构
 
-```
-docs/
-├── README.md               # 本文档 — 总入口
-├── 00_索引/                # 导航和路由
-│   └── README.md           # 任务路由、仓库地图、术语表
-├── 10_事实源/              # 当前模块真实状态
-│   ├── memory-state.md     # Memory 子系统状态
-│   ├── mcp-state.md        # MCP 子系统状态
-│   ├── skills-state.md     # Skills 子系统状态
-│   ├── daemon-state.md     # Daemon 子系统状态
-│   └── tui-architecture.md # TUI 架构状态
-├── 20_工作项/              # 阶段性工作上下文
-│   ├── 2026-05-31_Phase3_记忆子系统设计修订/
-│   ├── 2026-05-31_模块设计文档起草/
-│   ├── 2026-06-01_qx交互式TUI调研/
-│   └── 2026-06-01_TUI性能与Agent开发工具优化/
-├── 30_决策/                # 长期架构决策
-│   └── ADR-0001_数据库选型.md  # redb → SQLite 选型记录
-├── 40_验收/                # 有长期复盘价值的验证证据
-├── 90_历史/                # 已废弃有追溯价值的文档
-│   └── ai分析/             # 早期 AI 分析产出（保留追溯）
-│
-├── architecture.md         # 统一架构设计
-├── agent-pattern-design.md # Agent 模式设计（Phase 3b）
-├── memory-design.md        # 记忆子系统设计（Phase 3a）
-├── mcp-design.md           # MCP Client 设计（Phase 3a）
-├── skills-design.md        # Skill 系统设计（Phase 3a）
-├── daemon-design.md        # Daemon 模式设计（Phase 3c / 4a）
-└── vps-server-design.md    # VPS Server 设计（Phase 4b）
-```
+| 目录 | 职责 |
+|---|---|
+| `10_事实源/` | 子系统真实状态 (runtime, desktop) |
+| `20_工作项/` | 阶段性工作上下文 |
+| `30_决策/` | 长期架构决策 (ADR) |
+| `30_子项目规划/` | 跨 Track 规划和运行指南 |
+| `40_经验/` | 实施经验与收尾记录 |
 
-## 当前状态
+## 当前状态 (2026-06-09)
 
-> 校准: 2026-06-01。详细缺口与进度见 `docs/10_事实源/` 五个子系统状态文件,以及 `docs/20_工作项/2026-06-01_TUI性能与Agent开发工具优化/阶段路线.md` (A-G 路线)。
-
-| Phase | 状态 | 内容 |
+| Phase | 状态 | 说明 |
 |---|---|---|
-| 1-2 | ✅ 完成 | Agent 引擎 + Provider + 工具 + CLI REPL + ACP + 工作区 |
-| 3a | 🟡 部分实现 | Memory (SQLite+FTS5, 闭环缺口) + MCP (ServerManager+transport, 工具注册未完) + Skills (frontmatter 加载, 路径/能力未对齐设计) — 见 `memory-state.md` `mcp-state.md` `skills-state.md` |
-| 3b | 🟡 部分实现 | AgentPattern 类型 + plan/reflect/workflow 模块 — 未接入主链路 |
-| 3c | 🟡 骨架 | Daemon HTTP 骨架 (axum + 11 路由 + session CRUD) — 未接 AgentLoop, 见 `daemon-state.md` |
-| 3d | ✅ 完成 | 独立 TUI 模式 (ratatui + 脏标记渲染 + 增量行缓存 + 1MB 压测) — 见 `tui-architecture.md` |
-| 4a | 📋 待实现 | Daemon 升级为唯一 Agent runtime, TUI/ACP 改 thin client |
-| 4b | 📋 待实现 | VPS Server 完整 (WebSocket Hub + 完整认证) + 完整 RAG |
+| 1-2 | ✅ | Agent 引擎 + Provider + ACP + 工作区 |
+| 3a/3b | ✅ | Memory + Skills + MCP + Agent 模式(plan/reflect/workflow) |
+| 3c | ✅ | Daemon HTTP 骨架 |
+| 3d | ✅ | 独立 TUI (ratatui) |
+| 4a-1 | ✅ | qianxun-runtime crate 抽取 + RuntimeApi 收口 + Tauri 集成 + Svelte 切真后端 |
+| 4a-2 | 🟡 | **当前**:用户手动 E2E 验收 6 步 (见 40_经验/Phase_ABCD_收尾总览) |
 
-## 文档职责一览
+## 后续工作 (Phase E)
 
-| 文件 | 类型 | Phase |
-|---|---|---|
-| `docs/architecture.md` | 统一架构设计 | 1-4 ✅ |
-| `docs/agent-pattern-design.md` | Agent 模式设计 | 3b 🟡 |
-| `docs/memory-design.md` | 记忆子系统设计 | 3a 🟡 |
-| `docs/mcp-design.md` | MCP Client 设计 | 3a 🟡 |
-| `docs/skills-design.md` | Skill 系统设计 | 3a 🟡 |
-| `docs/daemon-design.md` | Daemon 模式设计 | 3c 🟡 / 4a 📋 |
-| `docs/vps-server-design.md` | VPS Server 设计 | 4b 📋 |
-| `docs/10_事实源/` | 子系统真实状态 | 持续维护 |
-| `docs/30_决策/ADR-0001_数据库选型.md` | 决策记录 | 3 |
-| `CLAUDE.md` | 项目规则 | — |
+参考 [40_经验/2026-06-08_Phase_ABCD_收尾总览.md](40_经验/2026-06-08_Phase_ABCD_收尾总览.md) "用户后续工作 (Phase E)" 章节。简要:
 
-## 导航
+1. **P0-1**: 用户手动跑 6 步 E2E 验收(关键)
+2. **P0-2**: sub_session 后端实现
+3. **P0-3**: list_plans Tauri command 注册
+4. **P0-4**: project.svelte.ts 后端实现
+5. **P1-1/2/3/4**: Plan 持久化 / 路径分离 / PlanUpdate 事件 / connection 真实化
 
-- 了解系统架构 → `docs/architecture.md`
-- 了解各个子系统设计 → 上述设计文档
-- 快速索引和任务路由 → `docs/00_索引/README.md`
-- 项目规则 → `CLAUDE.md`
-- 当前工作项 → `docs/20_工作项/`
-- qx 交互式 TUI 调研 → `docs/20_工作项/2026-06-01_qx交互式TUI调研/`
-- TUI 性能与 Agent 开发工具优化 → `docs/20_工作项/2026-06-01_TUI性能与Agent开发工具优化/`
+详细见 `runtime-state.md` 和 `desktop-state.md` 的"已知缺口"段。

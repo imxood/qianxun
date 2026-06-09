@@ -38,6 +38,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 2026-06-09 启动日志本地化: tracing-subscriber 0.3.23 没有内置 LocalTime,
+# 自己用 time crate (轻量, ~0 额外依赖) 实现 FormatTime trait.
+# 输出格式: "2026-06-09 19:03:13.245" 本地时间 + ms 精度.
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+# 2026-06-09: state/runtime.rs 用 futures::executor::block_on 同步跑 async fn
+# (RuntimeState::new 是 async 但内部全同步, 跑在 spawn_blocking 线程里 OK)
+futures = "0.3"
 # HTTP 客户端 (用于 daemon_health_fetch), 复用 qianxun-core 的 reqwest 配置策略:
 # default-features=false 走纯 rustls, 不需要 OpenSSL/cmake.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots"] }

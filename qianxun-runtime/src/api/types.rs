@@ -42,6 +42,43 @@ pub struct SessionInfo {
     pub created_at: String,
     pub last_active_at: String,
     pub message_count: u32,
+    /// 2026-06-09 加: 工作目录根 (跟 create_session 的 project_root 透传).
+    /// 前端 projectStore 用此字段去重 derive project 列表.
+    /// None 表示会话未绑定项目 (顶层 "Chat" 入口).
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
+
+/// create_session 入参 (前端 invoke 透传).
+///
+/// `model` 暂未使用 — SessionRuntime 内部从 `SharedState.resolved` 拿 active provider,
+/// 跟 SendRequest.model 一致 (Stage 2 简化, 留 config 切换用).
+/// `project_root` 透传给 AgentLoopHost::create_session (工作目录关联).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateSessionRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
+
+/// update_active_provider 入参 (前端 Provider 设置 UI 调).
+///
+/// 行为 (2026-06-09 加):
+/// 1. 后端把 active_provider 字段写到 ~/.qianxun/config.json (原子写)
+/// 2. **不**热替换 runtime.provider (避免破坏 send_message in-flight task)
+/// 3. 前端收到 success 后**提示用户重启 desktop** (改动需重启生效)
+///
+/// 理由: 简化实现, 跟当前 "RuntimeState 启动时构造, 之后不变" 一致.
+/// 后续 P1 可加 "热替换 provider" (ArcSwap + 重置 mpsc 通道).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateProviderRequest {
+    /// 新激活的 provider 名称 (e.g. "deepseek" / "MiniMax" / 自定义)
+    pub active_provider: String,
+    /// 可选: 同时更新该 provider 的配置 (api_key / model / base_url).
+    /// None 表示只切 active, 不动 provider 配置.
+    #[serde(default)]
+    pub provider_config: Option<qianxun_core::config::ProviderConfig>,
 }
 
 /// list_sessions 返回的容器 (含总数 + 内存中活跃/暂停计数 + filter 回显).

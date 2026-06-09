@@ -7,10 +7,12 @@
 
 	let query = $state('');
 
-	function onNewTask() {
+	async function onNewTask() {
 		const project = projectStore.get('proj_qianxun_desktop') ?? null;
-		const s = sessionStore.create({ project_id: project?.id ?? null });
-		uiStore.switchToSession(s.id);
+		// 2026-06-09 lazy create: 只切到 'new' view, 不调 create_session invoke.
+		// 真正的 session 持久化等用户发送第一条消息时 (chatStore.send) 才发生.
+		// 理由: 避免"点新建任务但永远不发消息"产生的空 session 浪费 SQLite row.
+		uiStore.switchToNew(project?.id ?? null);
 	}
 </script>
 

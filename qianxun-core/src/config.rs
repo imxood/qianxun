@@ -1,14 +1,14 @@
 use crate::agent::conversation::TokenBudget;
 use crate::agent::context::window::TokenScope;
 use crate::types::{AgentConfig, AgentPattern, PlanAndExecuteConfig, ReflectiveConfig, WorkflowConfig, ThinkingConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use json_comments::StripComments;
 use std::collections::HashMap;
 use std::path::Path;
 
 // ─── Raw config (from JSON file with comments) ────────────
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct Config {
     /// 当前激活的 provider 名称. 留空则默认 "deepseek".
@@ -20,7 +20,7 @@ pub struct Config {
     pub compaction: Option<CompactionConfig>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct ProviderConfig {
     pub api_key: Option<String>,
@@ -30,14 +30,14 @@ pub struct ProviderConfig {
     pub max_tokens: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct AgentDefaults {
     pub max_turns: Option<u32>,
     pub max_retries: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct BudgetConfig {
     pub max_input_tokens: Option<u64>,
@@ -51,7 +51,7 @@ pub enum CompactScope {
     BodyAfterPrefix,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CompactionConfig {
     pub enabled: Option<bool>,
@@ -228,6 +228,55 @@ impl Config {
             path: path.display().to_string(),
             source: e,
         })
+    }
+
+    /// 原子写 config 文件 (写 tmp → rename, 防半写文件).
+    /// 2026-06-09 加: 桌面端 Provider 设置 UI 写配置.
+    ///
+    /// 行为:
+    /// 1. 序列化 Config 为 JSON (缩进 2 空格, 含原注释风格 — 通过 StripComments writer 不必要)
+    /// 2. 写到 `<path>.tmp` 同目录
+    /// 3. `std::fs::rename` 原子替换原文件
+    /// 4. 失败时清理 tmp
+    pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+        use std::io::Write;
+        let path = path.as_ref();
+        let tmp = path.with_extension("json.tmp");
+
+        // 1. 序列化
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            ConfigError::Parse {
+                path: path.display().to_string(),
+                source: e,
+            }
+        })?;
+
+        // 2. 写 tmp
+        {
+            let mut f = std::fs::File::create(&tmp).map_err(|e| ConfigError::Io {
+                path: tmp.display().to_string(),
+                source: e,
+            })?;
+            f.write_all(json.as_bytes()).map_err(|e| ConfigError::Io {
+                path: tmp.display().to_string(),
+                source: e,
+            })?;
+            f.sync_all().map_err(|e| ConfigError::Io {
+                path: tmp.display().to_string(),
+                source: e,
+            })?;
+        }
+
+        // 3. 原子 rename
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            // 清理 tmp
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ConfigError::Io {
+                path: path.display().to_string(),
+                source: e,
+            });
+        }
+        Ok(())
     }
 
     /// Resolve config with env/CLI overrides.

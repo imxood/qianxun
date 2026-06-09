@@ -112,7 +112,7 @@
 
 | Phase | 规划 | 现状 |
 |---|---|---|
-| A 文档事实源 | 修 docs/ | 部分 (daemon-state.md 待更新) |
+| A 文档事实源 | 修 docs/ | ✅ done (2026-06-09: 新建 runtime-state.md + desktop-state.md) |
 | B TUI 性能 | 脏标记 + 增量渲染 | 之前已 done (03d) |
 | C Memory 闭环 | FTS + 检索 + char 边界 | ✅ done (这次) |
 | D MCP/Skills | ServerManager + frontmatter | 之前已 done |
@@ -148,7 +148,7 @@
 - Plan summary (LLLM 拿 task outputs 总结)
 
 ### 跨 phase 文档 follow-up (1 项)
-- `docs/10_事实源/daemon-state.md` 待重写 (现引用旧文件路径)
+- ✅ 2026-06-09 已完成: docs/ 整体清理 (53 → 18 个 .md), 新建 runtime-state.md / desktop-state.md, 删 daemon-state.md
 
 ## 用户后续工作 (Phase E)
 

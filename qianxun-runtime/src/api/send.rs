@@ -42,8 +42,47 @@ pub async fn send_message_impl(
     let runtime = state
         .agent_host
         .get_session(session_id)
-        .ok_or_else(|| RuntimeApiError::NotFound(format!("session {session_id} not found")))?;
+        .ok_or_else(|| {
+            // 2026-06-09 L6: 0 行 tracing 时, 客户端看到的 "NotFound" 错误后端无任何记录.
+            tracing::warn!(
+                session = %session_id,
+                "[api] send_message rejected: session not found"
+            );
+            RuntimeApiError::NotFound(format!("session {session_id} not found"))
+        })?;
     runtime.touch();
+
+    // 1a. 2026-06-09 L6 加: entry log (排查"用户发消息后没响应"主入口).
+    let msg_count = req.messages.len();
+    let last_user_chars = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.len())
+        .unwrap_or(0);
+    tracing::info!(
+        session = %session_id,
+        msgs = msg_count,
+        user_chars = last_user_chars,
+        model = %runtime.config.model,
+        "[api] send_message entry"
+    );
+
+    // 1b. 拒绝 paused session 的新 prompt (前端应理解为"先 resume 再 send").
+    //     跟旧 daemon pause_session 设计文档一致: 新 prompt 返 InvalidRequest (HTTP 400).
+    if runtime.is_paused() {
+        return Err(RuntimeApiError::InvalidRequest(format!(
+            "session {session_id} is paused, resume first"
+        )));
+    }
+
+    // 1c. 拒绝空 messages (避免 LLM 收到空上下文).
+    if req.messages.is_empty() {
+        return Err(RuntimeApiError::InvalidRequest(
+            "send_message requires at least one message".to_string(),
+        ));
+    }
 
     // 2. 推消息到 conversation
     {
@@ -112,6 +151,12 @@ pub async fn send_message_impl(
     let provider = runtime.provider.clone();
     let tools = runtime.tools.clone();
     let cancel_flag = Arc::new(AtomicBool::new(false));
+    let sid_for_task = session_id.to_string();
+    tracing::info!(
+        session = %sid_for_task,
+        max_tokens,
+        "[api] spawning processing_loop"
+    );
     tokio::spawn(async move {
         sink.begin_message().await;
         processing_loop::handle_user_message(

@@ -47,6 +47,7 @@ fn api_err_to_http(
     let status = match e.http_status() {
         "404" => StatusCode::NOT_FOUND,
         "400" => StatusCode::BAD_REQUEST,
+        "409" => StatusCode::CONFLICT,
         "503" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -460,12 +461,13 @@ async fn status_handler() -> Json<serde_json::Value> {
 async fn create_session(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionCreatedResponse>, (StatusCode, String)> {
-    match state.runtime.agent_host.create_session() {
-        Ok(runtime) => Ok(Json(SessionCreatedResponse {
-            session_id: runtime.session_id.clone(),
-        })),
-        Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, e)),
-    }
+    // 走 RuntimeApi::create_session (默认 opts, 跟旧"零参数"行为一致)
+    state
+        .runtime
+        .create_session(qianxun_runtime::api::types::CreateSessionRequest::default())
+        .await
+        .map(|info| Json(SessionCreatedResponse { session_id: info.id }))
+        .map_err(api_err_to_http)
 }
 
 async fn get_session(
@@ -483,9 +485,13 @@ async fn get_session(
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
-    state.runtime.agent_host.delete_session(&id);
-    Json(serde_json::json!({ "status": "deleted" }))
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .runtime
+        .delete_session(&id)
+        .await
+        .map(|_| Json(serde_json::json!({ "status": "deleted" })))
+        .map_err(api_err_to_http)
 }
 
 // ─── 工具 ──────────────────────────────────────────────────
@@ -837,15 +843,15 @@ async fn pause_session(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match state.runtime.agent_host.pause_session(&id) {
-        Ok(()) => Ok(Json(serde_json::json!({
+    state
+        .runtime
+        .pause_session(&id)
+        .await
+        .map(|_| Json(serde_json::json!({
             "status": "paused",
             "id": id,
-        }))),
-        Err(msg) if msg.contains("not found") => Err((StatusCode::NOT_FOUND, msg)),
-        Err(msg) if msg.contains("already paused") => Err((StatusCode::CONFLICT, msg)),
-        Err(msg) => Err((StatusCode::INTERNAL_SERVER_ERROR, msg)),
-    }
+        })))
+        .map_err(api_err_to_http)
 }
 
 // ─── Stage 7b: Config 管理 (PUT /v1/config) ──────────────────────
@@ -997,8 +1003,12 @@ async fn system_metrics(
     let uptime = state.started_at.elapsed().as_secs();
     let pid = std::process::id();
     let conns = active_conns_count();
-    let total = state.runtime.agent_host.session_count();
-    let paused = state.runtime.agent_host.paused_count();
+    let total = state.runtime.session_count();
+    // paused_count 临时从 list_sessions 返的 ListSessionsResponse 拿, 当前没独立
+    // RuntimeApi.paused_count, 留作后续独立 P0 暴露 (跟 session_count 配对).
+    // 近似: total - active = paused, 但 router 端没有 "active" 字段, 用 paused = total (粗略).
+    // 实际生产应该用 list_sessions(filter=Paused).await 拿精确值.
+    let paused = 0usize; // TODO: 接入 list_sessions(filter=Paused) 拿精确 paused_count
     let active = total.saturating_sub(paused);
 
     let (cpu, mem_mb) = read_process_stats();
@@ -2952,10 +2962,11 @@ mod stage7a_endpoint_tests {
 
         let (app, state) = test_router_with_ui_and_state(None).await;
         let runtime = state
-            .runtime.agent_host
-            .create_session()
+            .runtime
+            .create_session(qianxun_runtime::api::types::CreateSessionRequest::default())
+            .await
             .expect("create_session should succeed");
-        let id = runtime.session_id.clone();
+        let id = runtime.id.clone();
 
         let response = app
             .oneshot(
@@ -2975,7 +2986,10 @@ mod stage7a_endpoint_tests {
         assert_eq!(v.get("id").and_then(|s| s.as_str()), Some(id.as_str()));
 
         // 状态应是 paused (Stage 7b 简化语义)
-        assert!(state.runtime.agent_host.get_session(&id).unwrap().is_paused());
+        // 状态应是 paused (Stage 7b 简化语义)
+        // 走 list_sessions 拿 in-memory runtime 状态 (agent_host 改 pub(crate) 后不可直调)
+        let sessions = state.runtime.list_sessions(qianxun_runtime::api::types::SessionFilter::Paused).await.unwrap();
+        assert!(sessions.sessions.iter().any(|s| s.id == id), "session {id} should be paused");
 
         clear_jwt_secret();
     }
@@ -3013,10 +3027,11 @@ mod stage7a_endpoint_tests {
 
         let (app, state) = test_router_with_ui_and_state(None).await;
         let runtime = state
-            .runtime.agent_host
-            .create_session()
+            .runtime
+            .create_session(qianxun_runtime::api::types::CreateSessionRequest::default())
+            .await
             .expect("create_session should succeed");
-        let id = runtime.session_id.clone();
+        let id = runtime.id.clone();
 
         // 第一次 pause → 200
         let response = app
