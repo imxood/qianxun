@@ -283,15 +283,15 @@ impl Config {
     ///
     /// 优先级 (从高到低):
     ///   1. CLI `--provider` / `--model`
-    ///   2. Env `QIANXUN_ACTIVE_PROVIDER` (仅 active_provider)
+    ///   2. Env `QIANXUN_ACTIVE_PROVIDER` (仅 active_provider, 保留: 主动切 provider 场景)
     ///   3. 配置文件 `active_provider` / `providers.<name>.*`
     ///   4. 内置默认值 (`"deepseek"`)
     ///
-    /// 每个 provider 的 API key 查找顺序 (在 `resolve()` 内部, 不依赖外部传参):
-    ///   1. 预设的硬编码 env var (例如 MiniMax → `ANTHROPIC_AUTH_TOKEN`)
-    ///   2. 通用约定 `<PROVIDER>_API_KEY`
-    ///   3. 通用约定 `<PROVIDER>_AUTH_TOKEN`
-    ///   4. 配置文件 `providers.<name>.api_key`
+    /// **2026-06-09 改: API key 强制从 config.json 读取, 不再使用环境变量**:
+    ///   - 之前支持 `DEEPSEEK_API_KEY` / `MINIMAX_API_KEY` / `ANTHROPIC_AUTH_TOKEN` 等 env var
+    ///   - 用户决策: 桌面端启动时不继承 shell env, env var 路径不可控; 改为单一配置源
+    ///   - 路径: 配置文件 `providers.<name>.api_key` 唯一来源
+    ///   - env var `QIANXUN_ACTIVE_PROVIDER` 保留 (切换 active provider 仍可临时用)
     pub fn resolve(
         self,
         cli_model: Option<String>,
@@ -306,13 +306,11 @@ impl Config {
             .unwrap_or_else(|| "deepseek".to_string());
 
         // ── 2. 解析所有 raw providers → ResolvedProviderConfig ──
+        // 2026-06-09 改: api_key 只从 config 读, 不读 env.
         let mut all_resolved: HashMap<String, ResolvedProviderConfig> = HashMap::new();
         if let Some(raw_providers) = self.providers {
             for (name, raw_pcfg) in raw_providers {
-                let env_key = env_api_key_for(&name);
-                let api_key = env_key
-                    .or_else(|| raw_pcfg.api_key.clone())
-                    .unwrap_or_default();
+                let api_key = raw_pcfg.api_key.clone().unwrap_or_default();
 
                 let base_url = raw_pcfg
                     .base_url
@@ -338,9 +336,10 @@ impl Config {
         }
 
         // ── 3. 保证激活的 provider 至少有一个 config (即使 config 文件没定义) ──
+        // 2026-06-09 改: api_key 直接为空 (config 文件没定义), 不读 env.
         if !all_resolved.contains_key(&active_provider) {
             let default_cfg = ResolvedProviderConfig {
-                api_key: env_api_key_for(&active_provider).unwrap_or_default(),
+                api_key: String::new(),
                 model: default_model_for(&active_provider),
                 base_url: default_base_url_for(&active_provider),
                 temperature: None,
@@ -441,39 +440,9 @@ impl Config {
     }
 }
 
-// ─── Env / Default helpers ─────────────────────────────────
-
-/// 按 provider 名称查找 API key 环境变量.
-fn env_api_key_for(provider_name: &str) -> Option<String> {
-    // 1. 预设的硬编码 env var
-    let specific: &[&str] = match provider_name {
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "MiniMax" => &["ANTHROPIC_AUTH_TOKEN"],
-        _ => &[],
-    };
-    for var in specific {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    // 2. 通用约定: <PROVIDER>_API_KEY
-    let generic = format!("{}_API_KEY", provider_name.to_uppercase());
-    if let Ok(v) = std::env::var(&generic) {
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    // 3. Anthropic 风格: <PROVIDER>_AUTH_TOKEN
-    let anthropic = format!("{}_AUTH_TOKEN", provider_name.to_uppercase());
-    if let Ok(v) = std::env::var(&anthropic) {
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    None
-}
+// ─── Default helpers ───────────────────────────────────────
+// 2026-06-09: 删除 env_api_key_for() — 用户决策: API key 只从 config.json 读,
+// 不读 env var (桌面端启动不继承 shell env, 单一配置源更可控).
 
 fn default_base_url_for(provider_name: &str) -> String {
     match provider_name {

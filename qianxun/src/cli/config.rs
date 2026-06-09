@@ -3,20 +3,17 @@ use std::path::PathBuf;
 const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
 //
 // 优先级（从高到低）:
-//   CLI 参数 (--provider / --model) > 环境变量 > 配置文件 > 内置默认值
+//   CLI 参数 (--provider / --model) > 配置文件 > 内置默认值
 //
 // 切换 LLM provider:
 //   1. 修改下方 "active_provider" 字段为 "deepseek" / "MiniMax" 或其他
 //   2. 在 "providers" 区块添加对应 provider 的 api_key / model / base_url
 //   3. 也可通过 CLI 临时覆盖:  qx --provider MiniMax
 //
-// API key 解析顺序（每个 provider 独立查找）:
-//   1. 预设的硬编码 env var:
-//        - "deepseek" → DEEPSEEK_API_KEY
-//        - "MiniMax" → ANTHROPIC_AUTH_TOKEN
-//   2. 通用约定: <PROVIDER>_API_KEY
-//   3. Anthropic 风格: <PROVIDER>_AUTH_TOKEN
-//   4. 本配置文件中 providers.<name>.api_key
+// 2026-06-09 改: API key 强制从本配置文件读, 不再支持环境变量
+//   - 之前支持 DEEPSEEK_API_KEY / MINIMAX_API_KEY / ANTHROPIC_AUTH_TOKEN / 通用 <PROVIDER>_API_KEY
+//   - 用户决策: 桌面端启动不继承 shell env, 单一配置源更可控
+//   - 路径: 下方 providers.<name>.api_key 唯一来源
 //
 // 所有字段均为可选项，缺失 = 使用对应级别的默认值。
 
@@ -28,7 +25,7 @@ const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
   // ── Provider 配置 ─────────────────────────────────
   "providers": {
     // "deepseek": {
-    //   // API 密钥（可选，默认走 DEEPSEEK_API_KEY 环境变量）
+    //   // API 密钥 (必填, 唯一来源)
     //   // "api_key": "sk-...",
     //
     //   // 模型名（可选，可被 --model CLI 参数覆盖）
@@ -45,8 +42,8 @@ const TEMPLATE: &str = r#"// 千寻 (Qianxun) 全局配置文件
     // },
 
     // "MiniMax": {
-    //   // API 密钥（可选，默认走 ANTHROPIC_AUTH_TOKEN 环境变量）
-    //   // 也可填在这里: "api_key": "eyJ..."
+    //   // API 密钥 (必填, 唯一来源)
+    //   // "api_key": "eyJ...",
     //
     //   // 模型名（可选，默认 MiniMax-M3, 支持 1M 上下文 + thinking + tool_use + 图片）
     //   // "model": "MiniMax-M3",

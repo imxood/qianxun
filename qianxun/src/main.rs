@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
     let resolved = if let Some(ref path) = config_path {
         match qianxun_core::config::Config::from_file(path) {
             Ok(raw) => {
-                // env var 读取由 resolve() 内部按 provider 分发 (DEEPSEEK_API_KEY / ANTHROPIC_AUTH_TOKEN / 通用约定)
+                // 2026-06-09 改: API key 只从 config.json 读, 不再读 env var.
                 raw.resolve(cli.model.clone(), cli.provider.clone())
             }
             Err(e) => {
@@ -224,23 +224,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 验证 active provider 的 api_key 非空
+    // 2026-06-09 改: API key 只从 config.json 读 (用户决策), 错误提示只指向 config.
     if resolved.active_provider_config().api_key.is_empty() {
         let provider = &resolved.active_provider;
-        let env_var = match provider.as_str() {
-            "deepseek" => "DEEPSEEK_API_KEY",
-            "MiniMax" => "ANTHROPIC_AUTH_TOKEN",
-            other => {
-                // 通用约定
-                tracing::warn!(
-                    "[main] no api_key for provider '{other}'; tried {}_API_KEY / {}_AUTH_TOKEN env vars and config.providers.{other}.api_key",
-                    other.to_uppercase(),
-                    other.to_uppercase()
-                );
-                "<PROVIDER>_API_KEY or <PROVIDER>_AUTH_TOKEN"
-            }
-        };
         eprintln!(
-            "错误: provider '{provider}' 缺少 API key. 请设置 env var {env_var} 或在 config.json 的 providers.{provider}.api_key 填写."
+            "错误: provider '{provider}' 缺少 API key. 请在 ~/.qianxun/config.json 的 providers.{provider}.api_key 填写."
         );
         std::process::exit(1);
     }
