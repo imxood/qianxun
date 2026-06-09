@@ -1,9 +1,11 @@
 # 千寻 (Qianxun) 文档
 
-> 状态: 生效 | 最后更新: 2026-06-09 | 核心需求: **tauri → core** 端到端跑通
+> 状态: 生效 | 最后更新: 2026-06-10 | 核心需求: **tauri → core** 端到端跑通 + v2 AgentLoop 演进
 
 ## 核心入口
 
+- **架构事实源**: [10_事实源/架构/](10_事实源/架构/) — AgentLoop v2 设计 (HookRegistry + 双轴模式)
+- **设计补齐目录**: [设计/](设计/) — 14 个独立设计缺口文档 (P0 5 + P1 9)
 - **当前架构决策**: [ADR-0003: 桌面 + ACP 同进程 2-Mode 互斥](30_决策/ADR-0003_desktop_2mode.md)
 - **qianxun-runtime 子系统状态**: [10_事实源/runtime-state.md](10_事实源/runtime-state.md)
 - **qianxun-desktop 子系统状态**: [10_事实源/desktop-state.md](10_事实源/desktop-state.md)
@@ -50,7 +52,7 @@ qianxun/                  # workspace 根
 
 | 目录 | 职责 |
 |---|---|
-| `10_事实源/` | 子系统真实状态 (runtime, desktop) |
+| `10_事实源/` | 子系统真实状态 (runtime, desktop) + 架构设计 (架构/) |
 | `20_工作项/` | 阶段性工作上下文 |
 | `30_决策/` | 长期架构决策 (ADR) |
 | `30_子项目规划/` | 跨 Track 规划和运行指南 |

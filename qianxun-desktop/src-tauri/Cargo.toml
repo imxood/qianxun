@@ -26,6 +26,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-http = "2"
+# 2026-06-09 加: Tauri 官方 dialog plugin. 新对话页 '选择项目' 打开原生文件夹选择器.
+# 选中后路径作为 project_root, 关联新建的 session.
+tauri-plugin-dialog = "2"
 # Stage 6a (§11.3): 凭据加密 vault.
 # 计划: 走 tauri-plugin-stronghold, 但 v2.3.1 没有公开的 Rust API
 # (只有 JS-bound invoke handlers). 直接用 iota_stronghold (plugin 的底层)

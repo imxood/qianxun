@@ -52,6 +52,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
+        // 2026-06-09 加: Tauri dialog plugin. 给 '选择项目' 入口用, 调原生文件夹选择器.
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             // 2026-06-09: timing 日志同时输出 (a) 距 Tauri 进程启动的累计耗时 since_t0
             //              (b) 距上一跳的相对耗时 since_prev
