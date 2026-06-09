@@ -4,9 +4,31 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
+		<title>千寻</title>
+		<!-- 2026-06-09 启动体验打磨: 内联纯 CSS splash, webview 解析完 HTML 立即显示,
+		     避免 "webview 创建 → JS 解析 → Svelte hydration" 期间 3-10s 黑屏.
+		     JS 加载完后 Svelte 会用真正的 LoadingSplash 组件替换. -->
+		<style>
+			html, body { margin: 0; padding: 0; background: #0a0a0a; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+			#__init_splash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+			#__init_splash .logo { width: 48px; height: 48px; color: #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
+			#__init_splash h1 { margin: 0; font-size: 20px; font-weight: 600; color: #fafafa; letter-spacing: 0.05em; }
+			#__init_splash p { margin: 0; font-size: 12px; color: #a1a1aa; }
+			#__init_splash .bar { width: 240px; height: 6px; background: #27272a; border-radius: 9999px; overflow: hidden; margin-top: 8px; }
+			#__init_splash .bar div { height: 100%; width: 30%; background: linear-gradient(90deg, #fbbf24, #f59e0b); border-radius: 9999px; animation: slide 1.4s ease-in-out infinite; }
+			@keyframes pulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+			@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
+		</style>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">
+		<!-- 静态 splash 占位 (webview 解析 HTML 立即可见, JS 加载完后由 Svelte LoadingSplash 替换) -->
+		<div id="__init_splash" aria-label="千寻正在启动">
+			<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+			<h1>千寻</h1>
+			<p>正在启动…</p>
+			<div class="bar"><div></div></div>
+		</div>
 		<div style="display: contents">%sveltekit.body%</div>
 	</body>
 </html>

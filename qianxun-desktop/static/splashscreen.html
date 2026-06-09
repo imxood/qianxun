@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- 2026-06-09 加: Tauri 官方 splash 窗口 (https://v2.tauri.app/learn/splashscreen/).
+     走 static/ 目录, SvelteKit build 时原样复制到 build/, dev 模式 Vite serve
+     static/ 也立即可用. 不走 Vite 编译, 启动 < 50ms 显示.
+     前端 ready 后 invoke 'set_complete' (后端关 splash + 显示 main). -->
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>千寻</title>
+		<style>
+			html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #0a0a0a; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+			.wrap { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+			.logo { width: 64px; height: 64px; color: #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
+			h1 { margin: 0; font-size: 28px; font-weight: 600; color: #fafafa; letter-spacing: 0.08em; }
+			p { margin: 0; font-size: 12px; color: #a1a1aa; }
+			.bar { width: 200px; height: 3px; background: #27272a; border-radius: 9999px; overflow: hidden; margin-top: 4px; }
+			.bar div { height: 100%; width: 30%; background: linear-gradient(90deg, #fbbf24, #f59e0b); border-radius: 9999px; animation: slide 1.4s ease-in-out infinite; }
+			@keyframes pulse { 0%, 100% { opacity: 0.7; transform: scale(1); } 50% { opacity: 1; transform: scale(1.05); } }
+			@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
+		</style>
+	</head>
+	<body>
+		<div class="wrap">
+			<svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+			<h1>千寻</h1>
+			<p>正在准备您的工作环境</p>
+			<div class="bar"><div></div></div>
+		</div>
+	</body>
+</html>
