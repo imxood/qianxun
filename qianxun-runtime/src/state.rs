@@ -9,9 +9,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 use qianxun_core::config::ResolvedConfig;
 use qianxun_core::hooks::HookRegistry;
@@ -23,16 +23,53 @@ use qianxun_core::tools::ToolRegistry;
 use qianxun_memory::MemoryCore;
 
 use crate::agent_host::{AgentLoopHost, SharedState};
-use crate::api::plans::PlanStore;
 use crate::background_task::BackgroundTaskManager;
 use crate::persistence::SessionStore;
+use crate::sse::SseEvent;
+
+/// 运行时模式 (P1-2 收尾, 2026-06-12).
+///
+/// 决定 SQLite db 路径后缀, 避免 desktop / daemon / tui 跨进程锁竞争同一 db 文件.
+/// 同一 OS 里这 3 个 binary 可能同时存在 (e.g. 用户 daemon 跑着时开 desktop, 或
+/// 启 TUI 监控), 路径分文件是 0 成本隔离手段.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMode {
+    /// Tauri 桌面端 (Svelte 5 webview). 路径: `desktop.db` + `desktop_mem.db`.
+    Desktop,
+    /// daemon HTTP binary. 路径: `daemon.db` + `daemon_mem.db`.
+    Daemon,
+    /// TUI binary (ratatui). 路径: `tui.db` + `tui_mem.db`.
+    Tui,
+}
+
+/// 模式对应 db 路径 (owned String, 避免 build 内部生命周期问题).
+struct ModePaths {
+    mem: String,
+    store: String,
+}
+
+/// 根据模式算 db 路径. 路径基于 `qianxun_core::workspace::qianxun_dir()`
+/// (默认 `~/.qianxun/`), 拼上 `<mode>.db` / `<mode>_mem.db`.
+fn paths_for(mode: RuntimeMode) -> ModePaths {
+    let dir = qianxun_core::workspace::qianxun_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    let suffix = match mode {
+        RuntimeMode::Desktop => "desktop",
+        RuntimeMode::Daemon => "daemon",
+        RuntimeMode::Tui => "tui",
+    };
+    ModePaths {
+        mem: format!("{dir}/{suffix}_mem.db"),
+        store: format!("{dir}/{suffix}.db"),
+    }
+}
 
 /// 千寻运行时核心状态 — 11 核心字段, 跨桌面 / daemon 共享.
 ///
-/// 字段变更:
-///   - 新增 `plans: Arc<PlanStore>` — in-memory plan store (RuntimeApi plans impl 用)
-///   - 新增 `background_tasks: Arc<BackgroundTaskManager>` — 后台任务管理 (Stage 5 缺口 05)
-///   - 之前 9 字段不变
+/// 字段变更 (P1-1 收尾, 2026-06-12):
+///   - 移除 `plans: Arc<PlanStore>` — 改走 `store.plans` SQLite 表 (重启不丢)
+///   - 之前 11 字段不变 (background_tasks / lifecycle / hooks 等保持)
 pub struct RuntimeState {
     /// 内部 session 生命周期管理. **pub(crate)** — 外部禁止直接访问, 必须走 RuntimeApi trait.
     /// 内部 6 个字段 (provider / config / tools / memory / skills / shared) 仍 pub,
@@ -48,7 +85,6 @@ pub struct RuntimeState {
     pub skills: SkillManager,
     pub shared: Arc<SharedState>,
     pub store: Arc<SessionStore>,
-    pub plans: Arc<PlanStore>,
     /// 缺口 05: 后台任务管理器 (FIFO + 状态机)
     pub background_tasks: Arc<BackgroundTaskManager>,
     /// 缺口 04 v0.3 集成: skill 生命周期记录器, 每次 `api/send.rs` matched_skills
@@ -60,6 +96,11 @@ pub struct RuntimeState {
     /// 默认空 registry (5 tier 全空), 调用方可通过 `state.hooks.register(...)` 注入业务 hook.
     pub hooks: Arc<HookRegistry>,
     pub shutdown_tx: watch::Sender<()>,
+    /// P1-3 收尾 (2026-06-12): plan 事件 broadcast bus.
+    /// plans.rs 在 6 个状态变更点 try_send (失败 ignore — 无订阅者不阻塞业务).
+    /// 订阅方: Tauri desktop (走 `app.emit("plan_event", ...)`), daemon SSE 流.
+    /// 容量 256: 单 plan 状态变更稀疏, 256 足够撑 30s 高频更新不丢.
+    plan_event_tx: broadcast::Sender<SseEvent>,
     /// 2026-06-09 加: restore_from_disk 懒初始化标志 (OnceCell 模式).
     /// build() 同步不调 restore_from_disk (它跑 5-15s 同步 SQLite, 阻塞 webview 启动).
     /// 后台 task 调 ensure_restored() 异步跑, 完成后置 true. 首次 send_message / list_sessions
@@ -104,6 +145,20 @@ impl RuntimeState {
         self.agent_host.shutdown_all()
     }
 
+    /// P1-3 收尾 (2026-06-12): 订阅 plan 事件 bus.
+    /// 返回 `broadcast::Receiver<SseEvent>`, 订阅方 (Tauri command / daemon SSE)
+    /// 持 receiver 后 recv() 消费事件, 调 `app.emit("plan_event", payload)` / 写 SSE 流.
+    pub fn subscribe_plan_events(&self) -> broadcast::Receiver<SseEvent> {
+        self.plan_event_tx.subscribe()
+    }
+
+    /// P1-3 收尾 (2026-06-12): 推 plan 事件 (plans.rs 内部调).
+    /// try_send: 无订阅者时直接忽略 (不阻塞业务), channel 满时 drop 旧消息.
+    /// 业务路径: plans.rs 6 处状态变更 (create / run / per-task run / per-task done / plan done / cancel).
+    pub(crate) fn emit_plan_event(&self, event: SseEvent) {
+        let _ = self.plan_event_tx.send(event);
+    }
+
     /// 启动后台 reap_stale 任务 (清理 1 小时未活跃的 session).
     /// RuntimeState::new 自动调用, qianxun binary 不需要手动启动.
     /// 暴露 pub 是给 mod.rs 显式触发的 fallback (Stage 4 之前), 后续可改 private.
@@ -116,31 +171,48 @@ impl RuntimeState {
     /// 完整初始化: provider / tools / memory / skills / SessionStore / AgentLoopHost
     /// 跟 `qianxun/src/runtime/mod.rs::run()` 初始化逻辑 1:1
     /// (Stage 1 最小集, 真实 provider + builtin tools + 真 SQLite memory/skills)
+    ///
+    /// P1-2 收尾 (2026-06-12): 内部走 `paths_for(RuntimeMode::Daemon)` — 用
+    /// `daemon.db` + `daemon_mem.db` 路径. Tauri desktop 端应改调 `new_desktop`,
+    /// 走 `desktop.db` + `desktop_mem.db`, 避免跟 daemon 共享同一 SQLite 文件
+    /// 触发跨进程锁竞争.
     pub async fn new(config: ResolvedConfig) -> anyhow::Result<Arc<Self>> {
-        let mem_path = qianxun_core::workspace::qianxun_dir()
-            .map(|d| d.join("mem.db"))
-            .unwrap_or_else(|| PathBuf::from("./mem.db"));
-        let store_path = qianxun_core::workspace::qianxun_dir()
-            .map(|d| d.join("daemon.db"))
-            .ok_or_else(|| anyhow::anyhow!("cannot determine ~/.qianxun home dir"))?;
-        Self::build(
-            config,
-            mem_path.to_str().unwrap_or("./mem.db"),
-            store_path.to_str().unwrap_or("./daemon.db"),
-        )
-        .await
+        let p = paths_for(RuntimeMode::Daemon);
+        Self::build(config, p.mem, p.store).await
+    }
+
+    /// P1-2 收尾 (2026-06-12): Tauri desktop 端专用入口. 内部走 `desktop.db` +
+    /// `desktop_mem.db`, 跟 daemon / tui 完全隔离, 避免跨进程 SQLite 锁竞争.
+    ///
+    /// 业务等价于 `new(config)`, 仅文件路径不同. desktop binary 必须用这个,
+    /// 不能再调 `new` (会跟 daemon 抢锁).
+    pub async fn new_desktop(config: ResolvedConfig) -> anyhow::Result<Arc<Self>> {
+        let p = paths_for(RuntimeMode::Desktop);
+        Self::build(config, p.mem, p.store).await
+    }
+
+    /// TUI binary 专用入口 (P1-2 收尾, 2026-06-12). 走 `tui.db` + `tui_mem.db`,
+    /// 跟 desktop / daemon 都隔离 (TUI 通常是用户在 daemon 跑着时另开, 不应互锁).
+    pub async fn new_tui(config: ResolvedConfig) -> anyhow::Result<Arc<Self>> {
+        let p = paths_for(RuntimeMode::Tui);
+        Self::build(config, p.mem, p.store).await
     }
 
     /// 集成测试用: 真 config + 真 provider, 但 store 走 in_memory 避免污染 ~/.qianxun/daemon.db
     /// memory 也走 in_memory (跟 llm_integration_tests 旧实现 1:1)
     pub async fn new_in_memory_with_config(config: ResolvedConfig) -> anyhow::Result<Arc<Self>> {
-        Self::build(config, ":memory:", ":memory:").await
+        Self::build(
+            config,
+            ":memory:".to_string(),
+            ":memory:".to_string(),
+        )
+        .await
     }
 
     async fn build(
         config: ResolvedConfig,
-        mem_path: &str,
-        store_path: &str,
+        mem_path: String,
+        store_path: String,
     ) -> anyhow::Result<Arc<Self>> {
         // provider: 缺口 12 集成 — 遍历 config.providers, 构造 ProviderStack
         // (primary = active, fallbacks = 其它). HashMap 迭代顺序 → fallback 顺序不保证稳定.
@@ -181,7 +253,7 @@ impl RuntimeState {
         let memory = if mem_path == ":memory:" {
             Arc::new(MemoryCore::open_in_memory()?)
         } else {
-            MemoryCore::open(PathBuf::from(mem_path))
+            MemoryCore::open(PathBuf::from(&mem_path))
                 .map(Arc::new)
                 .unwrap_or_else(|_| Arc::new(MemoryCore::open_in_memory().expect("in_memory fallback")))
         };
@@ -193,7 +265,7 @@ impl RuntimeState {
         let store = if store_path == ":memory:" {
             Arc::new(SessionStore::in_memory()?)
         } else {
-            Arc::new(SessionStore::new(&PathBuf::from(store_path))?)
+            Arc::new(SessionStore::new(&PathBuf::from(&store_path))?)
         };
 
         // shared: 包共享 provider/tools/memory/skills
@@ -214,6 +286,8 @@ impl RuntimeState {
         let _ = agent_host.restore_from_disk().await;
 
         let (shutdown_tx, _) = watch::channel(());
+        // P1-3: plan 事件 broadcast bus (容量 256)
+        let (plan_event_tx, _) = broadcast::channel::<SseEvent>(256);
 
         Ok(Arc::new(Self {
             agent_host,
@@ -224,11 +298,11 @@ impl RuntimeState {
             skills,
             shared,
             store,
-            plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             background_tasks: Arc::new(BackgroundTaskManager::new()),
             lifecycle: Arc::new(SkillLifecycle::new()),
             hooks: Arc::new(HookRegistry::new()),
             shutdown_tx,
+            plan_event_tx,
             restored: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -269,6 +343,7 @@ impl RuntimeState {
         ));
         let agent_host = Arc::new(AgentLoopHost::new(10, shared.clone(), store.clone()));
         let (shutdown_tx, _) = watch::channel(());
+        let (plan_event_tx, _) = broadcast::channel::<SseEvent>(256);
         Arc::new(Self {
             agent_host,
             config: Arc::new(config),
@@ -278,12 +353,57 @@ impl RuntimeState {
             skills,
             shared,
             store,
-            plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             background_tasks: Arc::new(BackgroundTaskManager::new()),
             lifecycle: Arc::new(SkillLifecycle::new()),
             hooks: Arc::new(HookRegistry::new()),
             shutdown_tx,
+            plan_event_tx,
             restored: Arc::new(AtomicBool::new(false)),
         })
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// P1-2 收尾单测 (2026-06-12): paths_for 路径分流验证
+// ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// paths_for 必须按 mode 选不同后缀, 避免 desktop / daemon / tui 共享 db.
+    /// 关键回归测试: 改 mode 时若拼错, 会直接复现 "跨进程锁竞争" 故障.
+    #[test]
+    fn paths_for_picks_per_mode_suffix() {
+        let d = paths_for(RuntimeMode::Desktop);
+        let m = paths_for(RuntimeMode::Daemon);
+        let t = paths_for(RuntimeMode::Tui);
+        // 三个 mode 路径必须互不相同
+        assert_ne!(d.mem, m.mem);
+        assert_ne!(d.mem, t.mem);
+        assert_ne!(m.mem, t.mem);
+        assert_ne!(d.store, m.store);
+        assert_ne!(d.store, t.store);
+        assert_ne!(m.store, t.store);
+        // mem 跟 store 必须不同 (避免一个文件被当两个 store 打开)
+        assert_ne!(d.mem, d.store);
+        assert_ne!(m.mem, m.store);
+        assert_ne!(t.mem, t.store);
+        // 后缀必须含 mode 标识
+        assert!(d.mem.ends_with("desktop_mem.db"), "desktop mem: {}", d.mem);
+        assert!(d.store.ends_with("desktop.db"), "desktop store: {}", d.store);
+        assert!(m.mem.ends_with("daemon_mem.db"), "daemon mem: {}", m.mem);
+        assert!(m.store.ends_with("daemon.db"), "daemon store: {}", m.store);
+        assert!(t.mem.ends_with("tui_mem.db"), "tui mem: {}", t.mem);
+        assert!(t.store.ends_with("tui.db"), "tui store: {}", t.store);
+    }
+
+    /// paths_for 必须基于 qianxun_dir() (默认 ~/.qianxun/) 拼路径.
+    #[test]
+    fn paths_for_uses_qianxun_dir_base() {
+        let p = paths_for(RuntimeMode::Desktop);
+        // 路径必须含 "/" 分隔符 (基于 dir, 不空)
+        assert!(p.mem.contains('/'), "mem path: {}", p.mem);
+        assert!(p.store.contains('/'), "store path: {}", p.store);
     }
 }

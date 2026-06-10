@@ -1016,11 +1016,20 @@ async fn system_metrics(
     let pid = std::process::id();
     let conns = active_conns_count();
     let total = state.runtime.session_count();
-    // paused_count 临时从 list_sessions 返的 ListSessionsResponse 拿, 当前没独立
-    // RuntimeApi.paused_count, 留作后续独立 P0 暴露 (跟 session_count 配对).
-    // 近似: total - active = paused, 但 router 端没有 "active" 字段, 用 paused = total (粗略).
-    // 实际生产应该用 list_sessions(filter=Paused).await 拿精确值.
-    let paused = 0usize; // TODO: 接入 list_sessions(filter=Paused) 拿精确 paused_count
+    // P1-5 收尾 (2026-06-12): 调 list_sessions(filter=Paused) 拿精确 paused_count.
+    // ListSessionsResponse.paused_in_memory 是 agent_host 内部统计 (走 paused AtomicBool 计数),
+    // 比 walk 整个 sessions map 轻. 失败 fallback 0 (跟旧占位行为一致, 避免 metrics endpoint 500).
+    let paused = match state
+        .runtime
+        .list_sessions(qianxun_runtime::api::types::SessionFilter::Paused)
+        .await
+    {
+        Ok(resp) => resp.paused_in_memory,
+        Err(e) => {
+            tracing::warn!("[router] system_metrics: list_sessions(Paused) failed: {e}");
+            0
+        }
+    };
     let active = total.saturating_sub(paused);
 
     let (cpu, mem_mb) = read_process_stats();
@@ -1623,6 +1632,7 @@ mod e2e_tests {
                 SseEvent::BackgroundTaskUpdated { .. } => "background_task_updated",
                 SseEvent::BackgroundTaskCancelled { .. } => "background_task_cancelled",
                 SseEvent::BackgroundTaskCompleted { .. } => "background_task_completed",
+                SseEvent::PlanUpdate { .. } => "plan_update",
             })
             .collect();
         assert_eq!(

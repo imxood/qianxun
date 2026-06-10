@@ -209,15 +209,17 @@ impl AgentLoopHost {
     /// `tx.send()` 时返回 Err, 自然退出. Stage 7c 接入完整 AgentLoop 后会
     /// 把 cancel 信号发到 LLM provider (HTTP request abort).
     ///
+    /// P1-4 收尾 (2026-06-12): 触发 per-session `cancel_flag` (processing_loop
+    /// 在 L94/109/254/507 4 处轮询, 看到 true 立刻退出循环, 不再调 LLM). 同时
+    /// 设 paused 拒绝后续新 prompt (跟 Stage 7b 一致). 幂等 (canceled 后再调 OK).
+    ///
     /// 错误: session 不存在 → `Err("session not found")`.
     pub async fn cancel_session(&self, id: &str) -> Result<(), String> {
         let runtime = self
             .get_session(id)
             .ok_or_else(|| format!("session {id} not found"))?;
         tracing::info!("[runtime] cancel session {id}");
-        // 当前无活跃 stream (Stage 2 prompt_handler spawn 的 task 不可直接
-        // 引用). 我们设置 paused = true 作为软信号; Stage 7c 接入完整
-        // 取消令牌 (tokio CancellationToken) 后, 这里调 token.cancel().
+        runtime.trigger_cancel();
         runtime.set_paused(true);
         runtime.touch();
         Ok(())
@@ -582,6 +584,38 @@ mod tests {
             conv_guard.messages().len(),
             0,
             "placeholder snapshot should yield empty conversation"
+        );
+    }
+
+    /// P1-4 收尾 (2026-06-12): cancel_session 触发 per-session cancel_flag.
+    /// 验证链路: create_session → 初始 cancel_flag=false → cancel_session → cancel_flag=true + paused=true.
+    /// 不验 processing_loop 退出 (那个需要 LLM 真实调用 + 跨 await, 留给 integration test).
+    #[tokio::test]
+    async fn test_cancel_session_triggers_cancel_flag() {
+        let host = AgentLoopHost::for_test(10, ResolvedConfig::default());
+        let runtime = host
+            .create_session(CreateSessionOpts::default())
+            .expect("create_session");
+        let id = runtime.session_id.clone();
+
+        // 初始状态: 未取消, 未暂停
+        assert!(!runtime.is_canceled(), "初始 cancel_flag 应为 false");
+        assert!(!runtime.is_paused(), "初始 paused 应为 false");
+
+        // cancel_session 触发
+        host.cancel_session(&id)
+            .await
+            .expect("cancel_session 应成功");
+
+        // 重新取 runtime 验状态 (cancel_session 改的是 runtime 内部字段, 取的还是同一个 Arc)
+        let runtime_after = host.get_session(&id).expect("session still in host");
+        assert!(
+            runtime_after.is_canceled(),
+            "cancel_session 后 cancel_flag 应为 true"
+        );
+        assert!(
+            runtime_after.is_paused(),
+            "cancel_session 后 paused 应为 true (Stage 7b 行为)"
         );
     }
 }

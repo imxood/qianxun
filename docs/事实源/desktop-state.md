@@ -113,10 +113,10 @@ qianxun-desktop/
 |---|---|---|
 | `connection.svelte.ts` | **真** (但接 mock) | 4 态机 (offline/reconnecting/degraded/connected),10s 周期 health check,调 `bridge.ts::fetchDaemonHealth` |
 | `session.svelte.ts` | **真** | `init()` 调 `listSessions`,`switchTo()` 调 `loadSession` |
-| `chat.svelte.ts` | **真** | `send()` 调 `sendMessage` invoke,`init()` 一次性 `onSessionEvent` 监听 |
-| `plan.svelte.ts` | **真** | `create()` 调 `createPlan`,`cancel()` 调 `cancelPlan` |
-| `project.svelte.ts` | **占位** | `loadAll()` noop,后端缺 `list_projects` |
-| `sub_session.svelte.ts` | **占位** | `sendToSubSession` noop + TODO toast |
+| `chat.svelte.ts` | **真** | `send()` 调 `sendMessage` invoke,`sendToSubSession()` 调 `sendMessageToSubSession` (4a-2 P0-2) |
+| `plan.svelte.ts` | **真** | `create()` 调 `createPlan`,`cancel()` 调 `cancelPlan`,`loadAll()` 调 `listPlans` (4a-2 P0-3) |
+| `project.svelte.ts` | **真** | `loadAll()` 调 `listSessions('all')` + `deriveProjectsFromSessions` 按 `project_root` 去重 (2026-06-09 重构, 4a-2 P0-4) |
+| `sub_session.svelte.ts` | **真** | `sendToSubSession` 解析 `sub → parent_session_id` 后调 `sendMessageToSubSession` invoke (4a-2 P0-2) |
 | `team.svelte.ts` | **真**(VPS 外部) | `refresh()` 走 VPS REST,不走 Tauri command |
 | `vps.svelte.ts` | **真**(VPS 外部) | WebSocket + 3 个写方法 |
 | `settings.svelte.ts` | 无 | 纯 localStorage 同步 |
@@ -138,10 +138,10 @@ qianxun-desktop/
 
 ### P0 (端到端跑通核心)
 
-- **P0-1**: 用户手动 E2E 验收(6 步清单)
-- **P0-2**: `sub_session.sendToSubSession` 后端实现(RuntimeApi 加方法 + Tauri command + 替换 noop)
-- **P0-3**: `list_plans` Tauri command 注册
-- **P0-4**: `project.svelte.ts:loadAll` 后端实现
+- **P0-1**: 用户手动 E2E 验收(6 步清单) — 用户驱动, AI 不能代执行
+- ~~**P0-2**: `sub_session.sendToSubSession` 后端实现~~ ✅ **2026-06-12 done** (RuntimeApi `send_message_to_sub_session` alias + Tauri `send_to_sub_session` command + 前端 `sendMessageToSubSession` invoke + `chatStore.sendToSubSession` 解析 parent_sid 走真 invoke)
+- ~~**P0-3**: `list_plans` Tauri command 注册~~ ✅ **2026-06-12 done** (Tauri `list_plans` command + 前端 `listPlans()` invoke)
+- ~~**P0-4**: `project.svelte.ts:loadAll` 后端实现~~ ✅ **2026-06-09 done** (project.svelte.ts 走 `listSessions('all')` + `deriveProjectsFromSessions` 按 `project_root` 去重; 不需独立 `list_projects` RuntimeApi)
 
 ### P1 (影响体验和稳定性)
 
@@ -222,3 +222,30 @@ qianxun-desktop/
   - `send_message` 入口调 `state.ensure_restored().await` (Tauri command 层)
   - 关键: `list_sessions_impl` **不调** `ensure_restored()` (会 overwrite `cancel_session` 设的 paused=true)
 - **测试基线**: 107/107 vitest ✅ + 260/260 cargo test ✅
+
+**4a-2 P0 收尾 (2026-06-12, P0-2/P0-3 真后端打通)**:
+
+P0-4 (`project.svelte.ts`) 在 2026-06-09 重构时已 done (走 `listSessions('all')` + `deriveProjectsFromSessions` 按 `project_root` 去重, 不需独立 `list_projects` RuntimeApi). P0-2/P0-3 之前留 noop / 漏接, 2026-06-12 收尾.
+
+- **P0-2 sub_session.sendToSubSession 后端实现** (4 文件对称):
+  - 后端 `qianxun-runtime/src/api/trait_def.rs:78` 加 `send_message_to_sub_session` RuntimeApi 方法
+  - 后端 `qianxun-runtime/src/core.rs:72` impl forward 到 `send_message_impl` (P0 务实版: sub_session_id 当前由前端解析成 parent_session_id 后传, P1 阶段 sub_session 持久化缺口接时改造)
+  - Tauri `qianxun-desktop/src-tauri/src/commands/runtime/send.rs:84` 加 `send_to_sub_session` command (同 `send_message` 壳, 走专门 command 名)
+  - Tauri `qianxun-desktop/src-tauri/src/lib.rs:140` `generate_handler!` 注册
+  - 前端 `qianxun-desktop/src/lib/ipc/runtime.ts:296` 加 `sendMessageToSubSession` invoke 包装
+  - 前端 `qianxun-desktop/src/lib/stores/chat.svelte.ts:222` 替换 TODO 为真 invoke: 解析 `sub → parent_session_id` → 调 `sendMessageToSubSession(parent_sid, req)` → 流走 session_event (跟 send 共用 listener)
+  - 拒绝路径: sub 不存在弹 warn toast; invoke 失败弹 error toast + 标本地 message 错误
+
+- **P0-3 list_plans Tauri command 注册** (3 文件对称):
+  - Tauri `qianxun-desktop/src-tauri/src/commands/runtime/plans.rs:37` 加 `list_plans` command (薄壳调 RuntimeApi)
+  - Tauri `qianxun-desktop/src-tauri/src/lib.rs:141` `generate_handler!` 注册
+  - 前端 `qianxun-desktop/src/lib/ipc/runtime.ts:404` 加 `listPlans()` invoke 包装 (web fallback 返空数组)
+
+- **测试基线**:
+  - `chat.svelte.test.ts` 8 个测试 (新增 2 个: `sendToSubSession_when_sub_exists_routes_to_sendMessageToSubSession` + `sendToSubSession_failure_marks_error_message`)
+  - cargo test --workspace: 360 passed, 0 failed, 4 ignored
+  - pnpm test:unit: 108 passed, 0 failed (16 files)
+
+- **后端 `send_message_to_sub_session` 设计权衡**:
+  - 当前 P0 阶段: API 表面 100% 对称 (RuntimeApi 17 → 18 方法), 内部 forward 到 `send_message_impl`. 前端 chatStore 解析 `sub_id → parent_sid` 调这个 method
+  - 后续 P1 (sub_session 持久化缺口接时): 改 impl 内部查 sub_session store 拿 parent_session_id, 前端改成调 `sendMessageToSubSession(sub_id, ...)` (传真 sub_id, 不解析)

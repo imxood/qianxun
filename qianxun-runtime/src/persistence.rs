@@ -311,6 +311,142 @@ impl SessionStore {
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
+
+    // ─── Plan 持久化 (P1-1 收尾, 2026-06-12) ───
+    //
+    // 替代旧 `PlanStore = Mutex<HashMap>` in-memory 方案. 5 个 plan CRUD 走
+    // SQLite, 重启不丢. contract + task_results 走 JSON 列, 业务方传 serde_json::Value
+    // / String, 内部统一 String 存储.
+    //
+    // 设计取舍:
+    // - 没把 PlanInfo 直接放 `state.store` 内 (通过 Option<PlanInfo>), 因为 plan
+    //   是独立 entity, 跟 session 1:N 关系弱, 走独立表 + 独立 CRUD 更清晰.
+    // - 不 FK daemon_sessions: 旧 plan 业务历史保留 (即使 session 被删, plan 还能查).
+
+    /// 新建 plan. contract_json + task_results_json 由 caller 序列化.
+    pub fn create_plan(
+        &self,
+        id: &str,
+        session_id: &str,
+        name: &str,
+        status: &str,
+        started_at: &str,
+        ended_at: Option<&str>,
+        contract_json: &str,
+        task_results_json: &str,
+    ) -> Result<(), SessionStoreError> {
+        let conn = self.db.lock()?;
+        conn.execute(
+            "INSERT INTO plans \
+             (id, session_id, name, status, started_at, ended_at, contract_json, task_results_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, session_id, name, status, started_at, ended_at, contract_json, task_results_json],
+        )?;
+        Ok(())
+    }
+
+    /// 列所有 plan (按 started_at 降序, 最新在前). 返原始 7 列 (id, session_id,
+    /// name, status, started_at, ended_at, contract_json, task_results_json),
+    /// caller 自行 JSON 反序列化 contract + task_results 成业务 struct.
+    pub fn list_plans(&self) -> Result<Vec<PlanRow>, SessionStoreError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, name, status, started_at, ended_at, contract_json, task_results_json \
+             FROM plans ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PlanRow {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                name: row.get(2)?,
+                status: row.get(3)?,
+                started_at: row.get(4)?,
+                ended_at: row.get(5)?,
+                contract_json: row.get(6)?,
+                task_results_json: row.get(7)?,
+            })
+        })?;
+        let out: Vec<PlanRow> = rows.filter_map(|r| r.ok()).collect();
+        Ok(out)
+    }
+
+    /// 拿单个 plan (供 execute_plan 启动时读 contract + tasks).
+    pub fn get_plan(&self, plan_id: &str) -> Result<Option<PlanRow>, SessionStoreError> {
+        let conn = self.db.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, session_id, name, status, started_at, ended_at, contract_json, task_results_json \
+                 FROM plans WHERE id = ?1",
+                params![plan_id],
+                |row| {
+                    Ok(PlanRow {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        name: row.get(2)?,
+                        status: row.get(3)?,
+                        started_at: row.get(4)?,
+                        ended_at: row.get(5)?,
+                        contract_json: row.get(6)?,
+                        task_results_json: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// 更新 plan 状态 (跟 ended_at). 用在:
+    /// - cancel_plan 写 status=Aborted, ended_at=now
+    /// - execute_plan 写 status=Running → Done/Failed
+    /// - execute_one_task 标 task_results 时**不调**这个, 调 update_task_results
+    pub fn update_plan_status(
+        &self,
+        plan_id: &str,
+        status: &str,
+        ended_at: Option<&str>,
+    ) -> Result<(), SessionStoreError> {
+        let conn = self.db.lock()?;
+        let affected = conn.execute(
+            "UPDATE plans SET status = ?1, ended_at = ?2 WHERE id = ?3",
+            params![status, ended_at, plan_id],
+        )?;
+        if affected == 0 {
+            return Err(SessionStoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+        }
+        Ok(())
+    }
+
+    /// 更新 plan 关联的 task_results 序列 (execute_one_task 调).
+    /// task_results_json 是完整 JSON 数组, 每次更新整组覆盖.
+    pub fn update_plan_task_results(
+        &self,
+        plan_id: &str,
+        task_results_json: &str,
+    ) -> Result<(), SessionStoreError> {
+        let conn = self.db.lock()?;
+        let affected = conn.execute(
+            "UPDATE plans SET task_results_json = ?1 WHERE id = ?2",
+            params![task_results_json, plan_id],
+        )?;
+        if affected == 0 {
+            return Err(SessionStoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+        }
+        Ok(())
+    }
+}
+
+/// Plan 持久化行 (P1-1 收尾, 2026-06-12). caller 自己把 contract_json /
+/// task_results_json 反序列化成业务 struct (PlanContract / Vec<PlanTaskResult>).
+#[derive(Debug, Clone)]
+pub struct PlanRow {
+    pub id: String,
+    pub session_id: String,
+    pub name: String,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub contract_json: String,
+    pub task_results_json: String,
 }
 
 // ─── 内部: 3 张表 DDL ────────────────────────────────────────
@@ -349,6 +485,24 @@ fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_event_log_session_seq
             ON daemon_event_log(session_id, seq);
+
+        -- === 4. plan 持久化 (P1-1 收尾, 2026-06-12) ===
+        -- 替代旧 in-memory `PlanStore = Mutex<HashMap>` 方案, 重启不丢 plan.
+        -- contract + task_results 走 JSON 列存 (sub-task spec + result state).
+        -- 不 FK daemon_sessions: session 可能被删, plan 仍可查 (跟 daemon_sessions
+        -- ON DELETE CASCADE 相反语义, 留 plan 业务历史).
+        CREATE TABLE IF NOT EXISTS plans (
+            id                  TEXT PRIMARY KEY,
+            session_id          TEXT NOT NULL,
+            name                TEXT NOT NULL,
+            status              TEXT NOT NULL,
+            started_at          TEXT NOT NULL,
+            ended_at            TEXT,
+            contract_json       TEXT NOT NULL,
+            task_results_json   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_plans_session ON plans(session_id);
+        CREATE INDEX IF NOT EXISTS idx_plans_status  ON plans(status);
         ",
     )
 }

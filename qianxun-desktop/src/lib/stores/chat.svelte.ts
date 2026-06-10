@@ -22,7 +22,12 @@
 //   - $lib/stores/chat-stream.ts (SseEvent → Message 状态机)
 //   - $lib/stores/plan.svelte.ts (plan 触发后调 planStore.create)
 
-import { sendMessage, onSessionEvent, type SessionEventPayload } from '$lib/ipc/runtime';
+import {
+	sendMessage,
+	sendMessageToSubSession,
+	onSessionEvent,
+	type SessionEventPayload,
+} from '$lib/ipc/runtime';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { newStreamState, applyEvent, type MessageStreamState } from './chat-stream';
 import { sessionStore } from './session.svelte';
@@ -217,9 +222,14 @@ function createChatStore() {
 		}
 	}
 
-	/// sub_session 追问 (后端 RuntimeApi 暂不支持, 留 TODO).
-	/// 当前: noop + 弹 error toast, 不抛 panic.
-	async function sendToSubSession(sub_id: string, _userMessage: string) {
+	/// sub_session 追问 (4a-2 P0-2 收尾: 走真实后端 invoke).
+	///
+	/// 流程 (跟 send 同款, 但走 send_to_sub_session command):
+	/// 1. 解析 `sub_session_id → parent_session_id` (P0 阶段前端解析; P1 阶段后端解析)
+	/// 2. 追加 user 消息 (sub_session_id 标记) + assistant 消息占位
+	/// 3. 调 `sendMessageToSubSession(parent_session_id, req)` 走真后端 invoke
+	/// 4. 流走 session_event 异步推 (跟 send 共用 listener)
+	async function sendToSubSession(sub_id: string, userMessage: string) {
 		const sub = subSessionStore.get(sub_id);
 		if (!sub) {
 			uiStore.pushToast({
@@ -229,12 +239,60 @@ function createChatStore() {
 			});
 			return;
 		}
-		// TODO: 等后端 RuntimeApi 加 send_to_sub_session 方法
-		uiStore.pushToast({
-			kind: 'info',
-			title: 'sub_session 追问功能待后端 RuntimeApi 支持 (后续 sub-task)',
-			timeout_ms: 3000,
+
+		// 0. 解析 parent_session_id (P0 阶段前端解析; P1 后端接 sub_session 持久化时去掉这步)
+		const parent_sid = sub.parent_session_id;
+
+		// 1. 追加 user 消息 (sub_session_id 标记)
+		const userMsg: Message = {
+			id: genId(),
+			sid: parent_sid,
+			sub_session_id: sub_id,
+			role: 'user',
+			content: userMessage,
+			kind: 'followup',
+			created_at: new Date().toISOString(),
+		};
+		sessionStore.appendMessage(parent_sid, userMsg);
+
+		// 2. 追加 assistant 消息占位
+		const assistantMsg: Message = {
+			id: genId(),
+			sid: parent_sid,
+			sub_session_id: sub_id,
+			role: 'assistant',
+			content: '',
+			created_at: new Date().toISOString(),
+			streaming: true,
+		};
+		sessionStore.appendMessage(parent_sid, assistantMsg);
+		streaming.message_id = assistantMsg.id;
+
+		// 3. stream state (key 用 parent_sid, 跟 onSessionEvent 路由一致)
+		const state = newStreamState(assistantMsg.id, () => {
+			const list = sessionStore.getMessages(parent_sid);
+			const m = list.find((x) => x.id === assistantMsg.id);
+			if (m) m.content = state.content;
 		});
+		streams.set(parent_sid, state);
+
+		// 4. 调 invoke (sub_session 追问专用入口)
+		try {
+			await sendMessageToSubSession(parent_sid, {
+				messages: [{ role: 'user', content: userMessage }],
+			});
+		} catch (e) {
+			const msg = (e as Error).message ?? String(e);
+			state.content = `[错误] ${msg}`;
+			state.finished = true;
+			finalizeStream(parent_sid, state);
+			uiStore.pushToast({
+				kind: 'error',
+				title: 'sub_session 追问失败',
+				body: msg,
+				timeout_ms: 8000,
+			});
+		}
 	}
 
 	return {

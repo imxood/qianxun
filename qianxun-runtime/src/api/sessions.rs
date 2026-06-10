@@ -252,3 +252,66 @@ pub async fn update_active_provider_impl(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_host::CreateSessionOpts;
+
+    /// P1-5 收尾 (2026-06-12): list_sessions(filter=Paused).paused_in_memory
+    /// 精确反映 cancel_session 触发的 paused 状态. router.rs::system_metrics
+    /// 走这个 API 拿 paused_count, 之前是 hardcoded 0.
+    ///
+    /// 验证:
+    ///   1. 创 2 session (都 active, paused_in_memory=0)
+    ///   2. cancel 1 个 (paused_in_memory=1)
+    ///   3. list_sessions(filter=Paused) 返 1 个 + paused_in_memory=1
+    ///   4. list_sessions(filter=Active) 返 1 个 + paused_in_memory=1 (总数不变)
+    #[tokio::test]
+    async fn list_sessions_paused_reflects_cancel_state() {
+        let state = RuntimeState::new_in_memory_with_config(
+            qianxun_core::config::ResolvedConfig::default(),
+        )
+        .await
+        .expect("RuntimeState init");
+
+        // 1. 创 2 session
+        let s1 = state
+            .agent_host
+            .create_session(CreateSessionOpts::default())
+            .expect("create s1");
+        let s2 = state
+            .agent_host
+            .create_session(CreateSessionOpts::default())
+            .expect("create s2");
+        // 初始: 都 active, paused_in_memory=0
+        let resp = list_sessions_impl(state.clone(), SessionFilter::All)
+            .await
+            .expect("list All");
+        assert_eq!(resp.paused_in_memory, 0);
+        assert_eq!(resp.active_in_memory, 2);
+
+        // 2. cancel s1 (P1-4 收尾: 触发 paused + cancel_flag)
+        state
+            .agent_host
+            .cancel_session(&s1.session_id)
+            .await
+            .expect("cancel s1");
+
+        // 3. list_sessions(Paused) 返 1 个 + paused_in_memory=1
+        let resp = list_sessions_impl(state.clone(), SessionFilter::Paused)
+            .await
+            .expect("list Paused");
+        assert_eq!(resp.paused_in_memory, 1, "P1-5: paused_in_memory 必须反映 cancel 状态");
+        assert_eq!(resp.sessions.len(), 1, "filter=Paused 应返 1 个 session");
+        assert_eq!(resp.sessions[0].id, s1.session_id);
+
+        // 4. list_sessions(Active) 返 s2 + paused_in_memory=1 (总数不变)
+        let resp = list_sessions_impl(state.clone(), SessionFilter::Active)
+            .await
+            .expect("list Active");
+        assert_eq!(resp.paused_in_memory, 1);
+        assert_eq!(resp.sessions.len(), 1);
+        assert_eq!(resp.sessions[0].id, s2.session_id);
+    }
+}

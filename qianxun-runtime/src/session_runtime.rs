@@ -87,6 +87,13 @@ pub struct SessionRuntime {
     /// Stage 7b: 暂停标志. `pause_session` 调后切 true, 后续 prompt 拒绝
     /// 接收 (返 409). 完整 resume 语义留给 Stage 7c/8.
     pub paused: AtomicBool,
+
+    /// P1-4 收尾 (2026-06-12): per-session 取消标志. send_message_impl 把
+    /// `runtime.cancel_flag.clone()` 传给 `processing_loop::handle_user_message`,
+    /// `cancel_session` 调 `cancel_flag.store(true, SeqCst)` 触发 processing_loop
+    /// 退出 (engine.rs L94/109/254/507 3 处轮询). 跟 `paused` 区别: `paused` 是
+    /// 拒绝新 prompt 的入口闸, `cancel_flag` 是中断 in-flight LLM 调用的实时信号.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 impl SessionRuntime {
@@ -124,7 +131,19 @@ impl SessionRuntime {
             created_at: now,
             last_active_at: RwLock::new(now),
             paused: AtomicBool::new(false),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// P1-4 收尾 (2026-06-12): 读 cancel_flag 状态 (cancel_session 调, 测试断言用).
+    pub fn is_canceled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
+    }
+
+    /// P1-4 收尾 (2026-06-12): 触发取消信号. send_message spawn 的
+    /// processing_loop 看到 flag=true 后退出循环, 不再调 LLM.
+    pub fn trigger_cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
     }
 
     /// 读取最后活跃时间 (拷贝).

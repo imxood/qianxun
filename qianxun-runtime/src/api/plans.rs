@@ -1,25 +1,22 @@
 // qianxun-runtime/src/api/plans.rs
-// create_plan / list_plans — Phase D 收尾: tasks 真实执行.
+// create_plan / list_plans / cancel_plan — P1-1 收尾 (2026-06-12) 走 SQLite 持久化.
 //
-// 业务变化 (Phase D 收尾):
-//   - 之前: PlanInfo 只有 id / session_id / name / status, create_plan 立刻返
-//     Running 但不真执行. list_plans 返所有.
-//   - 现在: PlanInput 加 tasks 列表, create_plan:
-//       1. 验证 session 存在
-//       2. 构造 PlanInfo (status = Pending, task_results = 空 Vec 占位)
-//       3. 写 in-memory store
-//       4. spawn 后台 task 跑 execute_plan() — 顺序执行每个 task,
-//          每个 task 走 LLM (state.provider) + tools (state.tools) 真实跑
-//       5. 即时返 plan (status=Pending, 等后台 spawn 完改成 Running)
-//   - list_plans 返所有 + 完整 task_results (供前端展示).
-//   - 取消走 cancel_session (跟现有 daemon 一致, 后续加 plan.cancel 单独接口).
+// 业务变化 (P1-1 收尾):
+//   - 之前: in-memory `PlanStore = Mutex<HashMap>`, 重启丢 plan. 注释明确:
+//     "sub-task 接 store (跟 SessionStore 同款 SQLite 表) 时, 整体替换".
+//   - 现在: 全走 `state.store` SQLite 表 plans (5 个 CRUD: create / list /
+//     get / update_status / update_task_results), 重启不丢. contract_json +
+//     task_results_json 走 JSON 列存.
 //
-// 并发模型: 后台 task 持 Arc<RuntimeState> 跑, 通过 store lock 改 plan status,
-// 当前没 watch 通知前端 (后续 SseEvent 加 plan_update variant).
+// 并发模型: 状态变更走 SQLite 串行写 (跟 SessionStore 共享连接, 内部 Mutex 锁).
+//   - 业务接口 `create_plan_impl` / `list_plans_impl` / `cancel_plan_impl` 签名不变
+//   - execute_plan 启动从 `store.get_plan` 反序列化 contract 跟 task_results
+//   - 每个状态变更 (status / task_results) 调对应 store 方法, 走 SQLite
+//
+// 后续 P1-3 接 SseEvent::PlanUpdate 时, 这里 state 变更处加 emit.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Utc;
 
@@ -32,13 +29,107 @@ use crate::api::error::{RuntimeApiError, RuntimeApiResult};
 use crate::api::types::{
     PlanContract, PlanInfo, PlanInput, PlanStatus, PlanTaskResult, PlanTaskSpec,
 };
+use crate::persistence::{PlanRow, SessionStore};
+use crate::sse::SseEvent;
 use crate::RuntimeState;
 
-/// in-memory plan store (sub-task #3: HashMap + Mutex).
-///
-/// 后续 sub-task 接 store (跟 SessionStore 同款 SQLite 表) 时, 整体替换为
-/// `Arc<dyn PlanStore>`, 业务方法签名不变.
-pub type PlanStore = Mutex<HashMap<String, PlanInfo>>;
+/// PlanStatus → SQLite 字符串 (snake_case, 跟 serde rename_all 一致).
+fn plan_status_to_str(s: PlanStatus) -> &'static str {
+    match s {
+        PlanStatus::Pending => "pending",
+        PlanStatus::Running => "running",
+        PlanStatus::Done => "done",
+        PlanStatus::Failed => "failed",
+        PlanStatus::Aborted => "aborted",
+    }
+}
+
+fn plan_status_from_str(s: &str) -> RuntimeApiResult<PlanStatus> {
+    match s {
+        "pending" => Ok(PlanStatus::Pending),
+        "running" => Ok(PlanStatus::Running),
+        "done" => Ok(PlanStatus::Done),
+        "failed" => Ok(PlanStatus::Failed),
+        "aborted" => Ok(PlanStatus::Aborted),
+        other => Err(RuntimeApiError::Internal(format!(
+            "unknown plan status: {other}"
+        ))),
+    }
+}
+
+/// 把 PlanRow 反序列化成完整 PlanInfo (contract_json / task_results_json).
+fn plan_row_to_info(row: PlanRow) -> RuntimeApiResult<PlanInfo> {
+    let contract: PlanContract = serde_json::from_str(&row.contract_json).map_err(|e| {
+        RuntimeApiError::Internal(format!("plan contract deserialize failed: {e}"))
+    })?;
+    let task_results: Vec<PlanTaskResult> =
+        serde_json::from_str(&row.task_results_json).map_err(|e| {
+            RuntimeApiError::Internal(format!("plan task_results deserialize failed: {e}"))
+        })?;
+    Ok(PlanInfo {
+        id: row.id,
+        session_id: row.session_id,
+        name: row.name,
+        status: plan_status_from_str(&row.status)?,
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        task_results,
+        contract,
+    })
+}
+
+/// 更新 plan 总体 status + ended_at (走 SQLite).
+fn store_update_plan_status(
+    store: &SessionStore,
+    plan_id: &str,
+    status: PlanStatus,
+    ended_at: Option<&str>,
+) -> RuntimeApiResult<()> {
+    store
+        .update_plan_status(plan_id, plan_status_to_str(status), ended_at)
+        .map_err(|e| RuntimeApiError::Internal(format!("update_plan_status failed: {e}")))
+}
+
+/// 读出 task_results, 找到指定 task_id 调 mutator, 再写回 (read-modify-write).
+/// 用于 execute_one_task 标 task 自身的 Running / Done / Failed + 时间戳.
+/// 返回最新 task_results JSON 字符串 (P1-3: emit PlanUpdate 时附快照).
+fn store_mutate_task_result(
+    store: &SessionStore,
+    plan_id: &str,
+    task_id: &str,
+    mutator: impl FnOnce(&mut PlanTaskResult),
+) -> RuntimeApiResult<String> {
+    let row = store
+        .get_plan(plan_id)
+        .map_err(|e| RuntimeApiError::Internal(format!("get_plan failed: {e}")))?
+        .ok_or_else(|| RuntimeApiError::NotFound(format!("plan {plan_id} not found")))?;
+    let mut task_results: Vec<PlanTaskResult> =
+        serde_json::from_str(&row.task_results_json).map_err(|e| {
+            RuntimeApiError::Internal(format!("task_results deserialize failed: {e}"))
+        })?;
+    if let Some(tr) = task_results.iter_mut().find(|r| r.id == task_id) {
+        mutator(tr);
+    } else {
+        return Err(RuntimeApiError::NotFound(format!(
+            "task {task_id} not in plan {plan_id}"
+        )));
+    }
+    let json = serde_json::to_string(&task_results)
+        .map_err(|e| RuntimeApiError::Internal(format!("task_results serialize failed: {e}")))?;
+    store
+        .update_plan_task_results(plan_id, &json)
+        .map_err(|e| RuntimeApiError::Internal(format!("update_plan_task_results failed: {e}")))?;
+    Ok(json)
+}
+
+/// P1-3 helper: 读 plan 当前 task_results JSON 字符串 (供 PlanUpdate 快照用).
+fn read_task_results_json(store: &SessionStore, plan_id: &str) -> RuntimeApiResult<String> {
+    let row = store
+        .get_plan(plan_id)
+        .map_err(|e| RuntimeApiError::Internal(format!("get_plan failed: {e}")))?
+        .ok_or_else(|| RuntimeApiError::NotFound(format!("plan {plan_id} not found")))?;
+    Ok(row.task_results_json)
+}
 
 /// create_plan 业务实现.
 pub async fn create_plan_impl(
@@ -85,11 +176,32 @@ pub async fn create_plan_impl(
         contract,
     };
 
-    // 3. 写入 in-memory store
-    {
-        let mut plans = state.plans.lock().expect("PlanStore lock poisoned");
-        plans.insert(plan.id.clone(), plan.clone());
-    }
+    // 3. 写入 SQLite store (P1-1 收尾: 重启不丢)
+    let contract_json = serde_json::to_string(&plan.contract)
+        .map_err(|e| RuntimeApiError::Internal(format!("contract serialize failed: {e}")))?;
+    let task_results_json = serde_json::to_string(&plan.task_results)
+        .map_err(|e| RuntimeApiError::Internal(format!("task_results serialize failed: {e}")))?;
+    state
+        .store
+        .create_plan(
+            &plan.id,
+            &plan.session_id,
+            &plan.name,
+            plan_status_to_str(plan.status),
+            &plan.started_at,
+            plan.ended_at.as_deref(),
+            &contract_json,
+            &task_results_json,
+        )
+        .map_err(|e| RuntimeApiError::Internal(format!("create_plan failed: {e}")))?;
+
+    // 3.5 P1-3: emit PlanUpdate (Pending) 给订阅方
+    state.emit_plan_event(SseEvent::PlanUpdate {
+        plan_id: plan.id.clone(),
+        status: "pending".into(),
+        task_results_json: Some(task_results_json.clone()),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    });
 
     // 4. spawn 后台 task 跑 execute_plan() — 顺序执行每个 task.
     //    即时返 Pending 状态, 后台 task 跑起来后改 Running, 完事后改 Done/Failed.
@@ -117,21 +229,34 @@ pub async fn create_plan_impl(
 
 /// list_plans 业务实现.
 pub async fn list_plans_impl(state: Arc<RuntimeState>) -> RuntimeApiResult<Vec<PlanInfo>> {
-    let plans = state.plans.lock().expect("PlanStore lock poisoned");
-    Ok(plans.values().cloned().collect())
+    let rows = state
+        .store
+        .list_plans()
+        .map_err(|e| RuntimeApiError::Internal(format!("list_plans failed: {e}")))?;
+    rows.into_iter().map(plan_row_to_info).collect()
 }
 
-/// cancel_plan 业务实现 (Phase D 收尾加).
+/// cancel_plan 业务实现.
 ///
 /// 把指定 plan 状态置为 Aborted. 当前实现: 直接改 store. 后续 sub-task 加
 /// 真正的 task 取消 (给 in-flight task 发 cancel signal).
 pub async fn cancel_plan_impl(state: Arc<RuntimeState>, plan_id: &str) -> RuntimeApiResult<()> {
-    let mut plans = state.plans.lock().expect("PlanStore lock poisoned");
-    let plan = plans
-        .get_mut(plan_id)
+    // 1. 验证 plan 存在
+    state
+        .store
+        .get_plan(plan_id)
+        .map_err(|e| RuntimeApiError::Internal(format!("get_plan failed: {e}")))?
         .ok_or_else(|| RuntimeApiError::NotFound(format!("plan {plan_id} not found")))?;
-    plan.status = PlanStatus::Aborted;
-    plan.ended_at = Some(Utc::now().to_rfc3339());
+    // 2. 标 Aborted + ended_at
+    let now = Utc::now().to_rfc3339();
+    store_update_plan_status(&state.store, plan_id, PlanStatus::Aborted, Some(&now))?;
+    // P1-3: emit PlanUpdate (Aborted)
+    state.emit_plan_event(SseEvent::PlanUpdate {
+        plan_id: plan_id.to_string(),
+        status: "aborted".into(),
+        task_results_json: None, // Aborted 路径不再重发 task_results
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    });
     tracing::info!(plan_id = %plan_id, "plan cancelled");
     Ok(())
 }
@@ -152,23 +277,29 @@ pub async fn cancel_plan_impl(state: Arc<RuntimeState>, plan_id: &str) -> Runtim
 ///
 ///   - 所有 task Done → plan Done. 任一 Failed → plan Failed.
 async fn execute_plan(state: Arc<RuntimeState>, plan_id: String) -> RuntimeApiResult<()> {
-    // 1. 取 plan 跟 tasks
-    let (tasks, session_id, timeout_ms) = {
-        let plans = state.plans.lock().expect("PlanStore lock poisoned");
-        let plan = plans
-            .get(&plan_id)
-            .ok_or_else(|| RuntimeApiError::NotFound(format!("plan {plan_id} not found")))?;
-        // Phase D 收尾: 复制 tasks + session_id + timeout
-        (plan.contract.tasks.clone(), plan.session_id.clone(), plan.contract.timeout_ms)
-    };
+    // 1. 从 SQLite 读 plan (contract + task_results)
+    let row = state
+        .store
+        .get_plan(&plan_id)
+        .map_err(|e| RuntimeApiError::Internal(format!("get_plan failed: {e}")))?
+        .ok_or_else(|| RuntimeApiError::NotFound(format!("plan {plan_id} not found")))?;
+    let plan_info = plan_row_to_info(row)?;
+    let (tasks, session_id, timeout_ms) = (
+        plan_info.contract.tasks.clone(),
+        plan_info.session_id.clone(),
+        plan_info.contract.timeout_ms,
+    );
 
     // 2. 把 plan 状态置 Running
-    {
-        let mut plans = state.plans.lock().expect("PlanStore lock poisoned");
-        if let Some(plan) = plans.get_mut(&plan_id) {
-            plan.status = PlanStatus::Running;
-        }
-    }
+    store_update_plan_status(&state.store, &plan_id, PlanStatus::Running, None)?;
+    // P1-3: emit PlanUpdate (Running) — 重新读 task_results 序列化附上, 方便前端显示完整快照
+    let running_snapshot = read_task_results_json(&state.store, &plan_id)?;
+    state.emit_plan_event(SseEvent::PlanUpdate {
+        plan_id: plan_id.clone(),
+        status: "running".into(),
+        task_results_json: Some(running_snapshot),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    });
 
     // 3. 顺序执行 tasks
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -202,17 +333,22 @@ async fn execute_plan(state: Arc<RuntimeState>, plan_id: String) -> RuntimeApiRe
     }
 
     // 4. 更新 plan 状态
-    {
-        let mut plans = state.plans.lock().expect("PlanStore lock poisoned");
-        if let Some(plan) = plans.get_mut(&plan_id) {
-            plan.status = if any_failed {
-                PlanStatus::Failed
-            } else {
-                PlanStatus::Done
-            };
-            plan.ended_at = Some(Utc::now().to_rfc3339());
-        }
-    }
+    let now = Utc::now().to_rfc3339();
+    let final_status = if any_failed {
+        PlanStatus::Failed
+    } else {
+        PlanStatus::Done
+    };
+    store_update_plan_status(&state.store, &plan_id, final_status, Some(&now))?;
+    // P1-3: emit PlanUpdate (Done/Failed) — 附完整 task_results 快照
+    let final_snapshot = read_task_results_json(&state.store, &plan_id)?;
+    let final_status_str = plan_status_to_str(final_status).to_string();
+    state.emit_plan_event(SseEvent::PlanUpdate {
+        plan_id: plan_id.clone(),
+        status: final_status_str,
+        task_results_json: Some(final_snapshot),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    });
 
     // 5. 触发 plan 整体超时 (用 tokio timeout 包) — 简化: 暂不实现
     let _ = timeout_ms;
@@ -230,15 +366,18 @@ async fn execute_one_task(
     cancel_flag: Arc<AtomicBool>,
 ) -> RuntimeApiResult<String> {
     // 1. 标 task → Running
-    {
-        let mut plans = state.plans.lock().expect("PlanStore lock poisoned");
-        if let Some(plan) = plans.get_mut(plan_id) {
-            if let Some(tr) = plan.task_results.iter_mut().find(|r| r.id == task.id) {
-                tr.status = PlanStatus::Running;
-                tr.started_at = Some(Utc::now().to_rfc3339());
-            }
-        }
-    }
+    let now_running = Utc::now().to_rfc3339();
+    let task_running_json = store_mutate_task_result(&state.store, plan_id, &task.id, |tr| {
+        tr.status = PlanStatus::Running;
+        tr.started_at = Some(now_running.clone());
+    })?;
+    // P1-3: emit PlanUpdate (task Running)
+    state.emit_plan_event(SseEvent::PlanUpdate {
+        plan_id: plan_id.to_string(),
+        status: "running".into(),
+        task_results_json: Some(task_running_json),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    });
 
     // 2. 拿 session runtime
     let runtime = state
@@ -333,17 +472,22 @@ async fn execute_one_task(
     let _ = handle.await;
 
     // 6. 标 task → Done (Phase D 收尾: 简化, 不区分工具调用是否出错)
-    {
-        let mut plans = state.plans.lock().expect("PlanStore lock poisoned");
-        if let Some(plan) = plans.get_mut(plan_id) {
-            if let Some(tr) = plan.task_results.iter_mut().find(|r| r.id == task.id) {
-                tr.status = PlanStatus::Done;
-                tr.output = last_output.clone();
-                tr.ended_at = Some(Utc::now().to_rfc3339());
-            }
-        }
-    }
+    let now_ended = Utc::now().to_rfc3339();
+    let output_for_store = last_output.clone();
+    let task_done_json = store_mutate_task_result(&state.store, plan_id, &task.id, |tr| {
+        tr.status = PlanStatus::Done;
+        tr.output = last_output.clone();
+        tr.ended_at = Some(now_ended.clone());
+    })?;
+    // P1-3: emit PlanUpdate (task Done)
+    state.emit_plan_event(SseEvent::PlanUpdate {
+        plan_id: plan_id.to_string(),
+        status: "running".into(),
+        task_results_json: Some(task_done_json),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    });
 
+    let _ = output_for_store;
     Ok(last_output)
 }
 
@@ -351,8 +495,23 @@ async fn execute_one_task(
 mod tests {
     use super::*;
 
-    /// Phase D 收尾测试 1: create_plan + cancel_plan 基础流程.
-    /// 验证: create 后 plan 在 store, cancel 后 status = Aborted.
+    /// 等待 plan 终止状态 (Done / Failed / Aborted), 避免裸 sleep 不稳定.
+    /// 简化: 最多等 50 * 100ms = 5s. P1 收尾测试, 跑空 task 列表应 <100ms.
+    async fn wait_plan_terminated(state: &Arc<RuntimeState>, plan_id: &str) {
+        for _ in 0..50 {
+            let row = state.store.get_plan(plan_id).expect("get_plan");
+            if let Some(r) = row {
+                if r.status == "done" || r.status == "failed" || r.status == "aborted" {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("plan {plan_id} did not reach terminal state in 5s");
+    }
+
+    /// P1-1 收尾测试 1: create_plan + cancel_plan 基础流程.
+    /// 验证: create 后 plan 走 SQLite 持久化, cancel 后 status = Aborted.
     /// 不验 task 真实执行 (那个需要 LLM 真实调用, 留给 integration test).
     #[tokio::test]
     async fn create_then_cancel_plan_marks_aborted() {
@@ -362,10 +521,9 @@ mod tests {
         .await
         .expect("RuntimeState init");
 
-        // 1. 创 session (auto-gen id)
+        // 1. 创 session
         let session = state
             .agent_host
-
             .create_session(crate::agent_host::CreateSessionOpts::default())
             .expect("create_session");
         let session_id = session.session_id.clone();
@@ -376,7 +534,7 @@ mod tests {
             PlanInput {
                 session_id: session_id.clone(),
                 name: "测试 plan".into(),
-                description: "phase D".into(),
+                description: "P1-1".into(),
                 timeout_ms: 0,
                 tasks: vec![],
             },
@@ -384,23 +542,30 @@ mod tests {
         .await
         .expect("create_plan");
         assert_eq!(plan.session_id, session_id);
-        // 之前是 Running (mock 阶段), 现在是 Pending
-        assert!(matches!(plan.status, PlanStatus::Pending | PlanStatus::Running));
-        // task_results 跟 tasks 同长度
+        // Pending (启动瞬间) 或 Running (后台已改) 都 OK
+        assert!(matches!(
+            plan.status,
+            PlanStatus::Pending | PlanStatus::Running | PlanStatus::Done
+        ));
         assert_eq!(plan.task_results.len(), 0);
         assert_eq!(plan.contract.tasks.len(), 0);
 
-        // 3. cancel_plan
+        // 3. cancel_plan (后台 task 跑空 list 标 Done 后, cancel 改 Aborted)
+        wait_plan_terminated(&state, &plan.id).await;
         cancel_plan_impl(state.clone(), &plan.id)
             .await
             .expect("cancel_plan");
-        let plans = state.plans.lock().expect("PlanStore lock poisoned");
-        let plan_after = plans.get(&plan.id).expect("plan still in store");
-        assert_eq!(plan_after.status, PlanStatus::Aborted);
-        assert!(plan_after.ended_at.is_some());
+        // 直接查 SQLite 验证 (P1-1: 不再 state.plans.lock())
+        let row = state
+            .store
+            .get_plan(&plan.id)
+            .expect("get_plan")
+            .expect("plan still in store");
+        assert_eq!(row.status, "aborted");
+        assert!(row.ended_at.is_some());
     }
 
-    /// Phase D 收尾测试 2: cancel_plan 不存在的 plan_id → NotFound.
+    /// P1-1 收尾测试 2: cancel_plan 不存在的 plan_id → NotFound.
     #[tokio::test]
     async fn cancel_nonexistent_plan_returns_not_found() {
         let state = RuntimeState::new_in_memory_with_config(
@@ -419,7 +584,7 @@ mod tests {
         }
     }
 
-    /// Phase D 收尾测试 3: create_plan 不存在的 session_id → NotFound.
+    /// P1-1 收尾测试 3: create_plan 不存在的 session_id → NotFound.
     #[tokio::test]
     async fn create_plan_nonexistent_session_returns_not_found() {
         let state = RuntimeState::new_in_memory_with_config(
@@ -448,7 +613,7 @@ mod tests {
         }
     }
 
-    /// Phase D 收尾测试 4: list_plans 返所有 + 含 task_results.
+    /// P1-1 收尾测试 4: list_plans 返所有 + 含 task_results (走 SQLite 序列化).
     #[tokio::test]
     async fn list_plans_returns_all_with_task_results() {
         let state = RuntimeState::new_in_memory_with_config(
@@ -459,7 +624,6 @@ mod tests {
 
         let session = state
             .agent_host
-
             .create_session(crate::agent_host::CreateSessionOpts::default())
             .expect("create_session");
         let session_id = session.session_id.clone();
@@ -487,14 +651,143 @@ mod tests {
             .expect("create_plan");
         }
 
-        // list 返 2 个
+        // list 返 2 个 (走 SQLite)
         let all = list_plans_impl(state.clone()).await.expect("list_plans");
         assert_eq!(all.len(), 2);
-        // 每个 plan 都有 1 个 task_result (Pending 状态)
+        // 每个 plan 都有 1 个 task_result (Pending/Running/Done, 后端 task 跑空 list 后 Done)
         for plan in &all {
             assert_eq!(plan.task_results.len(), 1);
             assert_eq!(plan.task_results[0].id, "t1");
-            // Pending (后端 task 没真跑前) 或 Running (真跑后) 都 OK
         }
+    }
+
+    /// P1-1 收尾测试 5: plan 走 SQLite 持久化 — 重启后仍能 list 到.
+    /// 验证: in-memory store 测不出来 (重启 = 新 state), 但 list/get API
+    /// 内部必须走 SQLite, 此测试用 store.create_plan + store.list_plans 直接验证.
+    #[tokio::test]
+    async fn plans_persist_to_sqlite_store() {
+        let state = RuntimeState::new_in_memory_with_config(
+            qianxun_core::config::ResolvedConfig::default(),
+        )
+        .await
+        .expect("RuntimeState init");
+
+        let session = state
+            .agent_host
+            .create_session(crate::agent_host::CreateSessionOpts::default())
+            .expect("create_session");
+        let session_id = session.session_id.clone();
+
+        let plan = create_plan_impl(
+            state.clone(),
+            PlanInput {
+                session_id: session_id.clone(),
+                name: "持久化测试".into(),
+                description: "P1-1 sqlite".into(),
+                timeout_ms: 0,
+                tasks: vec![PlanTaskSpec {
+                    id: "t1".into(),
+                    title: "test".into(),
+                    prompt: "do something".into(),
+                    assigned_to: "coder".into(),
+                    depends_on: vec![],
+                    timeout_ms: 0,
+                }],
+            },
+        )
+        .await
+        .expect("create_plan");
+
+        // 1. 直接查 store (绕开 in-memory 已废弃的 state.plans)
+        let row = state
+            .store
+            .get_plan(&plan.id)
+            .expect("get_plan")
+            .expect("plan in store");
+        assert_eq!(row.session_id, session_id);
+        assert_eq!(row.name, "持久化测试");
+        // contract_json 必须含 tasks 序列化
+        assert!(row.contract_json.contains("\"id\":\"t1\""));
+        // task_results_json 必须含初始 Pending 状态
+        assert!(row.task_results_json.contains("\"id\":\"t1\""));
+        assert!(row.task_results_json.contains("\"pending\""));
+
+        // 2. list_plans 也必须能查到
+        let all = list_plans_impl(state.clone()).await.expect("list_plans");
+        assert!(all.iter().any(|p| p.id == plan.id));
+    }
+
+    /// P1-3 收尾测试: broadcast bus 收到 PlanUpdate 事件.
+    /// 验证: subscribe_plan_events → create_plan (Pending) + cancel (Aborted)
+    /// 至少收到 2 个 PlanUpdate, 顺序正确, 字段对齐 (plan_id / status).
+    /// 不验 task_results_json 完整内容 (序列化路径 store 测过), 只验事件能发出来.
+    #[tokio::test]
+    async fn plan_events_emitted_via_broadcast() {
+        use crate::sse::SseEvent;
+
+        let state = RuntimeState::new_in_memory_with_config(
+            qianxun_core::config::ResolvedConfig::default(),
+        )
+        .await
+        .expect("RuntimeState init");
+
+        // 1. 创 session + 订阅事件
+        let session = state
+            .agent_host
+            .create_session(crate::agent_host::CreateSessionOpts::default())
+            .expect("create_session");
+        let session_id = session.session_id.clone();
+        let mut rx = state.subscribe_plan_events();
+
+        // 2. create_plan 触发 Pending 事件
+        let plan = create_plan_impl(
+            state.clone(),
+            PlanInput {
+                session_id: session_id.clone(),
+                name: "事件测试".into(),
+                description: "P1-3".into(),
+                timeout_ms: 0,
+                tasks: vec![],
+            },
+        )
+        .await
+        .expect("create_plan");
+
+        // 3. 等背景 task 跑完 (空 list 走 Done)
+        wait_plan_terminated(&state, &plan.id).await;
+
+        // 4. cancel_plan 触发 Aborted
+        cancel_plan_impl(state.clone(), &plan.id)
+            .await
+            .expect("cancel_plan");
+
+        // 5. 收集事件 (最多 10 个, 设 1s timeout 防 hang)
+        let mut events: Vec<SseEvent> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && events.len() < 10 {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(ev)) => events.push(ev),
+                _ => break,
+            }
+        }
+
+        // 6. 至少包含 pending + aborted (中间可能还有 running/done, 都 OK)
+        let plan_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                SseEvent::PlanUpdate {
+                    plan_id, status, ..
+                } if plan_id == &plan.id => Some(status.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            plan_events.iter().any(|s| s == "pending"),
+            "expected pending event, got: {plan_events:?}"
+        );
+        assert!(
+            plan_events.iter().any(|s| s == "aborted"),
+            "expected aborted event, got: {plan_events:?}"
+        );
     }
 }

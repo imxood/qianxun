@@ -117,6 +117,23 @@ pub enum SseEvent {
         result: serde_json::Value,
         completed_at: i64,
     },
+
+    // ─── P1-3 收尾 (2026-06-12): Plan 状态实时事件 ─────
+
+    /// Plan 状态变更 (Pending/Running/Done/Failed/Aborted) + 当前 task_results 快照.
+    /// 订阅方: Tauri desktop 前端 (走 `app.emit("plan_event", ...)`), daemon SSE 流.
+    /// task_results_json: None 表示未提供 (e.g. PlanUpdate 只标 plan 状态变更,
+    /// 不重发 task_results). 走 JSON 字符串保持 sse 模块零外部类型依赖.
+    #[serde(rename = "plan_update")]
+    PlanUpdate {
+        plan_id: String,
+        /// PlanStatus snake_case 字符串 ("pending" / "running" / "done" / "failed" / "aborted").
+        status: String,
+        /// task_results JSON 数组. None = plan 级状态变更 (不带 task 详情).
+        task_results_json: Option<String>,
+        /// Unix epoch ms, 给前端做去重 / 排序.
+        updated_at: i64,
+    },
 }
 
 impl SseEvent {
@@ -145,6 +162,7 @@ impl SseEvent {
             SseEvent::BackgroundTaskUpdated { .. } => "background_task_updated",
             SseEvent::BackgroundTaskCancelled { .. } => "background_task_cancelled",
             SseEvent::BackgroundTaskCompleted { .. } => "background_task_completed",
+            SseEvent::PlanUpdate { .. } => "plan_update",
         }
     }
 }

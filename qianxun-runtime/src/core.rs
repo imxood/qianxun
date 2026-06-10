@@ -69,6 +69,16 @@ impl RuntimeApi for Arc<RuntimeState> {
         send_message_impl(self.clone(), session_id, req).await
     }
 
+    async fn send_message_to_sub_session(
+        &self,
+        sub_session_id: &str,
+        req: SendRequest,
+    ) -> RuntimeApiResult<(SendResponse, mpsc::Receiver<SseEvent>)> {
+        // 4a-2 P0-2: 务实版 — sub_session_id 当前等同于 session_id (前端解析 parent 后传).
+        // P1 阶段 (sub_session 持久化缺口) 改造为查 sub_session store 拿 parent_session_id.
+        send_message_impl(self.clone(), sub_session_id, req).await
+    }
+
     async fn create_plan(&self, input: PlanInput) -> RuntimeApiResult<PlanInfo> {
         create_plan_impl(self.clone(), input).await
     }

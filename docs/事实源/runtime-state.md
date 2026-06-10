@@ -53,10 +53,10 @@ qianxun-runtime/src/
 | `list_sessions` | `(filter: SessionFilter) -> ListSessionsResponse` | filter: `active` / `paused` / `stored` / `all` |
 | `create_session` | `(req: CreateSessionRequest) -> SessionInfo` | **后端生成 sess_ 格式 ID, 持久化** (2026-06-09 加) |
 | `send_message` | `(session_id, req) -> (SendResponse, Receiver<SseEvent>)` | **唯一流式**,64 容量 mpsc |
-| `create_plan` | `(input: PlanInput) -> PlanInfo` | 内存 HashMap,**重启丢** |
-| `list_plans` | `() -> Vec<PlanInfo>` | **P0 漏接**:Tauri 无 command 包装 |
-| `cancel_plan` | `(plan_id) -> ()` | 状态置 `Aborted` |
-| `cancel_session` | `(session_id) -> ()` | 软取消,仅设 `paused` flag |
+| `create_plan` | `(input: PlanInput) -> PlanInfo` | ✅ **2026-06-12 (P1-1 收尾)**: 走 `state.store` SQLite 表 plans (重启不丢) |
+| `list_plans` | `() -> Vec<PlanInfo>` | ✅ **2026-06-12 (P1-1 收尾)**: 全 SQLite 持久化, contract + task_results 走 JSON 列存 |
+| `cancel_plan` | `(plan_id) -> ()` | ✅ **2026-06-12 (P1-1 收尾)**: 走 `update_plan_status` 写 SQLite |
+| `cancel_session` | `(session_id) -> ()` | ✅ **2026-06-12 (P1-4 收尾)**: 触发 per-session `cancel_flag: Arc<AtomicBool>`, processing_loop L94/109/254/507 4 处轮询到即退出. 同时设 paused 拒绝新 prompt (Stage 7b 行为). 幂等. |
 | `delete_session` | `(session_id) -> ()` | 删除 in-memory + SQLite (2026-06-09 加) |
 | `pause_session` | `(session_id) -> ()` | 设 paused, send_message 返 InvalidRequest (2026-06-09 加) |
 | `resume_session` | `(session_id) -> ()` | 清 paused (2026-06-09 加) |
@@ -84,26 +84,32 @@ qianxun-runtime/src/
 - `max_sessions` 字段保留 (类型仍 `usize`), 默认 `usize::MAX`, 后续可改成从 `~/.qianxun/config.json` 读
 - **运行中并发控制** 移到 processing_loop 内部 (Semaphore, 后续 PR), 跟 session 数量解耦
 
-## SseEvent 12 变体
+## SseEvent 16 变体
 
-`qianxun-runtime/src/sse.rs:29-89` 定义。前端 `chat-stream.ts:79` 12-case switch 镜像处理。
+`qianxun-runtime/src/sse.rs:29-149` 定义。前端 `chat-stream.ts:79` 12-case switch 镜像处理 (背景任务 + plan 走独立事件名, 不走 session_event).
 
-| # | 变体 | 关键字段 | 触发点 |
-|---|---|---|---|
-| 1 | `MessageStart` | session_id, model, max_tokens | `DaemonOutputSink::begin_message()` |
-| 2 | `ContentBlockStart` | index, block_type | block 类型切换时 |
-| 3 | `TextDelta` | index, text | LLM 流 token |
-| 4 | `ThinkingDelta` | index, text | thinking 流 |
-| 5 | `ToolUseDelta` | index, id, name, arguments_json | 预留,当前 provider 走批式不产生 |
-| 6 | `ToolUseComplete` | index, id, name, arguments | 批式 tool 调 |
-| 7 | `ToolResult` | tool_use_id, content, is_error, elapsed_ms | 工具执行后 |
-| 8 | `ContentBlockStop` | index | block 切换 / finalize |
-| 9 | `Usage` | input/output/cache tokens | LLM usage 累计 |
-| 10 | `MessageDelta` | stop_reason | 收尾时 |
-| 11 | `MessageStop` | (无) | 最末条 |
-| 12 | `Error` | code, message | `LlmError` 6 变体 → 4 个 error code |
+| # | 变体 | 关键字段 | 触发点 | 事件名 |
+|---|---|---|---|---|
+| 1 | `MessageStart` | session_id, model, max_tokens | `DaemonOutputSink::begin_message()` | `session_event` |
+| 2 | `ContentBlockStart` | index, block_type | block 类型切换时 | `session_event` |
+| 3 | `TextDelta` | index, text | LLM 流 token | `session_event` |
+| 4 | `ThinkingDelta` | index, text | thinking 流 | `session_event` |
+| 5 | `ToolUseDelta` | index, id, name, arguments_json | 预留,当前 provider 走批式不产生 | `session_event` |
+| 6 | `ToolUseComplete` | index, id, name, arguments | 批式 tool 调 | `session_event` |
+| 7 | `ToolResult` | tool_use_id, content, is_error, elapsed_ms | 工具执行后 | `session_event` |
+| 8 | `ContentBlockStop` | index | block 切换 / finalize | `session_event` |
+| 9 | `Usage` | input/output/cache tokens | LLM usage 累计 | `session_event` |
+| 10 | `MessageDelta` | stop_reason | 收尾时 | `session_event` |
+| 11 | `MessageStop` | (无) | 最末条 | `session_event` |
+| 12 | `Error` | code, message | `LlmError` 6 变体 → 4 个 error code | `session_event` |
+| 13 | `BackgroundTaskStarted` | task_id, task_kind, started_at | 缺口 05 后台任务启动 | `background_task_event` |
+| 14 | `BackgroundTaskUpdated` | task_id, status, progress, message | 进度变更 | `background_task_event` |
+| 15 | `BackgroundTaskCancelled` | task_id, reason | 取消 | `background_task_event` |
+| 16 | **`PlanUpdate`** (P1-3 收尾) | plan_id, status, task_results_json, updated_at | plans.rs 6 处状态变更 (create / run / per-task run / per-task done / plan done / cancel) | **`plan_event`** |
 
 JSON 序列化用 `#[serde(tag = "type")]`,形如 `{"type":"text_delta","index":0,"text":"..."}`。
+
+**Plan 事件总线 (P1-3 收尾, 2026-06-12)**: `RuntimeState.plan_event_tx: broadcast::Sender<SseEvent>` (容量 256), 暴露 `subscribe_plan_events() -> broadcast::Receiver<SseEvent>`. plans.rs 在 6 个状态变更点 (`create_plan` / `execute_plan` 启动 / 单 task Running / 单 task Done / plan 终止 Done/Failed / `cancel_plan` Aborted) `state.emit_plan_event(SseEvent::PlanUpdate { .. })`. Tauri desktop 走 `commands::runtime::plans::subscribe_plan_events` Tauri command 把 `Receiver` 转 `app.emit("plan_event", ..)`, 前端 `planStore.init()` 调 `subscribePlanEvents()` + `onPlanEvent()` 接 store, 实时更新 plan.status / ended_at / result.tasks_completed. 1 个 broadcast test (`plan_events_emitted_via_broadcast`) 覆盖 subscribe → emit → recv 链路.
 
 ## 端到端: send_message 内部流
 
@@ -128,26 +134,34 @@ send_message_impl(state, session_id, req)
 
 | 项 | 值 | 路径 |
 |---|---|---|
-| Memory 数据库 | `<qianxun_dir>/mem.db` | `state.rs:48-50` |
-| Session 数据库 | `<qianxun_dir>/daemon.db` | `state.rs:51-53` |
-| Session 上限 | **10 (硬编码)** | `state.rs:114` |
-| 失败 fallback | `new_for_test()` → temp_dir | `state.rs:147-155` |
-| API key 读取 | env `DEEPSEEK_API_KEY` → config.json → 空 | `qianxun-core/src/config.rs:398-421` |
+| Memory 数据库 | `<qianxun_dir>/<mode>_mem.db` (Desktop=`desktop_mem.db` / Daemon=`daemon_mem.db` / Tui=`tui_mem.db`) | `state.rs:paths_for` (P1-2 收尾, 2026-06-12) |
+| Session 数据库 | `<qianxun_dir>/<mode>.db` (Desktop / Daemon / Tui 同上规则) | `state.rs:paths_for` (P1-2 收尾) |
+| Session 上限 | `usize::MAX` (无上限, 2026-06-09 修正; 运行中并发控制走 processing_loop 内部 Semaphore, 后续 PR) | `state.rs::build` |
+| 失败 fallback | `new_for_test()` → temp_dir | `state.rs:new_for_test` |
+| API key 读取 | env `DEEPSEEK_API_KEY` → config.json → 空 | `qianxun-core/src/config.rs` |
+
+**RuntimeMode (P1-2 收尾, 2026-06-12)**: 桌面 / daemon / TUI 三个 binary 共享 `RuntimeState` 构造逻辑, 但用 `<mode>` 后缀分 db 文件, 避免同一 OS 里同时跑 desktop + daemon 时跨进程 SQLite 锁竞争. 公开方法:
+- `RuntimeState::new(config)` → Daemon 模式 (daemon.db)
+- `RuntimeState::new_desktop(config)` → Desktop 模式 (desktop.db, Tauri 桌面端专用)
+- `RuntimeState::new_tui(config)` → TUI 模式 (tui.db, ratatui 监控用)
+- `RuntimeState::new_in_memory_with_config(config)` / `new_for_test()` → 测试 (":memory:" 或 temp)
 
 ## 已知缺口
 
 ### P0 (端到端跑通核心)
 
 - **P0-1**: 用户手动 E2E 验收。6 步清单见 `经验/2026-06-08_Phase_ABCD_收尾总览.md:155-171`
-- **P0-3**: `list_plans` 在 trait 里有,但 Tauri 无 command 包装,前端无 invoke
-- **P0-4**: `project.svelte.ts` 后端缺 `list_projects` / `create_project` RuntimeApi
+- ~~**P0-2**: `sub_session.sendToSubSession` 后端实现~~ ✅ **2026-06-12 done** — 见 `desktop-state.md` 同步注脚
+- ~~**P0-3**: `list_plans` 在 trait 里有, Tauri 无 command 包装~~ ✅ **2026-06-12 done** — Tauri command + invoke 已接
+- ~~**P0-4**: `project.svelte.ts` 后端缺 `list_projects` / `create_project` RuntimeApi~~ ✅ **2026-06-09 done** — 改用 `listSessions('all')` + `deriveProjectsFromSessions` (project.svelte.ts), 不需独立 RuntimeApi
 
 ### P1 (影响体验和稳定性)
 
-- **P1-1**: Plan 持久化(当前 in-memory HashMap,重启丢)
-- **P1-2**: SessionStore 路径分 desktop.db vs daemon.db(避免跨进程锁)
-- **P1-3**: `SseEvent::PlanUpdate` 实时事件(plan 进度只能轮询)
-- **P1-4**: `cancel_session` 软取消(未接 `tokio::CancellationToken`,非真中断 LLM HTTP)
+- ~~**P1-1**: Plan 持久化(当前 in-memory HashMap,重启丢)~~ ✅ **2026-06-12 done** — `state.plans: Arc<Mutex<HashMap>>` 全删, 改走 `state.store` SQLite plans 表 (5 个 CRUD: create / list / get / update_status / update_task_results). `PlanInfo.contract_json` + `task_results_json` 走 JSON 列存. `plan_row_to_info` 反序列化辅助. 5 个 plans 测试覆盖持久化场景. 全栈 363 passed (baseline 354 + 新增 5 + 之前 4).
+- ~~**P1-2**: SessionStore 路径分 desktop.db vs daemon.db~~ ✅ **2026-06-12 done** — `RuntimeMode` enum (Desktop/Daemon/Tui) + `paths_for()` 选 `<dir>/<mode>.db` + `<dir>/<mode>_mem.db`; 暴露 `new_desktop` / `new_tui` 公开方法; Tauri desktop 改调 `new_desktop`. 2 单测覆盖 `paths_for` 路径分流.
+- ~~**P1-3**: `SseEvent::PlanUpdate` 实时事件(plan 进度只能轮询)~~ ✅ **2026-06-12 done** — `SseEvent::PlanUpdate { plan_id, status, task_results_json, updated_at }` 第 16 变体; `RuntimeState.plan_event_tx: broadcast::Sender<SseEvent>` 容量 256 + `subscribe_plan_events()` / `emit_plan_event()`; plans.rs 6 处状态变更 emit; Tauri command `subscribe_plan_events` 转 `app.emit("plan_event", ..)`; 前端 `planStore.init()` 调 `subscribePlanEvents()` + `onPlanEvent()` 实时更新 plan.status / result.tasks_completed. 1 broadcast 单测覆盖. 全栈 369 passed (baseline 363 + 6 plans + 0 新增独立).
+- ~~**P1-4**: `cancel_session` 软取消(未接 `tokio::CancellationToken`,非真中断 LLM HTTP)~~ ✅ **2026-06-12 done** — `SessionRuntime` 加 `cancel_flag: Arc<AtomicBool>` 字段 (跟 `paused` 并列, 入口闸 vs 实时信号). `send_message_impl` 改用 `runtime.cancel_flag.clone()` 替代 `Arc::new(AtomicBool::new(false))` (新 new 没人触发). `agent_host.cancel_session` 调 `runtime.trigger_cancel()` + `set_paused(true)`. processing_loop 已在 4 处轮询 cancel_flag, 触发即退出循环, 不再调 LLM / tool. 1 单测覆盖 cancel_session → cancel_flag=true 链路. 业务效果: 用户点"取消"时 in-flight LLM HTTP stream 看到 flag=true 后立刻终止, SSE 流推 MessageStop.
+- ~~**P1-5**: paused_count 走 list_sessions(目前 router.rs status endpoint 用 0 占位, 应改用 list_sessions(filter=Paused).await)~~ ✅ **2026-06-12 done** — `qianxun/src/runtime/router.rs::system_metrics` 把 `let paused = 0usize` 改为 `runtime.list_sessions(SessionFilter::Paused).await` 拿 `paused_in_memory` (现成 API, 不引入新 RuntimeApi 方法). 失败 fallback 0 + warn log, 避免 metrics endpoint 500. 1 单测 (`list_sessions_paused_reflects_cancel_state`) 覆盖 cancel → list_paused 链路: 2 session → cancel 1 → filter=Paused 返 1 + paused_in_memory=1, filter=Active 返 1 + paused_in_memory=1. 业务效果: 监控 metrics 跟实际 session 状态一致 (旧版 0 占位误导运维).
 - **P1-5**: paused_count 走 list_sessions(目前 router.rs status endpoint 用 0 占位, 应改用 list_sessions(filter=Paused).await)
 
 ## 2026-06-09 日志增强

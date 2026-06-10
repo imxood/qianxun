@@ -210,10 +210,23 @@ export type SseEventFromBackend =
 	  }
 	| { type: "message_delta"; stop_reason: string }
 	| { type: "message_stop" }
-	| { type: "error"; code: string; message: string };
+	| { type: "error"; code: string; message: string }
+	// P1-3 收尾 (2026-06-12): PlanUpdate 事件, 通过 `plan_event` Tauri 事件名
+	// 独立分发, 不走 session_event. 字段: plan_id / status / task_results_json / updated_at.
+	| {
+			type: "plan_update";
+			plan_id: string;
+			status: string;
+			task_results_json: string | null;
+			updated_at: number;
+	  };
 
 /// Tauri emit 事件名 (跟 src-tauri/src/commands/runtime/send.rs::SESSION_EVENT 一致).
 export const SESSION_EVENT_NAME = "session_event";
+
+/// P1-3 收尾 (2026-06-12): plan_event Tauri emit 名 (跟 src-tauri::subscribe_plan_events 一致).
+/// payload = SseEventFromBackend (跟 session_event 共用 union, type="plan_update").
+export const PLAN_EVENT_NAME = "plan_event";
 
 // ─── RuntimeApiError (前端包装, 跟后端 RuntimeApiError 4 类 1:1) ────────
 
@@ -288,6 +301,30 @@ export async function sendMessage(
 	}
 	try {
 		return await invoke<SendResponse>("send_message", { sessionId, request });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 推消息到 sub_session (4a-2 P0-2 收尾).
+///
+/// 当前 (P0) 行为: 前端 `chatStore.sendToSubSession` 解析 `sub_session_id → parent_session_id`
+/// 后传过来, 走跟 sendMessage 同壳. P1 阶段 (sub_session 持久化缺口接时) 改成传真 sub_id.
+///
+/// Tauri 模式: invoke<send_to_sub_session, SendResponse>('send_to_sub_session', { subSessionId, request }).
+/// Web fallback: 模拟 'streaming' 状态.
+export async function sendMessageToSubSession(
+	subSessionId: string,
+	request: SendRequest,
+): Promise<SendResponse> {
+	if (!isTauri()) {
+		return { session_id: subSessionId, status: "streaming" };
+	}
+	try {
+		return await invoke<SendResponse>("send_to_sub_session", {
+			subSessionId,
+			request,
+		});
 	} catch (e) {
 		throw RuntimeApiError.parse(String(e));
 	}
@@ -401,6 +438,20 @@ export async function cancelPlan(planId: string): Promise<void> {
 	}
 }
 
+/// 列所有 plan (2026-06-12 4a-2 P0 收尾: Tauri command list_plans 注册).
+/// Tauri 模式: invoke<list_plans, PlanInfo[]>('list_plans').
+/// Web fallback: 返空数组 (UI 显空状态, 不假装有数据).
+export async function listPlans(): Promise<PlanInfo[]> {
+	if (!isTauri()) {
+		return [];
+	}
+	try {
+		return await invoke<PlanInfo[]>("list_plans");
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
 // ─── session_event 监听 (全局唯一 listener) ─────────────────────────────
 
 /// Listen 'session_event' Tauri 事件. caller 自己过滤 session_id.
@@ -415,6 +466,34 @@ export async function onSessionEvent(
 	return await listen<SessionEventPayload>(SESSION_EVENT_NAME, (e: Event<SessionEventPayload>) =>
 		handler(e.payload),
 	);
+}
+
+// ─── plan_event 监听 (P1-3 收尾, 2026-06-12) ─────────────────────────
+
+/// Listen 'plan_event' Tauri 事件. payload = SseEventFromBackend (type="plan_update").
+/// 后端 plans.rs 在 6 个状态变更点 emit, Tauri command subscribe_plan_events
+/// 启长连接, 把 broadcast::Receiver 转 app.emit("plan_event", ...).
+///
+/// 调用方: planStore 在启动时调一次拿 UnlistenFn, UI 关闭时 unlisten 释放.
+export async function onPlanEvent(
+	handler: (event: SseEventFromBackend) => void,
+): Promise<UnlistenFn> {
+	if (!isTauri()) {
+		return () => {};
+	}
+	return await listen<SseEventFromBackend>(PLAN_EVENT_NAME, (e: Event<SseEventFromBackend>) =>
+		handler(e.payload),
+	);
+}
+
+/// 启动后端 plan event 订阅 (P1-3 收尾, 2026-06-12).
+/// Tauri 模式: invoke<subscribe_plan_events, ()>('subscribe_plan_events') — 启长连接.
+/// Web fallback: noop.
+export async function subscribePlanEvents(): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	await invoke<void>("subscribe_plan_events");
 }
 
 // ─── Web fallback 内部 helper ───────────────────────────────────────────

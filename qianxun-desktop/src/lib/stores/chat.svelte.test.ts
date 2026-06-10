@@ -8,12 +8,16 @@
 //   4. 流式事件通过 listener 路由到 stream state, 同步到 message.content
 //   5. message_stop 收尾, streaming = false
 //   6. send() 失败时本地标记错误, 弹 toast
-//   7. sendToSubSession 后端未支持, 弹 info toast 不 panic
+//   7. sendToSubSession: sub 不存在弹 warn toast
+//   8. sendToSubSession: sub 存在时调 sendMessageToSubSession(parent_sid, ...)
+//      (4a-2 P0-2 收尾: 走真后端 invoke, 不再 noop + TODO toast)
+//   9. sendToSubSession 失败时本地标记错误
 // ───────────────────────────────────────────────────────────────────────────
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const sendMessageMock = vi.fn();
+const sendMessageToSubSessionMock = vi.fn();
 const onSessionEventMock = vi.fn();
 const createPlanMock = vi.fn();
 const cancelSessionMock = vi.fn();
@@ -22,6 +26,7 @@ const listSessionsMock = vi.fn();
 
 vi.mock("$lib/ipc/runtime", () => ({
 	sendMessage: (...args: unknown[]) => sendMessageMock(...args),
+	sendMessageToSubSession: (...args: unknown[]) => sendMessageToSubSessionMock(...args),
 	onSessionEvent: (...args: unknown[]) => onSessionEventMock(...args),
 	createPlan: (...args: unknown[]) => createPlanMock(...args),
 	cancelSession: (...args: unknown[]) => cancelSessionMock(...args),
@@ -49,6 +54,7 @@ async function resetStores() {
 
 beforeEach(async () => {
 	sendMessageMock.mockReset();
+	sendMessageToSubSessionMock.mockReset();
 	onSessionEventMock.mockReset();
 	createPlanMock.mockReset();
 	cancelSessionMock.mockReset();
@@ -65,6 +71,8 @@ beforeEach(async () => {
 
 	await resetStores();
 	uiStore.setActiveView({ kind: "empty" });
+	// 清 toast 避免测试间状态泄漏 (uiStore 无 __resetForTesting, 直接清数组)
+	uiStore.toasts.length = 0;
 
 	// 预置一个 session 给 chatStore 用
 	listSessionsMock.mockResolvedValue({
@@ -182,11 +190,20 @@ describe("ChatStore (Stage 4a sub-task #4 切 invoke)", () => {
 
 	it("sendToSubSession_when_no_sub_returns_silently: sub 不存在弹 toast", async () => {
 		await chatStore.sendToSubSession("sub_nonexistent", "test");
-		// 没 panic, uiStore 推了 toast
+		// 没 panic, uiStore 推了 warn toast
 		expect(uiStore.toasts.length).toBeGreaterThan(0);
+		expect(uiStore.toasts[0]?.kind).toBe("warn");
+		// 不调 sendMessage 也不调 sendMessageToSubSession
+		expect(sendMessageMock).not.toHaveBeenCalled();
+		expect(sendMessageToSubSessionMock).not.toHaveBeenCalled();
 	});
 
-	it("sendToSubSession_when_sub_exists_shows_todo_toast: 后端未支持", async () => {
+	it("sendToSubSession_when_sub_exists_routes_to_sendMessageToSubSession: 走真后端 invoke (4a-2 P0-2)", async () => {
+		await sessionStore.init();
+		sendMessageToSubSessionMock.mockResolvedValue({
+			session_id: "sess_test_001",
+			status: "streaming",
+		});
 		// 临时给 subSessionStore 加一个 sub
 		vi.spyOn(subSessionStore, "get").mockReturnValueOnce({
 			id: "sub_test",
@@ -200,9 +217,48 @@ describe("ChatStore (Stage 4a sub-task #4 切 invoke)", () => {
 			started_at: new Date().toISOString(),
 			ended_at: null,
 		});
-		await chatStore.sendToSubSession("sub_test", "followup");
-		expect(uiStore.toasts.length).toBeGreaterThan(0);
-		// 不调 sendMessage (后端没这方法)
+
+		await chatStore.sendToSubSession("sub_test", "追问一下");
+
+		// 1. 解析 sub → parent_sid, 调 sendMessageToSubSession(parent_sid, ...)
+		expect(sendMessageToSubSessionMock).toHaveBeenCalledTimes(1);
+		expect(sendMessageToSubSessionMock).toHaveBeenCalledWith("sess_test_001", {
+			messages: [{ role: "user", content: "追问一下" }],
+		});
+		// 2. 不应再调 sendMessage (避免走普通 session 路径)
 		expect(sendMessageMock).not.toHaveBeenCalled();
+		// 3. 追加 user + assistant 占位消息, 都标记 sub_session_id
+		const msgs = sessionStore.getMessages("sess_test_001");
+		expect(msgs).toHaveLength(2);
+		expect(msgs[0]?.role).toBe("user");
+		expect(msgs[0]?.sub_session_id).toBe("sub_test");
+		expect(msgs[0]?.kind).toBe("followup");
+		expect(msgs[1]?.role).toBe("assistant");
+		expect(msgs[1]?.sub_session_id).toBe("sub_test");
+		expect(msgs[1]?.streaming).toBe(true);
+	});
+
+	it("sendToSubSession_failure_marks_error_message: invoke 失败", async () => {
+		await sessionStore.init();
+		sendMessageToSubSessionMock.mockRejectedValueOnce(new Error("session not found"));
+		vi.spyOn(subSessionStore, "get").mockReturnValueOnce({
+			id: "sub_test",
+			plan_id: "plan_test",
+			plan_task_id: "task_1",
+			parent_session_id: "sess_test_001",
+			role: "coder",
+			status: "Done",
+			messages: [],
+			output: null,
+			started_at: new Date().toISOString(),
+			ended_at: null,
+		});
+
+		await chatStore.sendToSubSession("sub_test", "追问");
+
+		const msgs = sessionStore.getMessages("sess_test_001");
+		const lastAsst = msgs.find((m) => m.role === "assistant");
+		expect(lastAsst?.content).toContain("[错误]");
+		expect(lastAsst?.streaming).toBe(false);
 	});
 });

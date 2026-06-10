@@ -71,6 +71,23 @@ pub trait RuntimeApi: Send + Sync {
         req: SendRequest,
     ) -> RuntimeApiResult<(SendResponse, mpsc::Receiver<SseEvent>)>;
 
+    /// 推消息到 sub_session (4a-2 P0-2 收尾: sub_session 追问专用入口).
+    ///
+    /// 当前 (P0) 实现: 把 `sub_session_id` 直接当 `session_id` 调 `send_message`.
+    /// 4a-2 阶段后端没独立 sub_session runtime — SubSession 是前端 UI 概念,
+    /// 后端 agent_host 唯一 in-memory key 是 parent_session. 前端 `chatStore.sendToSubSession`
+    /// 解析 `sub_session_id → parent_session_id` 后传过来, 走这条路能命中 in-memory runtime.
+    ///
+    /// P1 阶段 (sub_session 持久化 / 独立 SessionRuntime 缺口接时) 改造:
+    ///   1. 后端加 `sub_session_store` (内存 HashMap / SQLite 表)
+    ///   2. 内部逻辑改为: sub_id → 查 sub_session → 拿 parent_session_id → 调 send_message_impl
+    ///   3. 前端改成调 `sendMessageToSubSession(sub_id, ...)` (传真 sub_id, 不解析)
+    async fn send_message_to_sub_session(
+        &self,
+        sub_session_id: &str,
+        req: SendRequest,
+    ) -> RuntimeApiResult<(SendResponse, mpsc::Receiver<SseEvent>)>;
+
     /// 在指定 session 上建一个 plan, 立即返 Pending 状态.
     ///
     /// Phase D 收尾: 真实执行 — spawn 后台 task 顺序跑每个 task (LLM + tools),

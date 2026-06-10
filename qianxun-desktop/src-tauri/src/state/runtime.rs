@@ -63,10 +63,10 @@ pub fn build() -> Result<Arc<RuntimeState>, String> {
     });
     tracing::info!(since_prev_ms = t_cfg.elapsed().as_millis() as u64, "[state] T1.1 config loaded");
 
-    // 同步跑 RuntimeState::new (内部全同步 SQLite, 13ms).
+    // 同步跑 RuntimeState::new_desktop (P1-2: 桌面端走 desktop.db, 跟 daemon 隔离).
     // build() 在 Tauri setup 同步闭包里调, 内部全同步 IO OK (不抢 tokio runtime).
-    let state = futures::executor::block_on(RuntimeState::new(config))
-        .map_err(|e| format!("RuntimeState::new failed: {e}"))?;
+    let state = futures::executor::block_on(RuntimeState::new_desktop(config))
+        .map_err(|e| format!("RuntimeState::new_desktop failed: {e}"))?;
     tracing::info!(since_prev_ms = t0.elapsed().as_millis() as u64, "[state] T1.2 RuntimeState::new done (真 provider + restore inline)");
 
     // 懒 restore 不在 build() 同步跑 (它会跑 5-15s 同步 SQLite, 阻塞 webview 启动).

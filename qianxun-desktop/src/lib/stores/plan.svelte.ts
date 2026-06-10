@@ -7,18 +7,29 @@
 //   - cancel() 调 invoke('cancel_session') (后端 RuntimeApi 暂没 plan.cancel 单独方法)
 //   - progressOf() 改纯函数 (没后端实时进度, 只能看 contract.tasks.length vs result.tasks_completed)
 //
+// P1-3 收尾 (2026-06-12): 接 `plan_event` Tauri 实时事件.
+//   - init() 在 app 启动时调, 启后端 subscribePlanEvents 长连接 + listen "plan_event"
+//   - 收到 plan_update 事件 → 按 plan_id 找本地 plan, 更新 status / task_results
+//   - 之前要等 listPlans() 拉或轮询, 现在实时推 (毫秒级)
+//
 // 业务约束:
-//   - 后端 SseEvent 暂没 plan_update variant (qianxun-runtime/src/sse.rs 12 variant 不含 plan_update)
-//     → plan 进度跟踪等后续 sub-task 加 (需要后端加 plan_update emit + Tauri command)
-//   - 取消走 cancel_session 而非 plan.cancel: 后端 RuntimeApi 5 方法没 plan.cancel,
-//     业务上取消 session 即可终止 session 上的 plan (跟现有 daemon 一致)
+//   - 后端 SseEvent 现 16 variant 含 plan_update (P1-3 收尾加)
+//   - 取消走 cancel_plan (P0 收尾加)
 //
 // 关联:
-//   - $lib/ipc/runtime.ts (createPlan / cancelSession invoke)
+//   - $lib/ipc/runtime.ts (createPlan / cancelPlan / onPlanEvent / subscribePlanEvents)
 //   - qianxun-runtime/src/api/types.rs (PlanInfo DTO)
+//   - qianxun-runtime/src/api/plans.rs (SQLite 持久化 + broadcast bus 收尾)
 //   - docs/30_子项目规划/04b-tauri-runtime-integration.md §"Sub-task 5"
 
-import { createPlan, cancelPlan, type PlanInfo as IpcPlanInfo, type PlanTaskResult } from '$lib/ipc/runtime';
+import {
+	createPlan,
+	cancelPlan,
+	onPlanEvent,
+	subscribePlanEvents,
+	type PlanInfo as IpcPlanInfo,
+	type PlanTaskResult,
+} from '$lib/ipc/runtime';
 import { subSessionStore } from './sub_session.svelte';
 import { uiStore } from './ui.svelte';
 import type { Plan, PlanStatus as EntityPlanStatus, ChangedFile } from '$lib/types/entity';
@@ -137,11 +148,72 @@ function createPlanStore() {
 	}
 
 	/// 进度计算: contract.tasks.length 是总数, 已完成 = result.tasks_completed 兜底
-	/// (后续 sub-task 接 plan_update 事件实时更新 result).
+	/// (P1-3 收尾: 实时 event 更新 result.tasks_completed).
 	function progressOf(plan: Plan): { done: number; total: number } {
 		const total = plan.contract.tasks.length;
 		const done = plan.result?.tasks_completed ?? 0;
 		return { done, total };
+	}
+
+	/// P1-3 收尾: 处理后端 plan_event (SseEvent::PlanUpdate).
+	/// 收到 plan_update → 按 plan_id 找本地 plan, 更新 status / ended_at / task_results 派生 result.
+	/// status 5 态 lowercase → PascalCase 映射 (跟 ipcPlanToEntity 共用).
+	function handlePlanEvent(
+		planId: string,
+		status: string,
+		taskResultsJson: string | null,
+	): void {
+		const plan = plans.find((p) => p.id === planId);
+		if (!plan) return; // 未知 plan_id 忽略 (可能 web fallback / 旧 plan)
+		const statusMap: Record<string, Plan['status']> = {
+			pending: 'Pending',
+			running: 'Running',
+			done: 'Done',
+			failed: 'Failed',
+			aborted: 'Aborted',
+		};
+		const newStatus = statusMap[status] ?? plan.status;
+		plan.status = newStatus;
+		// 终态 (Done / Failed / Aborted) 写 ended_at, 兼容后端没传 (e.g. Running)
+		if (newStatus === 'Done' || newStatus === 'Failed' || newStatus === 'Aborted') {
+			plan.ended_at = plan.ended_at ?? new Date().toISOString();
+		}
+		// task_results_json 反序列化, 算 tasks_completed 更新 plan.result
+		if (taskResultsJson) {
+			try {
+				const taskResults: PlanTaskResult[] = JSON.parse(taskResultsJson);
+				const tasksCompleted = taskResults.filter(
+					(r) => r.status === 'done' || r.status === 'aborted',
+				).length;
+				const tasksTotal = plan.contract.tasks.length;
+				plan.result = {
+					summary: plan.result?.summary ?? '',
+					tasks_completed: tasksCompleted,
+					tasks_total: tasksTotal,
+					deliverables: plan.result?.deliverables ?? [],
+				};
+			} catch (e) {
+				console.warn('[planStore] failed to parse task_results_json:', e);
+			}
+		}
+	}
+
+	/// P1-3 收尾: 启 plan 事件订阅 (在 app 启动时调一次).
+	/// 1. 调 subscribePlanEvents() 让 Tauri 后端 spawn 长连接任务
+	/// 2. listen "plan_event" Tauri 事件, 转 handlePlanEvent 处理
+	/// 3. 返 unlisten 函数 (app 关闭时调)
+	async function init(): Promise<() => void> {
+		try {
+			await subscribePlanEvents();
+		} catch (e) {
+			console.warn('[planStore] subscribePlanEvents failed:', e);
+			return () => {};
+		}
+		const unlisten = await onPlanEvent((event) => {
+			if (event.type !== 'plan_update') return;
+			handlePlanEvent(event.plan_id, event.status, event.task_results_json);
+		});
+		return unlisten;
 	}
 
 	return {
@@ -166,6 +238,7 @@ function createPlanStore() {
 		create,
 		cancel,
 		progressOf,
+		init,
 		/// 测试专用: 重置内部状态. 业务代码不应该调.
 		__resetForTesting() {
 			plans.length = 0;

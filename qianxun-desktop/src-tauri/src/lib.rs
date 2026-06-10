@@ -136,8 +136,12 @@ pub fn run() {
             commands::runtime::sessions::resume_session,
             commands::runtime::sessions::update_active_provider,
             commands::runtime::send::send_message,
+            commands::runtime::send::send_to_sub_session,
             commands::runtime::plans::create_plan,
+            commands::runtime::plans::list_plans,
             commands::runtime::plans::cancel_plan,
+            // P1-3 收尾 (2026-06-12): 订阅 plan 实时事件, 推前端 `plan_event`
+            commands::runtime::plans::subscribe_plan_events,
             commands::runtime::cancel::cancel_session,
             commands::runtime::load::load_session,
             // 缺口 05 v0.3: 4 个后台任务 command (Stage 5.4 写但未注册)

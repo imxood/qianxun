@@ -78,6 +78,47 @@ pub async fn send_message(
     Ok(resp)
 }
 
+/// Tauri command: 推消息到 sub_session (4a-2 P0-2 收尾).
+///
+/// 当前 (P0) 实现跟 `send_message` 同壳, 调 RuntimeApi::send_message_to_sub_session.
+/// 前端 `chatStore.sendToSubSession` 解析 `sub_session_id → parent_session_id` 后传过来,
+/// 走 send_message_to_sub_session alias 命中 in-memory runtime.
+///
+/// 后续 P1 sub_session 持久化缺口接时:
+///   1. 后端 send_message_to_sub_session 内部查 sub_session store 拿 parent_session_id
+///   2. 前端改成传真 sub_id
+///   3. emit payload.session_id 仍用 parent_session_id (跟 in-memory runtime 一致)
+#[tauri::command]
+pub async fn send_to_sub_session(
+    app: AppHandle,
+    state: State<'_, Arc<RuntimeState>>,
+    sub_session_id: String,
+    request: SendRequest,
+) -> Result<SendResponse, String> {
+    let msg_count = request.messages.len();
+    tracing::info!(
+        sub_session = %sub_session_id,
+        msgs = msg_count,
+        "[tauri] send_to_sub_session entry"
+    );
+
+    let (resp, rx) = state
+        .send_message_to_sub_session(&sub_session_id, request)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                sub_session = %sub_session_id,
+                error = %e,
+                "[tauri] send_to_sub_session rejected"
+            );
+            e.to_string()
+        })?;
+
+    state.ensure_restored().await;
+    spawn_event_emitter(app, resp.session_id.clone(), rx);
+    Ok(resp)
+}
+
 /// 消费 Receiver<SseEvent>, 逐个 emit Tauri event. 通道关闭后 task 自然退出.
 fn spawn_event_emitter(app: AppHandle, session_id: String, mut rx: mpsc::Receiver<qianxun_runtime::SseEvent>) {
     tauri::async_runtime::spawn(async move {

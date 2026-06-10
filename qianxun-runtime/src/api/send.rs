@@ -159,7 +159,9 @@ pub async fn send_message_impl(
     let provider = runtime.provider.clone();
     let tools = runtime.tools.clone();
     let hooks = state.hooks.clone();
-    let cancel_flag = Arc::new(AtomicBool::new(false));
+    // P1-4 收尾 (2026-06-12): 复用 session 的 cancel_flag, 这样 cancel_session
+    // 触发的 store(true) 能让 processing_loop 看到并退出 (而非新 new 没人触发).
+    let cancel_flag = runtime.cancel_flag.clone();
     let sid_for_task = session_id.to_string();
     tracing::info!(
         session = %sid_for_task,
