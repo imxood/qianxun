@@ -250,6 +250,7 @@ impl AcpRequestHandler {
                 &skills_catalog_for_spawn,
                 &skill_injections_for_spawn,
                 cancel_flag,
+                None,
             )
             .await;
             (agent_loop, conversation) // 正常完成后返还所有权

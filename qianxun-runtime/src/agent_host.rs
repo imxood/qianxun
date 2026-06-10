@@ -409,15 +409,22 @@ impl AgentLoopHost {
     #[cfg(test)]
     pub fn for_test(max_sessions: usize, resolved: ResolvedConfig) -> Self {
         use qianxun_core::provider::create_provider;
+        use qianxun_core::provider::failover::ProviderStack;
         use qianxun_core::tools::ToolRegistry;
         use qianxun_core::skills::SkillManager;
         use qianxun_memory::MemoryCore;
 
-        let provider: Arc<dyn LlmProvider> = create_provider(
+        // 缺口 12: 用 ProviderStack 包单 provider, 测试同样走 fail/success 决策路径.
+        let active_cfg = resolved.active_provider_config();
+        let provider: Arc<dyn LlmProvider> = Arc::new(ProviderStack::new(
+            vec![(
+                resolved.active_provider.clone(),
+                active_cfg.clone(),
+                create_provider(&resolved.active_provider, &active_cfg),
+            )],
             &resolved.active_provider,
-            &resolved.active_provider_config(),
-        )
-        .into();
+            resolved.agent.max_retries,
+        ));
         let tools = Arc::new(ToolRegistry::new());
         let memory = Arc::new(
             MemoryCore::open_in_memory().expect("MemoryCore::open_in_memory failed"),
@@ -461,7 +468,7 @@ mod tests {
             || runtime.config.model.contains("MiniMax")
             || !runtime.config.model.is_empty());
         assert_eq!(runtime.agent_loop.turn_count, 0);
-        assert_eq!(runtime.agent_loop.retry_count, 0);
+        // 缺口 12 移除: retry_count 字段已迁到 ProviderStack, AgentLoop 不再持有.
         // Stage 4: conversation 改 Arc<Mutex<>> 包装, lock 后再读 messages
         assert_eq!(
             runtime.conversation.lock().expect("conv lock").messages().len(),

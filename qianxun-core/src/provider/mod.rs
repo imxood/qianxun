@@ -1,7 +1,11 @@
 pub mod anthropic_compat;
 pub mod deepseek;
 pub mod error_classifier;
+pub mod failover;
 pub mod types;
+
+// 缺口 12 引入: 透传 error_classifier 核心类型, 减少外层 use 路径.
+pub use error_classifier::{LlmErrorKind, RecoveryAction};
 
 use crate::config::ResolvedProviderConfig;
 use crate::types::{LlmError, ProviderCapabilities};

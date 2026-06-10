@@ -200,7 +200,8 @@ impl ToolRegistry {
         let mut count = 0;
         let mut errors: Vec<String> = Vec::new();
 
-        // 13 个无外部依赖的 builtin 工具（SkillReadTool 单独注册）
+        // 14 个无外部依赖的 builtin 工具（SkillReadTool 单独注册）
+        // 缺 03 v0.3 新增 delegate_to_subagent: subagent 白名单校验占位工具
         let candidates: Vec<(&'static str, Arc<dyn AgentTool>)> = vec![
             ("read_text_file", Arc::new(builtin::ReadTextFileTool)),
             ("write_text_file", Arc::new(builtin::WriteTextFileTool)),
@@ -215,6 +216,7 @@ impl ToolRegistry {
             ("fetch_url", Arc::new(builtin::FetchUrlTool)),
             ("memory_recall", Arc::new(builtin::MemoryRecallTool)),
             ("memory_remember", Arc::new(builtin::MemoryRememberTool)),
+            ("delegate_to_subagent", Arc::new(builtin::DelegateToSubagentTool)),
         ];
 
         for (name, tool) in candidates {

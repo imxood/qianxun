@@ -319,6 +319,7 @@ async fn execute_one_task(
             &skills_catalog,
             &skill_injections,
             cancel_flag_clone,
+            None,
         )
         .await;
     });

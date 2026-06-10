@@ -121,6 +121,14 @@ impl LlmErrorKind {
     }
 }
 
+impl Default for LlmErrorKind {
+    /// 兜底: 未分类时按 Unknown 处理. 用于 `#[serde(default)]` 反序列化和
+    /// `LlmError` 字段缺失时的 fallthrough.
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 // ─── RecoveryAction ────────────────────────────────────────
 
 /// 恢复动作决策.
@@ -168,7 +176,7 @@ pub fn classify_llm_error(err: &LlmError) -> LlmErrorKind {
         }
         LlmError::RateLimitExceeded { .. } => LlmErrorKind::RateLimit,
         LlmError::PromptTooLarge { .. } => LlmErrorKind::ContextOverflow,
-        LlmError::StreamEnded => LlmErrorKind::Timeout,
+        LlmError::StreamEnded { .. } => LlmErrorKind::Timeout,
         LlmError::ApiError {
             status, message, ..
         } => classify_http_status(*status, message),
@@ -177,8 +185,9 @@ pub fn classify_llm_error(err: &LlmError) -> LlmErrorKind {
 
 /// HTTP 状态码 + 错误消息 → LlmErrorKind 映射 (缺口 02 §2.4 完整表).
 ///
-/// 不导出, 由 `classify_llm_error` 内部调用.
-fn classify_http_status(status: u16, message: &str) -> LlmErrorKind {
+/// 公开: anthropic_compat.rs 在构造 `LlmError` 之前先调本函数拿到精确分类,
+/// 注入到 `kind` 字段. 不再走 `classify_llm_error` 内部 match.
+pub fn classify_http_status(status: u16, message: &str) -> LlmErrorKind {
     let msg_lower = message.to_ascii_lowercase();
     match status {
         401 | 403 => {
@@ -340,6 +349,7 @@ mod tests {
             provider: "test".into(),
             status,
             message: message.into(),
+            kind: classify_http_status(status, message),
         }
     }
 
@@ -349,6 +359,7 @@ mod tests {
     fn test_classify_no_api_key_is_auth_permanent() {
         let e = LlmError::NoApiKey {
             provider: "deepseek".into(),
+            kind: LlmErrorKind::AuthPermanent,
         };
         assert_eq!(classify_llm_error(&e), LlmErrorKind::AuthPermanent);
     }
@@ -358,6 +369,7 @@ mod tests {
         let e = LlmError::AuthenticationError {
             provider: "deepseek".into(),
             message: "token expired, please refresh".into(),
+            kind: LlmErrorKind::Auth,
         };
         assert_eq!(classify_llm_error(&e), LlmErrorKind::Auth);
     }
@@ -367,6 +379,7 @@ mod tests {
         let e = LlmError::AuthenticationError {
             provider: "deepseek".into(),
             message: "API key has been revoked".into(),
+            kind: LlmErrorKind::AuthPermanent,
         };
         assert_eq!(classify_llm_error(&e), LlmErrorKind::AuthPermanent);
     }
@@ -376,6 +389,7 @@ mod tests {
         let e = LlmError::RateLimitExceeded {
             provider: "deepseek".into(),
             retry_after: Some(Duration::from_secs(5)),
+            kind: LlmErrorKind::RateLimit,
         };
         assert_eq!(classify_llm_error(&e), LlmErrorKind::RateLimit);
     }
@@ -384,6 +398,7 @@ mod tests {
     fn test_classify_prompt_too_large_is_context_overflow() {
         let e = LlmError::PromptTooLarge {
             tokens: Some(50000),
+            kind: LlmErrorKind::ContextOverflow,
         };
         assert_eq!(classify_llm_error(&e), LlmErrorKind::ContextOverflow);
     }
@@ -474,7 +489,9 @@ mod tests {
 
     #[test]
     fn test_classify_stream_ended_is_timeout() {
-        let e = LlmError::StreamEnded;
+        let e = LlmError::StreamEnded {
+            kind: LlmErrorKind::Timeout,
+        };
         assert_eq!(classify_llm_error(&e), LlmErrorKind::Timeout);
     }
 

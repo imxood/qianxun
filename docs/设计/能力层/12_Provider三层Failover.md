@@ -1,7 +1,24 @@
 # 缺口 12: Provider 三层 Failover
 
-> 状态: 待 code review | 适用范围: qianxun-core / qianxun-runtime | 最后更新: 2026-06-11 | 版本: v0.2
+> 状态: 已实现 v0.3 (Layer 1+2, Layer 3 留 P2) | 适用范围: qianxun-core / qianxun-runtime | 最后更新: 2026-06-12 | 版本: v0.3
 > **⚠️ 重建说明**: 本文档因 H4 修复脚本误操作 + git restore 删除后重建, 内容精简, 完整接口见 [`../规范/16_接口契约汇总.md`](../规范/16_接口契约汇总.md)。
+
+## v0.3 实施记录 (2026-06-12)
+
+**实施范围**: Layer 1 (RetryProvider, 同 provider 指数 backoff) + Layer 2 (ProviderChain, 切下个 provider).
+**未实施**: Layer 3 (AdaptiveRouter + ProviderScoreboard) — 留 P2, 见 `../设计/规范/17_异常路径.md` §"Layer 3 决策".
+
+### 关键决策
+
+1. **ProviderStack 自己 `impl LlmProvider`** (forwarder 模式) — 业务调用方零修改, `processing_loop` / `SharedState` / `compact` 等全部继续用 `&dyn LlmProvider`, 实际拿到的是 `ProviderStack`.
+2. **fallback 顺序不保证稳定** — `config.providers` 是 HashMap, 无序. `ProviderStack::new` 内部按 HashMap 迭代顺序拆 active + fallbacks. 升级稳定顺序时需改 `ResolvedConfig` 加 `provider_order: Vec<String>` 字段 (留 P2).
+3. **Layer 3 缺失的 action (CompressContext / FallbackModel) 走 "break 返原始错误" 路径** — ProviderStack 看到这俩 action 当 terminal, 透传原始 LlmError 给上层.
+4. **变体 A 风险缓解**: ProviderStack 只在 `stream_completion` 返 `Err` 时走 retry/rotate; `Ok(stream)` 直接透传. stream 已经开始后不切 provider, 避免双连接.
+5. **`agent.retry_count` 字段从 AgentLoop 删除** — retry 决策已迁到 ProviderStack, 业务不再持有 per-call 重试状态. `AgentConfig.max_retries` 字段保留, ProviderStack 构造时读.
+
+### 实施文档
+
+详细实施记录 + 测试 + 行数统计: `../../经验/2026-06-12_缺口12_ProviderFailover_收尾.md`.
 
 ## 借鉴源
 

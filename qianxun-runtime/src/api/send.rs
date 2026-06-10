@@ -126,6 +126,14 @@ pub async fn send_message_impl(
     let matched_skills: Vec<String> = runtime.skills.auto_select(&last_user_msg, &[]);
     let skill_injections: String = runtime.skills.build_injections(&matched_skills);
 
+    // 4.5 缺口 04 v0.3 集成: 记录每个 matched skill 一次成功 invoke (skill 注入成功 = 用户消息触达了 prompt).
+    // body_cache 找不到 → success=false (skill 名匹配但内容缺失, 算失败样本).
+    // 跨 session 累积 use_count / success_count, 后续 tick() 自动 promote/quarantine.
+    for skill_name in &matched_skills {
+        let success = runtime.skills.read_body(skill_name).is_some();
+        state.lifecycle.record_usage(skill_name, success).await;
+    }
+
     // 5. 准备 AgentLoop + Conversation 快照
     let mut agent_loop = AgentLoop::new(runtime.resolved.agent.clone());
     let mut conv: Conversation = runtime
@@ -150,6 +158,7 @@ pub async fn send_message_impl(
     // 7. spawn 后台 task
     let provider = runtime.provider.clone();
     let tools = runtime.tools.clone();
+    let hooks = state.hooks.clone();
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let sid_for_task = session_id.to_string();
     tracing::info!(
@@ -170,6 +179,7 @@ pub async fn send_message_impl(
             &skills_catalog,
             &skill_injections,
             cancel_flag,
+            Some(hooks.as_ref()),
         )
         .await;
     });

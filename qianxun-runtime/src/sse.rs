@@ -85,7 +85,10 @@ pub enum SseEvent {
     MessageStop,
 
     #[serde(rename = "error")]
-    Error { code: String, message: String },
+    Error {
+        code: qianxun_core::provider::error_classifier::LlmErrorKind,
+        message: String,
+    },
 
     // ─── 缺口 05: 后台异步任务事件 (Stage 5 新增) ─────
 
@@ -233,66 +236,50 @@ impl SseEventBuilder {
         out
     }
 
-    /// 把 `LlmError` 映射成 SSE 4 种 error code (shared-contract §3.2 末项).
+    /// 把 `LlmError` 映射成 SSE `Error` 事件.
+    ///
+    /// `code` 字段携带 `LlmErrorKind` (15 种语义分类, 由 `LlmError.kind` 注入),
+    /// 序列化时按 snake_case 出 string (e.g. `auth` / `rate_limit` / `server_error`),
+    /// 与前端 `chat-stream.ts` `case "error"` 解析兼容.
     pub fn error_from_llm(e: &qianxun_core::types::LlmError) -> SseEvent {
-        use qianxun_core::types::LlmError::*;
-        let (code, message) = match e {
-            NoApiKey { provider } => (
-                "auth".to_string(),
-                format!("API key not configured for {provider}"),
-            ),
-            AuthenticationError {
-                provider,
-                message,
-            } => ("auth".to_string(), format!("[{provider}] {message}")),
-            RateLimitExceeded {
+        use qianxun_core::types::LlmError;
+        // 1. 拿 kind (HTTP 错误时已注入, 其他场景 LlmErrorKind::default() = Unknown).
+        let kind = e.kind();
+        // 2. 拼 message (沿用原 error_from_llm 的人类可读格式, 不丢 provider/status 信息).
+        let message = match e {
+            LlmError::NoApiKey { provider, .. } => {
+                format!("API key not configured for {provider}")
+            }
+            LlmError::AuthenticationError {
+                provider, message, ..
+            } => format!("[{provider}] {message}"),
+            LlmError::RateLimitExceeded {
                 provider,
                 retry_after,
+                ..
             } => {
                 let wait = retry_after.map(|d| d.as_secs()).unwrap_or(0);
-                (
-                    "rate_limit".to_string(),
-                    format!("[{provider}] rate limit, retry after {wait}s"),
-                )
+                format!("[{provider}] rate limit, retry after {wait}s")
             }
-            ApiError {
+            LlmError::ApiError {
                 provider,
                 status,
                 message,
-            } => {
-                if *status >= 500 {
-                    (
-                        "api_error".to_string(),
-                        format!("[{provider}] {status} {message}"),
-                    )
-                } else if *status == 429 {
-                    (
-                        "rate_limit".to_string(),
-                        format!("[{provider}] {status} {message}"),
-                    )
-                } else {
-                    (
-                        "api_error".to_string(),
-                        format!("[{provider}] {status} {message}"),
-                    )
-                }
+                ..
+            } => format!("[{provider}] {status} {message}"),
+            LlmError::PromptTooLarge { tokens, .. } => {
+                format!("prompt too large: {tokens:?}")
             }
-            PromptTooLarge { tokens } => {
-                ("api_error".to_string(), format!("prompt too large: {tokens:?}"))
-            }
-            StreamEnded => (
-                "internal".to_string(),
-                "stream ended unexpectedly".to_string(),
-            ),
+            LlmError::StreamEnded { .. } => "stream ended unexpectedly".to_string(),
         };
         // 2026-06-09 L3: 之前 0 行 tracing, 错误分类后只发 SSE, 后端无任何审计.
         // 现在加 warn (front-end 立刻 toast, 后端 stderr 也留底, 排查时一查就着).
         tracing::warn!(
-            code = %code,
+            code = %kind.as_str(),
             "[sse] LlmError → SseEvent::Error: {}",
             message
         );
-        SseEvent::Error { code, message }
+        SseEvent::Error { code: kind, message }
     }
 
     /// 把 `StopReason` 转成 SSE `message_delta.stop_reason` 字符串 (snake_case).
@@ -508,7 +495,7 @@ mod tests {
             (SseEvent::MessageStop, "message_stop"),
             (
                 SseEvent::Error {
-                    code: "api_error".into(),
+                    code: qianxun_core::provider::error_classifier::LlmErrorKind::ServerError,
                     message: "boom".into(),
                 },
                 "error",
@@ -641,7 +628,7 @@ mod tests {
             (SseEvent::MessageStop, "message_stop"),
             (
                 SseEvent::Error {
-                    code: "api_error".into(),
+                    code: qianxun_core::provider::error_classifier::LlmErrorKind::ServerError,
                     message: "boom".into(),
                 },
                 "error",
@@ -732,18 +719,57 @@ mod tests {
 
     #[test]
     fn test_error_classification() {
+        use qianxun_core::provider::error_classifier::LlmErrorKind;
         use qianxun_core::types::LlmError;
         let e = LlmError::RateLimitExceeded {
             provider: "deepseek".into(),
             retry_after: Some(std::time::Duration::from_secs(5)),
+            kind: LlmErrorKind::RateLimit,
         };
         let ev = SseEventBuilder::error_from_llm(&e);
         match ev {
             SseEvent::Error { code, message } => {
-                assert_eq!(code, "rate_limit");
+                assert_eq!(code, LlmErrorKind::RateLimit);
                 assert!(message.contains("deepseek"));
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    /// 缺口 02 集成层 v0.3: 验证 LlmError → SseEvent::Error 透传 `kind` 字段,
+    /// 5xx ApiError 注入 LlmErrorKind::ServerError (走 `classify_http_status(500, _)`).
+    #[test]
+    fn test_error_from_llm_preserves_kind_for_5xx() {
+        use qianxun_core::provider::error_classifier::LlmErrorKind;
+        use qianxun_core::types::LlmError;
+        let e = LlmError::ApiError {
+            provider: "deepseek".into(),
+            status: 500,
+            message: "internal server error".into(),
+            kind: LlmErrorKind::ServerError,
+        };
+        let ev = SseEventBuilder::error_from_llm(&e);
+        match ev {
+            SseEvent::Error { code, message } => {
+                assert_eq!(code, LlmErrorKind::ServerError);
+                assert!(message.contains("500"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// 缺口 02 集成层 v0.3: 验证 SseEvent::Error 序列化时 `code` 字段出 snake_case 字符串,
+    /// 跟前端 chat-stream.ts 解析契约一致.
+    #[test]
+    fn test_sse_event_error_serializes_kind_as_snake_case() {
+        use qianxun_core::provider::error_classifier::LlmErrorKind;
+        let ev = SseEvent::Error {
+            code: LlmErrorKind::RateLimit,
+            message: "rate limit hit".into(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["type"], "error");
+        assert_eq!(json["code"], "rate_limit"); // snake_case 字符串, 前端按 string 解析
+        assert_eq!(json["message"], "rate limit hit");
     }
 }

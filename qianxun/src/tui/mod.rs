@@ -993,6 +993,7 @@ impl App {
                 &catalog,
                 &skill_injections,
                 cancel_flag,
+                None,
             )
             .await;
 

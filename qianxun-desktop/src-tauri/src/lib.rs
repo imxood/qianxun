@@ -140,6 +140,11 @@ pub fn run() {
             commands::runtime::plans::cancel_plan,
             commands::runtime::cancel::cancel_session,
             commands::runtime::load::load_session,
+            // 缺口 05 v0.3: 4 个后台任务 command (Stage 5.4 写但未注册)
+            commands::runtime::background::start_background_task,
+            commands::runtime::background::list_background_tasks,
+            commands::runtime::background::cancel_background_task,
+            commands::runtime::background::resume_background_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

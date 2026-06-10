@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use qianxun_core::output::OutputSink;
 use qianxun_core::provider::types::LlmStreamEvent;
+use qianxun_core::provider::error_classifier::LlmErrorKind;
 use qianxun_core::types::{LlmError, StopReason, TokenUsage};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -624,7 +625,10 @@ mod tests {
             cache_read_input: None,
         };
         sink.usage(&usage).await;
-        sink.error(&LlmError::StreamEnded).await;
+        sink.error(&LlmError::StreamEnded {
+            kind: LlmErrorKind::Timeout,
+        })
+        .await;
         sink.finish_turn(&StopReason::EndTurn).await;
 
         // 关键断言: 走到这里说明没有 panic
@@ -694,6 +698,7 @@ mod tests {
         sink.error(&LlmError::RateLimitExceeded {
             provider: "deepseek".into(),
             retry_after: Some(Duration::from_secs(5)),
+            kind: LlmErrorKind::RateLimit,
         })
         .await;
         sink.finish_turn_str("error").await;
@@ -702,7 +707,7 @@ mod tests {
         let events = collect(rx, Duration::from_millis(100)).await;
         match &events[0] {
             SseEvent::Error { code, message } => {
-                assert_eq!(code, "rate_limit");
+                assert_eq!(*code, LlmErrorKind::RateLimit);
                 assert!(message.contains("deepseek"));
             }
             other => panic!("expected Error, got {other:?}"),

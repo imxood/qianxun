@@ -1757,6 +1757,7 @@ mod e2e_tests {
             Err(LlmError::RateLimitExceeded {
                 provider: "deepseek".into(),
                 retry_after: Some(Duration::from_secs(2)),
+                kind: qianxun_core::provider::error_classifier::LlmErrorKind::RateLimit,
             }),
         ]));
 
@@ -1805,10 +1806,10 @@ mod e2e_tests {
             .collect();
         assert_eq!(types, vec!["cbs", "td", "error", "cbs_stop", "md", "ms"]);
 
-        // 验证 error 事件的 code = "rate_limit"
+        // 验证 error 事件的 code = LlmErrorKind::RateLimit
         match &collected[2] {
             SseEvent::Error { code, message } => {
-                assert_eq!(code, "rate_limit");
+                assert_eq!(*code, qianxun_core::provider::error_classifier::LlmErrorKind::RateLimit);
                 assert!(message.contains("deepseek"), "msg should mention provider: {message}");
                 assert!(message.contains("2"), "msg should mention retry_after: {message}");
             }

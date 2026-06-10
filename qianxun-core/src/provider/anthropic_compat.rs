@@ -14,6 +14,7 @@
 //! section 加一个条目, 并设置 `active_provider` 指向它。
 
 use crate::agent::message::ContentBlock;
+use crate::provider::error_classifier::classify_http_status;
 use crate::provider::types::{CompletionRequest, LlmStreamEvent};
 use crate::types::{LlmError, ProviderCapabilities, StopReason, TokenUsage};
 use async_trait::async_trait;
@@ -409,6 +410,7 @@ impl AnthropicCompatProvider {
                 provider: self.provider_id.clone(),
                 status: 0,
                 message: e.to_string(),
+                kind: classify_http_status(0, &e.to_string()),
             })?;
 
         let status = response.status();
@@ -454,15 +456,18 @@ impl AnthropicCompatProvider {
                 401 => Err(LlmError::AuthenticationError {
                     provider: self.provider_id.clone(),
                     message: error_text,
+                    kind: classify_http_status(401, "unauthorized"),
                 }),
                 429 => Err(LlmError::RateLimitExceeded {
                     provider: self.provider_id.clone(),
                     retry_after,
+                    kind: classify_http_status(429, "rate limit"),
                 }),
                 _ => Err(LlmError::ApiError {
                     provider: self.provider_id.clone(),
                     status: status.as_u16(),
-                    message: error_text,
+                    message: error_text.clone(),
+                    kind: classify_http_status(status.as_u16(), &error_text),
                 }),
             };
         }
@@ -573,6 +578,7 @@ impl super::LlmProvider for AnthropicCompatProvider {
                                 provider: provider_id.clone(),
                                 status: 0,
                                 message: e.to_string(),
+                                kind: classify_http_status(0, &e.to_string()),
                             }))
                             .await;
                         return;

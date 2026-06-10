@@ -84,7 +84,7 @@ qianxun-desktop/
 | `load_session` | `runtime/load.rs:16-25` | **真** | 委托 `RuntimeApi::load_session` |
 | `update_active_provider` | `runtime/sessions.rs` 尾部 | **真** | 委托 RuntimeApi (2026-06-09 加) |
 | **`list_plans`** | (缺失) | **P0 漏接** | `RuntimeApi` trait 有,Tauri 无 command,前端无 invoke |
-| `start_background_task` | `runtime/background.rs:36-46` | **真** | 缺口 05: 委托 RuntimeApi |
+| `start_background_task` | `runtime/background.rs:36-46` | **真** | 缺口 05: 委托 RuntimeApi + v0.3 路由到真实 ops |
 | `list_background_tasks` | `runtime/background.rs:49-69` | **真** | 缺口 05: 委托 RuntimeApi |
 | `cancel_background_task` | `runtime/background.rs:72-82` | **真** | 缺口 05: 委托 RuntimeApi |
 | `resume_background_task` | `runtime/background.rs:85-93` | **真** | 缺口 05: 委托 RuntimeApi |

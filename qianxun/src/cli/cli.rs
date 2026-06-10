@@ -1067,6 +1067,7 @@ impl Repl {
             &self.skills_catalog,
             &skill_injections,
             self.cancel_flag.clone(),
+            None,
         )
         .await;
 

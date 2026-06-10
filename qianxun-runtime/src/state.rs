@@ -14,7 +14,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use qianxun_core::config::ResolvedConfig;
+use qianxun_core::hooks::HookRegistry;
+use qianxun_core::provider::failover::ProviderStack;
 use qianxun_core::provider::{create_provider, LlmProvider};
+use qianxun_core::skills::lifecycle::SkillLifecycle;
 use qianxun_core::skills::SkillManager;
 use qianxun_core::tools::ToolRegistry;
 use qianxun_memory::MemoryCore;
@@ -36,6 +39,9 @@ pub struct RuntimeState {
     /// 因为 RuntimeApi impl + DaemonOutputSink 等内部组件需要读它们.
     pub(crate) agent_host: Arc<AgentLoopHost>,
     pub config: Arc<ResolvedConfig>,
+    /// LLM provider 入口. 实际类型是 `ProviderStack` (缺口 12 引入), 对外保持 `Arc<dyn LlmProvider>`
+    /// 不变以兼容下游 `SharedState` / `processing_loop` / `compact` 等所有 caller.
+    /// ProviderStack 内部走 Layer 1 (同 provider retry) + Layer 2 (切 fallback) 失败转移.
     pub provider: Arc<dyn LlmProvider>,
     pub tools: Arc<ToolRegistry>,
     pub memory: Arc<MemoryCore>,
@@ -45,6 +51,14 @@ pub struct RuntimeState {
     pub plans: Arc<PlanStore>,
     /// 缺口 05: 后台任务管理器 (FIFO + 状态机)
     pub background_tasks: Arc<BackgroundTaskManager>,
+    /// 缺口 04 v0.3 集成: skill 生命周期记录器, 每次 `api/send.rs` matched_skills
+    /// 注入后调 `record_usage(name, true/false)`. 跨 session 累积 use_count / success_count
+    /// (内存态, 持久化留 P1).
+    pub lifecycle: Arc<SkillLifecycle>,
+    /// 缺口 01 v0.3 集成: 全局 hook 注册表. 传给 processing_loop,
+    /// dispatch BeforeLoopIter/BeforeToolCall/AfterToolCall/AfterLoopIter.
+    /// 默认空 registry (5 tier 全空), 调用方可通过 `state.hooks.register(...)` 注入业务 hook.
+    pub hooks: Arc<HookRegistry>,
     pub shutdown_tx: watch::Sender<()>,
     /// 2026-06-09 加: restore_from_disk 懒初始化标志 (OnceCell 模式).
     /// build() 同步不调 restore_from_disk (它跑 5-15s 同步 SQLite, 阻塞 webview 启动).
@@ -128,12 +142,35 @@ impl RuntimeState {
         mem_path: &str,
         store_path: &str,
     ) -> anyhow::Result<Arc<Self>> {
-        // provider: 来自 config.active_provider
-        let provider: Arc<dyn LlmProvider> = create_provider(
+        // provider: 缺口 12 集成 — 遍历 config.providers, 构造 ProviderStack
+        // (primary = active, fallbacks = 其它). HashMap 迭代顺序 → fallback 顺序不保证稳定.
+        let mut provider_entries: Vec<(String, qianxun_core::config::ResolvedProviderConfig, Box<dyn LlmProvider>)> =
+            Vec::new();
+        // 1. 其它 provider (non-active)
+        for (name, cfg) in &config.providers {
+            if name == &config.active_provider {
+                continue;
+            }
+            provider_entries.push((
+                name.clone(),
+                cfg.clone(),
+                create_provider(name, cfg),
+            ));
+        }
+        // 2. active provider 必含
+        let active_cfg = config.active_provider_config();
+        provider_entries.push((
+            config.active_provider.clone(),
+            active_cfg,
+            create_provider(&config.active_provider, &config.active_provider_config()),
+        ));
+
+        // 3. 构造 ProviderStack (filter api_key 空 + 拆 primary/fallbacks + 兜底)
+        let provider: Arc<dyn LlmProvider> = Arc::new(ProviderStack::new(
+            provider_entries,
             &config.active_provider,
-            &config.active_provider_config(),
-        )
-        .into();
+            config.agent.max_retries,
+        ));
 
         // tools: 空 registry + register_all_builtin (失败 fallback 空)
         let mut tools = ToolRegistry::new();
@@ -189,6 +226,8 @@ impl RuntimeState {
             store,
             plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             background_tasks: Arc::new(BackgroundTaskManager::new()),
+            lifecycle: Arc::new(SkillLifecycle::new()),
+            hooks: Arc::new(HookRegistry::new()),
             shutdown_tx,
             restored: Arc::new(AtomicBool::new(false)),
         }))
@@ -198,11 +237,17 @@ impl RuntimeState {
     /// 跟 daemon `mod.rs::make_test_state()` 1:1
     pub fn new_for_test() -> Arc<Self> {
         let config = ResolvedConfig::default();
-        let provider: Arc<dyn LlmProvider> = create_provider(
+        // 缺口 12: 用 ProviderStack 包单 provider, 测试同样走 fail/success 决策路径.
+        let active_cfg = config.active_provider_config();
+        let provider: Arc<dyn LlmProvider> = Arc::new(ProviderStack::new(
+            vec![(
+                config.active_provider.clone(),
+                active_cfg.clone(),
+                create_provider(&config.active_provider, &active_cfg),
+            )],
             &config.active_provider,
-            &config.active_provider_config(),
-        )
-        .into();
+            config.agent.max_retries,
+        ));
         let tools = Arc::new(ToolRegistry::new());
         let memory = Arc::new(MemoryCore::open_in_memory().expect("in-memory mem"));
         let skills = SkillManager::new();
@@ -235,6 +280,8 @@ impl RuntimeState {
             store,
             plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
             background_tasks: Arc::new(BackgroundTaskManager::new()),
+            lifecycle: Arc::new(SkillLifecycle::new()),
+            hooks: Arc::new(HookRegistry::new()),
             shutdown_tx,
             restored: Arc::new(AtomicBool::new(false)),
         })

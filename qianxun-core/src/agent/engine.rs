@@ -3,6 +3,7 @@ use crate::agent::context::{AutoCompactWindow, compact, normalize};
 use crate::agent::conversation::Conversation;
 use crate::agent::message::{ContentBlock, Message};
 use crate::config::ResolvedCompactionConfig;
+use crate::hooks::{HookContext, HookEvent, HookRegistry, HookResult};
 use crate::output::OutputSink;
 use crate::provider::LlmProvider;
 use crate::provider::types::LlmStreamEvent;
@@ -38,7 +39,8 @@ pub enum AgentState {
 pub struct AgentLoop {
     pub state: AgentState,
     pub turn_count: u32,
-    pub retry_count: u32,
+    /// 缺口 12 移除: retry 决策已迁到 ProviderStack (Layer 1 + Layer 2 失败转移).
+    /// 旧 `retry_count: u32` 字段已删除, 业务不再持有 per-call 重试状态.
     pub config: AgentConfig,
     pub accumulated_usage: TokenUsage,
     pub compact_window: Option<AutoCompactWindow>,
@@ -50,7 +52,6 @@ impl AgentLoop {
         Self {
             state: AgentState::Idle,
             turn_count: 0,
-            retry_count: 0,
             config,
             accumulated_usage: TokenUsage::default(),
             compact_window: None,
@@ -65,7 +66,6 @@ impl AgentLoop {
     pub fn reset(&mut self) {
         self.state = AgentState::Idle;
         self.turn_count = 0;
-        self.retry_count = 0;
         self.accumulated_usage = TokenUsage::default();
         // 保留 compact_window — reset 只清运行时状态，不丢压缩窗口配置
     }
@@ -79,6 +79,7 @@ pub mod processing_loop {
     /// 处理用户消息：stream → tool_loop → 输出
     /// - `skills_catalog`: Layer 1 技能目录（注入 system prompt）
     /// - `skill_injections`: Layer 2 技能完整内容（自动/手动匹配后注入）
+    /// - `hooks`: 可选 HookRegistry. None 时跳过所有 dispatch (旧调用方不破坏).
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_user_message(
         agent: &mut AgentLoop,
@@ -91,10 +92,18 @@ pub mod processing_loop {
         skills_catalog: &str,
         skill_injections: &str,
         cancel_flag: Arc<AtomicBool>,
+        hooks: Option<&HookRegistry>,
     ) {
         agent.state = AgentState::WaitingLlm;
         agent.turn_count += 1;
         tracing::info!("[turn {}] processing user message", agent.turn_count);
+
+        // ── 缺口 01 集成: 入口 dispatch (BeforeLoopIter, 触发 Continuation tier).
+        //     best-effort, hook 错误不阻塞主流程 (HookResult::Block 时记录后继续).
+        if let Some(h) = hooks {
+            let mut ctx = HookContext::default();
+            let _ = h.dispatch(HookEvent::BeforeLoopIter, &mut ctx).await;
+        }
 
         loop {
             if cancel_flag.load(Ordering::SeqCst) {
@@ -214,31 +223,17 @@ pub mod processing_loop {
                 tracing::debug!("=== System Prompt ===\n{}", trunc(sys, 2000));
             }
 
-            // ── stream_completion with rate-limit retry ──
-            let mut stream = loop {
-                match provider.stream_completion(request.clone()).await {
-                    Ok(s) => break s,
-                    Err(e) => {
-                        if let crate::types::LlmError::RateLimitExceeded { retry_after, .. } = &e {
-                            if agent.retry_count < agent.config.max_retries {
-                                agent.retry_count += 1;
-                                let wait = retry_after.unwrap_or(std::time::Duration::from_secs(5));
-                                sink.on_status(&format!(
-                                    "速率受限，{}s 后重试 ({}/{})",
-                                    wait.as_secs(),
-                                    agent.retry_count,
-                                    agent.config.max_retries
-                                ))
-                                .await;
-                                tokio::time::sleep(wait).await;
-                                continue;
-                            }
-                        }
-                        tracing::error!("LLM stream start failed: {e}");
-                        sink.on_error(&e).await;
-                        agent.state = AgentState::Error(e.to_string());
-                        return;
-                    }
+            // ── stream_completion (Layer 1 + Layer 2 失败转移已迁到 ProviderStack) ──
+            // 缺口 12: 旧版 RateLimit retry 循环 (24 行) 已删. 失败时 ProviderStack
+            // 内部已尝试 retry 同 provider + 切 fallback, 仍失败返 LlmError,
+            // 透传到 sink.on_error 让上层走错误路径.
+            let mut stream = match provider.stream_completion(request).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("[engine] LLM stream start failed: {e}");
+                    sink.on_error(&e).await;
+                    agent.state = AgentState::Error(e.to_string());
+                    return;
                 }
             };
 
@@ -319,6 +314,36 @@ pub mod processing_loop {
                                     "[tool] execute: {name} ({id}) args={}",
                                     serde_json::to_string(args).unwrap_or_default(),
                                 );
+                                // ── 缺口 01 集成: 工具调用前 dispatch (BeforeToolCall, 触发 ToolGuard+Transform tier).
+                                //     HookResult::Block 时记录并跳过该工具 (best-effort, 不阻塞主流程).
+                                if let Some(h) = hooks {
+                                    let mut hook_ctx = HookContext {
+                                        tool_name: Some(name.clone()),
+                                        tool_args: Some(args.clone()),
+                                        ..Default::default()
+                                    };
+                                    let res = h
+                                        .dispatch(HookEvent::BeforeToolCall, &mut hook_ctx)
+                                        .await;
+                                    if matches!(res, HookResult::Block { .. }) {
+                                        tracing::warn!(
+                                            tool = %name,
+                                            "[hooks] BeforeToolCall blocked, skipping"
+                                        );
+                                        let blocked_msg = format!(
+                                            "[blocked by hook] tool {name} not allowed"
+                                        );
+                                        sink.on_tool_result(
+                                            id,
+                                            &blocked_msg,
+                                            true,
+                                            0,
+                                        )
+                                        .await;
+                                        results.push((id.clone(), blocked_msg, true));
+                                        continue;
+                                    }
+                                }
                                 let tool_start = std::time::Instant::now();
                                 match tools
                                     .execute_async_with_filter(name, args.clone(), &tool_filter)
@@ -345,6 +370,17 @@ pub mod processing_loop {
                                             elapsed_ms,
                                         )
                                         .await;
+                                        // ── 缺口 01 集成: 工具调用后 dispatch (AfterToolCall, 触发 ToolGuard+Continuation tier).
+                                        if let Some(h) = hooks {
+                                            let mut hook_ctx = HookContext {
+                                                tool_name: Some(name.clone()),
+                                                tool_args: Some(args.clone()),
+                                                ..Default::default()
+                                            };
+                                            let _ = h
+                                                .dispatch(HookEvent::AfterToolCall, &mut hook_ctx)
+                                                .await;
+                                        }
                                         results.push((id.clone(), output.content, output.is_error));
                                     }
                                     Err(e) => {
@@ -356,6 +392,17 @@ pub mod processing_loop {
                                         let err_content = format!("Error: {e}");
                                         sink.on_tool_result(id, &err_content, true, elapsed_ms)
                                             .await;
+                                        // AfterToolCall 同样 dispatch (错误结果也是结果).
+                                        if let Some(h) = hooks {
+                                            let mut hook_ctx = HookContext {
+                                                tool_name: Some(name.clone()),
+                                                tool_args: Some(args.clone()),
+                                                ..Default::default()
+                                            };
+                                            let _ = h
+                                                .dispatch(HookEvent::AfterToolCall, &mut hook_ctx)
+                                                .await;
+                                        }
                                         results.push((id.clone(), err_content, true));
                                     }
                                 }
@@ -408,6 +455,11 @@ pub mod processing_loop {
                                 tracing::debug!("=== thinking block {i} ===\n{}", trunc(t, 5000));
                             }
                             sink.on_turn_finished(&reason, &turn_usage).await;
+                            // ── 缺口 01 集成: 出口 dispatch (AfterLoopIter, 触发 Continuation+Skill tier).
+                            if let Some(h) = hooks {
+                                let mut hook_ctx = HookContext::default();
+                                let _ = h.dispatch(HookEvent::AfterLoopIter, &mut hook_ctx).await;
+                            }
                             return;
                         }
                     }
@@ -502,5 +554,221 @@ pub mod processing_loop {
         if !blocks.is_empty() {
             conversation.push_message(Message::assistant(blocks));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::{HookHandler, HookResult, HookTier};
+    use crate::provider::types::{CompletionRequest, LlmStreamEvent};
+    use crate::types::{ProviderCapabilities, StopReason};
+    use async_trait::async_trait;
+    use futures::stream;
+
+    /// 计数 hook: 每次 handle 被调都把 (event_name) 推到共享 Vec.
+    /// 用于断言 handle_user_message 触发了几次, 哪些 event.
+    struct CountingHook {
+        name: String,
+        tier: HookTier,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl HookHandler for CountingHook {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn tier(&self) -> HookTier {
+            self.tier
+        }
+        async fn handle(
+            &self,
+            event: HookEvent,
+            _ctx: &mut HookContext,
+        ) -> HookResult {
+            let label = match event {
+                HookEvent::BeforeLoopIter => "BeforeLoopIter",
+                HookEvent::AfterLoopIter => "AfterLoopIter",
+                HookEvent::BeforeToolCall => "BeforeToolCall",
+                HookEvent::AfterToolCall => "AfterToolCall",
+                HookEvent::BeforePromptBuild => "BeforePromptBuild",
+                HookEvent::AfterPromptBuild => "AfterPromptBuild",
+            };
+            self.log.lock().unwrap().push(label.to_string());
+            HookResult::Ok
+        }
+    }
+
+    /// 极简 mock provider: 1 轮返 1 个 Text event + 1 个 Stop, 之后返空流.
+    /// 不实现完整 LlmProvider 行为, 只够触发 turn 结束路径.
+    struct TextOnlyProvider;
+
+    #[async_trait]
+    impl LlmProvider for TextOnlyProvider {
+        fn id(&self) -> &str {
+            "test-text-only"
+        }
+        fn name(&self) -> &str {
+            "TextOnlyProvider"
+        }
+        fn capabilities(&self) -> &ProviderCapabilities {
+            use std::sync::OnceLock;
+            static CAPS: OnceLock<ProviderCapabilities> = OnceLock::new();
+            CAPS.get_or_init(|| ProviderCapabilities {
+                streaming: true,
+                thinking: false,
+                tool_use: false,
+                max_tokens: Some(1024),
+                max_input_tokens: Some(8192),
+                supports_system_prompt: true,
+                supports_cache_control: false,
+                supports_image_input: false,
+            })
+        }
+        async fn stream_completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<LlmStreamEvent, crate::types::LlmError>>,
+            crate::types::LlmError,
+        > {
+            let events: Vec<Result<LlmStreamEvent, crate::types::LlmError>> = vec![
+                Ok(LlmStreamEvent::Text("hello".into())),
+                Ok(LlmStreamEvent::Stop(StopReason::EndTurn)),
+            ];
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// 收集 sink: 啥也不存, 只标记 agent 是否进入 Idle.
+    struct CollectSink {
+        finished: std::sync::Arc<std::sync::Mutex<bool>>,
+    }
+
+    #[async_trait]
+    impl OutputSink for CollectSink {
+        async fn on_status(&self, _msg: &str) {}
+        async fn on_text(&self, _text: &str) {}
+        async fn on_thinking(&self, _text: &str) {}
+        async fn on_tool_call(
+            &self,
+            _id: &str,
+            _name: &str,
+            _args: &serde_json::Value,
+        ) {
+        }
+        async fn on_token_usage(&self, _usage: &TokenUsage) {}
+        async fn on_tool_result(
+            &self,
+            _id: &str,
+            _content: &str,
+            _is_error: bool,
+            _elapsed_ms: u64,
+        ) {
+        }
+        async fn on_turn_finished(&self, _reason: &StopReason, _usage: &TokenUsage) {
+            *self.finished.lock().unwrap() = true;
+        }
+        async fn on_error(&self, _err: &crate::types::LlmError) {}
+    }
+
+    /// 验证: 传 `Some(&HookRegistry)` 时, processing_loop 入口 + 出口各 dispatch 1 次.
+    /// Text-only turn (无 tool call), 期望 BeforeLoopIter + AfterLoopIter 各 1.
+    #[tokio::test]
+    async fn test_handle_user_message_dispatches_entry_and_exit() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let registry = std::sync::Arc::new(HookRegistry::new());
+        registry.register(std::sync::Arc::new(CountingHook {
+            name: "counter-continuation".into(),
+            tier: HookTier::Continuation,
+            log: log.clone(),
+        }));
+
+        let mut agent = AgentLoop::new(AgentConfig {
+            max_turns: 4,
+            max_retries: 0,
+            max_tokens: Some(1024),
+            temperature: None,
+            thinking: crate::types::ThinkingConfig::Disabled,
+            pattern: Default::default(),
+            plan_and_execute: Default::default(),
+            reflective: Default::default(),
+            workflow: Default::default(),
+        });
+        let mut conv = Conversation::new(None);
+        conv.push_user_message(vec![ContentBlock::text("hi")]);
+        let tools = ToolRegistry::new();
+        let finished = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let sink = CollectSink { finished };
+
+        processing_loop::handle_user_message(
+            &mut agent,
+            &mut conv,
+            &TextOnlyProvider,
+            &tools,
+            ToolCategoryFilter::all(),
+            &sink,
+            "",
+            "",
+            "",
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Some(registry.as_ref()),
+        )
+        .await;
+
+        let log_snapshot = log.lock().unwrap().clone();
+        assert!(
+            log_snapshot.iter().any(|e| e == "BeforeLoopIter"),
+            "expected BeforeLoopIter in {log_snapshot:?}"
+        );
+        assert!(
+            log_snapshot.iter().any(|e| e == "AfterLoopIter"),
+            "expected AfterLoopIter in {log_snapshot:?}"
+        );
+    }
+
+    /// 验证: 传 `None` 时, handle_user_message 正常运行, 不 panic, sink 收到 on_turn_finished.
+    /// 这是 plan 9.1.2 的"旧调用方不破坏"契约.
+    #[tokio::test]
+    async fn test_handle_user_message_with_none_hooks_completes() {
+        let mut agent = AgentLoop::new(AgentConfig {
+            max_turns: 4,
+            max_retries: 0,
+            max_tokens: Some(1024),
+            temperature: None,
+            thinking: crate::types::ThinkingConfig::Disabled,
+            pattern: Default::default(),
+            plan_and_execute: Default::default(),
+            reflective: Default::default(),
+            workflow: Default::default(),
+        });
+        let mut conv = Conversation::new(None);
+        conv.push_user_message(vec![ContentBlock::text("hi")]);
+        let tools = ToolRegistry::new();
+        let finished = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let sink = CollectSink {
+            finished: finished.clone(),
+        };
+
+        processing_loop::handle_user_message(
+            &mut agent,
+            &mut conv,
+            &TextOnlyProvider,
+            &tools,
+            ToolCategoryFilter::all(),
+            &sink,
+            "",
+            "",
+            "",
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+        )
+        .await;
+
+        assert!(
+            *finished.lock().unwrap(),
+            "sink should have received on_turn_finished even with hooks=None"
+        );
     }
 }

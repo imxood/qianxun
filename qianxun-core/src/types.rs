@@ -3,15 +3,23 @@ use thiserror::Error;
 
 // ─── LlmError ───────────────────────────────────────────
 
+/// LLM provider 错误. 每个 variant 携带 `kind: LlmErrorKind` (15 种语义分类),
+/// 由 `provider::error_classifier::classify_http_status` 在 HTTP 错误时注入.
+///
+/// `kind` 字段缺省 (如 LlmError 来自反序列化或旧代码) → `LlmErrorKind::default() = Unknown`.
 #[derive(Error, Debug, Clone)]
 pub enum LlmError {
     #[error("API key not configured for provider {provider}")]
-    NoApiKey { provider: String },
+    NoApiKey {
+        provider: String,
+        kind: crate::provider::error_classifier::LlmErrorKind,
+    },
 
     #[error("rate limit exceeded for {provider}: retry after {retry_after:?}")]
     RateLimitExceeded {
         provider: String,
         retry_after: Option<Duration>,
+        kind: crate::provider::error_classifier::LlmErrorKind,
     },
 
     #[error("API error from {provider}: {message}")]
@@ -19,19 +27,88 @@ pub enum LlmError {
         provider: String,
         status: u16,
         message: String,
+        kind: crate::provider::error_classifier::LlmErrorKind,
     },
 
     #[error("authentication failed for {provider}: {message}")]
-    AuthenticationError { provider: String, message: String },
+    AuthenticationError {
+        provider: String,
+        message: String,
+        kind: crate::provider::error_classifier::LlmErrorKind,
+    },
 
     #[error("prompt too large (tokens: {tokens:?})")]
-    PromptTooLarge { tokens: Option<u64> },
+    PromptTooLarge {
+        tokens: Option<u64>,
+        kind: crate::provider::error_classifier::LlmErrorKind,
+    },
 
     #[error("stream ended unexpectedly")]
-    StreamEnded,
+    StreamEnded {
+        kind: crate::provider::error_classifier::LlmErrorKind,
+    },
+}
+
+impl LlmError {
+    /// 取出 `kind` 字段. 已被 `error_classifier::classify_http_status` 注入.
+    /// 老代码构造的 LlmError (没填 kind) → `LlmErrorKind::default() = Unknown`.
+    pub fn kind(&self) -> crate::provider::error_classifier::LlmErrorKind {
+        match self {
+            Self::NoApiKey { kind, .. }
+            | Self::RateLimitExceeded { kind, .. }
+            | Self::ApiError { kind, .. }
+            | Self::AuthenticationError { kind, .. }
+            | Self::PromptTooLarge { kind, .. }
+            | Self::StreamEnded { kind, .. } => *kind,
+        }
+    }
 }
 
 // ─── TokenUsage ──────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::error_classifier::LlmErrorKind;
+
+    /// LlmError::kind() 从任意 variant 提取 kind 字段. 验证 path 不会 panic.
+    #[test]
+    fn test_llm_error_kind_helper_extracts_kind() {
+        let cases: [(LlmError, LlmErrorKind); 3] = [
+            (
+                LlmError::AuthenticationError {
+                    provider: "deepseek".into(),
+                    message: "expired".into(),
+                    kind: LlmErrorKind::Auth,
+                },
+                LlmErrorKind::Auth,
+            ),
+            (
+                LlmError::RateLimitExceeded {
+                    provider: "deepseek".into(),
+                    retry_after: None,
+                    kind: LlmErrorKind::RateLimit,
+                },
+                LlmErrorKind::RateLimit,
+            ),
+            (
+                LlmError::StreamEnded {
+                    kind: LlmErrorKind::Timeout,
+                },
+                LlmErrorKind::Timeout,
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.kind(), expected);
+        }
+    }
+
+    /// LlmErrorKind::default() = Unknown, 跟 serde untagged 兜底一致.
+    #[test]
+    fn test_llm_error_kind_default_is_unknown() {
+        assert_eq!(LlmErrorKind::default(), LlmErrorKind::Unknown);
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {

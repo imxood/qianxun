@@ -95,6 +95,83 @@ impl MemoryCore {
         Ok(affected > 0)
     }
 
+    /// 缺口 05 v0.3 集成: 重建 FTS5 索引 (供后台 IndexBuild 任务用).
+    ///
+    /// 用途: FTS5 触发器同步失败 / 索引腐化后, 一次性清空 + 逐条重填.
+    /// 走 `spawn_blocking` 避免阻塞 tokio reactor.
+    ///
+    /// 实现要点 (Windows FTS5 兼容):
+    /// - 清空索引用 `INSERT INTO obs_fts(obs_fts) VALUES('delete-all')`
+    ///   (FTS5 官方命令, 跳过 obs_ad_fts 触发器尝试从 `old.data` 读 title/narrative
+    ///   导致 "no such column: T.title" 错). 改命令不会触发外部 trigger.
+    /// - 重建用 prepared SELECT + 逐条 INSERT, 显式提供全部 5 列.
+    ///
+    /// 返回重建行数.
+    pub async fn rebuild_index(&self) -> anyhow::Result<usize> {
+        let db = self.db.clone();
+        let count = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = db.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            // FTS5 'delete-all' 命令: 清空索引, 不触发 obs_ad_fts 触发器.
+            conn.execute(
+                "INSERT INTO obs_fts(obs_fts) VALUES('delete-all')",
+                [],
+            )?;
+            // 逐条重建. 走 prepared statement + application-level json_extract.
+            let mut stmt = conn.prepare("SELECT rowid, data FROM observations")?;
+            let mut rows = stmt.query([])?;
+            let mut inserted = 0usize;
+            while let Some(row) = rows.next()? {
+                let rowid: i64 = row.get(0)?;
+                let data: String = row.get(1)?;
+                let title: String = conn
+                    .query_row(
+                        "SELECT COALESCE(json_extract(?1, '$.title'), '')",
+                        rusqlite::params![data],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_default();
+                let narrative: String = conn
+                    .query_row(
+                        "SELECT COALESCE(json_extract(?1, '$.narrative'), '')",
+                        rusqlite::params![data],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_default();
+                let facts: String = conn
+                    .query_row(
+                        "SELECT COALESCE(json_extract(?1, '$.facts'), '[]')",
+                        rusqlite::params![data],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|_| "[]".to_string());
+                let concepts: String = conn
+                    .query_row(
+                        "SELECT COALESCE(json_extract(?1, '$.concepts'), '[]')",
+                        rusqlite::params![data],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|_| "[]".to_string());
+                let files: String = conn
+                    .query_row(
+                        "SELECT COALESCE(json_extract(?1, '$.files'), '[]')",
+                        rusqlite::params![data],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|_| "[]".to_string());
+                conn.execute(
+                    "INSERT INTO obs_fts(rowid, title, narrative, facts, concepts, files) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![rowid, title, narrative, facts, concepts, files],
+                )?;
+                inserted += 1;
+            }
+            Ok(inserted)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("rebuild_index join: {e}"))??;
+        Ok(count)
+    }
+
     /// Stage 7b: 同步删除整个 memory session 及其级联 observations (供
     /// `DELETE /v1/memory/sessions/{id}`). 走 `spawn_blocking`.
     ///

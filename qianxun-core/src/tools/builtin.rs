@@ -1345,3 +1345,121 @@ impl super::AgentTool for MemoryRememberTool {
         })
     }
 }
+
+// ─── DelegateToSubagentTool ───────────────────────────────────
+//
+// 缺口 03 v0.3 集成: 让主 agent 可以委派任务给 subagent.
+// 当前未实现真实 subagent 调度 — 本工具只做"白名单校验 + 任务派发占位",
+// 验证 subagent 工具路径的真实集成 (子 agent 拿到任务后用 check_tool_allowed
+// 校验能否调目标工具).
+//
+// 白名单语义: 调工具时, 必须提供 `tool_name` 字段 (subagent 准备调的工具名).
+// 如果 `tool_name` 不在 subagent 默认白名单 (read_file/glob/grep/list_directory/...)
+// 或为写操作 (write_file/edit_file/delete_file), 返 is_error=true + 拒因.
+
+pub struct DelegateToSubagentTool;
+
+#[async_trait]
+impl super::AgentTool for DelegateToSubagentTool {
+    fn name(&self) -> &str { "delegate_to_subagent" }
+    fn description(&self) -> &str {
+        "把一个只读/受限任务委派给 subagent. subagent 内部走白名单校验 \
+         (默认只读工具集, 禁止写操作). 当前 v0.3 未实现真实调度, 仅做白名单检查 + 占位返回."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "subagent_id": {
+                    "type": "string",
+                    "description": "subagent 标识 (e.g. 'explorer', 'reviewer')"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "委派给 subagent 的任务描述"
+                },
+                "tool_name": {
+                    "type": "string",
+                    "description": "subagent 准备调用的工具名 (用于白名单校验). 必填."
+                }
+            },
+            "required": ["subagent_id", "task", "tool_name"]
+        })
+    }
+    fn category(&self) -> super::ToolCategory { super::ToolCategory::Think }
+    async fn execute(&self, arguments: serde_json::Value) -> Result<super::ToolOutput, super::ToolError> {
+        let subagent_id = arguments.get("subagent_id").and_then(|v| v.as_str())
+            .ok_or_else(|| super::ToolError::InvalidArguments("missing subagent_id".into()))?;
+        let task = arguments.get("task").and_then(|v| v.as_str())
+            .ok_or_else(|| super::ToolError::InvalidArguments("missing task".into()))?;
+        let tool_name = arguments.get("tool_name").and_then(|v| v.as_str())
+            .ok_or_else(|| super::ToolError::InvalidArguments("missing tool_name".into()))?;
+
+        // 构造默认 subagent 上下文 (白名单 + 禁写) 并调 check_tool_allowed.
+        // 缺 03 公共 API 就绪, 校验逻辑 0 行重复.
+        let ctx = crate::subagent::SubAgentContext::new(subagent_id);
+        if let Err(denied) = crate::subagent::check_tool_allowed(&ctx, tool_name) {
+            return Ok(super::ToolOutput {
+                content: format!(
+                    "[subagent:{subagent_id}] 工具 '{tool_name}' 被白名单拒绝: {} (任务: {task})",
+                    denied.reason
+                ),
+                is_error: true,
+            });
+        }
+
+        // 白名单通过 — 真实调度未实现, 返占位结果.
+        Ok(super::ToolOutput {
+            content: format!(
+                "[subagent:{subagent_id}] 任务已接收: '{task}'. 准备调 '{tool_name}'. \
+                 (v0.3 占位: 真实 subagent 调度未实现, 端到端联调留后续 PR.)"
+            ),
+            is_error: false,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::AgentTool;
+    use super::DelegateToSubagentTool;
+
+    /// 缺 03 v0.3 集成测试: delegate_to_subagent 对白名单内只读工具返 is_error=false.
+    /// 走通完整 execute 路径: 构造 SubAgentContext + check_tool_allowed + 占位返回.
+    #[tokio::test]
+    async fn test_delegate_to_subagent_allows_whitelisted_read_tool() {
+        let tool = DelegateToSubagentTool;
+        let args = serde_json::json!({
+            "subagent_id": "explorer",
+            "task": "列出 src 下的 .rs 文件",
+            "tool_name": "read_file"
+        });
+        let out = tool.execute(args).await.expect("execute ok");
+        assert!(!out.is_error, "read_file should be allowed: {}", out.content);
+        assert!(
+            out.content.contains("explorer") && out.content.contains("read_file"),
+            "output should mention subagent id and tool: {out:?}"
+        );
+    }
+
+    /// 缺 03 v0.3 集成测试: delegate_to_subagent 对非白名单/写操作工具返 is_error=true.
+    /// 验证白名单校验真的在 execute 路径里被调, 不是只声明.
+    #[tokio::test]
+    async fn test_delegate_to_subagent_denies_write_tool() {
+        let tool = DelegateToSubagentTool;
+        let args = serde_json::json!({
+            "subagent_id": "explorer",
+            "task": "覆盖 config.toml",
+            "tool_name": "write_file"
+        });
+        let out = tool.execute(args).await.expect("execute ok");
+        assert!(
+            out.is_error,
+            "write_file should be denied by subagent whitelist: {out:?}"
+        );
+        assert!(
+            out.content.contains("拒绝") || out.content.contains("not_in_whitelist"),
+            "denial reason should be visible: {out:?}"
+        );
+    }
+}

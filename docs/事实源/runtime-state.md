@@ -36,6 +36,18 @@ qianxun-runtime/src/
 
 `qianxun-runtime/src/api/trait_def.rs` 定义 17 个方法,`core.rs` blanket `impl RuntimeApi for Arc<RuntimeState>`。
 
+> 2026-06-12 v0.3 集成层注脚 (Stage 7-11):
+> - `send_message` 触发 LlmError 时 `SseEvent::Error.code` 走 `LlmErrorKind` (15 变体 snake_case 序列化)
+> - `send_message` 在 matched_skills 注入后调 `state.lifecycle.record_usage` (缺口 04 v0.3)
+> - `send_message` spawn processing_loop 时传 `state.hooks` 给 `handle_user_message` (缺口 01 v0.3)
+> - `start_background_task` 自动 spawn 真实 ops: IndexBuild 走 `memory.rebuild_index`; MemoryFlush/SkillReload 当前 no-op stub (P1)
+>
+> 2026-06-12 v0.3 缺口 12 注脚:
+> - `state.provider: Arc<dyn LlmProvider>` **实际类型是 `ProviderStack`** (缺口 12 引入), 对外保持 `Arc<dyn LlmProvider>` 不变以兼容下游 caller.
+> - `ProviderStack` 内部走 Layer 1 (同 provider retry, 指数 backoff) + Layer 2 (切 fallback), 全部失败返 `LlmError::ApiError { kind: AllProvidersFailed, .. }`.
+> - 启动时遍历 `config.providers` HashMap 构造 stack: primary = `active_provider`, fallbacks = 其它 (按 HashMap 迭代顺序, **不保证稳定**).
+> - 空 `api_key` 的 provider 在 `ProviderStack::new` 内部被过滤, 不会出现在 fallbacks.
+
 | 方法 | 签名 | 备注 |
 |---|---|---|
 | `list_sessions` | `(filter: SessionFilter) -> ListSessionsResponse` | filter: `active` / `paused` / `stored` / `all` |
