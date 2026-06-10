@@ -15,6 +15,7 @@
 //   - 类型分文件: types.rs 收口 request/response 结构体, 5 个方法文件各 1 个
 //   - impl 块在 core.rs, 业务逻辑 1:1 搬 daemon router (sub-task #3 不改业务, 只搬位置)
 
+pub mod background_task;
 pub mod cancel;
 pub mod error;
 pub mod load;

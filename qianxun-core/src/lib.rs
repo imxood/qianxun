@@ -6,5 +6,7 @@ pub mod agent;
 pub mod provider;
 pub mod tools;
 pub mod context;
+pub mod subagent;
 pub mod skills;
+pub mod hooks;
 pub mod mcp;

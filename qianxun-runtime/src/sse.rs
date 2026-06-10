@@ -86,6 +86,34 @@ pub enum SseEvent {
 
     #[serde(rename = "error")]
     Error { code: String, message: String },
+
+    // ─── 缺口 05: 后台异步任务事件 (Stage 5 新增) ─────
+
+    #[serde(rename = "background_task_started")]
+    BackgroundTaskStarted {
+        task_id: String,
+        task_kind: String,
+        started_at: i64,
+    },
+
+    #[serde(rename = "background_task_updated")]
+    BackgroundTaskUpdated {
+        task_id: String,
+        status: String,
+        progress: Option<f64>,
+        message: Option<String>,
+        updated_at: i64,
+    },
+
+    #[serde(rename = "background_task_cancelled")]
+    BackgroundTaskCancelled { task_id: String, reason: String },
+
+    #[serde(rename = "background_task_completed")]
+    BackgroundTaskCompleted {
+        task_id: String,
+        result: serde_json::Value,
+        completed_at: i64,
+    },
 }
 
 impl SseEvent {
@@ -110,6 +138,10 @@ impl SseEvent {
             SseEvent::MessageDelta { .. } => "message_delta",
             SseEvent::MessageStop => "message_stop",
             SseEvent::Error { .. } => "error",
+            SseEvent::BackgroundTaskStarted { .. } => "background_task_started",
+            SseEvent::BackgroundTaskUpdated { .. } => "background_task_updated",
+            SseEvent::BackgroundTaskCancelled { .. } => "background_task_cancelled",
+            SseEvent::BackgroundTaskCompleted { .. } => "background_task_completed",
         }
     }
 }

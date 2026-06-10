@@ -113,4 +113,58 @@ pub trait RuntimeApi: Send + Sync {
         &self,
         req: UpdateProviderRequest,
     ) -> RuntimeApiResult<()>;
+
+    // ─── 缺口 05: 后台异步任务方法 (Stage 5 新增) ───
+
+    /// 启动一个后台任务 (e.g. 索引构建 / 记忆压缩 / 长 prompt).
+    ///
+    /// 业务 (跟 qianxun-runtime/src/background_task.rs 1:1):
+    /// 1. 生成 task_id (`bgt_<counter>`)
+    /// 2. 当前 running < 5 → 直接 Running; 否则 Pending FIFO
+    /// 3. 返 TaskInfo (含 status / created_at)
+    ///
+    /// 错误: 暂无 (内部生成 ID, 不需要外部校验).
+    async fn start_background_task(
+        &self,
+        task_kind: String,
+        opts: serde_json::Value,
+    ) -> RuntimeApiResult<crate::background_task::TaskInfo>;
+
+    /// 拿后台任务详情.
+    ///
+    /// 错误: NotFound — task_id 不存在.
+    async fn get_background_task(
+        &self,
+        task_id: &str,
+    ) -> RuntimeApiResult<crate::background_task::TaskInfo>;
+
+    /// 取消后台任务 (任意非终态).
+    ///
+    /// 错误:
+    /// - NotFound — task_id 不存在
+    /// - InvalidRequest — 任务已在终态 (Cancelled / Done)
+    async fn cancel_background_task(
+        &self,
+        task_id: &str,
+        reason: String,
+    ) -> RuntimeApiResult<()>;
+
+    /// 恢复 Paused 任务 → Running.
+    ///
+    /// 错误:
+    /// - NotFound
+    /// - InvalidRequest — 当前状态不是 Paused
+    async fn resume_background_task(
+        &self,
+        task_id: &str,
+    ) -> RuntimeApiResult<()>;
+
+    /// 列后台任务, 可选 status 过滤.
+    ///
+    /// filter = None → 全部; filter = Some(Pending) → 只返 Pending 的.
+    /// 按 created_at 升序 (FIFO 顺序).
+    async fn list_background_tasks(
+        &self,
+        filter: Option<crate::background_task::TaskStatus>,
+    ) -> RuntimeApiResult<Vec<crate::background_task::TaskInfo>>;
 }

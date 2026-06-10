@@ -16,6 +16,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::api::background_task::{
+    cancel_background_task_impl, get_background_task_impl, list_background_tasks_impl,
+    resume_background_task_impl, start_background_task_impl,
+};
 use crate::api::cancel::cancel_session_impl;
 use crate::api::error::RuntimeApiResult;
 use crate::api::load::load_session_impl;
@@ -30,6 +34,7 @@ use crate::api::types::{
     CreateSessionRequest, ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse,
     SessionFilter, SessionInfo, SessionState, UpdateProviderRequest,
 };
+use crate::background_task::{TaskInfo, TaskStatus};
 use crate::sse::SseEvent;
 use crate::state::RuntimeState;
 
@@ -101,6 +106,45 @@ impl RuntimeApi for Arc<RuntimeState> {
         req: UpdateProviderRequest,
     ) -> RuntimeApiResult<()> {
         update_active_provider_impl(self.clone(), req).await
+    }
+
+    // ─── 缺口 05: 后台异步任务方法 (Stage 5 新增) ───
+
+    async fn start_background_task(
+        &self,
+        task_kind: String,
+        opts: serde_json::Value,
+    ) -> RuntimeApiResult<TaskInfo> {
+        start_background_task_impl(self.clone(), task_kind, opts).await
+    }
+
+    async fn get_background_task(
+        &self,
+        task_id: &str,
+    ) -> RuntimeApiResult<TaskInfo> {
+        get_background_task_impl(self.clone(), task_id).await
+    }
+
+    async fn cancel_background_task(
+        &self,
+        task_id: &str,
+        reason: String,
+    ) -> RuntimeApiResult<()> {
+        cancel_background_task_impl(self.clone(), task_id, reason).await
+    }
+
+    async fn resume_background_task(
+        &self,
+        task_id: &str,
+    ) -> RuntimeApiResult<()> {
+        resume_background_task_impl(self.clone(), task_id).await
+    }
+
+    async fn list_background_tasks(
+        &self,
+        filter: Option<TaskStatus>,
+    ) -> RuntimeApiResult<Vec<TaskInfo>> {
+        list_background_tasks_impl(self.clone(), filter).await
     }
 }
 

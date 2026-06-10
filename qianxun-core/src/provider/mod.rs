@@ -1,5 +1,6 @@
 pub mod anthropic_compat;
 pub mod deepseek;
+pub mod error_classifier;
 pub mod types;
 
 use crate::config::ResolvedProviderConfig;

@@ -21,12 +21,14 @@ use qianxun_memory::MemoryCore;
 
 use crate::agent_host::{AgentLoopHost, SharedState};
 use crate::api::plans::PlanStore;
+use crate::background_task::BackgroundTaskManager;
 use crate::persistence::SessionStore;
 
-/// 千寻运行时核心状态 — 10 核心字段, 跨桌面 / daemon 共享.
+/// 千寻运行时核心状态 — 11 核心字段, 跨桌面 / daemon 共享.
 ///
-/// 字段变更 (Stage 4a sub-task #3):
+/// 字段变更:
 ///   - 新增 `plans: Arc<PlanStore>` — in-memory plan store (RuntimeApi plans impl 用)
+///   - 新增 `background_tasks: Arc<BackgroundTaskManager>` — 后台任务管理 (Stage 5 缺口 05)
 ///   - 之前 9 字段不变
 pub struct RuntimeState {
     /// 内部 session 生命周期管理. **pub(crate)** — 外部禁止直接访问, 必须走 RuntimeApi trait.
@@ -41,6 +43,8 @@ pub struct RuntimeState {
     pub shared: Arc<SharedState>,
     pub store: Arc<SessionStore>,
     pub plans: Arc<PlanStore>,
+    /// 缺口 05: 后台任务管理器 (FIFO + 状态机)
+    pub background_tasks: Arc<BackgroundTaskManager>,
     pub shutdown_tx: watch::Sender<()>,
     /// 2026-06-09 加: restore_from_disk 懒初始化标志 (OnceCell 模式).
     /// build() 同步不调 restore_from_disk (它跑 5-15s 同步 SQLite, 阻塞 webview 启动).
@@ -184,6 +188,7 @@ impl RuntimeState {
             shared,
             store,
             plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            background_tasks: Arc::new(BackgroundTaskManager::new()),
             shutdown_tx,
             restored: Arc::new(AtomicBool::new(false)),
         }))
@@ -229,6 +234,7 @@ impl RuntimeState {
             shared,
             store,
             plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            background_tasks: Arc::new(BackgroundTaskManager::new()),
             shutdown_tx,
             restored: Arc::new(AtomicBool::new(false)),
         })

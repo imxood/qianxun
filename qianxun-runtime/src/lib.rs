@@ -6,6 +6,7 @@
 
 pub mod agent_host;
 pub mod api;
+pub mod background_task;
 pub mod core;
 pub mod output_sink;
 pub mod persistence;

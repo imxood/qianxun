@@ -18,6 +18,7 @@
 //   - Tauri command macro 必须在函数定义处, 不能 pub use 跨文件传递 (跟 sub-task #2 同坑)
 //   - lib.rs invoke_handler 用 `commands::runtime::sessions::list_sessions` 完整路径
 
+pub mod background;
 pub mod cancel;
 pub mod load;
 pub mod plans;

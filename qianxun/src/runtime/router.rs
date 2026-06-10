@@ -171,6 +171,18 @@ pub fn build_router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/v1/auth/login", post(auth_login))
         .route("/v1/auth/change-password", post(auth_change_password))
         .route("/v1/auth/logout", post(auth_logout))
+        // Stage 5 (缺口 05): 后台异步任务 — 5 endpoint
+        //  - POST /v1/background-tasks              启动
+        //  - GET  /v1/background-tasks              列表 (支持 ?status=running)
+        //  - GET  /v1/background-tasks/{id}         详情
+        //  - DELETE /v1/background-tasks/{id}       取消 (?reason=...)
+        //  - POST /v1/background-tasks/{id}/resume  恢复
+        .route("/v1/background-tasks", post(bgt_start).get(bgt_list))
+        .route(
+            "/v1/background-tasks/{id}",
+            get(bgt_get).delete(bgt_cancel),
+        )
+        .route("/v1/background-tasks/{id}/resume", post(bgt_resume))
         // 未知 path 返 404 JSON (而不是被 auth 拦成 401)
         .fallback(not_found_handler)
         .with_state(state.clone());
@@ -1607,6 +1619,10 @@ mod e2e_tests {
                 SseEvent::MessageDelta { .. } => "message_delta",
                 SseEvent::MessageStop => "message_stop",
                 SseEvent::Error { .. } => "error",
+                SseEvent::BackgroundTaskStarted { .. } => "background_task_started",
+                SseEvent::BackgroundTaskUpdated { .. } => "background_task_updated",
+                SseEvent::BackgroundTaskCancelled { .. } => "background_task_cancelled",
+                SseEvent::BackgroundTaskCompleted { .. } => "background_task_completed",
             })
             .collect();
         assert_eq!(
@@ -3665,6 +3681,134 @@ mod stage9c_csp_tests {
             response.headers().contains_key("content-security-policy"),
             "CSP missing on /"
         );
+    }
+}
+
+// ─── Stage 5 (缺口 05): 后台异步任务 HTTP handler ───
+
+use std::collections::HashMap;
+use qianxun_runtime::background_task::TaskStatus;
+
+/// POST /v1/background-tasks — 启动后台任务.
+async fn bgt_start(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    let task_kind = req
+        .get("task_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("custom")
+        .to_string();
+    let opts = req.get("opts").cloned().unwrap_or(serde_json::json!({}));
+    match state
+        .runtime
+        .start_background_task(task_kind, opts)
+        .await
+    {
+        Ok(info) => (StatusCode::CREATED, Json(serde_json::to_value(&info).unwrap_or_default()))
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.http_status(), "message": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /v1/background-tasks — 列表, 支持 ?status=pending|running|paused|cancelled|done.
+async fn bgt_list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let filter = params
+        .get("status")
+        .and_then(|s| match s.as_str() {
+            "pending" => Some(TaskStatus::Pending),
+            "running" => Some(TaskStatus::Running),
+            "paused" => Some(TaskStatus::Paused),
+            "cancelled" => Some(TaskStatus::Cancelled),
+            "done" => Some(TaskStatus::Done),
+            _ => None,
+        });
+    match state.runtime.list_background_tasks(filter).await {
+        Ok(tasks) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"tasks": tasks})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.http_status(), "message": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /v1/background-tasks/{id} — 详情.
+async fn bgt_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match state.runtime.get_background_task(&id).await {
+        Ok(info) => (StatusCode::OK, Json(serde_json::to_value(&info).unwrap_or_default()))
+            .into_response(),
+        Err(e) if matches!(e, qianxun_runtime::api::RuntimeApiError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "404", "message": e.to_string()})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.http_status(), "message": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /v1/background-tasks/{id}?reason=... — 取消.
+async fn bgt_cancel(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let reason = params
+        .get("reason")
+        .cloned()
+        .unwrap_or_else(|| "user_cancelled".to_string());
+    match state.runtime.cancel_background_task(&id, reason).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"cancelled": id}))).into_response(),
+        Err(e) if matches!(e, qianxun_runtime::api::RuntimeApiError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "404", "message": e.to_string()})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::from_u16(e.http_status().parse().unwrap_or(500))
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(serde_json::json!({"error": e.http_status(), "message": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /v1/background-tasks/{id}/resume — 恢复 Paused 任务.
+async fn bgt_resume(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match state.runtime.resume_background_task(&id).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"resumed": id}))).into_response(),
+        Err(e) if matches!(e, qianxun_runtime::api::RuntimeApiError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "404", "message": e.to_string()})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::from_u16(e.http_status().parse().unwrap_or(500))
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(serde_json::json!({"error": e.http_status(), "message": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
