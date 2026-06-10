@@ -1,6 +1,6 @@
 # 缺口 01: Hook 退出码与熔断
 
-> 状态: 草稿 (待 code review) | 适用范围: qianxun-core / qianxun-runtime | 最后更新: 2026-06-10 | 版本: v0.1
+> 状态: 已实现 (v0.2, 12 单测 passed) | 适用范围: qianxun-core / qianxun-runtime | 最后更新: 2026-06-11 | 版本: v0.2
 
 ## 借鉴源
 

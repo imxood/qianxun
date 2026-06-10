@@ -1,6 +1,6 @@
 # 缺口 07: Hook 五层 Tier
 
-> 状态: 草稿 (待 code review) | 适用范围: qianxun-core | 最后更新: 2026-06-11 | 版本: v0.1
+> 状态: 待 code review | 适用范围: qianxun-core | 最后更新: 2026-06-11 | 版本: v0.2
 > **⚠️ 重建说明**: 本文档因 H4 修复脚本误操作 + git restore 删除后重建, 内容精简, 完整接口见 [`../规范/16_接口契约汇总.md`](../规范/16_接口契约汇总.md)。
 
 ## 借鉴源
@@ -52,6 +52,37 @@ pub struct HookRegistry {
 
 - 跟 [缺口 01](./01_Hook退出码与熔断.md) 共享 `HookStats` + circuit breaker
 - 5 tier 跟 builtin/ 6 个 handler 一一标注 (各 handler 选 1 个 tier)
+
+### 7.4 跟缺口 01 联动 (HookStats + 熔断共享)
+
+```rust
+// qianxun-core/src/hooks/tier.rs (跟 registry.rs 共享)
+pub struct HookStats {
+    pub success_count: AtomicU64,
+    pub failure_count: AtomicU64,
+    pub consecutive_failures: AtomicU32,  // 缺口 01 熔断器读这个
+    pub circuit_state: AtomicU8,           // 0=Closed, 1=Open, 2=HalfOpen
+    pub last_failure_at: AtomicI64,        // unix timestamp
+}
+
+// 缺口 01 的熔断逻辑: 3 次连续 recoverable=false → Open
+impl HookStats {
+    pub fn record_failure(&self, recoverable: bool) {
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
+        if !recoverable {
+            let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+            if prev + 1 >= 3 {
+                self.circuit_state.store(1, Ordering::Relaxed);  // Open
+            }
+        }
+    }
+}
+```
+
+**单测覆盖** (跟缺口 01 共享测试 fixture):
+- `test_tier_records_failure_shared_with_circuit_breaker`
+- `test_tier_5_builtin_handlers_each_in_distinct_tier`
+- `test_tier_event_matrix_matches_spec`
 
 ## 文件改动
 

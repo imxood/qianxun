@@ -34,7 +34,7 @@ qianxun-runtime/src/
 
 ## 公开 API (RuntimeApi trait)
 
-`qianxun-runtime/src/api/trait_def.rs:35-79` 定义 10 个方法,`core.rs:41-76` blanket `impl RuntimeApi for Arc<RuntimeState>`。
+`qianxun-runtime/src/api/trait_def.rs` 定义 17 个方法,`core.rs` blanket `impl RuntimeApi for Arc<RuntimeState>`。
 
 | 方法 | 签名 | 备注 |
 |---|---|---|
@@ -50,6 +50,11 @@ qianxun-runtime/src/
 | `resume_session` | `(session_id) -> ()` | 清 paused (2026-06-09 加) |
 | `update_active_provider` | `(req: UpdateProviderRequest) -> ()` | 写 `~/.qianxun/config.json` (原子), **不热替换**, 需重启 desktop (2026-06-09 加) |
 | `load_session` | `(session_id) -> SessionState` | 含 `conversation_json` |
+| `start_background_task` | `(task_kind, opts) -> TaskInfo` | **缺口 05**:FIFO + 状态机 |
+| `get_background_task` | `(task_id) -> TaskInfo` | 详情 |
+| `cancel_background_task` | `(task_id, reason) -> ()` | 任意非终态 |
+| `resume_background_task` | `(task_id) -> ()` | Paused → Running |
+| `list_background_tasks` | `(filter) -> Vec<TaskInfo>` | 可选 status 过滤 |
 
 **RuntimeState 内部字段**:
 - `agent_host: pub(crate)` — 外部禁止直接访问, 必须走 RuntimeApi trait

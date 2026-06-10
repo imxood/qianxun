@@ -63,7 +63,7 @@ qianxun-desktop/
 
 ## Tauri command 全表
 
-`qianxun-desktop/src-tauri/src/lib.rs:56-69` `generate_handler!` 注册 14 个 (2026-06-09 增 4 个)。
+`qianxun-desktop/src-tauri/src/lib.rs:56-69` `generate_handler!` 注册 18 个 (2026-06-09 增 4 个, 2026-06-11 缺口 05 增 4 个 background task command, **注册到 generate_handler 待 lib.rs 接入**)。
 
 | Command | 文件:行 | 状态 | 说明 |
 |---|---|---|---|
@@ -84,6 +84,10 @@ qianxun-desktop/
 | `load_session` | `runtime/load.rs:16-25` | **真** | 委托 `RuntimeApi::load_session` |
 | `update_active_provider` | `runtime/sessions.rs` 尾部 | **真** | 委托 RuntimeApi (2026-06-09 加) |
 | **`list_plans`** | (缺失) | **P0 漏接** | `RuntimeApi` trait 有,Tauri 无 command,前端无 invoke |
+| `start_background_task` | `runtime/background.rs:36-46` | **真** | 缺口 05: 委托 RuntimeApi |
+| `list_background_tasks` | `runtime/background.rs:49-69` | **真** | 缺口 05: 委托 RuntimeApi |
+| `cancel_background_task` | `runtime/background.rs:72-82` | **真** | 缺口 05: 委托 RuntimeApi |
+| `resume_background_task` | `runtime/background.rs:85-93` | **真** | 缺口 05: 委托 RuntimeApi |
 
 ## 端到端链路 (Svelte 5 → LLM 流式响应)
 
