@@ -35,7 +35,7 @@
 - **Mode A**: 桌面 Tauri webview, Svelte 5 → Tauri IPC invoke → qianxun-runtime API (in-process, 类型安全)
 - **Mode B**: `--acp` stdio 协议 (复用现有 `qianxun/src/acp/`)
 
-详细决策: `docs/30_决策/ADR-0003_desktop_2mode.md`
+详细决策: `docs/决策/ADR-0003_desktop_2mode.md`
 
 **Supersedes**: ADR-0002 (daemon design chat-first) **整篇** (2026-06-09 文件已删除)
 
@@ -46,7 +46,7 @@
 | Tauri 端 | `qianxun-desktop/src/lib/` (Svelte 5) + `qianxun-desktop/src-tauri/src/` (Rust) |
 | Runtime 端 | `qianxun-runtime/src/api/` (RuntimeApi) + `state.rs` + `agent_host.rs` |
 | Core 端 | `qianxun-core/src/agent/engine.rs` (AgentLoop) |
-| 事实源 | `docs/10_事实源/runtime-state.md`, `desktop-state.md` |
+| 事实源 | `docs/事实源/runtime-state.md`, `desktop-state.md` |
 
 ## 依赖策略
 
@@ -81,10 +81,14 @@
 | 目录 | 职责 |
 |---|---|
 | `docs/README.md` | 文档总入口 |
-| `docs/10_事实源/` | 子系统真实状态 (runtime-state, desktop-state) |
-| `docs/30_决策/` | 长期架构决策 (ADR) |
-| `docs/30_子项目规划/` | 跨 Track 规划 (04b tauri-runtime 集成, 04c runtime 抽取, _shared-contract, 00-RUNNING-GUIDE) |
-| `docs/40_经验/` | 实施经验与最近 4 阶段收尾 |
+| `docs/事实源/` | 子系统真实状态 (runtime-state, desktop-state) |
+| `docs/设计/` | 整体架构 (总设计 + agent_loop_v2 + 14 缺口全景) |
+| `docs/设计/能力层/` | 14 个独立缺口文档 (01-14_*.md) |
+| `docs/设计/规范/` | 4 份跨缺口规范 (15-18: 文件层级/接口契约/异常路径/可观测性) |
+| `docs/设计/TODO/` | 阶段性 TODO/工作项 (含 2026-06-11_v2_缺口补齐_14项/) |
+| `docs/决策/` | 长期架构决策 (ADR) |
+| `docs/子项目规划/` | 跨 Track 规划 (04b tauri-runtime 集成, 04c runtime 抽取, _shared-contract, 00-RUNNING-GUIDE) |
+| `docs/经验/` | 实施经验与最近 4 阶段收尾 |
 
 ## 构建顺序
 
@@ -97,7 +101,7 @@
 | 3c | ✅ | Daemon HTTP 骨架 |
 | 3d | ✅ | 独立 TUI (ratatui + 脏标记渲染) |
 | 4a-1 | ✅ | qianxun-runtime 抽取 + Tauri 集成 + Svelte 切真后端 |
-| **4a-2** | 🟡 | **当前**: 用户手动 E2E 验收 (见 40_经验/Phase_ABCD_收尾总览) |
+| **4a-2** | 🟡 | **当前**: 用户手动 E2E 验收 (见 经验/Phase_ABCD_收尾总览) |
 
 ## 开发命令
 
@@ -109,11 +113,13 @@ cd qianxun-desktop && pnpm tauri dev   # 启桌面端 (需 DEEPSEEK_API_KEY)
 cargo run -- --help               # 查看 CLI 帮助
 ```
 
-## 当前 P0 缺口 (按优先级)
+## 当前 P0 收尾 (4a-2 阶段, 按优先级)
+
+> 注意: 这跟 [设计/TODO/2026-06-11_v2_缺口补齐_14项/](./docs/设计/TODO/2026-06-11_v2_缺口补齐_14项/) 的 14 缺口 P0 (02/01/04/03/05) 是**两套独立 P0**, 不要混淆。
 
 1. **用户手动 E2E 验收** (6 步清单, 关键)
 2. **sub_session 后端实现**
 3. **list_plans Tauri command 注册**
 4. **project.svelte.ts 后端实现**
 
-详细缺口列表见 `docs/10_事实源/runtime-state.md` 和 `desktop-state.md` 的 "已知缺口" 段。
+详细缺口列表见 `docs/事实源/runtime-state.md` 和 `desktop-state.md` 的 "已知缺口" 段。

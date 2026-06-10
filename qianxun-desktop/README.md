@@ -1,13 +1,13 @@
 # 千寻 Tauri 桌面端
 
 > 千寻 (Qianxun) 三大前端形态之一: Tauri 桌面 (Track C).
-> 设计详见 `docs/30_子项目规划/04b-tauri-runtime-integration.md`.
-> 状态: `docs/10_事实源/desktop-state.md`
+> 设计详见 `docs/子项目规划/04b-tauri-runtime-integration.md`.
+> 状态: `docs/事实源/desktop-state.md`
 
 ## 当前状态: **4a-1 收尾** (2026-06-08)
 
 Tauri 2.x + Svelte 5 桌面端,通过 Tauri IPC invoke 调 `qianxun-runtime` API (in-process, 零网络)。
-具体状态见 [desktop-state.md](../docs/10_事实源/desktop-state.md),包括 10 个 Tauri command、11 个 Svelte store、端到端链路、P0/P1 缺口。
+具体状态见 [desktop-state.md](../docs/事实源/desktop-state.md),包括 10 个 Tauri command、11 个 Svelte store、端到端链路、P0/P1 缺口。
 
 ## 技术栈
 
@@ -44,15 +44,15 @@ Svelte 5 ChatView button
   ← Svelte 反应式重渲染
 ```
 
-详见 [desktop-state.md](../docs/10_事实源/desktop-state.md) "端到端链路" 段。
+详见 [desktop-state.md](../docs/事实源/desktop-state.md) "端到端链路" 段。
 
 ## 关联文档
 
-- **状态**: [`docs/10_事实源/desktop-state.md`](../docs/10_事实源/desktop-state.md)
-- **集成规划**: [`docs/30_子项目规划/04b-tauri-runtime-integration.md`](../docs/30_子项目规划/04b-tauri-runtime-integration.md)
-- **契约**: [`docs/30_子项目规划/_shared-contract.md`](../docs/30_子项目规划/_shared-contract.md)
-- **当前决策**: [`docs/30_决策/ADR-0003_desktop_2mode.md`](../docs/30_决策/ADR-0003_desktop_2mode.md)
-- **实施经验**: [`docs/40_经验/2026-06-08_04b_subtask_{2,3,4}_*.md`](../docs/40_经验/)
+- **状态**: [`docs/事实源/desktop-state.md`](../docs/事实源/desktop-state.md)
+- **集成规划**: [`docs/子项目规划/04b-tauri-runtime-integration.md`](../docs/子项目规划/04b-tauri-runtime-integration.md)
+- **契约**: [`docs/子项目规划/_shared-contract.md`](../docs/子项目规划/_shared-contract.md)
+- **当前决策**: [`docs/决策/ADR-0003_desktop_2mode.md`](../docs/决策/ADR-0003_desktop_2mode.md)
+- **实施经验**: [`docs/经验/2026-06-08_04b_subtask_{2,3,4}_*.md`](../docs/经验/)
 
 ## 当前 P0 缺口
 

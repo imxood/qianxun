@@ -4,16 +4,17 @@
 
 ## 核心入口
 
-- **架构事实源**: [10_事实源/架构/](10_事实源/架构/) — AgentLoop v2 设计 (HookRegistry + 双轴模式)
-- **设计补齐目录**: [设计/](设计/) — 14 个独立设计缺口文档 (P0 5 + P1 9)
-- **当前架构决策**: [ADR-0003: 桌面 + ACP 同进程 2-Mode 互斥](30_决策/ADR-0003_desktop_2mode.md)
-- **qianxun-runtime 子系统状态**: [10_事实源/runtime-state.md](10_事实源/runtime-state.md)
-- **qianxun-desktop 子系统状态**: [10_事实源/desktop-state.md](10_事实源/desktop-state.md)
-- **Tauri + Runtime 集成规划**: [30_子项目规划/04b-tauri-runtime-integration.md](30_子项目规划/04b-tauri-runtime-integration.md)
-- **qianxun-runtime 抽取设计**: [30_子项目规划/04c-qianxun-runtime-extraction.md](30_子项目规划/04c-qianxun-runtime-extraction.md)
-- **跨 Track 契约**: [30_子项目规划/_shared-contract.md](30_子项目规划/_shared-contract.md)
-- **运行指南**: [30_子项目规划/00-RUNNING-GUIDE.md](30_子项目规划/00-RUNNING-GUIDE.md)
-- **最近 4 阶段收尾**: [40_经验/2026-06-08_Phase_ABCD_收尾总览.md](40_经验/2026-06-08_Phase_ABCD_收尾总览.md)
+- **总设计**: [设计/总设计.md](设计/总设计.md) — 千寻整体架构 + 14 缺口整合 + 4 集成点
+- **v2 基础设施**: [设计/agent_loop_v2.md](设计/agent_loop_v2.md) — HookRegistry + 双轴模式 + SubAgent
+- **14 缺口全景**: [设计/00_总览.md](设计/00_总览.md) — P0 5 + P1 9 个生产级能力
+- **当前架构决策**: [ADR-0003: 桌面 + ACP 同进程 2-Mode 互斥](决策/ADR-0003_desktop_2mode.md)
+- **qianxun-runtime 子系统状态**: [事实源/runtime-state.md](事实源/runtime-state.md)
+- **qianxun-desktop 子系统状态**: [事实源/desktop-state.md](事实源/desktop-state.md)
+- **Tauri + Runtime 集成规划**: [子项目规划/04b-tauri-runtime-integration.md](子项目规划/04b-tauri-runtime-integration.md)
+- **qianxun-runtime 抽取设计**: [子项目规划/04c-qianxun-runtime-extraction.md](子项目规划/04c-qianxun-runtime-extraction.md)
+- **跨 Track 契约**: [子项目规划/_shared-contract.md](子项目规划/_shared-contract.md)
+- **运行指南**: [子项目规划/00-RUNNING-GUIDE.md](子项目规划/00-RUNNING-GUIDE.md)
+- **最近 4 阶段收尾**: [经验/2026-06-08_Phase_ABCD_收尾总览.md](经验/2026-06-08_Phase_ABCD_收尾总览.md)
 
 ## 设计基线
 
@@ -52,11 +53,14 @@ qianxun/                  # workspace 根
 
 | 目录 | 职责 |
 |---|---|
-| `10_事实源/` | 子系统真实状态 (runtime, desktop) + 架构设计 (架构/) |
-| `20_工作项/` | 阶段性工作上下文 |
-| `30_决策/` | 长期架构决策 (ADR) |
-| `30_子项目规划/` | 跨 Track 规划和运行指南 |
-| `40_经验/` | 实施经验与收尾记录 |
+| `事实源/` | 子系统真实状态 (runtime, desktop) |
+| `设计/` | 设计事实源 (总设计 + agent_loop_v2 + 14 缺口全景) |
+| `设计/能力层/` | 14 个独立缺口文档 (01-14_*.md) |
+| `设计/规范/` | 4 份跨缺口规范 (15-18: 文件层级/接口契约/异常路径/可观测性) |
+| `设计/TODO/` | 阶段性 TODO/工作项 |
+| `决策/` | 长期架构决策 (ADR) |
+| `子项目规划/` | 跨 Track 规划和运行指南 |
+| `经验/` | 实施经验与收尾记录 |
 
 ## 当前状态 (2026-06-09)
 
@@ -67,11 +71,11 @@ qianxun/                  # workspace 根
 | 3c | ✅ | Daemon HTTP 骨架 |
 | 3d | ✅ | 独立 TUI (ratatui) |
 | 4a-1 | ✅ | qianxun-runtime crate 抽取 + RuntimeApi 收口 + Tauri 集成 + Svelte 切真后端 |
-| 4a-2 | 🟡 | **当前**:用户手动 E2E 验收 6 步 (见 40_经验/Phase_ABCD_收尾总览) |
+| 4a-2 | 🟡 | **当前**:用户手动 E2E 验收 6 步 (见 经验/Phase_ABCD_收尾总览) |
 
 ## 后续工作 (Phase E)
 
-参考 [40_经验/2026-06-08_Phase_ABCD_收尾总览.md](40_经验/2026-06-08_Phase_ABCD_收尾总览.md) "用户后续工作 (Phase E)" 章节。简要:
+参考 [经验/2026-06-08_Phase_ABCD_收尾总览.md](经验/2026-06-08_Phase_ABCD_收尾总览.md) "用户后续工作 (Phase E)" 章节。简要:
 
 1. **P0-1**: 用户手动跑 6 步 E2E 验收(关键)
 2. **P0-2**: sub_session 后端实现
