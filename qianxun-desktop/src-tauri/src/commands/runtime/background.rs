@@ -38,14 +38,22 @@ pub async fn list_background_tasks(
     filter: Option<String>,
 ) -> Result<Vec<TaskInfo>, String> {
     use qianxun_runtime::background_task::TaskStatus;
-    let parsed_filter = filter.as_deref().and_then(|s| match s {
-        "pending" => Some(TaskStatus::Pending),
-        "running" => Some(TaskStatus::Running),
-        "paused" => Some(TaskStatus::Paused),
-        "cancelled" => Some(TaskStatus::Cancelled),
-        "done" => Some(TaskStatus::Done),
-        _ => None,
-    });
+    // 2026-06-12 (批次 2.6): filter 字符串解析改 fail-closed 穷举, 不再 `_ => None` 兜底.
+    // 之前: "error" / "all" / 任何无效字符串都被静默吞成 "全部", 排查困惑; 同时如果后端
+    // TaskStatus 加新变体会拿不到. 改穷举 match, 错就返 Err 提示 (规范 10 命名准确).
+    let parsed_filter = match filter.as_deref() {
+        None => None,
+        Some("pending") => Some(TaskStatus::Pending),
+        Some("running") => Some(TaskStatus::Running),
+        Some("paused") => Some(TaskStatus::Paused),
+        Some("cancelled") => Some(TaskStatus::Cancelled),
+        Some("done") => Some(TaskStatus::Done),
+        Some(other) => {
+            return Err(format!(
+                "list_background_tasks: unknown filter '{other}', valid: pending/running/paused/cancelled/done"
+            ));
+        }
+    };
     state
         .list_background_tasks(parsed_filter)
         .await

@@ -8,6 +8,11 @@
 //   - 数组驱动循环, 1 个循环看清全部启动项
 //   - 不拆 4 个 phaseXxx 函数
 //   - +page.svelte 从 70 行 bootOnce 减到 5 行调用
+//
+// 2026-06-12 (批次 2.1): 加 registerUnlisten / cleanupBootListeners.
+//   chatStore.init() / planStore.init() 启的 Tauri event listener 句柄
+//   之前留在 store 私有, 多次 boot/HMR 后 listener 累积. 改用集中管理:
+//   store 调 registerUnlisten(unlistenFn) 把句柄交给 boot, 统一 cleanup.
 
 import { chatStore } from './stores/chat.svelte';
 import { planStore } from './stores/plan.svelte';
@@ -37,6 +42,7 @@ const _phases: BootPhase[] = [
 		progress: 20,
 		label: 'listeners',
 		run: async () => {
+			// store 内部 registerUnlisten 句柄, boot 集中管理.
 			await Promise.all([chatStore.init(), planStore.init()]);
 		},
 	},
@@ -45,7 +51,7 @@ const _phases: BootPhase[] = [
 		progress: 50,
 		label: 'health',
 		run: async () => {
-			// 占位: 未来 health_check ping 走这里 (Phase B.1 修完后可调)
+			// 占位: 未来 health_check ping 走这里
 		},
 	},
 	{
@@ -57,6 +63,28 @@ const _phases: BootPhase[] = [
 		},
 	},
 ];
+
+// 2026-06-12 (批次 2.1): 集中持有 Tauri event listener 句柄, 避免多次 boot/HMR 累积.
+// 业务 store (chat / plan) 调 registerUnlisten 把句柄交过来, cleanupBootListeners 统一释放.
+const _unlisteners: Array<() => void> = [];
+
+/** 注册 Tauri event listener 句柄. boot 集中管理, 避免 HMR 多次 boot 累积. */
+export function registerUnlisten(fn: () => void): void {
+	_unlisteners.push(fn);
+}
+
+/** 释放所有已注册 listener 句柄. 测试 (__resetForTesting) / app 卸载 (beforeunload) 调. */
+export function cleanupBootListeners(): void {
+	while (_unlisteners.length > 0) {
+		const fn = _unlisteners.pop()!;
+		try {
+			fn();
+		} catch (e) {
+			// 单个 unlisten 失败不该阻断其它, 留痕
+			console.warn('[boot] unlisten failed:', e);
+		}
+	}
+}
 
 /** 跑完整启动流程. 失败记录到 state.error 但不中断. */
 export async function bootOnce(state: BootState): Promise<void> {

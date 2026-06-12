@@ -93,24 +93,35 @@ export async function getSecret(
 	return await invoke<string | null>("get_secret", { key, password });
 }
 
-/// Stage 10b: Invoke Tauri command: `delete_secret` (从 stronghold vault 删除).
+/// 2026-06-12 (批次 2.7): Invoke Tauri command: `delete_secret` (从 stronghold vault 删除).
+/// 返 DeleteOutcome 结构化枚举 (跟后端 vault::DeleteOutcome 1:1), 不再合并成 boolean.
+///   - "deleted"         → 真删了
+///   - "key_missing"     → key 没存过 (idempotent 业务上等同成功)
+///   - "client_missing"  → vault 损坏, 极少见
+///   - "snapshot_missing"→ vault 从未初始化, 极少见
+/// 密码错误时 throw (跟 set/get 一致, 由上层 store 包 RuntimeApiError).
+///
 /// 业务用途: 用户换 VPS access_token / 撤权 API key 时, 删 vault 里的旧值.
-/// 凭据不存在 → 静默成功 (idempotent, 跟 stronghold store().delete() 语义对齐).
-/// Web 模式: 从 localStorage 删 base64 项 + password 项.
+/// Web 模式: 从 localStorage 删 base64 项 + password 项 (仅 2 态: deleted / key_missing).
+export type DeleteOutcome = "deleted" | "key_missing" | "client_missing" | "snapshot_missing";
+
 export async function deleteSecret(
 	key: string,
 	password: string
-): Promise<boolean> {
+): Promise<DeleteOutcome> {
 	if (!isTauri()) {
 		// 验证 password (跟 getSecret 一致的安全检查)
 		const storedPwd = localStorage.getItem(`secret-${key}-pwd`);
-		if (!storedPwd || atob(storedPwd) !== password) return false;
+		if (!storedPwd || atob(storedPwd) !== password) {
+			// web 端 password 错统一返 key_missing (跟"没存"等价, 业务方无感)
+			return "key_missing";
+		}
 		const existed = localStorage.getItem(`secret-${key}`) !== null;
 		localStorage.removeItem(`secret-${key}`);
 		localStorage.removeItem(`secret-${key}-pwd`);
-		return existed;
+		return existed ? "deleted" : "key_missing";
 	}
-	return await invoke<boolean>("delete_secret", { key, password });
+	return await invoke<DeleteOutcome>("delete_secret", { key, password });
 }
 
 // ─── 内部 helpers ────────────────────────────────────────────────────────

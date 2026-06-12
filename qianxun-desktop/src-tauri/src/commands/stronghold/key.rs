@@ -1,5 +1,4 @@
-// 2 个 Tauri command: set_secret / get_secret
-// (delete_secret TS 端有 mock, Rust 端等 4a 后续补, bridge.ts 走 isTauri 守卫 web fallback)
+// 3 个 Tauri command: set_secret / get_secret / delete_secret.
 
 use tauri::AppHandle;
 
@@ -31,14 +30,16 @@ pub async fn get_secret(
     vault::get(&snapshot_path, &password, &key)
 }
 
-/// 2026-06-12 (Phase B.2): 删除指定 key.
-/// 返 Ok(true) = 真删了, Ok(false) = vault 不存在或 key 不存在. 密码错误才返 Err.
+/// 2026-06-12 (Phase B.2, 批次 2.7 升级): 删除指定 key.
+/// 返 DeleteOutcome 结构化枚举 (snapshot_missing / client_missing / key_missing / deleted),
+/// 不再合并成 Ok(false). 密码错误才返 Err.
+/// 2026-06-12 (批次 2.8): commit 失败时回滚, 不留"内存改了磁盘没改"半态.
 #[tauri::command]
 pub async fn delete_secret(
     app: AppHandle,
     key: String,
     password: String,
-) -> Result<bool, String> {
+) -> Result<vault::DeleteOutcome, String> {
     let snapshot_path = vault_snapshot_path(&app)?;
     vault::delete(&snapshot_path, &password, &key)
 }

@@ -16,12 +16,20 @@ const createPlanMock = vi.fn();
 const cancelPlanMock = vi.fn();
 const subscribePlanEventsMock = vi.fn();
 const onPlanEventMock = vi.fn();
+// 2026-06-12 (批次 2.1): 验证 init() 通过 registerUnlisten 集中管理 unlisten
+const registerUnlistenMock = vi.fn();
+const cleanupBootListenersMock = vi.fn();
 
 vi.mock("$lib/ipc/runtime", () => ({
 	createPlan: (...args: unknown[]) => createPlanMock(...args),
 	cancelPlan: (...args: unknown[]) => cancelPlanMock(...args),
 	subscribePlanEvents: (...args: unknown[]) => subscribePlanEventsMock(...args),
 	onPlanEvent: (...args: unknown[]) => onPlanEventMock(...args),
+}));
+
+vi.mock("$lib/boot", () => ({
+	registerUnlisten: (...args: unknown[]) => registerUnlistenMock(...args),
+	cleanupBootListeners: (...args: unknown[]) => cleanupBootListenersMock(...args),
 }));
 
 import { planStore } from "$lib/stores/plan.svelte";
@@ -48,6 +56,8 @@ beforeEach(() => {
 	cancelPlanMock.mockReset();
 	subscribePlanEventsMock.mockReset();
 	onPlanEventMock.mockReset();
+	registerUnlistenMock.mockReset();
+	cleanupBootListenersMock.mockReset();
 	resetPlanStore();
 	uiStore.setActiveView({ kind: "empty" });
 });
@@ -199,6 +209,7 @@ describe("PlanStore (Stage 4a sub-task #4 切 invoke)", () => {
 
 	// 回归: planStore.init() 必须在 app 启动时调一次, 否则 PlanUpdate 事件断链.
 	// 之前 +page.svelte 启动序列只调了 chatStore.init, UI 永远收不到 plan_event.
+	// 2026-06-12 (批次 2.1): init() 不再 return unlisten, 改为 registerUnlisten(unlisten) 集中管理.
 	it("init_registers_plan_event_listener_and_subscribes_backend: P1-3 事件链", async () => {
 		const unlisten = vi.fn();
 		subscribePlanEventsMock.mockResolvedValueOnce(undefined);
@@ -210,7 +221,10 @@ describe("PlanStore (Stage 4a sub-task #4 切 invoke)", () => {
 		expect(subscribePlanEventsMock).toHaveBeenCalledTimes(1);
 		// 2. 调了 onPlanEvent 注册 Tauri 'plan_event' listener
 		expect(onPlanEventMock).toHaveBeenCalledTimes(1);
-		// 3. 返非空 unlisten (给 caller 用来 unregister)
-		expect(returned).toBe(unlisten);
+		// 3. (批次 2.1) unlisten 句柄走 boot.registerUnlisten 集中管理, 不再 return
+		expect(registerUnlistenMock).toHaveBeenCalledTimes(1);
+		expect(registerUnlistenMock).toHaveBeenCalledWith(unlisten);
+		// 4. init() 返 void
+		expect(returned).toBeUndefined();
 	});
 });

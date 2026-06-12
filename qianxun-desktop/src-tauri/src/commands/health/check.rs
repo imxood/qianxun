@@ -16,17 +16,23 @@ use super::types::{DaemonState, HealthStatus};
 /// 现在: 从 RuntimeState.list_sessions 拿真实 session 数, UI 显示与 sidebar 列表一致.
 ///
 /// 注: async + `State<'_>` 注入要求返回 `Result<_, _>` (Tauri 2.x 约束).
-/// list_sessions 失败时回退 0 (UI 仍显示 connected, 数字偏差可接受).
+/// list_sessions 失败时回退 0 + tracing::warn! 留痕, 不静默吞 (规范 1 错误处理要详细).
 #[tauri::command]
 pub async fn health_check(
     state: State<'_, Arc<RuntimeState>>,
 ) -> Result<HealthStatus, String> {
     use qianxun_runtime::api::RuntimeApi;
-    let session_count = state
+    let session_count: u32 = match state
         .list_sessions(qianxun_runtime::api::types::SessionFilter::All)
         .await
-        .map(|r| r.sessions.len() as u32)
-        .unwrap_or(0);
+    {
+        Ok(r) => r.sessions.len() as u32,
+        Err(e) => {
+            // 留痕, 不静默吞 (规范 1: 错误处理要详细). UI 看到 0 + tracing 日志可排查.
+            tracing::warn!(error = %e, "health_check: list_sessions failed, fall back to 0");
+            0
+        }
+    };
     Ok(HealthStatus {
         status: DaemonState::Connected,
         version: format!("desktop-{}", env!("CARGO_PKG_VERSION")),

@@ -28,13 +28,13 @@ import {
 	onSessionEvent,
 	type SessionEventPayload,
 } from '$lib/ipc/runtime';
-import type { UnlistenFn } from '@tauri-apps/api/event';
 import { newStreamState, applyEvent, type MessageStreamState } from './chat-stream';
 import { sessionStore } from './session.svelte';
 import { subSessionStore } from './sub_session.svelte';
 import { planStore } from './plan.svelte';
 import { uiStore } from './ui.svelte';
 import { reportError } from '$lib/errors';
+import { registerUnlisten, cleanupBootListeners } from '$lib/boot';
 import type { Message, PlanContract } from '$lib/types/entity';
 
 function createChatStore() {
@@ -46,18 +46,21 @@ function createChatStore() {
 
 	// 2026-06-12 (Phase D.8): 最近一次 user 消息, 给 resend() 用.
 	// key = session_id, value = message content. 切 session 不影响, 各自记.
+	// 2026-06-12 (批次 2.3): sessionStore.delete 联动 forgetUserMessage 释放半残留.
 	const lastUserMessage = new Map<string, string>();
 
-	// 全局 listener unlisten handle
-	let unlisten: UnlistenFn | null = null;
+	// 2026-06-12 (批次 2.1): listener 句柄改交给 boot 集中管理, 避免多次 boot/HMR 累积.
+	// 本地只保留 initialized 标志 (去重), 不再持有 unlisten.
 	let listenerInitialized = false;
 
 	/// 初始化全局 session_event listener. 重复调用安全.
-	/// 调用方: +page.svelte / +layout.svelte 的 onMount.
+	/// 调用方: boot.ts phase 1 (启动时一次性).
+	/// 句柄交给 boot.registerUnlisten, 由 cleanupBootListeners 统一释放.
 	async function init() {
 		if (listenerInitialized) return;
 		listenerInitialized = true;
-		unlisten = await onSessionEvent(handleSessionEvent);
+		const unlisten = await onSessionEvent(handleSessionEvent);
+		registerUnlisten(unlisten);
 	}
 
 	function handleSessionEvent(payload: SessionEventPayload) {
@@ -328,15 +331,18 @@ function createChatStore() {
 			await send(sid, last);
 		},
 		/// 测试专用: 重置内部状态 + 调 unlisten. 业务代码不应该调.
+		/// 2026-06-12 (批次 2.1): unlisten 句柄交给 boot 集中管理, 这里调 cleanupBootListeners 替自己清理.
 		async __resetForTesting() {
-			if (unlisten) {
-				unlisten();
-				unlisten = null;
-			}
+			cleanupBootListeners();
 			listenerInitialized = false;
 			streams.clear();
 			streaming.message_id = null;
 			lastUserMessage.clear();
+		},
+
+		/// 2026-06-12 (批次 2.3): 联动 sessionStore.delete 释放 resend 缓存, 避免 Map 累积泄漏.
+		forgetUserMessage(sid: string): void {
+			lastUserMessage.delete(sid);
 		},
 	};
 }

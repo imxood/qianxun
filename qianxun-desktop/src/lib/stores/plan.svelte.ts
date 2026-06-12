@@ -33,6 +33,7 @@ import {
 import { subSessionStore } from './sub_session.svelte';
 import { uiStore } from './ui.svelte';
 import { reportError } from '$lib/errors';
+import { registerUnlisten, cleanupBootListeners } from '$lib/boot';
 import type { Plan, PlanStatus as EntityPlanStatus, ChangedFile } from '$lib/types/entity';
 
 /// IpcPlanInfo (后端 DTO, lowercase status) → Plan (前端 entity, PascalCase status) 转换.
@@ -206,20 +207,20 @@ function createPlanStore() {
 	/// P1-3 收尾: 启 plan 事件订阅 (在 app 启动时调一次).
 	/// 1. 调 subscribePlanEvents() 让 Tauri 后端 spawn 长连接任务
 	/// 2. listen "plan_event" Tauri 事件, 转 handlePlanEvent 处理
-	/// 3. 返 unlisten 函数 (app 关闭时调)
-	async function init(): Promise<() => void> {
+	/// 3. 句柄交给 boot.registerUnlisten (批次 2.1), 由 cleanupBootListeners 统一释放.
+	async function init(): Promise<void> {
 		try {
 			await subscribePlanEvents();
 		} catch (e) {
 			// 静默: 实时事件非关键, 失败降级到手动刷新
 			reportError(e, { source: 'planStore.init.subscribe' });
-			return () => {};
+			return;
 		}
 		const unlisten = await onPlanEvent((event) => {
 			if (event.type !== 'plan_update') return;
 			handlePlanEvent(event.plan_id, event.status, event.task_results_json);
 		});
-		return unlisten;
+		registerUnlisten(unlisten);
 	}
 
 	return {
@@ -246,7 +247,9 @@ function createPlanStore() {
 		progressOf,
 		init,
 		/// 测试专用: 重置内部状态. 业务代码不应该调.
+		/// 2026-06-12 (批次 2.2): 之前不清 unlisten 句柄 (新发现 B), 现在用 cleanupBootListeners 统一释放.
 		__resetForTesting() {
+			cleanupBootListeners();
 			plans.length = 0;
 			for (const k of Object.keys(changedFiles)) delete changedFiles[k];
 			lastError = null;

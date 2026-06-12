@@ -29,6 +29,7 @@ import {
 } from '$lib/ipc/runtime';
 import { uiStore } from './ui.svelte';
 import { reportError } from '$lib/errors';
+import { chatStore } from './chat.svelte';
 import type { Session, Message } from '$lib/types/entity';
 
 /// SessionInfo (后端 summary) → Session (前端 entity) 转换.
@@ -214,11 +215,13 @@ function createSessionStore() {
 		},
 
 		/// 删除 session (调 invoke + 本地从 store 移除 + 清 messages).
+		/// 2026-06-12 (批次 2.3): 联动 chatStore.forgetUserMessage 释放 resend 缓存, 避免 Map 累积泄漏.
 		async delete(id: string): Promise<void> {
 			await deleteSession(id);
 			const idx = sessions.findIndex((s) => s.id === id);
 			if (idx >= 0) sessions.splice(idx, 1);
 			delete messages[id];
+			chatStore.forgetUserMessage(id);
 			// 如果删的是当前 active session, 切到空状态
 			const view = uiStore.activeView;
 			if (view.kind === 'session' && view.session_id === id) {

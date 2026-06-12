@@ -63,13 +63,14 @@ describe("bridge (Stage 6a §11.3 stronghold secret + Stage 10b delete)", () => 
 
 	// ─── Stage 10b 新增: deleteSecret 端到端 (web fallback 路径) ───
 
-	it("deleteSecret_web_mode_existing_key: set → delete (密码对) → 返 true, get 返 null", async () => {
+	it("deleteSecret_web_mode_existing_key: set → delete (密码对) → 返 'deleted', get 返 null", async () => {
 		const { setSecret, deleteSecret, getSecret } = await import("$lib/ipc/bridge");
 		await setSecret("anthropic-api-key", "sk-ant-to-delete", "user-pwd");
 		expect(await getSecret("anthropic-api-key", "user-pwd")).toBe("sk-ant-to-delete");
 
-		const existed = await deleteSecret("anthropic-api-key", "user-pwd");
-		expect(existed).toBe(true);
+		// 2026-06-12 (批次 2.7): 改返 DeleteOutcome 字符串, 替代 boolean
+		const outcome = await deleteSecret("anthropic-api-key", "user-pwd");
+		expect(outcome).toBe("deleted");
 
 		// 删除后 localStorage 应清干净
 		expect(localStorage.getItem("secret-anthropic-api-key")).toBeNull();
@@ -78,20 +79,22 @@ describe("bridge (Stage 6a §11.3 stronghold secret + Stage 10b delete)", () => 
 		expect(await getSecret("anthropic-api-key", "user-pwd")).toBeNull();
 	});
 
-	it("deleteSecret_web_mode_wrong_password: 密码错时返 false, 不删除", async () => {
+	it("deleteSecret_web_mode_wrong_password: 密码错时返 'key_missing' (web 端合并), 不删除", async () => {
 		const { setSecret, deleteSecret, getSecret } = await import("$lib/ipc/bridge");
 		await setSecret("vps-token-2", "vps-secret", "right-pwd");
 
-		const existed = await deleteSecret("vps-token-2", "wrong-pwd");
-		expect(existed).toBe(false);
+		// 2026-06-12 (批次 2.7): web fallback 把密码错归类为 key_missing (业务方无感,
+		// 跟"没存"等价, 不暴露 password 错误细节); Tauri 端会 throw 让上层处理.
+		const outcome = await deleteSecret("vps-token-2", "wrong-pwd");
+		expect(outcome).toBe("key_missing");
 
 		// 密码错不删除, 仍能正确取
 		expect(await getSecret("vps-token-2", "right-pwd")).toBe("vps-secret");
 	});
 
-	it("deleteSecret_web_mode_nonexistent_key: key 不存在返 false, 不 panic", async () => {
+	it("deleteSecret_web_mode_nonexistent_key: key 不存在返 'key_missing', 不 panic", async () => {
 		const { deleteSecret } = await import("$lib/ipc/bridge");
-		const existed = await deleteSecret("never-existed-key", "any-pwd");
-		expect(existed).toBe(false);
+		const outcome = await deleteSecret("never-existed-key", "any-pwd");
+		expect(outcome).toBe("key_missing");
 	});
 });
