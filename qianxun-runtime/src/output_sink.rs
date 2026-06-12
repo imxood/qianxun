@@ -28,9 +28,11 @@
 //! - `qianxun_core::output` / `qianxun_core::provider::types` (workspace 内)
 //! - `crate::daemon::persistence` / `crate::daemon::sse` (本 crate)
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use qianxun_core::agent::conversation::Conversation;
 use qianxun_core::output::OutputSink;
 use qianxun_core::provider::types::LlmStreamEvent;
 use qianxun_core::provider::error_classifier::LlmErrorKind;
@@ -78,6 +80,15 @@ pub struct DaemonOutputSink {
     #[allow(dead_code)] // 通过 begin_message 间接使用
     max_tokens: u32,
     state: Mutex<SinkState>,
+    /// 会话 conversation 引用 (共享 SessionRuntime.conversation), 用于
+    /// on_turn_finished 时把最新消息序列持久化到 store.
+    /// 2026-06-12 加, 修 E2E v2 bug: send_message_impl 走 processing_loop 路径
+    /// 之前从未触发 save_conversation_snapshot, 重启后历史全丢.
+    conversation: Arc<Mutex<Conversation>>,
+    /// 写 snapshot 的下一个 ordinal. 初始值由 `send_message_impl` 查
+    /// `load_latest_snapshot` 拿 max+1 传入, 保证跨多次 send_message 单调递增.
+    /// atomic 让 &self trait 方法 (on_turn_finished) 也能安全自增.
+    next_ordinal: AtomicU32,
 }
 
 impl DaemonOutputSink {
@@ -94,6 +105,14 @@ impl DaemonOutputSink {
     ///   调用方应**先**调 `begin_message()` 再发内容事件.
     /// - `false`: 调用方已在外层 (Stage 2 prompt_handler) 同步发过
     ///   `MessageStart`, sink 内部 `begin_message()` no-op.
+    ///
+    /// `conversation`: 共享 `SessionRuntime.conversation` 的 `Arc<Mutex<>>` 引用,
+    /// `on_turn_finished` 持久化时克隆出去写入 store. 必须引用同一份数据, 否则
+    /// 写入的是旧 snapshot, 启动恢复看到的是 send 之前的状态.
+    ///
+    /// `next_ordinal`: 第一次 save 的 ordinal. 调用方应查
+    /// `store.load_latest_snapshot(session_id)` 拿 max+1 传入, 保证跨
+    /// 多次 send_message 单调递增 (例: 第一次 ordinal=1, 第二次 ordinal=2).
     pub fn new(
         tx: mpsc::Sender<SseEvent>,
         store: Arc<SessionStore>,
@@ -101,6 +120,8 @@ impl DaemonOutputSink {
         model: String,
         max_tokens: u32,
         emit_message_start: bool,
+        conversation: Arc<Mutex<Conversation>>,
+        next_ordinal: u32,
     ) -> Self {
         let event_seq = if emit_message_start { 0 } else { 1 };
         Self {
@@ -114,6 +135,8 @@ impl DaemonOutputSink {
                 started: !emit_message_start,
                 event_seq,
             }),
+            conversation,
+            next_ordinal: AtomicU32::new(next_ordinal),
         }
     }
 
@@ -338,6 +361,30 @@ impl OutputSink for DaemonOutputSink {
         // _usage 忽略 — processing_loop 之前已经通过 on_token_usage 推过
         // cumulative usage, 这里不重复发 Usage 事件.
         self.finish_turn(reason).await;
+        // 2026-06-12 修 E2E v2 bug: send_message_impl 走 processing_loop 路径
+        // 之前从未触发 save_conversation_snapshot, 重启后 conv 状态全丢.
+        // 流程: 先 release 锁再 await 写 store, 避免持锁过锁临界区;
+        // 取 ordinal 后 fetch_add(1) 保证下次 save 用下一个; 失败仅 warn,
+        // 不阻断 SSE 流 (DB 偶尔锁等不该让用户看到 error toast).
+        let conv_clone = {
+            let guard = self
+                .conversation
+                .lock()
+                .expect("Conversation mutex poisoned");
+            guard.clone()
+        };
+        let ordinal = self.next_ordinal.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = self
+            .store
+            .save_conversation_snapshot(&self.session_id, ordinal, &conv_clone)
+        {
+            tracing::warn!(
+                session = %self.session_id,
+                error = ?e,
+                ordinal,
+                "[output_sink] save_conversation_snapshot failed (continuing)"
+            );
+        }
     }
 
     async fn on_status(&self, status: &str) {
@@ -359,6 +406,7 @@ impl OutputSink for DaemonOutputSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qianxun_core::agent::message::{ContentBlock, Message};
     use serde_json::json;
     use std::time::Duration;
 
@@ -368,13 +416,22 @@ mod tests {
     /// **重要**: 同步在 `daemon_sessions` 表里 `create()` session_id —
     /// `append_event` / `save_snapshot` 都有 FK CASCADE 依赖 sessions 表,
     /// 不 create 会拿不到写入 (SQLITE_CONSTRAINT 静默被 `_ = ...` 吞掉).
-    fn make_sink() -> (DaemonOutputSink, mpsc::Receiver<SseEvent>, Arc<SessionStore>) {
+    ///
+    /// 2026-06-12 加: 返 `(sink, rx, store, conv)` — 暴露 conv 引用让测试
+    /// 模拟"send_message 推消息"和"on_turn_finished 持久化"的端到端.
+    fn make_sink() -> (
+        DaemonOutputSink,
+        mpsc::Receiver<SseEvent>,
+        Arc<SessionStore>,
+        Arc<Mutex<Conversation>>,
+    ) {
         let (tx, rx) = mpsc::channel::<SseEvent>(64);
         let store = Arc::new(SessionStore::in_memory().expect("in_memory store"));
         // FK 前置: create session row, 让后续 append_event / save_snapshot 通过外键
         store
             .create("sess_test", Some("/tmp"), r#"{"model":"test-model"}"#)
             .expect("create test session");
+        let conv = Arc::new(Mutex::new(Conversation::new(None)));
         let sink = DaemonOutputSink::new(
             tx,
             store.clone(),
@@ -382,8 +439,10 @@ mod tests {
             "test-model".to_string(),
             16384,
             false, // 测试只关心 content 事件, 不测 message_start
+            conv.clone(),
+            1, // next_ordinal: 测试里从 1 开始, 跟生产 send_message 查 max+1 一致
         );
-        (sink, rx, store)
+        (sink, rx, store, conv)
     }
 
     /// 收集 mpsc 里的事件直到 channel 关闭或超时.
@@ -403,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_delta_emits_block_start_then_deltas() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
 
         // 模拟多 task 并发调 (因为 trait 是 &self, 这是真实使用模式)
@@ -446,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_use_emits_full_block_lifecycle() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
 
         sink.text_delta("读取一下").await;
@@ -498,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_result_does_not_touch_block_state() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
 
         // 先发 text 开一个 text block
@@ -551,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_finish_turn_emits_message_delta_and_stop() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         sink.text_delta("hi").await;
         sink.finish_turn_str("end_turn").await;
         drop(sink);
@@ -574,6 +633,8 @@ mod tests {
     async fn test_begin_message_is_idempotent() {
         let (tx, _rx) = mpsc::channel::<SseEvent>(64);
         let store = Arc::new(SessionStore::in_memory().expect("store"));
+        // 2026-06-12 加: 测 begin_message 幂等不依赖 store/conv, 但签名需要 conv+ordinal.
+        let conv = Arc::new(Mutex::new(Conversation::new(None)));
         let sink = DaemonOutputSink::new(
             tx,
             store,
@@ -581,6 +642,8 @@ mod tests {
             "m".to_string(),
             1024,
             true, // 由 sink 负责发 MessageStart
+            conv,
+            1,
         );
         let sink = std::sync::Arc::new(sink);
 
@@ -599,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn test_begin_message_when_external_emitted_is_noop() {
         // emit_message_start = false → sink.begin_message() 应 no-op
-        let (sink, _rx, _store) = make_sink();
+        let (sink, _rx, _store, _conv) = make_sink();
         sink.begin_message().await; // 不应 panic, 不应发任何事件
         // 再调几次
         sink.begin_message().await;
@@ -609,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn test_tx_send_error_does_not_panic() {
         // drop receiver 模拟客户端断, 然后 sink 继续 push — 不应 panic
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         drop(rx);
 
         // 这些调用都应静默 return, 不 panic
@@ -636,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_usage_event_has_correct_field_mapping() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let usage = TokenUsage {
             input: 100,
             output: 50,
@@ -667,7 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_usage_with_missing_cache_fields_defaults_to_zero() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let usage = TokenUsage {
             input: 10,
             output: 20,
@@ -694,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_event_uses_classification() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         sink.error(&LlmError::RateLimitExceeded {
             provider: "deepseek".into(),
             retry_after: Some(Duration::from_secs(5)),
@@ -717,7 +780,7 @@ mod tests {
     #[tokio::test]
     async fn test_output_sink_trait_routes_on_text_to_text_delta() {
         // 验证 on_text trait 路径走跟 text_delta 一样的状态机
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
         let dyn_sink: Arc<dyn OutputSink> = sink.clone();
 
@@ -745,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_sink_trait_routes_on_tool_call_to_tool_use() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
         let dyn_sink: Arc<dyn OutputSink> = sink.clone();
 
@@ -788,7 +851,7 @@ mod tests {
     /// + ToolResult 两条事件, 客户端能渲染 "调工具 → 拿结果" 完整配对.
     #[tokio::test]
     async fn test_output_sink_trait_routes_on_tool_result_to_tool_result_event() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
         let dyn_sink: Arc<dyn OutputSink> = sink.clone();
 
@@ -849,7 +912,7 @@ mod tests {
     /// (跟正常路径一致, 走同一条 send_event 路径).
     #[tokio::test]
     async fn test_output_sink_trait_routes_on_tool_result_error_path() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
         let dyn_sink: Arc<dyn OutputSink> = sink.clone();
 
@@ -881,7 +944,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_sink_trait_on_turn_finished_emits_stop_sequence() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
         let dyn_sink: Arc<dyn OutputSink> = sink.clone();
 
@@ -907,7 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_sink_trait_on_status_does_not_emit_event() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
         let dyn_sink: Arc<dyn OutputSink> = sink.clone();
 
@@ -927,7 +990,7 @@ mod tests {
     #[tokio::test]
     async fn test_finish_turn_converts_stop_reason_enum() {
         // 验证 finish_turn (StopReason enum) 跟 finish_turn_str 一致
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         sink.finish_turn(&StopReason::MaxTokens).await;
         drop(sink);
 
@@ -943,7 +1006,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_finish_turn_with_cancelled_stop_reason() {
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         sink.finish_turn(&StopReason::Cancelled).await;
         drop(sink);
 
@@ -960,7 +1023,7 @@ mod tests {
     async fn test_events_persisted_to_store() {
         // 验证 store.append_event 被调, 落盘顺序 = 发出顺序.
         // 因 emit_message_start=false, 第一条 content 事件 seq=1.
-        let (sink, rx, store) = make_sink();
+        let (sink, rx, store, _conv) = make_sink();
         sink.text_delta("a").await;
         sink.text_delta("b").await;
         sink.finish_turn_str("end_turn").await;
@@ -993,7 +1056,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_snapshot_helper_writes_to_store() {
-        let (sink, _rx, store) = make_sink();
+        let (sink, _rx, store, _conv) = make_sink();
         sink.save_snapshot(1, r#"{"messages":[],"stage":"test"}"#);
 
         let snap = store
@@ -1008,6 +1071,8 @@ mod tests {
     async fn test_message_start_uses_provided_model_and_max_tokens() {
         let (tx, _rx) = mpsc::channel::<SseEvent>(64);
         let store = Arc::new(SessionStore::in_memory().expect("store"));
+        // 2026-06-12 加: 测 MessageStart 字段不依赖 store/conv, 但签名需要 conv+ordinal.
+        let conv = Arc::new(Mutex::new(Conversation::new(None)));
         let sink = DaemonOutputSink::new(
             tx,
             store,
@@ -1015,6 +1080,8 @@ mod tests {
             "deepseek-v4-flash".to_string(),
             32768,
             true, // 由 sink 发
+            conv,
+            1,
         );
         sink.begin_message().await;
         sink.finish_turn_str("end_turn").await;
@@ -1023,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_text_delta_and_tool_use_serializes_via_mutex() {
         // 并发 text_delta + tool_use — 锁序列化保证块状态机不会被打乱
-        let (sink, rx, _store) = make_sink();
+        let (sink, rx, _store, _conv) = make_sink();
         let sink = std::sync::Arc::new(sink);
 
         let s1 = sink.clone();
@@ -1063,6 +1130,54 @@ mod tests {
             cbs_indices.len(),
             cbs_stop_indices.len(),
             "CBS and CBS_STOP must be paired (mutex should serialize)"
+        );
+    }
+
+    /// 2026-06-12 E2E v2 修复回归测试: on_turn_finished 必须把 conversation
+    /// 持久化到 store, 且 next_ordinal 跨多次 turn 单调递增. 模拟生产路径
+    /// (send_message → processing_loop → on_turn_finished), 验证重启后能
+    /// 通过 load_latest_conversation 拿到最新状态.
+    #[tokio::test]
+    async fn test_on_turn_finished_persists_conversation_and_advances_ordinal() {
+        let (sink, _rx, store, conv) = make_sink();
+        let sink = std::sync::Arc::new(sink);
+        let dyn_sink: Arc<dyn OutputSink> = sink.clone();
+
+        // 第 1 turn: 推 user 消息 + 跑 turn
+        {
+            let mut g = conv.lock().expect("conv lock");
+            g.push_user_message(vec![ContentBlock::text("hello")]);
+        }
+        dyn_sink
+            .on_turn_finished(&StopReason::EndTurn, &TokenUsage::default())
+            .await;
+
+        // 第 2 turn: 再推 user + assistant 消息
+        {
+            let mut g = conv.lock().expect("conv lock");
+            g.push_user_message(vec![ContentBlock::text("world")]);
+            g.push_message(Message::assistant(vec![ContentBlock::text("hi back")]));
+        }
+        dyn_sink
+            .on_turn_finished(&StopReason::EndTurn, &TokenUsage::default())
+            .await;
+
+        // 验证: store 里应该有 2 条 snapshot, ordinal=1 和 ordinal=2
+        let snap1 = store
+            .load_latest_snapshot("sess_test")
+            .expect("load")
+            .expect("snapshot exists");
+        assert_eq!(snap1.0, 2, "latest ordinal should be 2 after 2 turns");
+
+        // load_latest_conversation 拿最新 conv, 应该有 3 条消息 (user1 + user2 + assistant2)
+        let (_, restored) = store
+            .load_latest_conversation("sess_test")
+            .expect("load_latest_conversation")
+            .expect("conv exists");
+        assert_eq!(
+            restored.messages().len(),
+            3,
+            "should have user1 + user2 + assistant2"
         );
     }
 }

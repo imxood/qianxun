@@ -1550,6 +1550,7 @@ mod e2e_tests {
     use futures::stream;
     use qianxun_core::types::{LlmError, StopReason, TokenUsage};
     use serde_json::Value;
+    use std::sync::Mutex; // 2026-06-12: DaemonOutputSink::new 接收 Arc<Mutex<Conversation>>
     use std::time::Duration;
 
     /// 端到端测试: 喂入预定义的 LlmStreamEvent 序列, 验证产出的 SseEvent 顺序
@@ -1584,6 +1585,8 @@ mod e2e_tests {
             "test-model".to_string(),
             16384,
             false, // message_start 由 prompt_handler 同步发
+            std::sync::Arc::new(Mutex::new(Conversation::new(None))), // 2026-06-12: e2e 走 consume_stream_to_sse 不调 on_turn_finished, conv 用空占位
+            1,        // next_ordinal 占位, e2e 不测持久化
         );
         let task = tokio::spawn(async move {
             // Stage 4: 传 None + ordinal=0 跳过持久化 (e2e 只测事件序列)
@@ -1702,6 +1705,8 @@ mod e2e_tests {
             "test-model".to_string(),
             16384,
             false,
+            std::sync::Arc::new(Mutex::new(Conversation::new(None))),
+            1,
         );
         let task = tokio::spawn(async move {
             // Stage 4: 传 None 跳过持久化
@@ -1782,6 +1787,8 @@ mod e2e_tests {
             "test-model".to_string(),
             16384,
             false,
+            std::sync::Arc::new(Mutex::new(Conversation::new(None))),
+            1,
         );
         let task = tokio::spawn(async move {
             // Stage 4: 传 None 跳过持久化
@@ -1855,6 +1862,8 @@ mod e2e_tests {
             "test-model".to_string(),
             16384,
             false,
+            std::sync::Arc::new(Mutex::new(Conversation::new(None))),
+            1,
         );
         let task = tokio::spawn(async move {
             // Stage 4: 传 None 跳过持久化

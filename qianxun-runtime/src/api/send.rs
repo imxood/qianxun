@@ -146,6 +146,24 @@ pub async fn send_message_impl(
     let (tx, rx) = mpsc::channel::<SseEvent>(64);
     let model = runtime.config.model.clone();
     let max_tokens = runtime.resolved.agent.max_tokens.unwrap_or(16384) as u32;
+    // 6.1 2026-06-12 修 E2E v2 bug: 查 store 拿当前 session 的最大 ordinal + 1,
+    //     跨多次 send_message 保证单调递增. 第一次 send 拿 max_ordinal=0 (create
+    //     写占位), next_ordinal=1. 失败兜底 1 (DB 暂时不可用也不阻塞 send 入口).
+    let next_ordinal: u32 = state
+        .store
+        .load_latest_snapshot(session_id)
+        .map_err(|e| {
+            tracing::warn!(
+                session = %session_id,
+                error = ?e,
+                "[api] send_message: load_latest_snapshot failed, fall back to ordinal=1"
+            );
+            e
+        })
+        .ok()
+        .flatten()
+        .map(|(ord, _)| ord + 1)
+        .unwrap_or(1);
     let sink = DaemonOutputSink::new(
         tx,
         state.store.clone(),
@@ -153,6 +171,8 @@ pub async fn send_message_impl(
         model,
         max_tokens,
         true, // emit_message_start
+        runtime.conversation.clone(), // 2026-06-12: sink 持 conv 引用, on_turn_finished 持久化
+        next_ordinal,
     );
 
     // 7. spawn 后台 task
