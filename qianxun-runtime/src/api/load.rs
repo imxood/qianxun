@@ -3,10 +3,16 @@
 //
 // 业务:
 //   1. 检查内存中 agent_host 有没有 (有 → 返 Active/Paused, 没有 → 查 store 返 Stored)
-//   2. 从 store 拉 latest conversation snapshot (Optional, 没 snapshot 也能返)
+//   2. 从 store 拉 latest conversation, 反序列化为 Conversation, 再 to_jsonl_string 返前端
 //   3. 组装 SessionState 返回
 //
 // 用途: Tauri 端切 session 时拿历史消息; daemon 端 GET /v1/chat/session/{id} 也用同一个 impl.
+//
+// 2026-06-12 (方案 B): 改用 `load_latest_conversation` (反序列化) 而非 `load_latest_snapshot` (原始字符串).
+// 原因: 占位 snapshot 跟 Conversation JSONL 格式不一致 (历史遗留 `{"messages":[]}`), 原始字符串
+// 返前端会被 `parseConversationJsonl` 静默 skip 整个 object (Object.keys()[0] == "messages" 也不是
+// "User" / "Assistant"), 表现为"session 无历史". 改走反序列化入口, 拿 Conversation 再 to_jsonl_string
+// 统一输出 JSONL 格式, 前端 parseConversationJsonl 能直接解析.
 
 use std::sync::Arc;
 
@@ -51,12 +57,12 @@ pub async fn load_session_impl(
         }
     };
 
-    // 2. 拉 latest conversation snapshot (Optional)
+    // 2. 拉 latest conversation, 反序列化为 Conversation, 再 to_jsonl_string 返前端 (统一 JSONL 格式)
     let conversation_json = state
         .store
-        .load_latest_snapshot(session_id)
-        .map_err(|e| RuntimeApiError::Internal(format!("load_latest_snapshot failed: {e}")))?
-        .map(|(_ordinal, json)| json);
+        .load_latest_conversation(session_id)
+        .map_err(|e| RuntimeApiError::Internal(format!("load_latest_conversation failed: {e}")))?
+        .map(|(_ordinal, conv)| conv.to_jsonl_string());
 
     Ok(SessionState {
         session_id: session_id.to_string(),

@@ -131,11 +131,14 @@ impl SessionStore {
              VALUES (?1, ?2, ?3, 'active', ?4, ?4, 0)",
             params![id, project_root, config_json, now],
         )?;
-        // 写 ordinal=0 的空 snapshot
+        // 写 ordinal=0 的占位 snapshot (空字符串, 让 from_jsonl_str 返空 Conversation)
+        // 2026-06-12: 之前用 `{"messages":[]}` 旧占位, 跟 Conversation::to_jsonl_string() 的 JSONL 格式
+        // 不一致, 走 load_latest_conversation → from_jsonl_str 解析无 system 行无 message 行,
+        // 天然返空 Conversation, 跟空字符串等价. 改空字符串后端契约更清晰 (没 turn 就是空).
         conn.execute(
             "INSERT INTO daemon_conversation_snapshots \
              (session_id, ordinal, data_json, created_at) \
-             VALUES (?1, 0, '{\"messages\":[]}', ?2)",
+             VALUES (?1, 0, '', ?2)",
             params![id, now],
         )?;
         Ok(())
@@ -552,11 +555,13 @@ mod tests {
         store.create("sess_snap", Some("/work"), cfg).expect("create");
 
         // 初始 snapshot ordinal=0
+        // 2026-06-12 (方案 B): 占位改空字符串, 之前是 `{"messages":[]}` 旧格式.
+        // load_latest_conversation 走 from_jsonl_str("") 返空 Conversation, 行为不变.
         let initial = store.load_latest_snapshot("sess_snap").expect("load");
         assert!(initial.is_some());
         let (ord, json) = initial.unwrap();
         assert_eq!(ord, 0, "initial snapshot should be ordinal 0");
-        assert!(json.contains("messages"), "initial snapshot should have empty messages array");
+        assert_eq!(json, "", "initial snapshot should be empty string (方案 B)");
 
         // 写第 1 个 snapshot
         store

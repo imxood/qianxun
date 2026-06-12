@@ -110,7 +110,13 @@ function createSessionStore() {
 	/// 不再独立设 lastError (语义分离: lastError 留 sessionStore 级错误);
 	/// 不再 throw (调用方 switchTo 也不用 .catch(() => {}) 吞); loading state
 	/// 让 UI 显示骨架屏防空窗闪烁; finally 必清 loading, 完整执行流程.
+	///
+	/// 2026-06-12 (方案 C1 缓存): messages[id] !== undefined 时直接跳过 IPC.
+	/// 切回已加载过的 session 不重 load, 收到新消息已走 chatStore.send → appendMessage
+	/// 同步本地, 缓存自然新鲜. 失败路径不设 messages[id], 保留重试入口.
 	async function loadFullSession(id: string): Promise<void> {
+		// 缓存命中: 已加载过 (包括空数组, 后端没 turn 也会赋 []), 直接返回.
+		if (messages[id] !== undefined) return;
 		loadingFull.add(id);
 		try {
 			const state = await loadSession(id);
@@ -128,6 +134,10 @@ function createSessionStore() {
 					const prev = existingById.get(m.id);
 					return prev ? { ...m, created_at: prev.created_at } : m;
 				});
+			} else {
+				// 后端没 snapshot (刚 create 没 turn / load 返空字符串) → 显式赋 [] 标记已加载,
+				// 避免切回 session 重复 IPC 拿空字符串. 空字符串前端无法判断 "已查过没数据" vs "还没查".
+				messages[id] = [];
 			}
 		} catch (e) {
 			// 单一入口: reportError 上报 (含 toast), 不再独立设 lastError
