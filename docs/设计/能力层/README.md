@@ -1,6 +1,6 @@
 # 能力层 (14 缺口)
 
-> 状态: 启动中 | 适用范围: 千寻 v2 之上叠加的 14 个能力缺口 | 最后更新: 2026-06-11
+> 状态: P0 (5) + 缺口 12 已落地 v0.3, P1 (8) 待启动 | 适用范围: 千寻 v2 之上叠加的 14 个能力缺口 | 最后更新: 2026-06-12
 
 ## 编号规则
 
@@ -15,22 +15,22 @@
 
 ## 缺口清单
 
-| 编号 | 名称 | 等级 | 借鉴源 |
-|---|---|---|---|
-| 01 | [Hook 退出码 + 熔断](./01_Hook退出码与熔断.md) | L2 P0 | octos |
-| 02 | [LLM 错误分类与恢复](./02_LLM错误分类与恢复.md) | L2 P0 | hermes-agent |
-| 03 | [SubAgent 工具白名单](./03_SubAgent工具白名单.md) | L2 P0 | microclaw |
-| 04 | [Skill 生命周期自动化](./04_Skill生命周期自动化.md) | L2 P0 | opencrust |
-| 05 | [后台异步任务](./05_后台异步任务.md) | L2 P0 | oh-my-opencode |
-| 06 | [压缩前 Memory Flush](./06_压缩前MemoryFlush.md) | L3 P1 ROI 高 | openclaw-mini |
-| 07 | [Hook 五层 Tier](./07_Hook五层Tier.md) | L3 P1 ROI 高 | oh-my-opencode |
-| 08 | [Hashline Edit 防 Stale](./08_HashlineEdit防Stale.md) | L3 P1 ROI 高 | oh-my-opencode |
-| 09 | [Context Window 五层优先](./09_ContextWindow五层优先.md) | L3 P1 ROI 高 | moltis |
-| 10 | [Session Queue 五种模式](./10_SessionQueue五种模式.md) | L3 P1 ROI 高 | octos |
-| 11 | [Verdict 四态与 BDD 验收](./11_Verdict四态与BDD验收.md) | L4 P1 ROI 中 | agent-spec |
-| 12 | [Provider 三层 Failover](./12_Provider三层Failover.md) | L4 P1 ROI 中 | octos |
-| 13 | [双层循环与 EventStream](./13_双层循环与EventStream.md) | L5 P1 投资大 | openclaw-mini |
-| 14 | [Knowledge 五状态与 Gate](./14_Knowledge五状态与Gate.md) | L5 P1 投资大 | mempal |
+| 编号 | 名称 | 等级 | 借鉴源 | 状态 |
+|---|---|---|---|---|
+| 01 | [Hook 退出码 + 熔断](./01_Hook退出码与熔断.md) | L2 P0 | octos | ✅ 2026-06-10 (a6e9861) |
+| 02 | [LLM 错误分类与恢复](./02_LLM错误分类与恢复.md) | L2 P0 | hermes-agent | ✅ 2026-06-10 (a6e9861) |
+| 03 | [SubAgent 工具白名单](./03_SubAgent工具白名单.md) | L2 P0 | microclaw | ✅ 2026-06-10 (a6e9861) |
+| 04 | [Skill 生命周期自动化](./04_Skill生命周期自动化.md) | L2 P0 | opencrust | ✅ 2026-06-10 (a6e9861) |
+| 05 | [后台异步任务](./05_后台异步任务.md) | L2 P0 | oh-my-opencode | ✅ 2026-06-10 (a6e9861) |
+| 06 | [压缩前 Memory Flush](./06_压缩前MemoryFlush.md) | L3 P1 ROI 高 | openclaw-mini | ⏳ 待启动 |
+| 07 | [Hook 五层 Tier](./07_Hook五层Tier.md) | L3 P1 ROI 高 | oh-my-opencode | ⏳ 待启动 |
+| 08 | [Hashline Edit 防 Stale](./08_HashlineEdit防Stale.md) | L3 P1 ROI 高 | oh-my-opencode | ⏳ 待启动 |
+| 09 | [Context Window 五层优先](./09_ContextWindow五层优先.md) | L3 P1 ROI 高 | moltis | ⏳ 待启动 |
+| 10 | [Session Queue 五种模式](./10_SessionQueue五种模式.md) | L3 P1 ROI 高 | octos | ⏳ 待启动 |
+| 11 | [Verdict 四态与 BDD 验收](./11_Verdict四态与BDD验收.md) | L4 P1 ROI 中 | agent-spec | ⏳ 待启动 |
+| 12 | [Provider 三层 Failover](./12_Provider三层Failover.md) | L4 P1 ROI 中 | octos | ✅ 2026-06-10 (ae6f7e3 v0.3) |
+| 13 | [双层循环与 EventStream](./13_双层循环与EventStream.md) | L5 P1 投资大 | openclaw-mini | ⏳ 待启动 |
+| 14 | [Knowledge 五状态与 Gate](./14_Knowledge五状态与Gate.md) | L5 P1 投资大 | mempal | ⏳ 待启动 |
 
 ## 跨缺口规范
 

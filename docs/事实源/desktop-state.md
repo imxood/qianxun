@@ -145,8 +145,9 @@ qianxun-desktop/
 
 ### P1 (影响体验和稳定性)
 
-- **P1-1**: Plan 持久化(在 `runtime-state.md` 中)
-- **P1-2**: desktop.db 路径(避免跟 daemon.db 锁竞争)
+- ~~**P1-1**: Plan 持久化(在 `runtime-state.md` 中)~~ ✅ **2026-06-12 done** (`state.plans: Arc<Mutex<HashMap>>` 全删, 改走 `state.store` SQLite plans 表; commit a1801f8)
+- ~~**P1-2**: desktop.db 路径(避免跟 daemon.db 锁竞争)~~ ✅ **2026-06-12 done** (`RuntimeMode` enum + `paths_for()` 选 `<dir>/<mode>.db`; commit a1801f8)
+- ~~**P1-3**: `SseEvent::PlanUpdate` 实时事件(plan 进度只能轮询)~~ ✅ **2026-06-12 done** (第 16 变体 + broadcast + Tauri `plan_event` emit; commit a1801f8)
 - **P1-4**: `connection.svelte.ts` 接真 `daemon_health_fetch`(当前仍用 mock)
 - **P1-5**: Plan 决策逻辑 `chat.svelte.ts:103` 关键词正则移到后端
 
@@ -287,7 +288,8 @@ P0-4 (`project.svelte.ts`) 在 2026-06-09 重构时已 done (走 `listSessions('
 - ✅ 健康检查 session_count 修 (本次)
 - ✅ delete_secret 后端 done (本次)
 - ✅ ApprovalModal 真批准/拒绝 (本次)
-- ⏳ P1-1/2/4/5 仍未动, 留 v0.4
+- ✅ P1-1/2/3 done (commit a1801f8, Plan 持久化 + db 路径分文件 + PlanUpdate 实时事件)
+- ⏳ P1-4/5 仍未动, 留 v0.4 (2026-06-12 同步)
 
 **测试基线** (2026-06-12):
 - `pnpm test:unit`: **109 passed**, 0 failed (16 files) — 比 4a-2 收尾的 108 多 1 个 (新加的 lastError 语义测试覆盖)

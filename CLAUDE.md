@@ -113,13 +113,13 @@ cd qianxun-desktop && pnpm tauri dev   # 启桌面端 (需 DEEPSEEK_API_KEY)
 cargo run -- --help               # 查看 CLI 帮助
 ```
 
-## 当前 P0 收尾 (4a-2 阶段, 按优先级)
+## 4a-2 阶段状态 (2026-06-12 同步)
 
-> 注意: 这跟 [设计/TODO/2026-06-11_v2_缺口补齐_14项/](./docs/设计/TODO/2026-06-11_v2_缺口补齐_14项/) 的 14 缺口 P0 (02/01/04/03/05) 是**两套独立 P0**, 不要混淆。
+> 4a-2 P0 收尾 4 项 + P1 收尾 5 项 + 14 缺口 P0 5 项 + 缺口 12 全部 ✅ done. 详见 `docs/事实源/runtime-state.md` 和 `desktop-state.md` 的 "已知缺口" 段 (已同步带删除线 + 引用 commit).
 
-1. **用户手动 E2E 验收** (6 步清单, 关键)
-2. **sub_session 后端实现**
-3. **list_plans Tauri command 注册**
-4. **project.svelte.ts 后端实现**
-
-详细缺口列表见 `docs/事实源/runtime-state.md` 和 `desktop-state.md` 的 "已知缺口" 段。
+**仍待办 (按优先级)**:
+1. **用户手动 E2E 验收** (6 步清单) — 用户驱动, 阻塞收尾. 14b2bf4 (写路径持久化) 已修 E2E v2 反馈, 等你跑桌面验证
+2. **P1-4** `connection.svelte.ts` 接真 `daemon_health_fetch` (当前 mock)
+3. **P1-5** Plan 决策逻辑 `chat.svelte.ts:103` 关键词正则移到后端
+4. **14 缺口 P1** 8 项 (06/07/08/09/10/11/13/14) — 见 [设计/TODO/2026-06-11_v2_缺口补齐_14项/](./docs/设计/TODO/2026-06-11_v2_缺口补齐_14项/) §"下一步" 排序
+5. **遗留 commit** JWT 鉴权 (Cargo.toml + Cargo.lock §11.4 P0, 未提交) + `docs/决策/随手记.md` (untracked)

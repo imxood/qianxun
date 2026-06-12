@@ -16,11 +16,11 @@
 
 > **实施顺序**: 跟 [00_总览.md §3](../../00_总览.md) + [规范/16 §6](../../规范/16_接口契约汇总.md) + [README.md 下一步](./README.md) 1:1 对齐 — `02 → 01 → 04 → 03 → 05` (按依赖 + ROI)。
 
-### [ ] 缺口 02 — LLM 错误分类
+### [x] 缺口 02 — LLM 错误分类 ✅ **2026-06-10 done** (commit a6e9861)
 
 **借鉴**: [hermes-agent](E:\git\ai\hermes-agent) `error_classifier.py` 22 种 FailoverReason
 **详细**: [设计/02_LLM错误分类与恢复.md](../../能力层/02_LLM错误分类与恢复.md)
-**行数**: ~320
+**行数**: ~624 (`qianxun-core/src/provider/error_classifier.rs`)
 **依赖**: 无
 **步骤**:
 1. `qianxun-core/src/provider/error.rs` (新) LlmErrorKind 15 变体 + Classifier
@@ -31,11 +31,11 @@
 - [ ] `cargo test -p qianxun-core -- provider::error` 全过
 - [ ] 401/429/500/503/timeout/context_overflow 各 1 集成测试
 
-### [ ] 缺口 01 — Hook 退出码 + 熔断
+### [x] 缺口 01 — Hook 退出码 + 熔断 ✅ **2026-06-10 done** (commit a6e9861)
 
 **借鉴**: [octos](E:\git\ai\octos) 退出码语义 + 3 连败熔断
 **详细**: [设计/01_Hook退出码与熔断.md](../../能力层/01_Hook退出码与熔断.md)
-**行数**: ~105
+**行数**: ~562 (`qianxun-core/src/hooks/mod.rs`)
 **依赖**: v2 E1 (HookRegistry) 完成
 **步骤**:
 1. `qianxun-core/src/hooks/handler.rs` HookResult 加 `Error(String)` 变体
@@ -47,7 +47,7 @@
 - [ ] `cargo test -p qianxun-runtime -- sse` 全过
 - [ ] 248 基线不退
 
-### [ ] 缺口 04 — Skill 生命周期自动化 (后置, 不阻塞 P0)
+### [x] 缺口 04 — Skill 生命周期自动化 ✅ **2026-06-10 done** (commit a6e9861)
 
 **借鉴**: [opencrust](E:\git\ai\opencrust) self-learning skill lifecycle
 **详细**: [设计/04_Skill生命周期自动化.md](../../能力层/04_Skill生命周期自动化.md)
@@ -63,7 +63,7 @@
 - [ ] `cargo test -p qianxun-core -- skills::lifecycle` 全过
 - [ ] tick() 不阻塞 boot (async 后台)
 
-### [ ] 缺口 03 — SubAgent 工具白名单
+### [x] 缺口 03 — SubAgent 工具白名单 ✅ **2026-06-10 done** (commit a6e9861, `qianxun-core/src/subagent/mod.rs` ~315 行)
 
 **借鉴**: [microclaw](E:\git\ai\microclaw) 9-tool 白名单
 **详细**: [设计/03_SubAgent工具白名单.md](../../能力层/03_SubAgent工具白名单.md)
@@ -78,7 +78,7 @@
 - [ ] `cargo test -p qianxun-core -- subagent` 全过
 - [ ] sub-agent 调 write_file → 拒绝 + 收到 ToolDenied
 
-### [ ] 缺口 05 — 后台异步任务
+### [x] 缺口 05 — 后台异步任务 ✅ **2026-06-10 done** (commit a6e9861, `qianxun-runtime/src/background_task.rs` ~594 行)
 
 **借鉴**: [oh-my-opencode](E:\git\ai\oh-my-opencode) `background-task` + `background-continuation`
 **详细**: [设计/05_后台异步任务.md](../../能力层/05_后台异步任务.md)
@@ -125,7 +125,7 @@
 3. 接入 v2 loop
 4. 测试: steer 立即应用 + user input 等 inner 完成
 
-### [ ] 缺口 12 — Provider 三层 Failover (投资大, 最后)
+### [x] 缺口 12 — Provider 三层 Failover ✅ **2026-06-10 done** (commit ae6f7e3, v0.3 真实挂载)
 
 **借鉴**: [octos](E:\git\ai\octos) Retry/Chain/AdaptiveRouter
 **详细**: [能力层/12_Provider三层Failover.md](../../能力层/12_Provider三层Failover.md)
