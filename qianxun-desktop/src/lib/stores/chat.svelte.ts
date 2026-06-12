@@ -124,6 +124,11 @@ function createChatStore() {
 		};
 		sessionStore.appendMessage(sid, userMsg);
 
+		// 2. 2026-06-12 (批次 3.2): 记入 lastUserMessage 提前到 plan 判断前.
+		// 之前只在 line 196 普通响应分支记, plan 触发路径不记, 触发 plan 后想
+		// resend 会弹"无可重发"toast. 这里 appendMessage 后立即记, 覆盖 plan 路径.
+		lastUserMessage.set(sid, userMessage);
+
 		// 2. 更新 session title (首条消息)
 		const session = sessionStore.get(sid);
 		if (session && session.title === session.id.slice(0, 20)) {
@@ -192,10 +197,7 @@ function createChatStore() {
 			return;
 		}
 
-		// 4. 记入 lastUserMessage, 供 resend() 用
-		lastUserMessage.set(sid, userMessage);
-
-		// 5. 普通响应: 调 sendMessage invoke + 起流式 state
+		// 4. 普通响应: 调 sendMessage invoke + 起流式 state
 		const assistantMsg: Message = {
 			id: genId(),
 			session_id: sid,

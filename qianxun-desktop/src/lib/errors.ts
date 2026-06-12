@@ -15,11 +15,20 @@
 //   - trace_id 短码 (e_xxxxx_yyyy) 关联 console 和 toast, 用户贴日志就能反查
 //   - toast 仅在用户能感知失败时弹, 静默失败 (parse/refresh) 不弹避免误报淹没
 //   - 单文件单函数, 不拆 helper
+//
+// 2026-06-12 (批次 3.1) 加 toast throttle: 同 source 1s 内最多 THROTTLE_MAX 条 toast,
+// 错误风暴时 (WS 断连 1s 1000 事件) 不刷屏. console 仍全量 (排查用).
+// 实现: 简单 Map + window 滑动, 不引第三方库 (规范 4 反对低质量代码 → 不引 token bucket).
 
 import { uiStore } from './stores/ui.svelte';
 
 let _seq = 0;
 const _newTraceId = (): string => `e_${Date.now().toString(36)}_${(++_seq).toString(36)}`;
+
+/// 2026-06-12 (批次 3.1) throttle state: per-source 1s 滑动窗口, 累计被压条数.
+const _throttle = new Map<string, { count: number; firstAt: number; suppressed: number }>();
+const THROTTLE_WINDOW_MS = 1000;
+const THROTTLE_MAX = 3;
 
 export interface ReportErrorOpts {
 	/** 调用源标签, 形如 'sessionStore.init' / 'planStore.cancel' / 'boot.lists'. */
@@ -34,18 +43,46 @@ export interface ReportErrorOpts {
 export function reportError(e: unknown, opts: ReportErrorOpts): string {
 	const traceId = _newTraceId();
 	const err = e instanceof Error ? e : new Error(String(e));
+	// 1. console 永远写 (不 throttle, 排查用, 规范 1 错误处理要详细)
 	console.error(
 		`[${traceId}] ${opts.source} failed:`,
 		err.message,
 		opts.context ?? '',
 	);
+	// 2. toast throttle: 同 source 1s 内最多 THROTTLE_MAX 条, 后续折叠成 "还有 N 条被压"
 	if (opts.toast) {
-		uiStore.pushToast({
-			kind: 'error',
-			title: opts.toast,
-			description: `${err.message} (${traceId})`,
-			timeout_ms: 5000,
-		});
+		const now = Date.now();
+		const key = opts.source;
+		const prev = _throttle.get(key);
+		if (prev && now - prev.firstAt < THROTTLE_WINDOW_MS) {
+			prev.count++;
+			if (prev.count === THROTTLE_MAX + 1) {
+				// 正好越过阈值: 弹一条汇总 toast 告知用户"还在出错, 已被压"
+				uiStore.pushToast({
+					kind: 'error',
+					title: opts.toast,
+					description: `还有更多同源错误被压, 见 console (${traceId})`,
+					timeout_ms: 5000,
+				});
+			} else if (prev.count <= THROTTLE_MAX) {
+				// 阈值内: 弹正常 toast
+				uiStore.pushToast({
+					kind: 'error',
+					title: opts.toast,
+					description: `${err.message} (${traceId})`,
+					timeout_ms: 5000,
+				});
+			}
+			// 超出不弹, 但 console 还在
+		} else {
+			_throttle.set(key, { count: 1, firstAt: now, suppressed: 0 });
+			uiStore.pushToast({
+				kind: 'error',
+				title: opts.toast,
+				description: `${err.message} (${traceId})`,
+				timeout_ms: 5000,
+			});
+		}
 	}
 	return traceId;
 }

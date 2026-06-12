@@ -2,10 +2,22 @@
 	// 2026-06-12 (Phase C): 三个按钮接 dismiss 行为 + localStorage "已读" 标记.
 	// 关键设计: 三个按钮都只 dismiss, 不调后端 (experience 沉淀 API 暂无, 留 v0.4).
 	// localStorage key: qianxun.experience.dismissedAt, 存 ISO 时间戳.
+	//
+	// 2026-06-12 (批次 3.5): onClose 改可选 + 默认 noop, 跟 ApprovalModal (3.3) 同模式.
+	// 规范 10 命名准确: 0 caller 状态也允许 mount. 本 modal 无内部 $state, 不需要
+	// 跨 open 复位 (items 全受控, 由父组件 prop 决定).
 	import Modal from '../shared/Modal.svelte';
 	import Icon from '../shared/Icon.svelte';
 
-	let { open, onClose, items = [] }: { open: boolean; onClose: () => void; items?: { content: string }[] } = $props();
+	let {
+		open = false,
+		onClose = () => {},
+		items = [],
+	}: {
+		open?: boolean;
+		onClose?: () => void;
+		items?: { content: string }[];
+	} = $props();
 
 	function dismiss(reason: 'skip' | 'modify' | 'commit') {
 		try {

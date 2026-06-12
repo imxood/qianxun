@@ -1,24 +1,35 @@
 <script lang="ts">
 	// 2026-06-12 (Phase B.4): 按钮接 onApprove/onReject 回调, 父组件注入实际审批逻辑.
 	// 当前无调用方 (后续 P1.5 / v0.4 接入 tool approval 流时启用), 接口已对齐.
+	//
+	// 2026-06-12 (批次 3.3): 必传 props 改可选 + 默认 noop.
+	// 之前 0 caller 状态下硬传 5 个必传 props, 等接入流程期间容易让 TypeScript 报
+	// "missing props" 错. 默认 noop 表达"不接就什么都不做" (规范 10 命名准确).
+	//
+	// 2026-06-12 (批次 3.4): remember 跨 open 复位.
+	// 之前不重置, 打开 → 勾 remember → 关闭 → 再打开 → remember 仍勾, 用户体验割裂.
 	import Modal from '../shared/Modal.svelte';
 	import Icon from '../shared/Icon.svelte';
 
 	let {
-		open,
-		onClose,
-		request,
-		onApprove,
-		onReject,
+		open = false,
+		onClose = () => {},
+		request = { kind: 'file' as const, detail: '' },
+		onApprove = () => {},
+		onReject = () => {},
 	}: {
-		open: boolean;
-		onClose: () => void;
-		request: { kind: 'file' | 'command' | 'network'; detail: string };
-		onApprove: (remember: boolean) => void;
-		onReject: (remember: boolean) => void;
+		open?: boolean;
+		onClose?: () => void;
+		request?: { kind: 'file' | 'command' | 'network'; detail: string };
+		onApprove?: (remember: boolean) => void;
+		onReject?: (remember: boolean) => void;
 	} = $props();
 
 	let remember = $state(false);
+	// open 由 false 变 true 时重置 remember (规范 5: 完整执行流程).
+	$effect(() => {
+		if (open) remember = false;
+	});
 </script>
 
 <Modal {open} {onClose} title="需要你的批准" maxWidth="max-w-lg">
