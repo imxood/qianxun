@@ -10,6 +10,7 @@
 
 import type { Project } from '$lib/types/entity';
 import { listSessions, type SessionInfo } from '$lib/ipc/runtime';
+import { reportError } from '$lib/errors';
 
 function createProjectStore() {
 	const projects = $state<Project[]>([]);
@@ -29,9 +30,7 @@ function createProjectStore() {
 			projects.push(...deriveProjectsFromSessions(r.sessions));
 			initialized = true;
 		} catch (e) {
-			const msg = (e as Error).message ?? String(e);
-			lastError = msg;
-			console.warn('[projectStore] loadAll failed:', msg);
+			lastError = reportError(e, { source: 'projectStore.loadAll' });
 		} finally {
 			loading = false;
 		}

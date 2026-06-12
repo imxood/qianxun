@@ -19,6 +19,7 @@
 
 import type { Project, Team, TeamMember } from "$lib/types/ipc";
 import { settingsStore } from "$lib/stores/settings.svelte";
+import { reportError } from "$lib/errors";
 
 class TeamStore {
 	teams = $state<Team[]>([]);
@@ -82,7 +83,7 @@ class TeamStore {
 			}
 			this._syncActiveMembers();
 		} catch (e) {
-			this.lastError = (e as Error).message || "refresh teams/projects 失败";
+			this.lastError = reportError(e, { source: 'teamStore.refresh' }) || "refresh teams/projects 失败";
 		} finally {
 			this.loading = false;
 		}

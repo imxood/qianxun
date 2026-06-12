@@ -167,6 +167,10 @@ describe("ChatStore (Stage 4a sub-task #4 切 invoke)", () => {
 
 		// 不应调 sendMessage
 		expect(sendMessageMock).not.toHaveBeenCalled();
+		// createPlan 必须带 session_id (回归: 之前用 sid 字段导致后端报 missing field)
+		expect(createPlanMock).toHaveBeenCalledWith(
+			expect.objectContaining({ session_id: "sess_test_001" }),
+		);
 		// 应追加一个 user + 1 个 assistant (带 plan_ref) 消息
 		const msgs = sessionStore.getMessages("sess_test_001");
 		expect(msgs).toHaveLength(2);

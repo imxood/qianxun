@@ -12,26 +12,11 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
 use tauri::State;
 
 use qianxun_runtime::api::RuntimeApi;
 use qianxun_runtime::background_task::TaskInfo;
 use qianxun_runtime::RuntimeState;
-
-/// 序列化 wrapper: 把 RuntimeApiError 变成 String 给前端.
-#[derive(Debug, Serialize)]
-pub struct BgtCommandError {
-    pub message: String,
-}
-
-impl From<qianxun_runtime::api::RuntimeApiError> for BgtCommandError {
-    fn from(e: qianxun_runtime::api::RuntimeApiError) -> Self {
-        Self {
-            message: e.to_string(),
-        }
-    }
-}
 
 /// Tauri command: 启动后台任务.
 #[tauri::command]

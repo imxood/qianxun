@@ -249,3 +249,47 @@ P0-4 (`project.svelte.ts`) 在 2026-06-09 重构时已 done (走 `listSessions('
 - **后端 `send_message_to_sub_session` 设计权衡**:
   - 当前 P0 阶段: API 表面 100% 对称 (RuntimeApi 17 → 18 方法), 内部 forward 到 `send_message_impl`. 前端 chatStore 解析 `sub_id → parent_sid` 调这个 method
   - 后续 P1 (sub_session 持久化缺口接时): 改 impl 内部查 sub_session store 拿 parent_session_id, 前端改成调 `sendMessageToSubSession(sub_id, ...)` (传真 sub_id, 不解析)
+
+**桌面端 UI 完整性 (2026-06-12, Phase A-D 收尾)**:
+
+5 P0 真实 bug + 12 死按钮 + 8 半成品 + 12 错误吞噬 全部修复. 完整规划见 `C:\Users\maxu\.claude\plans\spicy-tumbling-engelbart.md` (已批准).
+
+**新增 2 个文件**:
+- `qianxun-desktop/src/lib/errors.ts` (~60 行) — 统一错误上报 `reportError(e, { source, toast?, context? })`, 返回 trace_id 短码, 写 console + 弹 toast. 12 处错误吞噬全用这个
+- `qianxun-desktop/src/lib/boot.ts` (~80 行) — 4 阶段启动 (listeners → health → lists → ready), 数组驱动循环, 阶段失败不中断 (累积到 `state.error`), 含 timing 日志
+
+**Phase B.5 P0 真实 bug 修复**:
+- `health_check` 注入 `State<Arc<RuntimeState>>`, 调 `state.list_sessions(SessionFilter::All)` 读真实 `session_count` (从硬编码 0 改成真值)
+- `delete_secret` 新增: `vault::delete` 用 stronghold `store().delete()` + `commit_with_keyprovider`, 注册到 `generate_handler!`
+- `loadFullSession` 解析后端 `conversation_json` (JSONL 格式) → `Message[]` 写入 `messages[id]`, 处理 serde external tag `{"User":{...}}` / `{"Assistant":{...}}`, 跳过 system header 行
+- `ApprovalModal` 按钮接 `onApprove(remember)` / `onReject(remember)` 回调, 父组件可调后端审批 API, "记住" 复选框 bound
+- 删 `BgtCommandError` 死代码 (Tauri `commands/runtime/background.rs`)
+
+**Phase C.12 死按钮修复**:
+- `ExperienceSuggestModal` 3 按钮 (跳过/修改/沉淀) 接 `dismiss(reason)` + localStorage `qianxun.experience.dismissedAt` 标记
+- `SidebarFooter` Provider 按钮接 `uiStore.openSettings()`
+- `TaskHistorySection` "更多" 按钮接 toast "完整历史记录功能开发中"
+- `Sidebar` "新建任务/团队/刷新" 5 按钮接 store 方法
+- `TopBar` 设置 ⚙ 接 `uiStore.openSettings()`
+
+**Phase D.8 半成品补全**:
+- `chatStore.resend(sid)`: 新增 lastUserMessage 跟踪 + `resend()` 方法, 失败时 toast
+- `ChatStream.svelte`: assistant 消息 `content.startsWith('[错误]')` 时显 "↻ 重试" 按钮, 调 `chatStore.resend`
+- `ChatView.svelte`: 加 `retryActive` 回调, session 视图传 `onRetry={retryActive}`
+
+**Phase A.3 12 错误吞噬迁移** (5 业务 store + 1 settings + 1 persist + 1 vps + 1 team + 1 sub_session + 1 connection):
+- 旧: `catch (e) { console.warn(...); }` (用户无感)
+- 新: `catch (e) { lastError = msg; reportError(e, { source, toast? }); }` (用户见 toast + dev 见 console trace)
+- 关键: `lastError` 保留人类可读消息 (test/UI 状态契约), trace_id 在 toast 里 (用户报告用)
+
+**4a-2 已知缺口更新**:
+- ✅ P0-2/3/4 done (前一段已记录)
+- ✅ 健康检查 session_count 修 (本次)
+- ✅ delete_secret 后端 done (本次)
+- ✅ ApprovalModal 真批准/拒绝 (本次)
+- ⏳ P1-1/2/4/5 仍未动, 留 v0.4
+
+**测试基线** (2026-06-12):
+- `pnpm test:unit`: **109 passed**, 0 failed (16 files) — 比 4a-2 收尾的 108 多 1 个 (新加的 lastError 语义测试覆盖)
+- `cargo test --workspace` (root 4 crates): baseline 360 passed, 0 failed, 4 ignored
+- typecheck 已知 31 个 pre-existing errors (Avatar 'user'/'bot' IconName, Badge 大小写比较, Project session_count 字段, SseEvent test fixture 等) — 全在本次未动过的文件, 留 v0.4

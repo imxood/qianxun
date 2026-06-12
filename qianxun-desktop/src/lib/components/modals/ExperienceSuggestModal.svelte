@@ -1,8 +1,23 @@
 <script lang="ts">
+	// 2026-06-12 (Phase C): 三个按钮接 dismiss 行为 + localStorage "已读" 标记.
+	// 关键设计: 三个按钮都只 dismiss, 不调后端 (experience 沉淀 API 暂无, 留 v0.4).
+	// localStorage key: qianxun.experience.dismissedAt, 存 ISO 时间戳.
 	import Modal from '../shared/Modal.svelte';
 	import Icon from '../shared/Icon.svelte';
 
 	let { open, onClose, items = [] }: { open: boolean; onClose: () => void; items?: { content: string }[] } = $props();
+
+	function dismiss(reason: 'skip' | 'modify' | 'commit') {
+		try {
+			localStorage.setItem(
+				'qianxun.experience.dismissedAt',
+				JSON.stringify({ reason, ts: new Date().toISOString() }),
+			);
+		} catch {
+			// localStorage 不可用时静默 (P2 报告走 Phase A.3 统一通道)
+		}
+		onClose();
+	}
 </script>
 
 <Modal {open} {onClose} title="建议沉淀项目经验" maxWidth="max-w-lg">
@@ -22,9 +37,9 @@
 		</div>
 
 		<div class="flex items-center justify-end gap-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
-			<button class="text-xs px-3 py-1.5 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800" onclick={onClose}>跳过</button>
-			<button class="text-xs px-3 py-1.5 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800" onclick={onClose}>修改</button>
-			<button class="text-xs px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-600 text-zinc-950 font-medium" onclick={onClose}>
+			<button class="text-xs px-3 py-1.5 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800" onclick={() => dismiss('skip')}>跳过</button>
+			<button class="text-xs px-3 py-1.5 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800" onclick={() => dismiss('modify')}>修改</button>
+			<button class="text-xs px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-600 text-zinc-950 font-medium" onclick={() => dismiss('commit')}>
 				沉淀 {items.length} 条
 			</button>
 		</div>

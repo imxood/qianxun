@@ -34,6 +34,7 @@ import { sessionStore } from './session.svelte';
 import { subSessionStore } from './sub_session.svelte';
 import { planStore } from './plan.svelte';
 import { uiStore } from './ui.svelte';
+import { reportError } from '$lib/errors';
 import type { Message, PlanContract } from '$lib/types/entity';
 
 function createChatStore() {
@@ -42,6 +43,10 @@ function createChatStore() {
 
 	// Per-session 流式 state (key = session_id, value = MessageStreamState)
 	const streams = new Map<string, MessageStreamState>();
+
+	// 2026-06-12 (Phase D.8): 最近一次 user 消息, 给 resend() 用.
+	// key = session_id, value = message content. 切 session 不影响, 各自记.
+	const lastUserMessage = new Map<string, string>();
 
 	// 全局 listener unlisten handle
 	let unlisten: UnlistenFn | null = null;
@@ -108,7 +113,7 @@ function createChatStore() {
 		// 1. 追加 user 消息
 		const userMsg: Message = {
 			id: genId(),
-			sid: sid,
+			session_id: sid,
 			sub_session_id: null,
 			role: 'user',
 			content: userMessage,
@@ -163,11 +168,11 @@ function createChatStore() {
 					},
 				],
 			};
-			const plan = await planStore.create({ sid, contract });
+			const plan = await planStore.create({ session_id: sid, contract });
 			// 追加一个 assistant 消息 (带 plan_ref)
 			const planMsg: Message = {
 				id: genId(),
-				sid,
+				session_id: sid,
 				sub_session_id: null,
 				role: 'assistant',
 				content: '',
@@ -178,10 +183,13 @@ function createChatStore() {
 			return;
 		}
 
-		// 4. 普通响应: 调 sendMessage invoke + 起流式 state
+		// 4. 记入 lastUserMessage, 供 resend() 用
+		lastUserMessage.set(sid, userMessage);
+
+		// 5. 普通响应: 调 sendMessage invoke + 起流式 state
 		const assistantMsg: Message = {
 			id: genId(),
-			sid,
+			session_id: sid,
 			sub_session_id: null,
 			role: 'assistant',
 			content: '',
@@ -207,17 +215,16 @@ function createChatStore() {
 			// 立即返, 流走 session_event 异步推
 		} catch (e) {
 			// 失败时本地标记 + 弹 toast
-			const msg = (e as Error).message ?? String(e);
-			state.content = `[错误] ${msg}`;
+			const err = e instanceof Error ? e : new Error(String(e));
+			state.content = `[错误] ${err.message}`;
 			state.finished = true;
 			finalizeStream(sid, state);
 			// 2026-06-09: invoke reject 走不到 chat-stream error 分支 (那时 listener 都还没收到任何事件),
 			// 必须在 catch 块主动 toast.
-			uiStore.pushToast({
-				kind: 'error',
-				title: '发送失败',
-				body: msg,
-				timeout_ms: 8000,
+			reportError(err, {
+				source: 'chatStore.send',
+				toast: '发送失败',
+				context: { session_id: sid },
 			});
 		}
 	}
@@ -246,7 +253,7 @@ function createChatStore() {
 		// 1. 追加 user 消息 (sub_session_id 标记)
 		const userMsg: Message = {
 			id: genId(),
-			sid: parent_sid,
+			session_id: parent_sid,
 			sub_session_id: sub_id,
 			role: 'user',
 			content: userMessage,
@@ -258,7 +265,7 @@ function createChatStore() {
 		// 2. 追加 assistant 消息占位
 		const assistantMsg: Message = {
 			id: genId(),
-			sid: parent_sid,
+			session_id: parent_sid,
 			sub_session_id: sub_id,
 			role: 'assistant',
 			content: '',
@@ -282,15 +289,14 @@ function createChatStore() {
 				messages: [{ role: 'user', content: userMessage }],
 			});
 		} catch (e) {
-			const msg = (e as Error).message ?? String(e);
-			state.content = `[错误] ${msg}`;
+			const err = e instanceof Error ? e : new Error(String(e));
+			state.content = `[错误] ${err.message}`;
 			state.finished = true;
 			finalizeStream(parent_sid, state);
-			uiStore.pushToast({
-				kind: 'error',
-				title: 'sub_session 追问失败',
-				body: msg,
-				timeout_ms: 8000,
+			reportError(err, {
+				source: 'chatStore.sendToSubSession',
+				toast: 'sub_session 追问失败',
+				context: { sub_session_id: sub_id, parent_session_id: parent_sid },
 			});
 		}
 	}
@@ -302,6 +308,19 @@ function createChatStore() {
 		init,
 		send,
 		sendToSubSession,
+		/// 2026-06-12 (Phase D.8): 重发最近一次 user 消息. UI 流式错误时给 "重试" 按钮用.
+		/// 没有最近消息时弹 toast 提示, 不抛.
+		async resend(sid: string): Promise<void> {
+			const last = lastUserMessage.get(sid);
+			if (!last) {
+				reportError(new Error('没有可重发的消息'), {
+					source: 'chatStore.resend',
+					toast: '当前会话没有最近消息可重发',
+				});
+				return;
+			}
+			await send(sid, last);
+		},
 		/// 测试专用: 重置内部状态 + 调 unlisten. 业务代码不应该调.
 		async __resetForTesting() {
 			if (unlisten) {
@@ -311,6 +330,7 @@ function createChatStore() {
 			listenerInitialized = false;
 			streams.clear();
 			streaming.message_id = null;
+			lastUserMessage.clear();
 		},
 	};
 }

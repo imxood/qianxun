@@ -82,3 +82,35 @@ pub fn get(
         None => Ok(None),
     }
 }
+
+/// 2026-06-12 (Phase B.2): 删除指定 key. 密码错误或 key 不存在时返 Ok(false) —
+///// 跟 get 行为对齐: 都不抛, 避免 UI 把"已删"误报成"出错".
+pub fn delete(
+    snapshot_path: &SnapshotPath,
+    password: &str,
+    key: &str,
+) -> Result<bool, String> {
+    if !snapshot_path.exists() {
+        return Ok(false);
+    }
+    let keyprovider = make_keyprovider(password)?;
+    let stronghold = Stronghold::default();
+    stronghold
+        .load_snapshot(&keyprovider, snapshot_path)
+        .map_err(|e| format!("stronghold load_snapshot failed (wrong password?): {e}"))?;
+    let client = stronghold
+        .load_client(VAULT_CLIENT_PATH)
+        .map_err(|e| format!("stronghold load_client failed: {e}"))?;
+    let store = client.store();
+    let removed = store
+        .delete(key.as_bytes())
+        .map_err(|e| format!("stronghold delete failed: {e}"))?;
+    // stronghold store().delete() 返回 Option<Vec<u8>>: Some(old_value)=存在并删除, None=本就不存在
+    if removed.is_none() {
+        return Ok(false);
+    }
+    stronghold
+        .commit_with_keyprovider(snapshot_path, &keyprovider)
+        .map_err(|e| format!("stronghold commit failed: {e}"))?;
+    Ok(true)
+}

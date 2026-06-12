@@ -1,8 +1,24 @@
 <script lang="ts">
+	// 2026-06-12 (Phase B.4): 按钮接 onApprove/onReject 回调, 父组件注入实际审批逻辑.
+	// 当前无调用方 (后续 P1.5 / v0.4 接入 tool approval 流时启用), 接口已对齐.
 	import Modal from '../shared/Modal.svelte';
 	import Icon from '../shared/Icon.svelte';
 
-	let { open, onClose, request }: { open: boolean; onClose: () => void; request: { kind: 'file' | 'command' | 'network'; detail: string } } = $props();
+	let {
+		open,
+		onClose,
+		request,
+		onApprove,
+		onReject,
+	}: {
+		open: boolean;
+		onClose: () => void;
+		request: { kind: 'file' | 'command' | 'network'; detail: string };
+		onApprove: (remember: boolean) => void;
+		onReject: (remember: boolean) => void;
+	} = $props();
+
+	let remember = $state(false);
 </script>
 
 <Modal {open} {onClose} title="需要你的批准" maxWidth="max-w-lg">
@@ -21,13 +37,23 @@
 		</div>
 
 		<label class="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
-			<input type="checkbox" class="accent-amber-500" />
+			<input type="checkbox" class="accent-amber-500" bind:checked={remember} />
 			记住这次, 后续同类操作不再询问
 		</label>
 
 		<div class="flex items-center justify-end gap-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
-			<button class="text-xs px-3 py-1.5 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800" onclick={onClose}>拒绝</button>
-			<button class="text-xs px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-600 text-zinc-950 font-medium" onclick={onClose}>批准</button>
+			<button
+				class="text-xs px-3 py-1.5 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+				onclick={() => onReject(remember)}
+			>
+				拒绝
+			</button>
+			<button
+				class="text-xs px-4 py-1.5 rounded bg-amber-500 hover:bg-amber-600 text-zinc-950 font-medium"
+				onclick={() => onApprove(remember)}
+			>
+				批准
+			</button>
 		</div>
 	</div>
 </Modal>

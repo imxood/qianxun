@@ -28,6 +28,7 @@ import {
 	type SessionInfo,
 } from '$lib/ipc/runtime';
 import { uiStore } from './ui.svelte';
+import { reportError } from '$lib/errors';
 import type { Session, Message } from '$lib/types/entity';
 
 /// SessionInfo (后端 summary) → Session (前端 entity) 转换.
@@ -79,9 +80,9 @@ function createSessionStore() {
 			sessions.push(...r.sessions.map(sessionInfoToSession));
 			initialized = true;
 		} catch (e) {
-			const msg = (e as Error).message ?? String(e);
-			lastError = msg;
-			console.warn('[sessionStore] init failed:', msg);
+			// lastError 存人类可读消息 (test/UI 状态), trace_id 在 toast 里 (用户报告用)
+			lastError = e instanceof Error ? e.message : String(e);
+			reportError(e, { source: 'sessionStore.init', toast: '加载会话失败' });
 		} finally {
 			loading = false;
 		}
@@ -93,9 +94,13 @@ function createSessionStore() {
 		await init();
 	}
 
-	/// 切 session 时调: 拉完整 conversation snapshot, 更新 message_count.
-	/// 暂时: 拿 session_count + 触发 refresh 拉新 list.
-	/// 完整 conversation → Message[] parse 留 sub-task #5.
+	/// 切 session 时调: 拉完整 conversation snapshot, 更新 message_count + 解析历史消息.
+	///
+	/// 2026-06-12 (Phase B.3): 解析后端 conversation_json (JSONL 格式) 写入 messages[id].
+	/// JSONL 格式 (见 qianxun-core/src/agent/conversation.rs::to_jsonl_string):
+	///   - 第 1 行: {"type":"system","prompt":"..."}
+	///   - 后续每行: {"User":{...}} 或 {"Assistant":{...}} (serde external tag)
+	///   - ContentBlock 数组简化: 取 text 字段拼接
 	async function loadFullSession(id: string) {
 		try {
 			const state = await loadSession(id);
@@ -104,10 +109,18 @@ function createSessionStore() {
 			if (local) {
 				local.message_count = state.message_count;
 			}
+			// 解析 conversation_json → Message[] 写入 messages[id]
+			if (state.conversation_json) {
+				messages[id] = parseConversationJsonl(state.conversation_json, id);
+			}
 			return state;
 		} catch (e) {
-			const msg = (e as Error).message ?? String(e);
-			lastError = msg;
+			lastError = e instanceof Error ? e.message : String(e);
+			reportError(e, {
+				source: 'sessionStore.loadFullSession',
+				toast: '加载会话详情失败',
+				context: { session_id: id },
+			});
 			throw e;
 		}
 	}
@@ -159,15 +172,8 @@ function createSessionStore() {
 						project_root: opts.project_id ?? undefined,
 					});
 				} catch (e) {
-					const msg = (e as Error).message ?? String(e);
-					lastError = msg;
-					console.error('[sessionStore] create failed:', msg);
-					uiStore.pushToast({
-						kind: 'error',
-						title: '新建会话失败',
-						body: msg,
-						timeout_ms: 5000,
-					});
+					lastError = e instanceof Error ? e.message : String(e);
+					reportError(e, { source: 'sessionStore.create', toast: '新建会话失败' });
 					throw e; // 让调用方 (NewTaskButton) 仍能 try/catch 处理 UI 状态
 				}
 				const newSession = sessionInfoToSession(info);
@@ -243,3 +249,47 @@ function createSessionStore() {
 }
 
 export const sessionStore = createSessionStore();
+
+/// JSONL conversation 解析 (2026-06-12 加, Phase B.3).
+///
+/// 后端 conversation_json 是 JSONL 字符串, 每行一条记录. 详见 qianxun-core
+/// src/agent/conversation.rs::to_jsonl_string. 解析失败抛 Error, 调用方捕.
+function parseConversationJsonl(jsonl: string, sessionId: string): Message[] {
+	const result: Message[] = [];
+	const lines = jsonl.split('\n');
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		// 第 1 行: 系统提示头, 跳过
+		if (trimmed.startsWith('{"type":"system"')) continue;
+		const parsed = JSON.parse(trimmed) as Record<string, { id: string; content: ContentBlock[] }>;
+		// serde external tag: {"User":{...}} / {"Assistant":{...}}
+		const tag = Object.keys(parsed)[0];
+		if (tag !== 'User' && tag !== 'Assistant') continue;
+		const inner = parsed[tag]!;
+		result.push({
+			id: inner.id,
+			role: tag === 'User' ? 'user' : 'assistant',
+			content: extractTextFromContentBlocks(inner.content),
+			created_at: new Date().toISOString(), // 后端未传 ts, 暂用现在
+			session_id: sessionId,
+			sub_session_id: null, // 主会话消息, 跟 Message 类型契约一致
+		});
+	}
+	return result;
+}
+
+/// ContentBlock 简化提取: 只取 text 字段拼接. 其它类型 (tool_use / tool_result)
+/// 暂不在 UI 渲染, 完整解析留 v0.4.
+function extractTextFromContentBlocks(blocks: ContentBlock[]): string {
+	return blocks
+		.filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+		.map((b) => b.text)
+		.join('\n');
+}
+
+/// ContentBlock Rust serde 反序列化形态. 跟 qianxun-core/src/agent/message.rs 1:1.
+type ContentBlock =
+	| { type: 'text'; text: string }
+	| { type: 'tool_use'; id: string; name: string; input: unknown }
+	| { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean };

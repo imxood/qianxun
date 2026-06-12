@@ -16,7 +16,11 @@
 </script>
 
 <div class="p-2 border-t border-zinc-200 dark:border-zinc-800 space-y-0.5">
-	<button class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800 rounded">
+	<button
+		class="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800 rounded"
+		onclick={() => uiStore.openSettings()}
+		title="点击修改 Provider"
+	>
 		<Icon name="zap" class="w-3.5 h-3.5 text-amber-500" />
 		<span>Provider · {providerLabel}</span>
 	</button>

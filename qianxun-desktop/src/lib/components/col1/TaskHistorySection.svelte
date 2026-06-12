@@ -44,6 +44,7 @@
 		{/each}
 		<button
 			class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] text-zinc-500 dark:text-zinc-500 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50 rounded"
+			onclick={() => uiStore.pushToast({ kind: 'info', title: '完整历史记录功能开发中', timeout_ms: 2000 })}
 		>
 			<Icon name="more-horizontal" class="w-3.5 h-3.5 flex-shrink-0" />
 			<span class="flex-1 text-left">更多 ({all.length - 6})</span>

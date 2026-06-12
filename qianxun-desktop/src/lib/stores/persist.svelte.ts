@@ -2,6 +2,7 @@
 // localStorage 读写工具 (mock 阶段: 不持久化, 真实化阶段接入)
 
 import { browser } from '$app/environment';
+import { reportError } from '$lib/errors';
 
 // 读 localStorage, 失败返 null
 export function readStorage<T>(key: string): T | null {
@@ -10,7 +11,8 @@ export function readStorage<T>(key: string): T | null {
 		const v = localStorage.getItem(key);
 		return v === null ? null : (JSON.parse(v) as T);
 	} catch (e) {
-		console.warn(`[persist] read ${key} failed:`, e);
+		// 静默: localStorage 失败不该打扰用户 (quota / parse error 等)
+		reportError(e, { source: 'persist.read', context: { key } });
 		return null;
 	}
 }
@@ -21,7 +23,8 @@ export function writeStorage<T>(key: string, value: T) {
 	try {
 		localStorage.setItem(key, JSON.stringify(value));
 	} catch (e) {
-		console.warn(`[persist] write ${key} failed:`, e);
+		// 静默: localStorage 失败不该打扰用户 (quota 等)
+		reportError(e, { source: 'persist.write', context: { key } });
 	}
 }
 

@@ -14,10 +14,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const createPlanMock = vi.fn();
 const cancelPlanMock = vi.fn();
+const subscribePlanEventsMock = vi.fn();
+const onPlanEventMock = vi.fn();
 
 vi.mock("$lib/ipc/runtime", () => ({
 	createPlan: (...args: unknown[]) => createPlanMock(...args),
 	cancelPlan: (...args: unknown[]) => cancelPlanMock(...args),
+	subscribePlanEvents: (...args: unknown[]) => subscribePlanEventsMock(...args),
+	onPlanEvent: (...args: unknown[]) => onPlanEventMock(...args),
 }));
 
 import { planStore } from "$lib/stores/plan.svelte";
@@ -42,6 +46,8 @@ function resetPlanStore() {
 beforeEach(() => {
 	createPlanMock.mockReset();
 	cancelPlanMock.mockReset();
+	subscribePlanEventsMock.mockReset();
+	onPlanEventMock.mockReset();
 	resetPlanStore();
 	uiStore.setActiveView({ kind: "empty" });
 });
@@ -67,6 +73,7 @@ describe("PlanStore (Stage 4a sub-task #4 切 invoke)", () => {
 			name: "JWT 鉴权",
 			description: "实现 JWT 鉴权",
 			timeout_ms: 1800000,
+			tasks: FAKE_CONTRACT.tasks,
 		});
 		expect(plan.id).toBe("plan_jwt_001");
 		expect(plan.status).toBe("Running"); // lowercase → PascalCase
@@ -182,5 +189,22 @@ describe("PlanStore (Stage 4a sub-task #4 切 invoke)", () => {
 		// 切到其他 session
 		uiStore.setActiveView({ kind: "session", session_id: "sess_other" });
 		expect(planStore.active).toBeNull();
+	});
+
+	// 回归: planStore.init() 必须在 app 启动时调一次, 否则 PlanUpdate 事件断链.
+	// 之前 +page.svelte 启动序列只调了 chatStore.init, UI 永远收不到 plan_event.
+	it("init_registers_plan_event_listener_and_subscribes_backend: P1-3 事件链", async () => {
+		const unlisten = vi.fn();
+		subscribePlanEventsMock.mockResolvedValueOnce(undefined);
+		onPlanEventMock.mockResolvedValueOnce(unlisten);
+
+		const returned = await planStore.init();
+
+		// 1. 调了后端 subscribePlanEvents 启 broadcast 任务
+		expect(subscribePlanEventsMock).toHaveBeenCalledTimes(1);
+		// 2. 调了 onPlanEvent 注册 Tauri 'plan_event' listener
+		expect(onPlanEventMock).toHaveBeenCalledTimes(1);
+		// 3. 返非空 unlisten (给 caller 用来 unregister)
+		expect(returned).toBe(unlisten);
 	});
 });

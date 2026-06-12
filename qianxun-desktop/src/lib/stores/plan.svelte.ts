@@ -32,6 +32,7 @@ import {
 } from '$lib/ipc/runtime';
 import { subSessionStore } from './sub_session.svelte';
 import { uiStore } from './ui.svelte';
+import { reportError } from '$lib/errors';
 import type { Plan, PlanStatus as EntityPlanStatus, ChangedFile } from '$lib/types/entity';
 
 /// IpcPlanInfo (后端 DTO, lowercase status) → Plan (前端 entity, PascalCase status) 转换.
@@ -106,6 +107,7 @@ function createPlanStore() {
 				name: opts.contract.name,
 				description: opts.contract.description,
 				timeout_ms: opts.contract.timeout_ms,
+				tasks: opts.contract.tasks,
 			});
 			const plan: Plan = {
 				...ipcPlanToEntity(ipc),
@@ -114,12 +116,11 @@ function createPlanStore() {
 			plans.push(plan);
 			return plan;
 		} catch (e) {
-			const msg = (e as Error).message ?? String(e);
-			lastError = msg;
-			uiStore.pushToast({
-				kind: 'error',
-				title: `创建 plan 失败: ${msg}`,
-				timeout_ms: 5000,
+			lastError = e instanceof Error ? e.message : String(e);
+			reportError(e, {
+				source: 'planStore.create',
+				toast: '创建 plan 失败',
+				context: { session_id: opts.session_id, plan_name: opts.contract.name },
 			});
 			throw e;
 		}
@@ -137,12 +138,11 @@ function createPlanStore() {
 			p.status = 'Aborted';
 			p.ended_at = new Date().toISOString();
 		} catch (e) {
-			const msg = (e as Error).message ?? String(e);
-			lastError = msg;
-			uiStore.pushToast({
-				kind: 'error',
-				title: `取消 plan 失败: ${msg}`,
-				timeout_ms: 5000,
+			lastError = e instanceof Error ? e.message : String(e);
+			reportError(e, {
+				source: 'planStore.cancel',
+				toast: '取消 plan 失败',
+				context: { plan_id: planId },
 			});
 		}
 	}
@@ -193,7 +193,8 @@ function createPlanStore() {
 					deliverables: plan.result?.deliverables ?? [],
 				};
 			} catch (e) {
-				console.warn('[planStore] failed to parse task_results_json:', e);
+				// 静默: parse 失败不该打扰用户, 但留痕
+				reportError(e, { source: 'planStore.handlePlanEvent.parse', context: { plan_id: planId } });
 			}
 		}
 	}
@@ -206,7 +207,8 @@ function createPlanStore() {
 		try {
 			await subscribePlanEvents();
 		} catch (e) {
-			console.warn('[planStore] subscribePlanEvents failed:', e);
+			// 静默: 实时事件非关键, 失败降级到手动刷新
+			reportError(e, { source: 'planStore.init.subscribe' });
 			return () => {};
 		}
 		const unlisten = await onPlanEvent((event) => {

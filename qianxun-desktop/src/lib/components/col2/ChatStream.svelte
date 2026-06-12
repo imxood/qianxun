@@ -15,11 +15,15 @@
 	let {
 		messages,
 		onSend,
+		onRetry,
 		placeholder = '输入消息... (Enter 发送 · Shift+Enter 换行)',
 		mode = 'task' as 'task' | 'followup',
 	}: {
 		messages: Message[];
 		onSend: (text: string) => void | Promise<void>;
+		/// 2026-06-12 (Phase D.8): 错误消息下显示的 "重试" 按钮回调.
+		/// 父组件 (ChatView) 注入 chatStore.resend(session_id).
+		onRetry?: () => void;
 		placeholder?: string;
 		mode?: 'task' | 'followup';
 	} = $props();
@@ -85,6 +89,14 @@
 						<p class="text-sm text-zinc-800 dark:text-zinc-200 leading-relaxed whitespace-pre-wrap">
 							{msg.content}{#if msg.streaming}<span class="inline-block w-2 h-4 bg-amber-500 ml-0.5 align-middle animate-pulse"></span>{/if}
 						</p>
+						{#if msg.content.startsWith('[错误]') && !msg.streaming && onRetry}
+							<button
+								class="mt-1.5 text-[11px] px-2 py-1 rounded border border-amber-300 dark:border-amber-500/30 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-500/10"
+								onclick={onRetry}
+							>
+								↻ 重试
+							</button>
+						{/if}
 					{/if}
 				</div>
 			</div>

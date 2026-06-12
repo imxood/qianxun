@@ -23,12 +23,21 @@
 		if (!activeSub) return;
 		await chatStore.sendToSubSession(activeSub.id, text);
 	}
+
+	// 2026-06-12 (Phase D.8): 重试按钮回调 — 调 chatStore.resend 重发最近 user 消息.
+	async function retryActive() {
+		if (view.kind === 'session' && active) {
+			await chatStore.resend(active.id);
+		}
+		// sub_session 流也类似, 但 v0.4 再加 (目前 subSessionStore 没 lastUserMessage 跟踪)
+	}
 </script>
 
 {#if view.kind === 'session' && active}
 	<ChatStream
 		messages={messages}
 		onSend={sendToActiveSession}
+		onRetry={retryActive}
 		placeholder="输入消息开始... (Enter 发送 · Shift+Enter 换行)"
 	/>
 {:else if view.kind === 'sub_session' && activeSub}

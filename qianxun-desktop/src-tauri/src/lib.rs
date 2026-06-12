@@ -128,6 +128,7 @@ pub fn run() {
             commands::health::fetch::daemon_health_fetch,
             commands::stronghold::key::set_secret,
             commands::stronghold::key::get_secret,
+            commands::stronghold::key::delete_secret,
             // runtime (sub-task #3 新增 5 个, 走 RuntimeApi trait 收口)
             commands::runtime::sessions::list_sessions,
             commands::runtime::sessions::create_session,
