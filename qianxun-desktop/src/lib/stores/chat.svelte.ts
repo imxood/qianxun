@@ -168,18 +168,24 @@ function createChatStore() {
 					},
 				],
 			};
-			const plan = await planStore.create({ session_id: sid, contract });
-			// 追加一个 assistant 消息 (带 plan_ref)
-			const planMsg: Message = {
-				id: genId(),
-				session_id: sid,
-				sub_session_id: null,
-				role: 'assistant',
-				content: '',
-				plan_ref: plan.id,
-				created_at: new Date().toISOString(),
-			};
-			sessionStore.appendMessage(sid, planMsg);
+			// 2026-06-12 (批次 1.3 联动): plan 分支外层 try/catch, 避免 planStore.create
+			// 抛错时冒泡成 unhandled promise rejection. planStore.create 内部已 reportError
+			// 弹 toast, 这里静默即可, 同时保证 planMsg 不被追加 (无半态 UI 残留).
+			try {
+				const plan = await planStore.create({ session_id: sid, contract });
+				const planMsg: Message = {
+					id: genId(),
+					session_id: sid,
+					sub_session_id: null,
+					role: 'assistant',
+					content: '',
+					plan_ref: plan.id,
+					created_at: new Date().toISOString(),
+				};
+				sessionStore.appendMessage(sid, planMsg);
+			} catch {
+				// planStore.create 内部已 reportError, 这里静默避免 unhandled rejection
+			}
 			return;
 		}
 

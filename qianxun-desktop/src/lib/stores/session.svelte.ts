@@ -57,6 +57,9 @@ function createSessionStore() {
 	let initialized = $state(false);
 	let loading = $state(false);
 	let lastError = $state<string | null>(null);
+	// 2026-06-12 (批次 1.2): loadFullSession 进行中标记, UI 派生用
+	// 防止切 session 时 history 加载完成前 ChatView 闪空窗
+	const loadingFull = $state<Set<string>>(new Set());
 
 	const activeSession = $derived.by(() => {
 		const view = uiStore.activeView;
@@ -101,27 +104,39 @@ function createSessionStore() {
 	///   - 第 1 行: {"type":"system","prompt":"..."}
 	///   - 后续每行: {"User":{...}} 或 {"Assistant":{...}} (serde external tag)
 	///   - ContentBlock 数组简化: 取 text 字段拼接
-	async function loadFullSession(id: string) {
+	///
+	/// 2026-06-12 (批次 1.2): 错误路径合并 — 单一入口 reportError (含 toast),
+	/// 不再独立设 lastError (语义分离: lastError 留 sessionStore 级错误);
+	/// 不再 throw (调用方 switchTo 也不用 .catch(() => {}) 吞); loading state
+	/// 让 UI 显示骨架屏防空窗闪烁; finally 必清 loading, 完整执行流程.
+	async function loadFullSession(id: string): Promise<void> {
+		loadingFull.add(id);
 		try {
 			const state = await loadSession(id);
-			// 找到本地 session, 更新 message_count
 			const local = sessions.find((s) => s.id === id);
 			if (local) {
 				local.message_count = state.message_count;
 			}
-			// 解析 conversation_json → Message[] 写入 messages[id]
 			if (state.conversation_json) {
-				messages[id] = parseConversationJsonl(state.conversation_json, id);
+				// 幂等: 二次加载不覆盖已有消息的 created_at (批次 1.4: 后端 Message 无 created_at,
+				// 解析时统一用 now 兜底, 不幂等会让历史消息时间戳每次刷新都变).
+				const fresh = parseConversationJsonl(state.conversation_json, id);
+				const existing = messages[id] ?? [];
+				const existingById = new Map(existing.map((m) => [m.id, m]));
+				messages[id] = fresh.map((m) => {
+					const prev = existingById.get(m.id);
+					return prev ? { ...m, created_at: prev.created_at } : m;
+				});
 			}
-			return state;
 		} catch (e) {
-			lastError = e instanceof Error ? e.message : String(e);
+			// 单一入口: reportError 上报 (含 toast), 不再独立设 lastError
 			reportError(e, {
 				source: 'sessionStore.loadFullSession',
 				toast: '加载会话详情失败',
 				context: { session_id: id },
 			});
-			throw e;
+		} finally {
+			loadingFull.delete(id);
 		}
 	}
 
@@ -137,6 +152,11 @@ function createSessionStore() {
 		},
 		get lastError() {
 			return lastError;
+		},
+		/// 2026-06-12 (批次 1.2): loadFullSession 进行中标记, UI 派生用.
+		/// 用法: `{#if sessionStore.loadingFull.has(active.id)} ... 加载骨架屏 ...`
+		get loadingFull(): ReadonlySet<string> {
+			return loadingFull;
 		},
 		get(id: string): Session | undefined {
 			return sessions.find((s) => s.id === id);
@@ -187,8 +207,9 @@ function createSessionStore() {
 			if (s) {
 				s.last_active_at = new Date().toISOString();
 				uiStore.switchToSession(id);
-				// 切 session 时拉完整状态 (失败 swallow, 不阻塞 UI)
-				void loadFullSession(id).catch(() => {});
+				// 2026-06-12 (批次 2.4): loadFullSession 内部已 reportError + finally 清 loading,
+				// 这里不再需要 .catch(() => {}) 吞错. UI 通过 loadingFull 派生显示骨架屏.
+				void loadFullSession(id);
 			}
 		},
 
@@ -250,19 +271,32 @@ function createSessionStore() {
 
 export const sessionStore = createSessionStore();
 
-/// JSONL conversation 解析 (2026-06-12 加, Phase B.3).
+/// JSONL conversation 解析 (2026-06-12 加, Phase B.3; 批次 1.1 容错升级).
 ///
 /// 后端 conversation_json 是 JSONL 字符串, 每行一条记录. 详见 qianxun-core
-/// src/agent/conversation.rs::to_jsonl_string. 解析失败抛 Error, 调用方捕.
+/// src/agent/conversation.rs::to_jsonl_string.
+///
+/// 契约 (2026-06-12 批次 1.1, 对齐 Rust from_jsonl_str):
+///   - 损坏行静默 skip (不阻断整体加载, Rust 端 if let Ok 行为)
+///   - system 行 (header) 跳过, 不解析 content (TS 暂不渲染 system_prompt)
+///   - 非 User/Assistant tag 行静默 skip
+///   - 空格容错: serde 序列化器输出 `{"type": "system"` (key 后有空格),
+///     老 startsWith('{"type":"system"') 不带空格匹配失败; 改宽松.
 function parseConversationJsonl(jsonl: string, sessionId: string): Message[] {
 	const result: Message[] = [];
 	const lines = jsonl.split('\n');
 	for (const line of lines) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
-		// 第 1 行: 系统提示头, 跳过
-		if (trimmed.startsWith('{"type":"system"')) continue;
-		const parsed = JSON.parse(trimmed) as Record<string, { id: string; content: ContentBlock[] }>;
+		// system header 行: 检测 "type" 字段 (不管 key 跟 value 间有没有空格)
+		if (trimmed.startsWith('{"type"') && trimmed.includes('"system"')) continue;
+		// 损坏行 try/catch 静默 skip, 对齐 Rust 行为
+		let parsed: Record<string, { id: string; content: ContentBlock[] }>;
+		try {
+			parsed = JSON.parse(trimmed) as typeof parsed;
+		} catch {
+			continue;
+		}
 		// serde external tag: {"User":{...}} / {"Assistant":{...}}
 		const tag = Object.keys(parsed)[0];
 		if (tag !== 'User' && tag !== 'Assistant') continue;
@@ -271,7 +305,10 @@ function parseConversationJsonl(jsonl: string, sessionId: string): Message[] {
 			id: inner.id,
 			role: tag === 'User' ? 'user' : 'assistant',
 			content: extractTextFromContentBlocks(inner.content),
-			created_at: new Date().toISOString(), // 后端未传 ts, 暂用现在
+			// 2026-06-12 (批次 1.4): 后端 qianxun-core/src/agent/message.rs Message struct
+			// 没有 created_at 字段, 序列化不携带; TS 端统一用 now 兜底.
+			// 二次 loadFullSession 由 messages[id] 幂等逻辑保护, 不覆盖已存在的 created_at.
+			created_at: new Date().toISOString(),
 			session_id: sessionId,
 			sub_session_id: null, // 主会话消息, 跟 Message 类型契约一致
 		});
@@ -293,3 +330,6 @@ type ContentBlock =
 	| { type: 'text'; text: string }
 	| { type: 'tool_use'; id: string; name: string; input: unknown }
 	| { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean };
+
+// 2026-06-12 (批次 1.5): 仅测试用 export, 业务代码不直接 import. 不污染运行时 API 表面.
+export { parseConversationJsonl };

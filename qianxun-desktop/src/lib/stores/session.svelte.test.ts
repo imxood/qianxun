@@ -183,16 +183,95 @@ beforeEach(() => {
 			message_count: 99, // 后端返新计数
 		});
 
-		const state = await sessionStore.loadFullSession("sess_20260608_001_aaa");
-		expect(state.message_count).toBe(99);
+		// 2026-06-12 (批次 1.2): 签名改 Promise<void>, 不再返 state; message_count 走 sessionStore.get()
+		await sessionStore.loadFullSession("sess_20260608_001_aaa");
 		expect(sessionStore.get("sess_20260608_001_aaa")?.message_count).toBe(99);
 	});
 
-	it("loadFullSession_propagates_error: 失败时 lastError + throw", async () => {
+	it("loadFullSession_no_throw_no_lastError_on_failure: 失败走 reportError 单一路", async () => {
+		// 2026-06-12 (批次 1.2): 错误路径合并 — 不 throw, 不独立设 lastError.
+		// 调用方 (switchTo) 不用 .catch(() => {}), UI 通过 loadingFull 派生显示骨架屏.
 		loadSessionMock.mockRejectedValueOnce(new Error("not found: session sess_xxx not found"));
 
-		await expect(sessionStore.loadFullSession("sess_xxx")).rejects.toThrow();
-		expect(sessionStore.lastError).toContain("not found");
+		await expect(sessionStore.loadFullSession("sess_xxx")).resolves.toBeUndefined();
+		expect(sessionStore.lastError).toBeNull(); // 不再独立设 lastError
+	});
+
+	it("loadFullSession_sets_and_clears_loading_state: loading 标记 finally 必清", async () => {
+		// 2026-06-12 (批次 1.2): loadingFull Set 反映 loadFullSession 进行中, finally 必清.
+		loadSessionMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) =>
+					setTimeout(
+						() =>
+							resolve({
+								session_id: "sess_20260608_001_aaa",
+								exists_in_memory: true,
+								status: "active",
+								conversation_json: null,
+								message_count: 1,
+							}),
+						20,
+					),
+				),
+		);
+
+		const promise = sessionStore.loadFullSession("sess_20260608_001_aaa");
+		// 进行中: 集合里应该有这个 id
+		expect(sessionStore.loadingFull.has("sess_20260608_001_aaa")).toBe(true);
+		await promise;
+		// 完成后: 集合里应该清掉
+		expect(sessionStore.loadingFull.has("sess_20260608_001_aaa")).toBe(false);
+	});
+
+	it("loadFullSession_clears_loading_state_even_on_failure: finally 必清 (失败路径)", async () => {
+		// 2026-06-12 (批次 1.2): 失败路径也走 finally, 不残留 loading 标记.
+		loadSessionMock.mockRejectedValueOnce(new Error("backend offline"));
+
+		await sessionStore.loadFullSession("sess_xxx");
+		expect(sessionStore.loadingFull.has("sess_xxx")).toBe(false);
+	});
+
+	it("loadFullSession_parses_conversation_json_and_idempotent: conversation_json 解析 + created_at 幂等", async () => {
+		// 2026-06-12 (批次 1.1 + 1.4): conversation_json 解析走 parseConversationJsonl
+		// (损坏行 skip, system header 宽松匹配), 二次 loadFullSession 保留原 created_at.
+		const conversationJsonl = [
+			'{"type": "system", "prompt": "You are helpful"}',
+			'{"User": {"id": "m1", "content": [{"type": "text", "text": "hi"}]}}',
+			'{"Assistant": {"id": "m2", "content": [{"type": "text", "text": "hello"}]}}',
+		].join("\n");
+
+		loadSessionMock.mockResolvedValueOnce({
+			session_id: "sess_20260608_001_aaa",
+			exists_in_memory: true,
+			status: "active",
+			conversation_json: conversationJsonl,
+			message_count: 2,
+		});
+		await sessionStore.loadFullSession("sess_20260608_001_aaa");
+
+		const msgs1 = sessionStore.getMessages("sess_20260608_001_aaa");
+		expect(msgs1).toHaveLength(2);
+		expect(msgs1[0]?.role).toBe("user");
+		expect(msgs1[0]?.content).toBe("hi");
+		expect(msgs1[1]?.role).toBe("assistant");
+		expect(msgs1[1]?.content).toBe("hello");
+		const originalCreatedAt1 = msgs1[0]?.created_at;
+
+		// 二次 loadFullSession: 同样 conversation_json, 期望 created_at 不被刷新
+		// (等 5ms 让 now 推进, 这样如果幂等没生效, created_at 会变化)
+		await new Promise((r) => setTimeout(r, 5));
+		loadSessionMock.mockResolvedValueOnce({
+			session_id: "sess_20260608_001_aaa",
+			exists_in_memory: true,
+			status: "active",
+			conversation_json: conversationJsonl,
+			message_count: 2,
+		});
+		await sessionStore.loadFullSession("sess_20260608_001_aaa");
+
+		const msgs2 = sessionStore.getMessages("sess_20260608_001_aaa");
+		expect(msgs2[0]?.created_at).toBe(originalCreatedAt1); // 幂等保留
 	});
 
 	it("switchTo_triggers_loadFullSession_fire_and_forget: 切 session 时自动拉", async () => {

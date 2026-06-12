@@ -97,6 +97,11 @@ function createPlanStore() {
 	/// planStatus 自动为 'Running' (后端 create_plan 一定返 running).
 	/// 失败: 弹 toast, 抛错.
 	/// contract 用 caller 传入的 (含 tasks), 后端 PlanInfo 不返 contract.
+	///
+	/// 2026-06-12 (批次 1.3): 失败回滚 — 错误统一走 reportError (不再独立设 lastError,
+	/// 跟 sessionStore 错误路径合并); plans.push 在 throw 之前, 失败时不残留半状态.
+	/// planMsg (带 plan_ref 的 assistant 消息) 由调用方 (chat.svelte.ts: send) 在拿到 plan
+	/// 引用后追加, 失败时不追加, 避免半态 UI 残留.
 	async function create(opts: {
 		session_id: string;
 		contract: Plan['contract'];
@@ -116,7 +121,6 @@ function createPlanStore() {
 			plans.push(plan);
 			return plan;
 		} catch (e) {
-			lastError = e instanceof Error ? e.message : String(e);
 			reportError(e, {
 				source: 'planStore.create',
 				toast: '创建 plan 失败',

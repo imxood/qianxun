@@ -82,13 +82,19 @@ describe("PlanStore (Stage 4a sub-task #4 切 invoke)", () => {
 	});
 
 	it("create_failure_shows_error_toast: 失败处理", async () => {
+		// 2026-06-12 (批次 1.3): 错误路径合并 — 走 reportError (含 toast) 单一路, 不再独立设 lastError.
+		// plans 也不残留 (push 在 throw 之前).
 		createPlanMock.mockRejectedValueOnce(new Error("internal error: store error"));
 
 		await expect(
 			planStore.create({ session_id: "sess_001", contract: FAKE_CONTRACT }),
-		).rejects.toThrow();
-		expect(planStore.lastError).toContain("store error");
+		).rejects.toThrow("internal error: store error");
+		// 不再独立设 lastError (语义分离: lastError 留 sessionStore 级错误, plan 业务错误走 reportError)
+		expect(planStore.lastError).toBeNull();
+		// toast 仍弹 (reportError 走的)
 		expect(uiStore.toasts.length).toBeGreaterThan(0);
+		// plans 没残留半状态 (push 在 throw 之前)
+		expect(planStore.all).toHaveLength(0);
 	});
 
 	it("cancel_running_plan_calls_invoke_and_marks_aborted: 取消走 cancel_plan (Phase D 收尾)", async () => {
