@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use qianxun_core::agent::conversation::Conversation;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use thiserror::Error;
 
 /// Session 持久化错误.
@@ -436,6 +436,136 @@ impl SessionStore {
         }
         Ok(())
     }
+
+    // ─── sub_session CRUD (2026-06-12, 收尾 E2E v2 Plan/SubAgent/子Session 链路) ───
+    //
+    // 旧设计: execute_one_task 用 TextCollectSink 把 text 累积成 last_output 写进
+    // plan.task_result, 没独立 sub_session entity. 导致前端 subSessionStore 永远
+    // 空, "打开子会话" 按钮点击静默无响应. 收尾修复: 给每个 task 跑时建 sub_session
+    // row, task 跑完更新 status + output, 推 SubSessionUpdate 事件.
+    //
+    // 不 FK plans / daemon_sessions: plan 被删后 sub_session 仍保留 (跟 plan
+    // 自身不 FK 保持一致, 留业务历史).
+
+    /// 新建 sub_session (execute_one_task 启动时调). 启动时 status=active,
+    /// started_at 由 caller 传 ISO 字符串, ended_at/output 留 NULL.
+    /// parent_session_id 是创建 plan 那个 session (后续追问会指向它).
+    pub fn create_sub_session(
+        &self,
+        id: &str,
+        plan_id: &str,
+        parent_session_id: &str,
+        task_id: &str,
+        role: &str,
+        started_at: &str,
+    ) -> Result<(), SessionStoreError> {
+        let conn = self.db.lock()?;
+        conn.execute(
+            "INSERT INTO daemon_sub_sessions \
+             (id, plan_id, parent_session_id, task_id, role, status, started_at, ended_at, output) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, NULL, NULL)",
+            params![id, plan_id, parent_session_id, task_id, role, started_at],
+        )?;
+        Ok(())
+    }
+
+    /// 更新 sub_session 状态 + ended_at + output (task 完成 / 失败时调).
+    /// status ∈ 'active' / 'done' / 'failed' / 'aborted'.
+    pub fn update_sub_session(
+        &self,
+        id: &str,
+        status: &str,
+        ended_at: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<(), SessionStoreError> {
+        let conn = self.db.lock()?;
+        let affected = conn.execute(
+            "UPDATE daemon_sub_sessions SET status = ?1, ended_at = ?2, output = ?3 WHERE id = ?4",
+            params![status, ended_at, output, id],
+        )?;
+        if affected == 0 {
+            return Err(SessionStoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+        }
+        Ok(())
+    }
+
+    /// 拿单个 sub_session (前端点击"打开子会话"跳转后, 按需查).
+    pub fn get_sub_session(
+        &self,
+        id: &str,
+    ) -> Result<Option<SubSessionRow>, SessionStoreError> {
+        let conn = self.db.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, plan_id, parent_session_id, task_id, role, status, \
+                        started_at, ended_at, output \
+                 FROM daemon_sub_sessions WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(SubSessionRow {
+                        id: row.get(0)?,
+                        plan_id: row.get(1)?,
+                        parent_session_id: row.get(2)?,
+                        task_id: row.get(3)?,
+                        role: row.get(4)?,
+                        status: row.get(5)?,
+                        started_at: row.get(6)?,
+                        ended_at: row.get(7)?,
+                        output: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// 列 sub_session. 跟 plans 一样, 按 started_at 降序 (最新在前).
+    /// plan_id 是 Option: None = 列所有 (启动时 init 用), Some(plan_id) = 列某 plan 的
+    /// 所有 sub_session (前端 byPlan 等价).
+    pub fn list_sub_sessions(
+        &self,
+        plan_id: Option<&str>,
+    ) -> Result<Vec<SubSessionRow>, SessionStoreError> {
+        let conn = self.db.lock()?;
+        let (sql, params_iter): (&str, Vec<String>) = match plan_id {
+            Some(pid) => (
+                "SELECT id, plan_id, parent_session_id, task_id, role, status, \
+                        started_at, ended_at, output \
+                 FROM daemon_sub_sessions WHERE plan_id = ?1 ORDER BY started_at ASC",
+                vec![pid.to_string()],
+            ),
+            None => (
+                "SELECT id, plan_id, parent_session_id, task_id, role, status, \
+                        started_at, ended_at, output \
+                 FROM daemon_sub_sessions ORDER BY started_at DESC",
+                vec![],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let row_mapper = |row: &rusqlite::Row| -> rusqlite::Result<SubSessionRow> {
+            Ok(SubSessionRow {
+                id: row.get(0)?,
+                plan_id: row.get(1)?,
+                parent_session_id: row.get(2)?,
+                task_id: row.get(3)?,
+                role: row.get(4)?,
+                status: row.get(5)?,
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                output: row.get(8)?,
+            })
+        };
+        let rows: Vec<SubSessionRow> = if params_iter.is_empty() {
+            stmt.query_map([], row_mapper)?
+                .filter_map(|r| r.ok())
+                .collect()
+        } else {
+            stmt.query_map(params_from_iter(params_iter.iter()), row_mapper)?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        Ok(rows)
+    }
 }
 
 /// Plan 持久化行 (P1-1 收尾, 2026-06-12). caller 自己把 contract_json /
@@ -450,6 +580,23 @@ pub struct PlanRow {
     pub ended_at: Option<String>,
     pub contract_json: String,
     pub task_results_json: String,
+}
+
+/// SubSession 持久化行 (2026-06-12 收尾, 跨 execute_one_task → 前端 subSessionStore).
+/// output 暂是 String (跟 plan.task_result.output 1:1), 后续追问模式 (user 跟 sub agent
+/// 继续对话) 可扩展成 messages_json 数组, 但 P0 阶段单 String 足够 (task 完整输出即
+/// sub agent 最后一次 assistant 回复).
+#[derive(Debug, Clone)]
+pub struct SubSessionRow {
+    pub id: String,
+    pub plan_id: String,
+    pub parent_session_id: String,
+    pub task_id: String,
+    pub role: String,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub output: Option<String>,
 }
 
 // ─── 内部: 3 张表 DDL ────────────────────────────────────────
@@ -506,6 +653,26 @@ fn create_tables(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_plans_session ON plans(session_id);
         CREATE INDEX IF NOT EXISTS idx_plans_status  ON plans(status);
+
+        -- === 5. sub_session 持久化 (2026-06-12 收尾, 跨 execute_one_task → 前端) ===
+        -- 给每个 plan task 跑时建一个 sub_session row, task 完成时更新 status + output.
+        -- 解决: 前端 subSessionStore 永远空, PlanBlock \"打开子会话\" 按钮静默无响应.
+        -- 不 FK plans / daemon_sessions: plan 被删 sub_session 仍保留, 跟 plan 不 FK
+        -- 保持一致. role 记 task.assigned_to (coder / tester / ...), UI 渲染用.
+        CREATE TABLE IF NOT EXISTS daemon_sub_sessions (
+            id                  TEXT PRIMARY KEY,
+            plan_id             TEXT NOT NULL,
+            parent_session_id   TEXT NOT NULL,
+            task_id             TEXT NOT NULL,
+            role                TEXT NOT NULL,
+            status              TEXT NOT NULL,
+            started_at          TEXT NOT NULL,
+            ended_at            TEXT,
+            output              TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sub_sessions_plan ON daemon_sub_sessions(plan_id);
+        CREATE INDEX IF NOT EXISTS idx_sub_sessions_parent ON daemon_sub_sessions(parent_session_id);
+        CREATE INDEX IF NOT EXISTS idx_sub_sessions_status ON daemon_sub_sessions(status);
         ",
     )
 }

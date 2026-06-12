@@ -1,22 +1,45 @@
 // ───────────────────────────────────────────────────────────────────────────
-// SubSessionStore — Stage 4a (sub-task #4) 测试
+// SubSessionStore — 2026-06-12 收尾测试
 //
 // 测试覆盖:
-//   1. loadAll 当前 noop (后端没 list_sub_sessions RuntimeApi)
-//   2. API 表面 (isActive / isReadOnly / canSend / byPlan / countByPlan) 保持兼容
-//   3. 空数据时业务方法不 panic
+//   1. loadAll 调 listSubSessions + 订阅 sub_session_event (E2E Round 1 修复后真接)
+//   2. realtime SubSessionUpdate 事件 upsert 实体 (保留已有 messages)
+//   3. byPlan 拿得到的 sub_session 可 open (之前永远 [] 死链)
+//   4. API 表面 (isActive / isReadOnly / canSend / byPlan / countByPlan) 保持兼容
 // ───────────────────────────────────────────────────────────────────────────
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const listSubSessionsMock = vi.fn();
+const subscribeSubSessionEventsMock = vi.fn();
+const onSubSessionEventMock = vi.fn();
+let _capturedHandler: ((payload: unknown) => void) | null = null;
+
 vi.mock("$lib/ipc/runtime", () => ({
 	listSubSessions: (...args: unknown[]) => listSubSessionsMock(...args),
+	subscribeSubSessionEvents: (...args: unknown[]) =>
+		subscribeSubSessionEventsMock(...args),
+	onSubSessionEvent: (...args: unknown[]) => {
+		_capturedHandler = args[0] as (payload: unknown) => void;
+		return onSubSessionEventMock(...args);
+	},
 }));
 
 import { subSessionStore } from "$lib/stores/sub_session.svelte";
 import { uiStore } from "$lib/stores/ui.svelte";
 import type { SubSession } from "$lib/types/entity";
+
+const FAKE_INFO = {
+	id: "sub_001",
+	plan_id: "plan_jwt",
+	parent_session_id: "sess_jwt_auth",
+	task_id: "task_a",
+	role: "coder",
+	status: "active" as const,
+	started_at: "2026-06-08T00:00:00Z",
+	ended_at: null,
+	output: null,
+};
 
 const FAKE_SUB: SubSession = {
 	id: "sub_001",
@@ -31,21 +54,97 @@ const FAKE_SUB: SubSession = {
 	ended_at: null,
 };
 
-describe("SubSessionStore (Stage 4a sub-task #4)", () => {
+describe("SubSessionStore (2026-06-12 收尾)", () => {
 function resetSubSessionStore() {
 	subSessionStore.__resetForTesting();
+	_capturedHandler = null;
 }
 
 beforeEach(() => {
 	listSubSessionsMock.mockReset();
+	subscribeSubSessionEventsMock.mockReset().mockResolvedValue(undefined);
+	onSubSessionEventMock.mockReset().mockResolvedValue(() => {});
 	resetSubSessionStore();
 	uiStore.setActiveView({ kind: "empty" });
 });
 
-	it("loadAll_is_currently_noop: 后端 RuntimeApi 暂没 list_sub_sessions", async () => {
+	it("loadAll_fetches_and_subscribes: 真接后端 listSubSessions + subscribe", async () => {
+		listSubSessionsMock.mockResolvedValue([FAKE_INFO]);
 		await subSessionStore.loadAll();
-		expect(listSubSessionsMock).not.toHaveBeenCalled();
+		expect(listSubSessionsMock).toHaveBeenCalledOnce();
+		expect(subscribeSubSessionEventsMock).toHaveBeenCalledOnce();
+		expect(onSubSessionEventMock).toHaveBeenCalledOnce();
 		expect(subSessionStore.initialized).toBe(true);
+		expect(subSessionStore.all).toHaveLength(1);
+		// 后端 snake_case + status active → 前端 PascalCase Active
+		expect(subSessionStore.all[0]!.status).toBe("Active");
+		expect(subSessionStore.all[0]!.plan_task_id).toBe("task_a");
+	});
+
+	it("loadAll_empty_list_keeps_initialized_true: 空 store 也标 ready", async () => {
+		listSubSessionsMock.mockResolvedValue([]);
+		await subSessionStore.loadAll();
+		expect(subSessionStore.initialized).toBe(true);
+		expect(subSessionStore.all).toEqual([]);
+	});
+
+	it("realtime_sub_session_update_upserts: E2E Round 1 根因修复, 事件来时插入", async () => {
+		listSubSessionsMock.mockResolvedValue([]);
+		await subSessionStore.loadAll();
+		// 收到 SubSessionUpdate 事件 (后端 emit, execute_one_task 启动时触发)
+		expect(_capturedHandler).toBeTruthy();
+		_capturedHandler!({
+			type: "sub_session_update",
+			sub_session_id: "sub_new",
+			plan_id: "plan_x",
+			task_id: "task_1",
+			status: "active",
+			sub_session_json: JSON.stringify({ ...FAKE_INFO, id: "sub_new", plan_id: "plan_x", task_id: "task_1" }),
+			updated_at: Date.now(),
+		});
+		expect(subSessionStore.all).toHaveLength(1);
+		expect(subSessionStore.get("sub_new")!.status).toBe("Active");
+	});
+
+	it("realtime_update_preserves_existing_messages: 事件 JSON 不带 messages, 不应清空", async () => {
+		listSubSessionsMock.mockResolvedValue([FAKE_INFO]);
+		await subSessionStore.loadAll();
+		// 模拟业务追加 messages
+		subSessionStore.appendMessage("sub_001", {
+			id: "msg_1",
+			session_id: null,
+			sub_session_id: "sub_001",
+			role: "assistant",
+			content: "hello",
+			created_at: new Date().toISOString(),
+		});
+		// 收到 update 事件 (后端 task 完成时, status 变 done)
+		_capturedHandler!({
+			type: "sub_session_update",
+			sub_session_id: "sub_001",
+			plan_id: "plan_jwt",
+			task_id: "task_a",
+			status: "done",
+			sub_session_json: JSON.stringify({ ...FAKE_INFO, status: "done" }),
+			updated_at: Date.now(),
+		});
+		const got = subSessionStore.get("sub_001")!;
+		expect(got.status).toBe("Done");
+		// messages 不能丢
+		expect(got.messages).toHaveLength(1);
+	});
+
+	it("open_routes_to_uiStore_with_real_sub: E2E 死链修复, byPlan 拿得到就能跳", async () => {
+		listSubSessionsMock.mockResolvedValue([FAKE_INFO]);
+		await subSessionStore.loadAll();
+		const subs = subSessionStore.byPlan("plan_jwt");
+		expect(subs).toHaveLength(1);
+		subSessionStore.open(subs[0]!.id);
+		expect(uiStore.activeView.kind).toBe("sub_session");
+		if (uiStore.activeView.kind === "sub_session") {
+			expect(uiStore.activeView.sub_session_id).toBe("sub_001");
+			expect(uiStore.activeView.parent_session_id).toBe("sess_jwt_auth");
+		}
 	});
 
 	it("byPlan_returns_empty_for_empty_list: 空数据查询安全", () => {

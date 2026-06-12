@@ -152,6 +152,30 @@ export interface PlanInfo {
 	contract?: PlanContract;
 }
 
+// 2026-06-12 收尾: sub_session 4 个 DTO (跟后端 SubSessionInfo 1:1, 跟前端
+// types/entity.ts::SubSession 字段不完全一致 — task_id 跟 plan_task_id 等价).
+export type SubSessionStatus = "active" | "done" | "failed" | "aborted";
+
+export interface SubSessionInfo {
+	id: string;
+	plan_id: string;
+	parent_session_id: string;
+	task_id: string;
+	role: string;
+	status: SubSessionStatus;
+	started_at: string;
+	ended_at: string | null;
+	output: string | null;
+}
+
+export interface SubSessionInput {
+	id: string;
+	plan_id: string;
+	parent_session_id: string;
+	task_id: string;
+	role?: string;
+}
+
 /// load_session 响应.
 export interface SessionState {
 	session_id: string;
@@ -218,6 +242,18 @@ export type SseEventFromBackend =
 			plan_id: string;
 			status: string;
 			task_results_json: string | null;
+			updated_at: number;
+	  }
+	// 2026-06-12 收尾: SubSessionUpdate 事件, 通过 `sub_session_event` Tauri 事件名
+	// 独立分发. 字段: sub_session_id / plan_id / task_id / status / sub_session_json / updated_at.
+	// sub_session_json 是完整 SubSessionInfo JSON 字符串, 前端 parse 拿实体.
+	| {
+			type: "sub_session_update";
+			sub_session_id: string;
+			plan_id: string;
+			task_id: string;
+			status: string;
+			sub_session_json: string;
 			updated_at: number;
 	  };
 
@@ -494,6 +530,81 @@ export async function subscribePlanEvents(): Promise<void> {
 		return;
 	}
 	await invoke<void>("subscribe_plan_events");
+}
+
+// ─── sub_session 4 个 command + 1 个事件订阅 (2026-06-12 收尾) ───────────────
+
+/// 列 sub_session. plan_id=None 列所有 (init 用), plan_id=Some 列表某 plan 下所有.
+export async function listSubSessions(planId?: string): Promise<SubSessionInfo[]> {
+	if (!isTauri()) {
+		return [];
+	}
+	try {
+		return await invoke<SubSessionInfo[]>("list_sub_sessions", { planId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 按 id 拿单个 sub_session (前端点击"打开子会话"调).
+export async function getSubSession(subSessionId: string): Promise<SubSessionInfo> {
+	if (!isTauri()) {
+		throw new RuntimeApiError("getSubSession requires Tauri runtime", "Unavailable");
+	}
+	try {
+		return await invoke<SubSessionInfo>("get_sub_session", { subSessionId });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 内部建 sub_session (Tauri 端留口以便 integration test / 调试, 业务不调).
+export async function createSubSession(input: SubSessionInput): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	try {
+		await invoke<void>("create_sub_session", { input });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 内部更新 sub_session status + output (task 完成 / 失败时调).
+export async function updateSubSession(
+	subSessionId: string,
+	status: SubSessionStatus,
+	output?: string,
+): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	try {
+		await invoke<void>("update_sub_session", { subSessionId, status, output });
+	} catch (e) {
+		throw RuntimeApiError.parse(String(e));
+	}
+}
+
+/// 启动后端 sub_session event 订阅. 走 Tauri 'sub_session_event' 事件透传.
+export async function subscribeSubSessionEvents(): Promise<void> {
+	if (!isTauri()) {
+		return;
+	}
+	await invoke<void>("subscribe_sub_session_events");
+}
+
+/// 监听 'sub_session_event' Tauri 事件. payload 形如后端 SseEvent (snake_case).
+/// caller 自己按 type 字段分发 (目前只有 'sub_session_update').
+export async function onSubSessionEvent(
+	handler: (payload: SseEventFromBackend) => void,
+): Promise<UnlistenFn> {
+	if (!isTauri()) {
+		return () => {};
+	}
+	return await listen<SseEventFromBackend>("sub_session_event", (e) =>
+		handler(e.payload),
+	);
 }
 
 // ─── Web fallback 内部 helper ───────────────────────────────────────────

@@ -22,6 +22,7 @@ pub mod load;
 pub mod plans;
 pub mod send;
 pub mod sessions;
+pub mod sub_sessions;
 pub mod trait_def;
 pub mod types;
 
@@ -29,7 +30,7 @@ pub use error::{RuntimeApiError, RuntimeApiResult};
 pub use trait_def::RuntimeApi;
 pub use types::{
     PlanInfo, PlanInput, PlanStatus, SendRequest, SendResponse, SessionFilter, SessionInfo,
-    SessionState, SessionStatus,
+    SessionState, SessionStatus, SubSessionInfo, SubSessionInput, SubSessionStatus,
 };
 
 // 重导出 core 里的 trait impl, 让 caller 直接 `use qianxun_runtime::api::RuntimeApiExt;`

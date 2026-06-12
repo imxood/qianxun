@@ -1636,6 +1636,7 @@ mod e2e_tests {
                 SseEvent::BackgroundTaskCancelled { .. } => "background_task_cancelled",
                 SseEvent::BackgroundTaskCompleted { .. } => "background_task_completed",
                 SseEvent::PlanUpdate { .. } => "plan_update",
+                SseEvent::SubSessionUpdate { .. } => "sub_session_update",
             })
             .collect();
         assert_eq!(

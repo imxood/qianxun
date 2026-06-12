@@ -27,7 +27,7 @@ use qianxun_core::tools::ToolCategoryFilter;
 
 use crate::api::error::{RuntimeApiError, RuntimeApiResult};
 use crate::api::types::{
-    PlanContract, PlanInfo, PlanInput, PlanStatus, PlanTaskResult, PlanTaskSpec,
+    PlanContract, PlanInfo, PlanInput, PlanStatus, PlanTaskResult, PlanTaskSpec, SubSessionStatus,
 };
 use crate::persistence::{PlanRow, SessionStore};
 use crate::sse::SseEvent;
@@ -365,6 +365,22 @@ async fn execute_one_task(
     task: &PlanTaskSpec,
     cancel_flag: Arc<AtomicBool>,
 ) -> RuntimeApiResult<String> {
+    // 0. 2026-06-12 收尾: 建 sub_session (跟 task 1:1, 失败 warn 不阻断 — 缺它只影响
+    //    前端"打开子会话", 不影响 plan 主体执行).
+    let sub_session_id = format!("sub_{}_{}", plan_id, task.id);
+    let _ = crate::api::sub_sessions::create_sub_session_impl(
+        state.clone(),
+        crate::api::types::SubSessionInput {
+            id: sub_session_id.clone(),
+            plan_id: plan_id.to_string(),
+            parent_session_id: session_id.to_string(),
+            task_id: task.id.clone(),
+            role: "executor".to_string(),
+        },
+    )
+    .await
+    .map_err(|e| tracing::warn!(error = %e, sub_session_id = %sub_session_id, "create_sub_session failed"));
+
     // 1. 标 task → Running
     let now_running = Utc::now().to_rfc3339();
     let task_running_json = store_mutate_task_result(&state.store, plan_id, &task.id, |tr| {
@@ -468,10 +484,29 @@ async fn execute_one_task(
     while let Some(delta) = rx.recv().await {
         last_output.push_str(&delta);
     }
-    // 等 task 真正结束 (processing_loop 已退出)
-    let _ = handle.await;
+    // 等 task 真正结束 (processing_loop 已退出) — 错误透传上层,
+    // 失败时由 execute_plan 负责 task Failed 标记, 这里也 update sub_session = Failed.
+    let task_result = handle.await;
+    let final_status = match &task_result {
+        Ok(()) => SubSessionStatus::Done,
+        Err(e) => {
+            tracing::warn!(error = %e, plan_id, task_id = %task.id, "execute_one_task LLM loop failed");
+            SubSessionStatus::Failed
+        }
+    };
 
-    // 6. 标 task → Done (Phase D 收尾: 简化, 不区分工具调用是否出错)
+    // 6. 2026-06-12 收尾: update sub_session (Done / Failed) — 跟 task 主线并行,
+    //    失败 warn 不阻断 task 主线写入.
+    let _ = crate::api::sub_sessions::update_sub_session_impl(
+        state.clone(),
+        &sub_session_id,
+        final_status,
+        Some(&last_output),
+    )
+    .await
+    .map_err(|e| tracing::warn!(error = %e, sub_session_id = %sub_session_id, "update_sub_session failed"));
+
+    // 7. 标 task → Done (Phase D 收尾: 简化, 不区分工具调用是否出错)
     let now_ended = Utc::now().to_rfc3339();
     let output_for_store = last_output.clone();
     let task_done_json = store_mutate_task_result(&state.store, plan_id, &task.id, |tr| {
@@ -488,6 +523,9 @@ async fn execute_one_task(
     });
 
     let _ = output_for_store;
+    // JoinError (tokio::spawn) → RuntimeApiError::Internal 透传上层 execute_plan.
+    // 失败前已经 update sub_session = Failed + 标 task Done, 不会重复标.
+    task_result.map_err(|e| RuntimeApiError::Internal(format!("execute_one_task join: {e}")))?;
     Ok(last_output)
 }
 

@@ -11,9 +11,15 @@
 	const subSessions = $derived(subSessionStore.byPlan(plan.id));
 	const progress = $derived(planStore.progressOf(plan));
 	const isRunning = $derived(plan.status === 'Running');
+	/// 2026-06-12 收尾: 跟 task 一对一 (plan_task_id 匹配) 的 sub_session 查找.
+	/// subSessionStore.byPlan 返回的顺序不保证跟 tasks 一致, 不能用下标.
+	const subOfTask = (taskId: string) => subSessions.find((s) => s.plan_task_id === taskId);
+	/// 等待中的子 Agent 数: 状态 = Active 的 sub_session 总数.
+	/// 主会话用这个显示 "等待 N 个子 Agent" 横条 (用户最关心).
+	const activeSubCount = $derived(subSessions.filter((s) => s.status === 'Active').length);
 
 	function statusOf(taskId: string, idx: number): 'done' | 'running' | 'pending' | 'failed' {
-		const sub = subSessions[idx];
+		const sub = subOfTask(taskId);
 		if (!sub) {
 			return idx < progress.done ? 'done' : 'pending';
 		}
@@ -112,13 +118,15 @@
 						+ 1 file · {st === 'running' ? '已 4 min' : '12 min'}
 					</p>
 				</div>
-				<button
-					class="text-xs text-amber-600 dark:text-amber-400 hover:underline opacity-70 hover:opacity-100 flex-shrink-0"
-					onclick={() => {
-						const sub = subSessions[i];
-						if (sub) subSessionStore.open(sub.id);
-					}}
-				>打开子会话</button>
+				{#if subOfTask(task.id)}
+					{@const sub = subOfTask(task.id)}
+					<button
+						class="text-xs text-amber-600 dark:text-amber-400 hover:underline opacity-70 hover:opacity-100 flex-shrink-0"
+						onclick={() => subSessionStore.open(sub!.id)}
+					>打开子会话</button>
+				{:else}
+					<span class="text-[10px] text-zinc-400 flex-shrink-0" title="子 Agent 尚未启动">—</span>
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -133,4 +141,28 @@
 		<div class="flex-1"></div>
 		<button class="text-xs px-2.5 py-1 rounded text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">查看日志</button>
 	</div>
+
+	<!-- 2026-06-12 收尾: 主会话"等待子 Agent"提示. E2E Round 1 反馈根因
+	     "主会话中没有任何交互提示如等待子Agent" — 在 PlanBlock 末尾加横条,
+	     只要有 Active sub_session 就常驻 (由订阅 sub_session_event 实时刷新). -->
+	{#if isRunning && activeSubCount > 0}
+		<div
+			class="px-4 py-2 border-t border-sky-200 dark:border-sky-800/50 bg-sky-50/60 dark:bg-sky-950/30 flex items-center gap-2"
+			data-testid="sub-session-waiting-banner"
+		>
+			<Icon name="loader" class="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 animate-spin flex-shrink-0" />
+			<span class="text-xs text-sky-700 dark:text-sky-300">
+				等待 {activeSubCount} 个子 Agent{activeSubCount > 1 ? '' : ''}完成
+			</span>
+			<div class="flex-1"></div>
+			<button
+				class="text-xs px-2 py-0.5 rounded text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900/50"
+				onclick={() => {
+					// 跳到第一个 Active sub session, 让用户能实时看进度.
+					const first = subSessions.find((s) => s.status === 'Active');
+					if (first) subSessionStore.open(first.id);
+				}}
+			>查看</button>
+		</div>
+	{/if}
 </div>

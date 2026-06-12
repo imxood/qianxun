@@ -222,3 +222,62 @@ pub struct SessionState {
     pub conversation_json: Option<String>,
     pub message_count: u32,
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2026-06-12 收尾: sub_session 实体 (execute_one_task spawn 时建, 完成时更新).
+// 跟 PlanInfo 1:1 对齐, 但不暴露 contract / task_results — task 上下文从 plan
+// 侧拿, sub_session 只负责 "谁在跑 / 跑到哪 / 出了什么" 这三件.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// sub_session 创建入参 (execute_one_task 内部调, 一般不外暴).
+/// 业务: plan_id + parent_session_id + task_id 三元组唯一确定一个子会话.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubSessionInput {
+    pub id: String,
+    pub plan_id: String,
+    pub parent_session_id: String,
+    pub task_id: String,
+    /// 角色标签 (e.g. "executor"), 后续缺口 03 工具白名单按 role 过滤.
+    #[serde(default = "default_sub_session_role")]
+    pub role: String,
+}
+
+fn default_sub_session_role() -> String {
+    "executor".to_string()
+}
+
+/// sub_session 状态 (前端 PlanBlock "等待子 Agent" 提示用).
+/// 字符串而不是 enum: 跟持久化层 status 字段直接对齐, 省一次转换.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubSessionStatus {
+    Active,
+    Done,
+    Failed,
+    Aborted,
+}
+
+impl SubSessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+/// 公开给前端的 sub_session 摘要 (list / get 返回).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubSessionInfo {
+    pub id: String,
+    pub plan_id: String,
+    pub parent_session_id: String,
+    pub task_id: String,
+    pub role: String,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub output: Option<String>,
+}

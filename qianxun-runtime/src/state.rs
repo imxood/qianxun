@@ -101,6 +101,10 @@ pub struct RuntimeState {
     /// 订阅方: Tauri desktop (走 `app.emit("plan_event", ...)`), daemon SSE 流.
     /// 容量 256: 单 plan 状态变更稀疏, 256 足够撑 30s 高频更新不丢.
     plan_event_tx: broadcast::Sender<SseEvent>,
+    /// 2026-06-12 收尾: sub_session 事件 broadcast bus. 跟 plan_event_tx 平级.
+    /// plans.rs::execute_one_task 在每个 task 启动/完成时 emit (一个 plan 跑通常
+    /// 触发 2N 条, N = 任务数). 容量 256 够 30s 高频, 跟 plan 同样.
+    sub_session_event_tx: broadcast::Sender<SseEvent>,
     /// 2026-06-09 加: restore_from_disk 懒初始化标志 (OnceCell 模式).
     /// build() 同步不调 restore_from_disk (它跑 5-15s 同步 SQLite, 阻塞 webview 启动).
     /// 后台 task 调 ensure_restored() 异步跑, 完成后置 true. 首次 send_message / list_sessions
@@ -157,6 +161,18 @@ impl RuntimeState {
     /// 业务路径: plans.rs 6 处状态变更 (create / run / per-task run / per-task done / plan done / cancel).
     pub(crate) fn emit_plan_event(&self, event: SseEvent) {
         let _ = self.plan_event_tx.send(event);
+    }
+
+    /// 2026-06-12 收尾: 订阅 sub_session 事件 bus.
+    /// 跟 subscribe_plan_events 模式 1:1 — Tauri command 调, 转 `app.emit("sub_session_event", ...)`.
+    pub fn subscribe_sub_session_events(&self) -> broadcast::Receiver<SseEvent> {
+        self.sub_session_event_tx.subscribe()
+    }
+
+    /// 2026-06-12 收尾: 推 sub_session 事件 (plans.rs::execute_one_task 内部调).
+    /// 跟 emit_plan_event 模式 1:1.
+    pub(crate) fn emit_sub_session_event(&self, event: SseEvent) {
+        let _ = self.sub_session_event_tx.send(event);
     }
 
     /// 启动后台 reap_stale 任务 (清理 1 小时未活跃的 session).
@@ -288,6 +304,8 @@ impl RuntimeState {
         let (shutdown_tx, _) = watch::channel(());
         // P1-3: plan 事件 broadcast bus (容量 256)
         let (plan_event_tx, _) = broadcast::channel::<SseEvent>(256);
+        // 2026-06-12 收尾: sub_session 事件 broadcast bus (容量 256, 跟 plan 同样)
+        let (sub_session_event_tx, _) = broadcast::channel::<SseEvent>(256);
 
         Ok(Arc::new(Self {
             agent_host,
@@ -303,6 +321,7 @@ impl RuntimeState {
             hooks: Arc::new(HookRegistry::new()),
             shutdown_tx,
             plan_event_tx,
+            sub_session_event_tx,
             restored: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -344,6 +363,8 @@ impl RuntimeState {
         let agent_host = Arc::new(AgentLoopHost::new(10, shared.clone(), store.clone()));
         let (shutdown_tx, _) = watch::channel(());
         let (plan_event_tx, _) = broadcast::channel::<SseEvent>(256);
+        // 2026-06-12 收尾: sub_session 事件 broadcast bus.
+        let (sub_session_event_tx, _) = broadcast::channel::<SseEvent>(256);
         Arc::new(Self {
             agent_host,
             config: Arc::new(config),
@@ -358,6 +379,7 @@ impl RuntimeState {
             hooks: Arc::new(HookRegistry::new()),
             shutdown_tx,
             plan_event_tx,
+            sub_session_event_tx,
             restored: Arc::new(AtomicBool::new(false)),
         })
     }

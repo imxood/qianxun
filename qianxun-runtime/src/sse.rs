@@ -134,6 +134,26 @@ pub enum SseEvent {
         /// Unix epoch ms, 给前端做去重 / 排序.
         updated_at: i64,
     },
+
+    /// 2026-06-12 收尾: sub_session 状态变更. 第 17 变体.
+    /// 跟 PlanUpdate 平级, 但只标单个 sub_session 状态变更 (启动/完成/失败).
+    /// 前端 subSessionStore.handleSubSessionEvent 实时更新.
+    /// 跟 PlanUpdate 区别: PlanUpdate 是 plan 级 + task_results 快照, 这个是
+    /// 单 sub_session 级 + output. 一个 plan 跑可能触发 6+ 条 SubSessionUpdate
+    /// (启动/完成/失败), 跟 PlanUpdate 不重复.
+    #[serde(rename = "sub_session_update")]
+    SubSessionUpdate {
+        sub_session_id: String,
+        plan_id: String,
+        task_id: String,
+        /// SubSession 状态 snake_case: "active" / "done" / "failed" / "aborted".
+        status: String,
+        /// sub_session 完整状态 (含 started_at, ended_at, output). 前端用这个
+        /// 一次 upsert, 不用再调 get_sub_session.
+        sub_session_json: String,
+        /// Unix epoch ms, 跟 PlanUpdate 同样语义.
+        updated_at: i64,
+    },
 }
 
 impl SseEvent {
@@ -163,6 +183,7 @@ impl SseEvent {
             SseEvent::BackgroundTaskCancelled { .. } => "background_task_cancelled",
             SseEvent::BackgroundTaskCompleted { .. } => "background_task_completed",
             SseEvent::PlanUpdate { .. } => "plan_update",
+            SseEvent::SubSessionUpdate { .. } => "sub_session_update",
         }
     }
 }

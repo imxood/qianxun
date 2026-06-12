@@ -29,10 +29,15 @@ use crate::api::sessions::{
     create_session_impl, delete_session_impl, list_sessions_impl, pause_session_impl,
     resume_session_impl, update_active_provider_impl,
 };
+use crate::api::sub_sessions::{
+    create_sub_session_impl, get_sub_session_impl, list_sub_sessions_impl,
+    update_sub_session_impl,
+};
 use crate::api::trait_def::RuntimeApi;
 use crate::api::types::{
     CreateSessionRequest, ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse,
-    SessionFilter, SessionInfo, SessionState, UpdateProviderRequest,
+    SessionFilter, SessionInfo, SessionState, SubSessionInfo, SubSessionInput, SubSessionStatus,
+    UpdateProviderRequest,
 };
 use crate::background_task::{TaskInfo, TaskStatus};
 use crate::sse::SseEvent;
@@ -89,6 +94,30 @@ impl RuntimeApi for Arc<RuntimeState> {
 
     async fn cancel_plan(&self, plan_id: &str) -> RuntimeApiResult<()> {
         cancel_plan_impl(self.clone(), plan_id).await
+    }
+
+    async fn list_sub_sessions(
+        &self,
+        plan_id: Option<&str>,
+    ) -> RuntimeApiResult<Vec<SubSessionInfo>> {
+        list_sub_sessions_impl(self.clone(), plan_id).await
+    }
+
+    async fn get_sub_session(&self, sub_session_id: &str) -> RuntimeApiResult<SubSessionInfo> {
+        get_sub_session_impl(self.clone(), sub_session_id).await
+    }
+
+    async fn create_sub_session(&self, input: SubSessionInput) -> RuntimeApiResult<()> {
+        create_sub_session_impl(self.clone(), input).await
+    }
+
+    async fn update_sub_session(
+        &self,
+        sub_session_id: &str,
+        status: SubSessionStatus,
+        output: Option<&str>,
+    ) -> RuntimeApiResult<()> {
+        update_sub_session_impl(self.clone(), sub_session_id, status, output).await
     }
 
     async fn cancel_session(&self, session_id: &str) -> RuntimeApiResult<()> {

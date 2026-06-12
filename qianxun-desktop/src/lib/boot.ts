@@ -18,6 +18,7 @@ import { chatStore } from './stores/chat.svelte';
 import { planStore } from './stores/plan.svelte';
 import { sessionStore } from './stores/session.svelte';
 import { projectStore } from './stores/project.svelte';
+import { subSessionStore } from './stores/sub_session.svelte';
 import { uiStore } from './stores/ui.svelte';
 import { reportError } from './errors';
 
@@ -59,7 +60,10 @@ const _phases: BootPhase[] = [
 		progress: 80,
 		label: 'lists',
 		run: async () => {
-			await Promise.all([sessionStore.init(), projectStore.loadAll()]);
+			// 2026-06-12 收尾: subSessionStore.loadAll 拉全量 + 订阅 realtime, 跟
+			// sessionStore.init / projectStore.loadAll 同 mode (并行启动, 任一失败
+			// reportError 不阻断其它).
+			await Promise.all([sessionStore.init(), projectStore.loadAll(), subSessionStore.loadAll()]);
 		},
 	},
 ];

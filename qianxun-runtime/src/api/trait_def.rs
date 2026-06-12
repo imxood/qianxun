@@ -15,7 +15,8 @@ use tokio::sync::mpsc;
 use crate::api::error::RuntimeApiResult;
 use crate::api::types::{
     CreateSessionRequest, ListSessionsResponse, PlanInfo, PlanInput, SendRequest, SendResponse,
-    SessionFilter, SessionInfo, SessionState, UpdateProviderRequest,
+    SessionFilter, SessionInfo, SessionState, SubSessionInfo, SubSessionInput, SubSessionStatus,
+    UpdateProviderRequest,
 };
 use crate::sse::SseEvent;
 
@@ -101,6 +102,27 @@ pub trait RuntimeApi: Send + Sync {
 
     /// 取消正在跑的 plan (Phase D 收尾加). 把 status 置 Aborted, 写 ended_at.
     async fn cancel_plan(&self, plan_id: &str) -> RuntimeApiResult<()>;
+
+    /// 2026-06-12 收尾: 列 sub_session. plan_id=None 列所有 (init 用),
+    /// plan_id=Some 列该 plan 下所有 (前端 PlanBlock.byPlan 等价).
+    async fn list_sub_sessions(
+        &self,
+        plan_id: Option<&str>,
+    ) -> RuntimeApiResult<Vec<SubSessionInfo>>;
+
+    /// 2026-06-12 收尾: 按 id 拿单个 sub_session (前端点击"打开子会话"调).
+    async fn get_sub_session(&self, sub_session_id: &str) -> RuntimeApiResult<SubSessionInfo>;
+
+    /// 2026-06-12 收尾: 内部建 sub_session. execute_one_task 启动时调, 业务一般不外暴.
+    async fn create_sub_session(&self, input: SubSessionInput) -> RuntimeApiResult<()>;
+
+    /// 2026-06-12 收尾: 内部更新 sub_session. task 完成 / 失败时调.
+    async fn update_sub_session(
+        &self,
+        sub_session_id: &str,
+        status: SubSessionStatus,
+        output: Option<&str>,
+    ) -> RuntimeApiResult<()>;
 
     /// 取消正在跑的 session (软取消, agent_host 设置 paused flag).
     async fn cancel_session(&self, session_id: &str) -> RuntimeApiResult<()>;
