@@ -4,6 +4,7 @@
   import TitleBar from './components/TitleBar.svelte';
   import SideNav from './components/SideNav.svelte';
   import StatusBar from './components/StatusBar.svelte';
+  import ContextMenuLayer from './components/ContextMenuLayer.svelte';
   import OverviewPage from './features/overview/OverviewPage.svelte';
   import EnvPage from './features/env/EnvPage.svelte';
   import ConsolePage from './features/console/ConsolePage.svelte';
@@ -120,4 +121,5 @@
     </div>
   </div>
   <StatusBar />
+  <ContextMenuLayer />
 </div>

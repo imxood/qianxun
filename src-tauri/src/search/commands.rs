@@ -14,12 +14,15 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{Error, Result};
 
-/// 内容搜索的默认每页上限与单文件上限（够用的经验值）。
-const GREP_PAGE_LIMIT: usize = 200;
+/// 内容搜索的每个分片：短时间预算既给引擎内的 abort 检查留粒度，
+/// 又让「新搜索顶掉旧搜索」在分片边界即时生效；循环推进 file_offset
+/// 直到搜完或被取消——对前端表现为流式（每分片经 Channel 推送）。
+const GREP_CHUNK_LIMIT: usize = 100;
+const GREP_CHUNK_BUDGET_MS: u64 = 800;
 const GREP_MAX_PER_FILE: usize = 100;
 const GREP_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
-/// fff 的 grep 有内部时间预算；给到 3s，长目录靠分页游标继续。
-const GREP_TIME_BUDGET_MS: u64 = 3000;
+/// 单次搜索的命中总量上限：超大目录请缩小范围/glob 过滤（提示由前端给出）。
+const GREP_MAX_TOTAL_ITEMS: usize = 2000;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +50,9 @@ pub struct FileHit {
     pub score: i32,
     /// 文件名内的匹配区间（字节偏移，前端按 UTF-8 切片高亮）。
     pub offsets: Vec<(u32, u32)>,
+    /// 大小（字节）与修改时间（毫秒）——列表排序列用；stat 失败记 0。
+    pub size: u64,
+    pub mtime: i64,
 }
 
 #[derive(Serialize)]
@@ -57,7 +63,7 @@ pub struct FilesPage {
     pub total_files: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GrepHit {
     pub path: String,
@@ -76,8 +82,19 @@ pub struct GrepPage {
     pub items: Vec<GrepHit>,
     pub files_searched: usize,
     pub files_with_matches: usize,
+    /// 0 = 已搜完；非 0 = 因取消中断（流式循环在分片边界推进，不再需要
+    /// 前端手动翻页）。
     pub next_file_offset: usize,
     pub aborted: bool,
+}
+
+/// 流式分片（经 Tauri Channel 推送）：items 为本分片新命中。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GrepProgress {
+    pub items: Vec<GrepHit>,
+    pub files_searched: usize,
+    pub files_with_matches: usize,
 }
 
 #[derive(Deserialize, Default)]
@@ -87,6 +104,21 @@ pub struct GrepOptions {
     pub smart_case: bool,
     pub before_context: usize,
     pub after_context: usize,
+    /// 文件名 glob 过滤（如 `*.rs`、`src/**`）：不含 `/` 时按文件名匹配，
+    /// 含 `/` 时按相对路径匹配（封装层逐分片过滤，引擎无此旋钮）。
+    pub glob: Option<String>,
+}
+
+/// 一个逻辑盘（搜索根选择器的盘符胶囊行）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveInfo {
+    /// 形如 `C:\` 的根路径。
+    pub path: String,
+    /// fixed | removable | network | cdrom | ramdisk | unknown
+    pub kind: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
 }
 
 /// 打开（或切换）搜索根目录：重建索引并立即返回，进度走轮询。
@@ -204,10 +236,32 @@ pub fn search_files(
         .iter()
         .zip(result.scores.iter())
         .zip(result.match_byte_offsets.iter())
-        .map(|((item, score), offsets)| FileHit {
-            path: item.relative_path(picker),
-            score: score.total,
-            offsets: offsets.iter().map(|(a, b)| (*a, *b)).collect(),
+        .map(|((item, score), offsets)| {
+            // stat 补大小/修改时间（≤500 行/页，毫秒级）；失败记 0 不阻断。
+            let absolute = state
+                .search
+                .root()
+                .map(|root| root.join(item.relative_path(picker)));
+            let (size, mtime) = absolute
+                .as_deref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .map(|meta| {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as i64)
+                        .unwrap_or(0);
+                    (meta.len(), mtime)
+                })
+                .unwrap_or((0, 0));
+            FileHit {
+                path: item.relative_path(picker),
+                score: score.total,
+                offsets: offsets.iter().map(|(a, b)| (*a, *b)).collect(),
+                size,
+                mtime,
+            }
         })
         .collect();
     Ok(FilesPage {
@@ -217,13 +271,14 @@ pub fn search_files(
     })
 }
 
-/// 内容搜索。新调用自动取消上一次（取消令牌在 SearchState 接力）。
-/// 大目录靠 nextFileOffset 分页继续，UI 传 fileOffset 翻页。
+/// 内容搜索（流式）：分片推进 file_offset 直至搜完或取消，每分片经
+/// Channel 推送增量命中。新调用自动取消上一次（取消令牌在 SearchState
+/// 接力）；换根（generation 变化）也会终止进行中的搜索。
 #[tauri::command]
-pub fn search_content(
+pub async fn search_content(
     query: String,
     opts: Option<GrepOptions>,
-    file_offset: Option<usize>,
+    on_progress: tauri::ipc::Channel<GrepProgress>,
     state: State<'_, crate::AppState>,
 ) -> Result<GrepPage> {
     if query.trim().is_empty() {
@@ -236,71 +291,150 @@ pub fn search_content(
         });
     }
     let opts = opts.unwrap_or_default();
+    let glob = opts
+        .glob
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    if let Some(pattern) = &glob {
+        glob_to_regex(pattern)?; // 先校验语法，坏 pattern 即时报错不静默。
+    }
     let token = state.search.rotate_abort();
-    let guard = state
-        .search
-        .picker()
-        .read()
-        .map_err(|cause| Error::Search(cause.to_string()))?;
-    let picker = guard
-        .as_ref()
-        .ok_or_else(|| Error::Search("尚未选择搜索根目录".to_owned()))?;
+    let start_generation = state.search.generation();
+    let search = state.search.clone();
 
-    let parsed = QueryParser::default().parse(&query);
-    let result = picker.grep(
-        &parsed,
-        &GrepSearchOptions {
-            max_file_size: GREP_MAX_FILE_SIZE,
-            max_matches_per_file: GREP_MAX_PER_FILE,
-            smart_case: opts.smart_case,
-            file_offset: file_offset.unwrap_or(0),
-            page_limit: GREP_PAGE_LIMIT,
-            mode: if opts.regex {
-                GrepMode::Regex
-            } else {
-                GrepMode::PlainText
-            },
-            time_budget_ms: GREP_TIME_BUDGET_MS,
-            before_context: opts.before_context.min(10),
-            after_context: opts.after_context.min(10),
-            classify_definitions: false,
-            trim_whitespace: false,
-            abort_signal: Some(Arc::clone(&token)),
-        },
-    );
+    // 引擎 grep 是阻塞调用：整个分片循环放进 blocking 线程，主循环
+    // （窗口/其他命令）全程不被冻结——这是「取消按钮立即生效」的前提。
+    // parsed query 在闭包内构建：fff 的 ParsedQuery 借用查询串。
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut all_items: Vec<GrepHit> = Vec::new();
+        let mut files_searched = 0usize;
+        let mut files_with_matches = 0usize;
+        let mut offset = 0usize;
+        let mut aborted = false;
+        let parsed = QueryParser::default().parse(&query);
 
-    let aborted = token.load(Ordering::Relaxed);
-    let items = result
-        .matches
-        .iter()
-        .map(|hit| {
-            let file = result
-                .files
-                .get(hit.file_index)
-                .map(|item| item.relative_path(picker))
-                .unwrap_or_default();
-            GrepHit {
-                path: file,
-                line_number: hit.line_number,
-                col: hit.col,
-                line_content: hit.line_content.clone(),
-                offsets: hit
-                    .match_byte_offsets
+        loop {
+            // 每分片独立取读锁：锁不跨分片持有，换根/状态轮询不再被长搜索拖住。
+            // guard、grep 结果（借用 picker）、映射产物同块开始同块销毁。
+            let (chunk_items, chunk_files, next_offset) = {
+                let guard = search
+                    .picker()
+                    .read()
+                    .map_err(|cause| Error::Search(cause.to_string()))?;
+                let Some(picker) = guard.as_ref() else {
+                    return Ok(GrepPage {
+                        items: all_items,
+                        files_searched,
+                        files_with_matches,
+                        next_file_offset: 0,
+                        aborted: true,
+                    });
+                };
+
+                let result = picker.grep(
+                    &parsed,
+                    &GrepSearchOptions {
+                        max_file_size: GREP_MAX_FILE_SIZE,
+                        max_matches_per_file: GREP_MAX_PER_FILE,
+                        smart_case: opts.smart_case,
+                        file_offset: offset,
+                        page_limit: GREP_CHUNK_LIMIT,
+                        mode: if opts.regex {
+                            GrepMode::Regex
+                        } else {
+                            GrepMode::PlainText
+                        },
+                        time_budget_ms: GREP_CHUNK_BUDGET_MS,
+                        before_context: opts.before_context.min(10),
+                        after_context: opts.after_context.min(10),
+                        classify_definitions: false,
+                        trim_whitespace: false,
+                        abort_signal: Some(Arc::clone(&token)),
+                    },
+                );
+                files_searched = files_searched.max(result.total_files_searched);
+
+                // glob 过滤在映射前：不命中的行不进推送，也不计入文件数。
+                let chunk_items: Vec<GrepHit> = result
+                    .matches
                     .iter()
-                    .map(|(a, b)| (*a, *b))
-                    .collect(),
-                context_before: hit.context_before.clone(),
-                context_after: hit.context_after.clone(),
+                    .filter_map(|hit| {
+                        let relative = result
+                            .files
+                            .get(hit.file_index)
+                            .map(|item| item.relative_path(picker))
+                            .unwrap_or_default();
+                        if !glob
+                            .as_deref()
+                            .is_none_or(|pattern| hit_matches_glob(&relative, pattern))
+                        {
+                            return None;
+                        }
+                        Some(GrepHit {
+                            path: relative,
+                            line_number: hit.line_number,
+                            col: hit.col,
+                            line_content: hit.line_content.clone(),
+                            offsets: hit
+                                .match_byte_offsets
+                                .iter()
+                                .map(|(a, b)| (*a, *b))
+                                .collect(),
+                            context_before: hit.context_before.clone(),
+                            context_after: hit.context_after.clone(),
+                        })
+                    })
+                    .collect();
+                let chunk_files = chunk_items
+                    .iter()
+                    .map(|hit| hit.path.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                (chunk_items, chunk_files, result.next_file_offset)
+            };
+            files_with_matches += chunk_files;
+
+            all_items.extend(chunk_items.iter().cloned());
+            let _ = on_progress.send(GrepProgress {
+                items: chunk_items,
+                files_searched,
+                files_with_matches,
+            });
+
+            // 命中总量上限：更多结果请缩小范围或用 glob 过滤。
+            if all_items.len() >= GREP_MAX_TOTAL_ITEMS {
+                break;
             }
+
+            if token.load(Ordering::Relaxed) {
+                aborted = true;
+                break;
+            }
+            // 换根（索引重建）后旧搜索结果失去意义：立即终止。
+            if search.generation() != start_generation {
+                aborted = true;
+                break;
+            }
+            match next_offset {
+                0 => break,                      // 搜完。
+                next if next == offset => break, // 防御：游标不动则退出，避免死循环。
+                next => offset = next,
+            }
+        }
+
+        Ok(GrepPage {
+            items: all_items,
+            files_searched,
+            files_with_matches,
+            // 非 0 即「已中断」（流式循环下前端不再手动翻页）。
+            next_file_offset: usize::from(aborted),
+            aborted,
         })
-        .collect();
-    Ok(GrepPage {
-        items,
-        files_searched: result.total_files_searched,
-        files_with_matches: result.files_with_matches,
-        next_file_offset: result.next_file_offset,
-        aborted,
     })
+    .await
+    .map_err(|cause| Error::Search(format!("内容搜索线程异常：{cause}")))?
 }
 
 /// 取消进行中的内容搜索。
@@ -308,6 +442,116 @@ pub fn search_content(
 pub fn search_cancel(state: State<'_, crate::AppState>) -> Result<()> {
     state.search.cancel_search();
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 盘符枚举（搜索根选择器）
+// ---------------------------------------------------------------------------
+
+/// 枚举逻辑盘（Windows：GetLogicalDrives 系；其余平台空表，Windows 优先）。
+#[tauri::command]
+pub fn search_list_drives() -> Vec<DriveInfo> {
+    list_drives()
+}
+
+#[cfg(windows)]
+fn list_drives() -> Vec<DriveInfo> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+    };
+    // windows-sys 0.60 裁掉了 DRIVE_* 常量（Win32 文档值）。
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    const DRIVE_REMOTE: u32 = 4;
+    const DRIVE_CDROM: u32 = 5;
+    const DRIVE_RAMDISK: u32 = 6;
+
+    let bitmask = unsafe { GetLogicalDrives() };
+    if bitmask == 0 {
+        return Vec::new();
+    }
+    let mut drives = Vec::new();
+    for index in 0u32..26 {
+        if bitmask & (1 << index) == 0 {
+            continue;
+        }
+        let letter = (b'A' + index as u8) as char;
+        let root = format!("{letter}:\\");
+        let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+        let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        let kind_name = match kind {
+            DRIVE_REMOVABLE => "removable",
+            DRIVE_FIXED => "fixed",
+            DRIVE_REMOTE => "network",
+            DRIVE_CDROM => "cdrom",
+            DRIVE_RAMDISK => "ramdisk",
+            _ => continue, // UNKNOWN / NO_ROOT_DIR：不可用盘，不进选择器。
+        };
+        let mut free: u64 = 0;
+        let mut total: u64 = 0;
+        unsafe {
+            GetDiskFreeSpaceExW(wide.as_ptr(), std::ptr::null_mut(), &mut total, &mut free);
+        }
+        drives.push(DriveInfo {
+            path: root,
+            kind: kind_name.to_owned(),
+            total_bytes: total,
+            free_bytes: free,
+        });
+    }
+    drives.sort_by(|a, b| a.path.cmp(&b.path));
+    drives
+}
+
+#[cfg(not(windows))]
+fn list_drives() -> Vec<DriveInfo> {
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// glob 过滤（grep 文件名/路径筛选）
+// ---------------------------------------------------------------------------
+
+/// glob → 正则：`**` 跨段、`*`/`?` 不跨段、其余字面。错误即时上报。
+fn glob_to_regex(pattern: &str) -> Result<regex::Regex> {
+    let mut text = String::from("(?i)^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    text.push_str(".*");
+                } else {
+                    text.push_str("[^/\\\\]*");
+                }
+            }
+            '?' => text.push_str("[^/\\\\]"),
+            other => {
+                for escaped in regex::escape(&other.to_string()).chars() {
+                    text.push(escaped);
+                }
+            }
+        }
+    }
+    text.push('$');
+    regex::Regex::new(&text).map_err(|cause| Error::Search(format!("glob 语法错误：{cause}")))
+}
+
+/// 相对路径是否命中 glob：pattern 不含 `/` 时按文件名匹配，否则按全路径。
+fn hit_matches_glob(relative: &str, pattern: &str) -> bool {
+    let Ok(re) = glob_to_regex(pattern) else {
+        return true; // 校验在入口做过；这里兜底放行，不静默吞结果。
+    };
+    if pattern.contains('/') {
+        re.is_match(relative)
+    } else {
+        relative
+            .rsplit(['/', '\\'])
+            .next()
+            .map(|name| re.is_match(name))
+            .unwrap_or(false)
+    }
 }
 
 /// 等待扫描完成（供集成测试；UI 走轮询）。
@@ -330,6 +574,22 @@ fn normalize_root(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// glob 语义：`*`/`?` 不跨段、`**` 跨段；不含 `/` 按文件名匹配，
+    /// 含 `/` 按相对路径匹配；整体大小写不敏感（Windows 习惯）。
+    #[test]
+    fn glob匹配文件名与路径() {
+        assert!(hit_matches_glob("src/main.rs", "*.rs"));
+        assert!(!hit_matches_glob("src/main.rs", "*.ts"));
+        assert!(hit_matches_glob("README.md", "*.md"));
+        assert!(hit_matches_glob("src/lib/ipc/index.ts", "src/**"));
+        assert!(!hit_matches_glob("lib/ipc/index.ts", "src/**"));
+        assert!(hit_matches_glob("a.txt", "?.txt"));
+        assert!(!hit_matches_glob("ab.txt", "?.txt"));
+        assert!(hit_matches_glob("SRC/MAIN.rs", "*.RS"));
+        assert!(hit_matches_glob("src/main.rs", "src/*"));
+        assert!(!hit_matches_glob("deep/src/main.rs", "src/*"));
+    }
 
     #[test]
     fn 根目录必须是存在的目录() {

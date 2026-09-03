@@ -4055,6 +4055,7 @@ dependencies = [
  "portable-pty",
  "proc-guard",
  "rand 0.8.8",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4070,6 +4071,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "url",
+ "windows-sys 0.60.2",
  "xcap",
  "zip",
 ]
