@@ -27,6 +27,7 @@ export const IPC_COMMANDS = [
   'search_cancel',
   'search_wait_ready',
   'shots_capture',
+  'shots_overlay_ready',
   'shots_set_hotkey',
   'shots_clear_hotkey',
   'shots_copy_clipboard',
@@ -60,7 +61,12 @@ export const IPC_COMMANDS = [
 export type IpcCommand = (typeof IPC_COMMANDS)[number];
 
 /** 全部事件通道（Rust 侧 emit ↔ 前端 listen）。 */
-export const IPC_EVENTS = ['harness://event', 'terminal://output', 'terminal://exit'] as const;
+export const IPC_EVENTS = [
+  'harness://event',
+  'harness://install-progress',
+  'terminal://output',
+  'terminal://exit',
+] as const;
 
 // ---------------------------------------------------------------------------
 // app_meta
@@ -176,6 +182,8 @@ export interface HarnessEnvironment {
   dshEntry: string;
   workspace: string;
   dshHome: string;
+  /** 一键安装将下载的 Node 版本（Rust 侧单一事实源，避免前端硬编码）。 */
+  bundledNodeVersion: string;
 }
 
 /** supervisor 状态机（serde tag = "phase"）。 */
@@ -211,6 +219,31 @@ export function formatHarnessStatus(status: HarnessStatus): string {
       return `启动失败：${status.reason}`;
   }
 }
+
+/**
+ * harness://install-progress 事件负载（serde tag = "stage"）。
+ * Node 下载带字节级进度；DSH 走 pnpm，只有包数推进。
+ * 可选数值字段为 null 表示该维度暂无数据，展示层沿用上一个事件。
+ */
+export type InstallProgress =
+  | { stage: 'node-manifest'; source: string }
+  | {
+      stage: 'node-download';
+      source: string;
+      url: string;
+      totalBytes: number | null;
+      downloadedBytes: number;
+    }
+  | { stage: 'node-finalize'; source: string; activity: string }
+  | {
+      stage: 'dsh-packages';
+      registry: string;
+      resolved: number | null;
+      downloaded: number;
+      added: number;
+      totalHint: number | null;
+    }
+  | { stage: 'done' };
 
 // ---------------------------------------------------------------------------
 // search_*（搜索域，M2）

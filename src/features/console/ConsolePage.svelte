@@ -85,7 +85,7 @@
     }}
   >
     {#if harness.logs.length === 0}
-      <p class="text-muted">暂无输出。DSH 的启动日志、npm 安装进度与健康事件都会流到这里。</p>
+      <p class="text-muted">暂无日志</p>
     {:else}
       {#each harness.logs as line, index (index)}
         <div class="whitespace-pre-wrap break-all">{line}</div>

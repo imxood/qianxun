@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { harness } from '../../stores/harness.svelte';
+  import { nav } from '../../stores/nav.svelte';
 
   onMount(() => {
     void harness.wire();
@@ -29,10 +30,10 @@
   });
 
   const statusText: Record<string, string> = {
-    stopped: 'DSH 未运行。到「控制台」启动，或在设置里开启随千寻自启。',
-    starting: 'DSH 启动中…（首次冷启动需要装载大量插件，请稍候）',
+    stopped: 'DSH 未运行。',
+    starting: 'DSH 启动中…首次启动需加载插件，稍慢。',
     restarting: 'DSH 异常退出，正在自动重启…',
-    failed: 'DSH 启动失败。详细原因见「控制台」日志；端口被占用时可在设置里更换端口。',
+    failed: 'DSH 启动失败，详见控制台日志。',
   };
 </script>
 
@@ -82,9 +83,9 @@
         {/if}
         <button
           class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
-          onclick={() => void harness.refreshEnvironment()}
+          onclick={() => nav.go('env')}
         >
-          检测环境
+          检查环境
         </button>
       </div>
     </div>

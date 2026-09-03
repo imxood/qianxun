@@ -4,11 +4,8 @@
 
 <section class="mx-auto max-w-4xl space-y-6">
   <header class="space-y-2">
-    <h1 class="text-xl font-semibold">千寻已就绪</h1>
-    <p class="text-sm leading-6 text-muted">
-      v0.1 已交付全部里程碑核心：外壳、设置系统与质量门禁，以及 DSH
-      托管、终端、截屏、搜索、笔记、插件桥、远程网关与同步一阶段；剩余为真机人工验收项（见 TODO）。
-    </p>
+    <h1 class="text-lg font-semibold">概览</h1>
+    <p class="text-sm leading-6 text-muted">v0.1 已交付全部核心能力。</p>
   </header>
 
   <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

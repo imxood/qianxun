@@ -7,7 +7,7 @@
 </script>
 
 <header
-  class="flex h-10 shrink-0 select-none items-stretch justify-between border-b border-line bg-surface"
+  class="flex h-8 shrink-0 select-none items-stretch justify-between border-b border-line bg-surface"
   data-tauri-drag-region
 >
   <div class="flex items-baseline gap-2 self-center pl-3" data-tauri-drag-region>
@@ -26,7 +26,7 @@
   ></div>
   <div class="flex items-stretch">
     <button
-      class="flex w-12 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
+      class="flex w-11 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
       aria-label="最小化"
       onclick={() => void win.minimize()}
     >
@@ -41,7 +41,7 @@
       </svg>
     </button>
     <button
-      class="flex w-12 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
+      class="flex w-11 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
       aria-label="最大化 / 还原"
       onclick={() => void win.toggleMaximize()}
     >
@@ -56,7 +56,7 @@
       </svg>
     </button>
     <button
-      class="flex w-12 items-center justify-center text-fg transition-colors hover:bg-danger hover:text-white"
+      class="flex w-11 items-center justify-center text-fg transition-colors hover:bg-danger hover:text-white"
       aria-label="关闭"
       onclick={() => void win.close()}
     >

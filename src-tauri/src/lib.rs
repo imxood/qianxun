@@ -85,6 +85,8 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // 原生目录选择器（搜索页选根目录，替代手输绝对路径）。
+        .plugin(tauri_plugin_dialog::init())
         // 截屏热键：注册在 Rust 侧（设置驱动），触发即 capture + 拉起每屏覆盖窗。
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -206,6 +208,7 @@ pub fn run() {
             search::commands::search_cancel,
             search::commands::search_wait_ready,
             shots::commands::shots_capture,
+            shots::commands::shots_overlay_ready,
             shots::commands::shots_set_hotkey,
             shots::commands::shots_clear_hotkey,
             shots::commands::shots_copy_clipboard,

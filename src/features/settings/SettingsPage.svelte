@@ -294,7 +294,7 @@
 </script>
 
 <section class="mx-auto max-w-2xl space-y-6">
-  <h1 class="text-xl font-semibold">设置</h1>
+  <h1 class="text-lg font-semibold">设置</h1>
 
   {#if settings.loadError}
     <div class="rounded-lg border border-danger bg-danger/10 p-4 text-sm">
@@ -327,7 +327,7 @@
     <section class="space-y-3 rounded-lg border border-line bg-card p-4">
       <h2 class="text-sm font-medium">窗口行为</h2>
       <label class="flex items-center justify-between text-sm">
-        <span>关闭窗口时隐藏到托盘（托盘菜单可退出）</span>
+        <span>关闭窗口时隐藏到托盘</span>
         <Switch
           label="关闭时隐藏到托盘"
           checked={settings.current.window.closeToTray}
@@ -335,7 +335,7 @@
         />
       </label>
       <label class="flex items-center justify-between text-sm">
-        <span>启动时最小化（不弹出窗口）</span>
+        <span>启动时最小化到托盘</span>
         <Switch
           label="启动时最小化"
           checked={settings.current.window.startMinimized}
@@ -359,18 +359,14 @@
         />
       </div>
       <p class="text-xs {portValid ? 'text-muted' : 'text-danger'}">
-        {portValid
-          ? '范围 1024–65535；端口被占用时启动会显式报错，可一键换端口。'
-          : '端口必须在 1024–65535 之间。'}
+        {portValid ? '1024–65535' : '范围 1024–65535'}
       </p>
       {#if portClashesStudio}
-        <p class="text-xs text-danger">
-          10000 是保留端口（常被本机其他 DSH 实例使用），请换一个端口避免冲突。
-        </p>
+        <p class="text-xs text-danger">10000 常被本机其他 DSH 实例占用，建议更换。</p>
       {/if}
 
       <label class="flex items-center justify-between text-sm">
-        <span>随千寻启动自动拉起 DSH</span>
+        <span>随千寻启动 DSH</span>
         <Switch
           label="随千寻启动 DSH"
           checked={settings.current.dsh.autostart}
@@ -388,8 +384,8 @@
             void save({ dsh: { home: value } });
           }}
         >
-          <option value="isolated">隔离（推荐，与系统 ~/.dsh 互不干扰）</option>
-          <option value="system">系统 ~/.dsh（与外部实例共用，可能冲突）</option>
+          <option value="isolated">隔离（推荐）</option>
+          <option value="system">系统 ~/.dsh</option>
         </select>
       </div>
 
@@ -405,12 +401,10 @@
           }}
         />
       </div>
-      <p class="text-xs text-muted">
-        填 npm 精确版本号（如 0.1.1-rc.2）可锁定安装与升级目标；留空跟随 latest。
-      </p>
+      <p class="text-xs text-muted">精确版本号（如 0.1.1-rc.2）；留空跟随 latest。</p>
 
       <label class="flex items-center justify-between text-sm">
-        <span>端口被占用时允许本次随机端口</span>
+        <span>端口占用时改用随机端口</span>
         <Switch
           label="允许随机端口回退"
           checked={settings.current.dsh.allowRandomFallback}
@@ -454,8 +448,8 @@
       </div>
       <p class="text-xs {registryValid ? 'text-muted' : 'text-danger'}">
         {registryValid
-          ? 'npmmirror / official，或以 http(s):// 开头的自定义 registry 地址。'
-          : '只能填 npmmirror、official 或 http(s):// 开头的地址。'}
+          ? 'npmmirror / official / http(s):// 自定义地址。'
+          : '仅限 npmmirror、official 或 http(s):// 地址。'}
       </p>
     </section>
   {/if}
@@ -485,9 +479,7 @@
         应用
       </button>
     </div>
-    <p class="text-xs text-muted">
-      需至少一个修饰键（Ctrl / Alt / Shift）+ 普通键。留空后应用 = 停用热键。
-    </p>
+    <p class="text-xs text-muted">修饰键 + 字母/数字；清空并应用为停用。</p>
     {#if hotkeyError}
       <p class="text-sm text-danger">{hotkeyError}</p>
     {/if}
@@ -536,7 +528,7 @@
         应用
       </button>
     </div>
-    <p class="text-xs text-muted">对新建的终端标签生效（已开的标签保持原样）。</p>
+    <p class="text-xs text-muted">对新建标签生效。</p>
     {#if terminalError}
       <p class="text-sm text-danger">{terminalError}</p>
     {/if}
@@ -545,21 +537,20 @@
   <section class="space-y-3 rounded-lg border border-line bg-card p-4">
     <h2 class="text-sm font-medium">DSH 笔记桥</h2>
     <p class="text-xs text-muted">
-      把千寻笔记库以 qx-bridge 插件注入千寻所辖 DSH：agent 获得 note_search / note_read / note_write
-      工具，笔记页解锁 AI 整理。 变更后需重启 DSH 生效。
+      把笔记库注入 DSH：agent 可直接检索与读写笔记。变更后需重启 DSH。
     </p>
     {#if bridge}
       <ul class="space-y-1 text-xs">
-        <li>{bridge.deployed ? '✓' : '✗'} 插件文件{bridge.deployed ? '已就位' : '未部署'}</li>
+        <li>{bridge.deployed ? '✓' : '✗'} 插件{bridge.deployed ? '已就位' : '未部署'}</li>
         <li>
-          {bridge.patchEntry ? '✓' : '✗'} profile 装配条目{bridge.patchEntry ? '已写入' : '未写入'}
+          {bridge.patchEntry ? '✓' : '✗'} 装配条目{bridge.patchEntry ? '已写入' : '未写入'}
         </li>
         <li>
-          {bridge.vaultMatch ? '✓' : '✗'} 笔记库配置{bridge.vaultMatch
-            ? '一致'
-            : '不一致（重新部署即可对齐）'}
+          {bridge.vaultMatch ? '✓' : '✗'} 笔记库{bridge.vaultMatch
+            ? '配置一致'
+            : '配置不一致，重新部署即可'}
         </li>
-        <li>{bridge.dshRunning ? '⏳ DSH 运行中：重启后加载桥' : 'DSH 未运行：下次启动加载'}</li>
+        <li>{bridge.dshRunning ? '⏳ DSH 运行中，重启后加载' : 'DSH 未运行，下次启动加载'}</li>
       </ul>
       <p class="truncate text-xs text-muted" title={bridge.pluginDir}>{bridge.pluginDir}</p>
     {:else}
@@ -574,18 +565,15 @@
         {bridgeBusy ? '部署中…' : '部署 / 修复'}
       </button>
       {#if !vaultReady}
-        <span class="text-xs text-muted">先到笔记页初始化笔记库</span>
+        <span class="text-xs text-muted">请先初始化笔记库</span>
       {/if}
       {#if bridgeError}<span class="text-sm text-danger">{bridgeError}</span>{/if}
     </div>
   </section>
 
   <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">远程访问（EasyTier）</h2>
-    <p class="text-xs text-muted">
-      网关是 DSH 的唯一远程暴露面：DSH 始终只听回环，手机等设备经 EasyTier
-      虚拟网访问配对链接。关闭时零监听。
-    </p>
+    <h2 class="text-sm font-medium">远程访问</h2>
+    <p class="text-xs text-muted">手机等设备经 EasyTier 网络访问 DSH；关闭时不监听任何端口。</p>
     <div class="flex flex-wrap items-center gap-3">
       <label class="flex items-center gap-2 text-sm">
         <Switch
@@ -629,7 +617,7 @@
     {#if remoteStatus}
       <p class="text-xs text-muted">
         {remoteStatus.listening
-          ? `监听中：${remoteStatus.listening}${remoteStatus.dshRunning ? '' : '（DSH 未运行：起 DSH 后即通）'}`
+          ? `监听中：${remoteStatus.listening}${remoteStatus.dshRunning ? '' : '（DSH 未运行）'}`
           : '未监听'}
         · 已配对 {remoteStatus.activeCount}/{remoteStatus.deviceCount} 台
       </p>
@@ -644,7 +632,7 @@
       >
         配对新设备
       </button>
-      <span class="text-xs text-muted">配对 = 生成一次性链接 + 二维码，手机扫码即入</span>
+      <span class="text-xs text-muted">生成一次性二维码，手机扫码即入</span>
     </div>
     {#if pairUrl}
       <div class="flex items-start gap-3 rounded-md border border-line bg-surface p-3">
@@ -685,14 +673,13 @@
   </section>
 
   <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">同步（第一阶段：笔记库）</h2>
+    <h2 class="text-sm font-medium">同步</h2>
     <p class="text-xs text-muted">
-      笔记库以 git 同步：推送 = 自动提交本地改动并 push；拉取 = rebase。 凭据与密钥永不同步（仅
-      vault 一个目录）。
+      笔记库以 git 同步，仅同步 vault 目录。推送 = 提交并 push；拉取 = rebase。
     </p>
     {#if syncStatus}
       {#if !syncStatus.gitAvailable}
-        <p class="text-sm text-danger">系统未安装 git：装好 Git for Windows 后刷新。</p>
+        <p class="text-sm text-danger">未检测到 git，请安装后重试。</p>
       {:else if !syncStatus.initialized}
         <p class="text-sm text-muted">笔记库还不是 git 仓。</p>
         <button
@@ -708,7 +695,7 @@
           {#if syncStatus.hasRemote}
             · 领先 {syncStatus.ahead ?? '?'} · 落后 {syncStatus.behind ?? '?'}
           {:else}
-            ·（无远端：加 remote 后可推拉，本地仓本身已是快照）
+            · 无远端
           {/if}
         </p>
         <div class="flex items-center gap-2">
@@ -748,7 +735,7 @@
     <h2 class="text-sm font-medium text-fg">关于</h2>
     {#if meta}
       <p>千寻 v{meta.version} · {meta.identifier}</p>
-      <p>Tauri 2 + Svelte 5 · 全部里程碑核心已交付</p>
+      <p>Tauri 2 · Svelte 5</p>
     {:else}
       <p>版本信息不可用</p>
     {/if}

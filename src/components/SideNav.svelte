@@ -46,18 +46,19 @@
   ];
 </script>
 
-<nav class="flex w-44 shrink-0 flex-col gap-1 border-r border-line bg-surface p-2">
+<nav class="flex w-16 shrink-0 flex-col gap-1 border-r border-line bg-surface p-1.5">
   {#each items as item (item.id)}
+    {@const active = nav.page === item.id}
     <button
-      class="flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors {nav.page ===
-      item.id
-        ? 'bg-accent-soft font-medium text-fg'
-        : 'text-muted hover:bg-accent-soft/60 hover:text-fg'}"
+      class="group flex flex-col items-center gap-1 rounded-lg px-1 py-2 transition-colors {active
+        ? 'bg-accent-soft'
+        : 'hover:bg-accent-soft/60'}"
+      aria-current={active ? 'page' : undefined}
       onclick={() => nav.go(item.id)}
     >
       <svg
         viewBox="0 0 24 24"
-        class="size-4 shrink-0"
+        class="size-5 shrink-0 {active ? 'text-accent' : 'text-muted group-hover:text-fg'}"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"
@@ -67,8 +68,13 @@
       >
         <path d={item.icon} />
       </svg>
-      {item.label}
+      <span
+        class="text-[11px] leading-none {active
+          ? 'font-medium text-fg'
+          : 'text-muted group-hover:text-fg'}"
+      >
+        {item.label}
+      </span>
     </button>
   {/each}
-  <div class="mt-auto px-3 py-2 text-xs text-muted">v0.1</div>
 </nav>
