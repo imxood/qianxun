@@ -31,11 +31,13 @@ const HOP_HEADERS: [&str; 9] = [
     "set-cookie",
 ];
 
-/// 运行中的网关句柄：停止信号 + 任务 + 实际监听地址（绑定成功的证明）。
+/// 运行中的网关句柄：停止信号 + 任务 + 实际监听地址（绑定成功的证明）+
+/// 启动配置指纹（sync 用它判断「配置没变才保留」，设备表是启动快照）。
 pub struct GatewayHandle {
     pub shutdown: watch::Sender<bool>,
     pub task: tokio::task::JoinHandle<()>,
     pub local_addr: std::net::SocketAddr,
+    pub fingerprint: u64,
 }
 
 /// 网关共享状态：DSH origin（host:port）+ 设备表快照（每次启动重建）。
@@ -64,11 +66,13 @@ impl GatewayState {
 }
 
 /// 启动网关。绑定失败（地址不可用/被占）即返错，不留半开状态。
+/// fingerprint = 启动配置指纹（commands::fingerprint），存入句柄供 sync 比对。
 pub async fn start(
     bind_ip: &str,
     port: u16,
     upstream: String,
     devices: Vec<RemoteDevice>,
+    fingerprint: u64,
 ) -> Result<GatewayHandle, String> {
     let bind: std::net::SocketAddr = format!("{bind_ip}:{port}")
         .parse()
@@ -108,6 +112,7 @@ pub async fn start(
         shutdown,
         task,
         local_addr,
+        fingerprint,
     })
 }
 

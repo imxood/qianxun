@@ -14,7 +14,7 @@ pub mod commands;
 pub mod gateway;
 
 /// 已配对设备（settings.json remote 域持久化）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDevice {
     pub id: String,

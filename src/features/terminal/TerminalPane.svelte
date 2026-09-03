@@ -2,6 +2,9 @@
   /**
    * 单个终端面板：一个 xterm 实例 ↔ 一个 PTY 会话（id 由父层 spawn 分配）。
    * 标签切换由父层 CSS 隐藏保活（组件不销毁，回滚与进程状态保留）。
+   * 输出可靠性的两道保险：挂载后 terminal_replay 回放（弥合 spawn→监听
+   * 注册窗口期丢失的横幅/提示符）；keep-alive 重见时主动 fit（visibility
+   * 切换不触发 ResizeObserver）。
    */
   import { onMount } from 'svelte';
   import { Terminal } from '@xterm/xterm';
@@ -18,11 +21,13 @@
 
   let {
     id,
+    active,
     prefs,
     onExit,
     onTitle,
   }: {
     id: number;
+    active: boolean;
     prefs: TerminalSettings;
     onExit: (id: number) => void;
     onTitle: (id: number, title: string) => void;
@@ -30,6 +35,16 @@
 
   let host: HTMLDivElement | null = $state(null);
   let alive = $state(true);
+
+  // 命令式引用：onMount 内定义，$effect/模板回调按需调用。
+  let syncSize: (() => void) | null = null;
+  let pasteFromClipboard: (() => void) | null = null;
+
+  // keep-alive 重见：visibility 切换不触发 ResizeObserver，主动补一次 fit。
+  $effect(() => {
+    if (!active) return;
+    requestAnimationFrame(() => syncSize?.());
+  });
 
   onMount(() => {
     const terminal = new Terminal({
@@ -51,6 +66,32 @@
       // DOM 渲染兜底，无需处理。
     }
     fit.fit();
+
+    // 剪贴板：Ctrl+Shift+C/V + 右键粘贴（WebView2 剪贴板权限策略下尽力而为）。
+    const doPaste = (): void => {
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) void call('terminal_write', { id, data: text });
+        })
+        .catch(() => {}); // 权限/上下文不支持：静默，不影响键盘输入。
+    };
+    pasteFromClipboard = doPaste;
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'c') {
+        const selection = terminal.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection).catch(() => {});
+        }
+        return false;
+      }
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') {
+        doPaste();
+        return false;
+      }
+      return true;
+    });
 
     terminal.onData((data) => {
       void call('terminal_write', { id, data });
@@ -74,6 +115,13 @@
         onExit(id);
       });
       disposers.push(unlistenOutput, unlistenExit);
+      // 回放：监听已就绪，补齐 spawn 以来的输出（含横幅与首个提示符）。
+      try {
+        const replayed = await call<string>('terminal_replay', { id });
+        if (replayed && alive) terminal.write(replayed);
+      } catch {
+        // 会话已退出：exit 事件已收尾，回放落空无害。
+      }
     })();
 
     // 标题随 shell 的 OSC 标题序列更新（提示符路径等）。
@@ -82,17 +130,18 @@
     });
 
     // 尺寸联动：fit 后把逻辑行列回传 PTY（初次 fit 也要同步）。
-    const syncSize = () => {
+    const doSyncSize = (): void => {
       if (!alive) return;
       try {
         fit.fit();
       } catch {
-        return; // 容器隐藏时 fit 会抛错：重新显示时再触发。
+        return; // 容器隐藏时 fit 会抛错：重新显示时由 $effect 再触发。
       }
       void call('terminal_resize', { id, cols: terminal.cols, rows: terminal.rows });
     };
-    syncSize();
-    const observer = new ResizeObserver(syncSize);
+    syncSize = doSyncSize;
+    doSyncSize();
+    const observer = new ResizeObserver(doSyncSize);
     observer.observe(host!);
 
     return () => {
@@ -104,4 +153,11 @@
   });
 </script>
 
-<div class="h-full w-full bg-[#1e1e1] {alive ? '' : 'opacity-80'}" bind:this={host}></div>
+<div
+  class="h-full w-full bg-[#1e1e1e] {alive ? '' : 'opacity-80'}"
+  bind:this={host}
+  oncontextmenu={(event) => {
+    event.preventDefault();
+    pasteFromClipboard?.();
+  }}
+></div>

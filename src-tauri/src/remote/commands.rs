@@ -129,13 +129,30 @@ pub fn remote_revoke(app: AppHandle, id: String) -> Result<()> {
     Ok(())
 }
 
-/// 设置变更后的同步入口：enabled/bind/port/设备表任一变化 → 重启网关。
+/// 启动配置指纹：enabled/bind/port/devices 任一变化都会改变它。
+/// sync 用它决定「保留运行中的网关」还是「停旧起新」——设备表是网关
+/// 启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）。
+fn fingerprint(enabled: bool, bind_ip: &str, port: u16, devices: &[RemoteDevice]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    enabled.hash(&mut hasher);
+    bind_ip.hash(&mut hasher);
+    port.hash(&mut hasher);
+    devices.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 设置变更后的同步入口：指纹一致且任务存活 → 保留；否则停旧起新。
 /// DSH origin 由 supervisor 状态提供；DSH 未跑时网关照常监听
 /// （请求会得到「上游不可达」提示），DSH 起来即通。
 pub async fn sync(app: AppHandle) {
     let (should_run, bind_ip, port, devices, upstream) = {
         let state = app.state::<crate::AppState>();
-        let settings = state.settings.lock().unwrap();
+        let settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let origin = match state.harness.supervisor.status() {
             crate::harness::supervisor::Status::Ready { origin, .. } => Some(origin),
             _ => None,
@@ -148,22 +165,27 @@ pub async fn sync(app: AppHandle) {
             origin,
         )
     };
+    let desired = fingerprint(should_run, &bind_ip, port, &devices);
 
-    // 停掉现有的（除非配置完全没变且仍在跑）。
+    // 指纹没变且任务健在才保留；否则（含吊销/配对/换网卡换端口）重建网关。
     {
         let state = app.state::<crate::AppState>();
-        let mut running = state.remote.running.lock().unwrap();
+        let mut running = state
+            .remote
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let keep = should_run
             && running
                 .as_ref()
-                .is_some_and(|handle| !handle.task.is_finished());
+                .is_some_and(|handle| !handle.task.is_finished() && handle.fingerprint == desired);
         if !keep {
             if let Some(handle) = running.take() {
                 let _ = handle.shutdown.send(true);
                 handle.task.abort();
             }
         } else {
-            return; // 网关在跑且无需变化。
+            return; // 网关在跑且配置未变。
         }
     }
 
@@ -173,11 +195,15 @@ pub async fn sync(app: AppHandle) {
     // 上游未知（DSH 未跑/未就绪）：网关仍然监听（等 DSH），
     // 上游地址用占位，DSH 就绪事件会再触发 sync 重建。
     let upstream = upstream.unwrap_or_else(|| "127.0.0.1:0".to_owned());
-    match remote::gateway::start(&bind_ip, port, upstream.clone(), devices).await {
+    match remote::gateway::start(&bind_ip, port, upstream.clone(), devices, desired).await {
         Ok(handle) => {
             let addr = handle.local_addr.to_string();
             let state = app.state::<crate::AppState>();
-            *state.remote.running.lock().unwrap() = Some(handle);
+            *state
+                .remote
+                .running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
             crate::logging::log("info", &format!("远程网关监听 {addr}（上游 {upstream}）"));
         }
         Err(cause) => {
@@ -204,5 +230,150 @@ mod tests {
         );
         let id = remote::gateway::new_device_id();
         assert!(id.starts_with("dev-"));
+    }
+
+    #[test]
+    fn 指纹随任一配置维度变化() {
+        let device = RemoteDevice {
+            id: "d".to_owned(),
+            name: "n".to_owned(),
+            token: "t".repeat(64),
+            created_at: 0,
+            revoked: false,
+        };
+        let base = fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device));
+        // 配置没变 → 指纹稳定（keep 的前提）。
+        assert_eq!(
+            base,
+            fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device))
+        );
+        // 新配对（设备表变化）→ 指纹变化。
+        let paired = RemoteDevice {
+            created_at: 1,
+            ..device.clone()
+        };
+        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[paired]));
+        // 吊销 → 指纹变化。
+        let revoked = RemoteDevice {
+            revoked: true,
+            ..device.clone()
+        };
+        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[revoked]));
+        // 换网卡 / 换端口 / 开关 → 指纹变化。
+        assert_ne!(
+            base,
+            fingerprint(true, "10.0.0.2", 17400, std::slice::from_ref(&device))
+        );
+        assert_ne!(
+            base,
+            fingerprint(true, "10.0.0.1", 17401, std::slice::from_ref(&device))
+        );
+        assert_ne!(base, fingerprint(false, "10.0.0.1", 17400, &[device]));
+    }
+
+    /// 完整 HTTP 栈集成：上游 mock + 网关真实监听——配对 302 发 cookie、
+    /// 带 cookie 转发上游、未带 401、吊销后（重建设备表）旧 cookie 401。
+    #[tokio::test]
+    async fn 网关配对鉴权与吊销全链路() {
+        // 模拟 DSH 上游：唯一路由 / → 200。
+        let upstream_app =
+            axum::Router::new().route("/", axum::routing::get(|| async { "dsh-ok" }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("上游绑定");
+        let upstream_addr = upstream_listener.local_addr().expect("上游地址");
+        tokio::spawn(async move {
+            let _ = axum::serve(upstream_listener, upstream_app).await;
+        });
+
+        let device = RemoteDevice {
+            id: "dev-test-1".to_owned(),
+            name: "测试机".to_owned(),
+            token: "ab".repeat(32),
+            created_at: 0,
+            revoked: false,
+        };
+
+        let handle = remote::gateway::start(
+            "127.0.0.1",
+            0,
+            upstream_addr.to_string(),
+            vec![device.clone()],
+            1,
+        )
+        .await
+        .expect("网关启动");
+        let base = format!("http://{}", handle.local_addr);
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client");
+
+        // 未带 token → 401。
+        let status = client
+            .get(format!("{base}/"))
+            .send()
+            .await
+            .expect("请求")
+            .status();
+        assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+
+        // 配对入口：有效 token → 302 + HttpOnly cookie。
+        let pair = client
+            .get(format!("{base}/qx-gate?token={}", device.token))
+            .send()
+            .await
+            .expect("配对请求");
+        assert_eq!(pair.status(), reqwest::StatusCode::FOUND);
+        let cookie = pair
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("应发 cookie")
+            .to_str()
+            .expect("cookie 文本")
+            .to_owned();
+        assert!(cookie.starts_with("qx_token="));
+        assert!(cookie.contains("HttpOnly"));
+
+        // 带 cookie → 转发上游 200。
+        let ok = client
+            .get(format!("{base}/"))
+            .header(reqwest::header::COOKIE, cookie.clone())
+            .send()
+            .await
+            .expect("转发请求");
+        assert_eq!(ok.status(), reqwest::StatusCode::OK);
+        assert_eq!(ok.text().await.expect("正文"), "dsh-ok");
+
+        // 无效 token 的配对 → 401。
+        let bad = client
+            .get(format!("{base}/qx-gate?token={}", "cd".repeat(32)))
+            .send()
+            .await
+            .expect("无效配对")
+            .status();
+        assert_eq!(bad, reqwest::StatusCode::UNAUTHORIZED);
+
+        let _ = handle.shutdown.send(true);
+
+        // 网关二：同设备已吊销（sync 指纹变化触发重建的等价场景）→ 旧 cookie 401。
+        let revoked = RemoteDevice {
+            revoked: true,
+            ..device
+        };
+        let handle2 =
+            remote::gateway::start("127.0.0.1", 0, upstream_addr.to_string(), vec![revoked], 2)
+                .await
+                .expect("网关二启动");
+        let base2 = format!("http://{}", handle2.local_addr);
+        let status = client
+            .get(format!("{base2}/"))
+            .header(reqwest::header::COOKIE, cookie)
+            .send()
+            .await
+            .expect("吊销后请求")
+            .status();
+        assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+        let _ = handle2.shutdown.send(true);
     }
 }

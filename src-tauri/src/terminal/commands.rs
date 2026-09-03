@@ -1,11 +1,16 @@
 //! 终端域 IPC 命令与会话管理。
+//!
+//! 会话三线程模型：读泵（PTY → 事件）/ 退出监视（先 emit 再清理）/
+//! 前端 xterm 保活。v0.2 修正：spawn 直接返回 shell 名（标签默认标题）、
+//! 输出带会话级回放缓冲（消除「监听注册晚于 banner」的竞态）、
+//! kill 显式终止子进程（不赌 conpty 关闭传播）。
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -14,6 +19,8 @@ use crate::error::{Error, Result};
 /// 事件通道（前端 listen 后按会话 id 过滤）。
 const OUTPUT_EVENT: &str = "terminal://output";
 const EXIT_EVENT: &str = "terminal://exit";
+/// 回放缓冲上限（字节）：够覆盖 shell 横幅 + 一屏历史，内存代价可忽略。
+const REPLAY_CAP: usize = 64 * 1024;
 
 /// 输出事件负载。
 #[derive(Serialize, Clone)]
@@ -35,6 +42,10 @@ struct ExitEvent {
 struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
+    /// 显式终止句柄：kill 命令用它，不依赖 conpty 关闭传播。
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// 输出回放缓冲（尾部 64KB）：前端监听就绪后拉取，弥合 spawn→挂载窗口期。
+    replay: Mutex<String>,
 }
 
 #[derive(Default)]
@@ -43,7 +54,7 @@ pub struct TerminalState {
     next_id: AtomicU64,
 }
 
-/// 会话清单条目（标签条重建用）。
+/// 会话信息（spawn 的返回值：id + 实际 shell，标签默认标题用）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalInfo {
@@ -51,7 +62,7 @@ pub struct TerminalInfo {
     pub shell: String,
 }
 
-/// 启动一个 PTY 会话，返回 id。输出/退出走事件。
+/// 启动一个 PTY 会话，返回 id 与解析后的 shell。输出/退出走事件。
 #[tauri::command]
 pub fn terminal_spawn(
     app: AppHandle,
@@ -60,7 +71,7 @@ pub fn terminal_spawn(
     cwd: Option<String>,
     cols: u16,
     rows: u16,
-) -> Result<u64> {
+) -> Result<TerminalInfo> {
     let shell = resolve_shell(shell.as_deref());
     let mut command = CommandBuilder::new(&shell);
     if let Some(dir) = cwd.filter(|text| !text.is_empty()) {
@@ -90,27 +101,52 @@ pub fn terminal_spawn(
         .master
         .take_writer()
         .map_err(|cause| Error::Terminal(format!("取得 PTY 写入端失败：{cause}")))?;
+    let killer = child.clone_killer();
 
     let id = state.next_id.fetch_add(1, Ordering::AcqRel);
-    state.sessions.lock().unwrap().insert(
-        id,
-        Session {
-            master: pair.master,
-            writer: Mutex::new(writer),
-        },
-    );
+    state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            id,
+            Session {
+                master: pair.master,
+                writer: Mutex::new(writer),
+                killer: Mutex::new(killer),
+                replay: Mutex::new(String::new()),
+            },
+        );
 
-    // 输出泵：PTY → 前端（lossy 解码，终端字节流容错）。
+    // 输出泵：PTY → 前端。每块读即发（读是阻塞的，攒批只会徒增延迟）；
+    // 同时写入回放缓冲，供监听晚到的前端补齐横幅与提示符。
     {
         let app = app.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
+            let mut decoder = DecodeState::new();
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(size) => {
-                        let data = String::from_utf8_lossy(&buffer[..size]).into_owned();
-                        let _ = app.emit(OUTPUT_EVENT, OutputEvent { id, data: &data });
+                        let text = decoder.feed(&buffer[..size]);
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let state = app.state::<TerminalState>();
+                        if let Some(session) = state
+                            .sessions
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .get(&id)
+                        {
+                            let mut replay = session
+                                .replay
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            append_capped(&mut replay, &text, REPLAY_CAP);
+                        }
+                        let _ = app.emit(OUTPUT_EVENT, OutputEvent { id, data: &text });
                     }
                 }
             }
@@ -132,25 +168,51 @@ pub fn terminal_spawn(
                     exit_code: code,
                 },
             );
-            // State 借用闭包拥有的 app：块内取、块尾还。
             {
                 let state = app.state::<TerminalState>();
-                state.sessions.lock().unwrap().remove(&id);
+                state
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
             }
         });
     }
 
-    Ok(id)
+    Ok(TerminalInfo { id, shell })
+}
+
+/// 回放：监听就绪的前端拉取 spawn 以来的累计输出（尾部 64KB）。
+#[tauri::command]
+pub fn terminal_replay(state: State<'_, TerminalState>, id: u64) -> Result<String> {
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match sessions.get(&id) {
+        Some(session) => Ok(session
+            .replay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()),
+        None => Ok(String::new()), // 会话已退出：空串，exit 事件负责收尾。
+    }
 }
 
 /// 前端键盘输入 → PTY。
 #[tauri::command]
 pub fn terminal_write(state: State<'_, TerminalState>, id: u64, data: String) -> Result<()> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let Some(session) = sessions.get(&id) else {
         return Ok(()); // 会话已退出：静默（前端也收到 exit 事件收尾）。
     };
-    let mut writer = session.writer.lock().unwrap();
+    let mut writer = session
+        .writer
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     writer
         .write_all(data.as_bytes())
         .map_err(|cause| Error::Terminal(format!("写入 PTY 失败：{cause}")))?;
@@ -168,7 +230,10 @@ pub fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<()> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let Some(session) = sessions.get(&id) else {
         return Ok(());
     };
@@ -183,25 +248,24 @@ pub fn terminal_resize(
         .map_err(|cause| Error::Terminal(format!("调整 PTY 尺寸失败：{cause}")))
 }
 
-/// 关闭标签：杀会话（exit 事件随后到达前端做 UI 收尾）。
+/// 关闭标签：出表 + 显式杀子进程（exit 事件随后到达前端做 UI 收尾）。
 #[tauri::command]
 pub fn terminal_kill(state: State<'_, TerminalState>, id: u64) -> Result<()> {
-    // drop master 会触发 reader EOF 与子进程收尾（Windows 上 conpty 同步关闭）。
-    state.sessions.lock().unwrap().remove(&id);
+    // 先出表再杀：kill 的耗时不可控，不持锁。
+    let session = state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&id);
+    if let Some(session) = session {
+        let mut killer = session
+            .killer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // 杀不动（已退出）不报错——目标状态本就是「进程结束」。
+        let _ = killer.kill();
+    }
     Ok(())
-}
-
-/// 存活会话清单。
-#[tauri::command]
-pub fn terminal_list(state: State<'_, TerminalState>) -> Result<Vec<TerminalInfo>> {
-    let sessions = state.sessions.lock().unwrap();
-    Ok(sessions
-        .keys()
-        .map(|id| TerminalInfo {
-            id: *id,
-            shell: String::new(),
-        })
-        .collect())
 }
 
 /// shell 解析：auto = pwsh 优先、powershell 兜底；显式路径直接用。
@@ -230,6 +294,66 @@ fn which_in_path(program: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 增量 UTF-8 解码：跨块多字节字符保留到下一块，不再产出替换符；
+/// 真正非法的字节序列以 U+FFFD 显式呈现（终端字节流容错语义）。
+struct DecodeState {
+    pending: Vec<u8>,
+}
+
+impl DecodeState {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut text = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    self.pending.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid_up_to = error.valid_up_to();
+                    if valid_up_to > 0 {
+                        // 前缀已被 std 验证合法。
+                        if let Ok(valid) = std::str::from_utf8(&self.pending[..valid_up_to]) {
+                            text.push_str(valid);
+                        }
+                        self.pending.drain(..valid_up_to);
+                    }
+                    match error.error_len() {
+                        None => break, // 尾部不完整：留给下一块。
+                        Some(bad_len) => {
+                            text.push('\u{FFFD}');
+                            self.pending.drain(..bad_len);
+                        }
+                    }
+                }
+            }
+        }
+        text
+    }
+}
+
+/// 追加并按字节上限裁掉头部（推进到字符边界，不切半个字）。
+fn append_capped(buffer: &mut String, chunk: &str, cap: usize) {
+    buffer.push_str(chunk);
+    let total = buffer.len();
+    if total <= cap {
+        return;
+    }
+    let mut drop_bytes = total - cap;
+    while drop_bytes < total && !buffer.is_char_boundary(drop_bytes) {
+        drop_bytes += 1;
+    }
+    buffer.drain(..drop_bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +375,29 @@ mod tests {
                 "powershell.exe"
             }
         });
+    }
+
+    #[test]
+    fn 增量解码跨块汉字不产出替换符() {
+        let mut decoder = DecodeState::new();
+        let bytes = "千寻终端".as_bytes();
+        // 在多字节字符中间切开：完整字符即时产出，拆开的留到下一块补齐。
+        let (head, tail) = bytes.split_at(5);
+        assert_eq!(decoder.feed(head), "千");
+        assert_eq!(decoder.feed(tail), "寻终端");
+        // 非法序列：显式替换符。
+        assert_eq!(decoder.feed(&[0xff, b'a']), "\u{FFFD}a");
+    }
+
+    #[test]
+    fn 回放缓冲按上限裁头部且不切字符() {
+        let mut buffer = String::new();
+        append_capped(&mut buffer, "千寻", 8);
+        append_capped(&mut buffer, "abcdef", 8);
+        // "千寻"=6 字节 + "abcdef"=6 字节 = 12 > 8：裁到字符边界，保留 "abcdef" 与可能的半个字。
+        assert!(buffer.len() <= 8);
+        assert!(buffer.is_char_boundary(0));
+        assert_eq!(buffer, "abcdef");
     }
 
     /// 真实 PTY 链路（conpty）：spawn cmd /c echo → 带超时读回标记。

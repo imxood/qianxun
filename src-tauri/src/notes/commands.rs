@@ -16,6 +16,8 @@ pub struct NoteMeta {
     pub path: String,
     pub title: String,
     pub tags: Vec<String>,
+    /// 正文首行摘要（跳过标题行，截断 80 字符），列表第二行展示。
+    pub excerpt: String,
     /// 文件修改时间（毫秒时间戳）。
     pub updated: i64,
     pub size: u64,
@@ -51,10 +53,22 @@ pub fn notes_read(vault: String, path: String) -> Result<NoteContent> {
     Ok(NoteContent { meta, body })
 }
 
-/// 原子保存（正文原样写回；frontmatter 由前端编辑器维护在同一文本里）。
+/// 原子保存：结构化元数据 + 纯正文，由 Rust 统一拼装 frontmatter。
+/// 读（剥）/写（拼）两侧同一实现，杜绝「首存丢元数据」的契约裂缝；
+/// 已有的 created 字段原样保留（用户建笔记日期不因编辑而变）。
 #[tauri::command]
-pub fn notes_save(vault: String, path: String, content: String) -> Result<NoteMeta> {
+pub fn notes_save(
+    vault: String,
+    path: String,
+    title: String,
+    tags: Vec<String>,
+    body: String,
+) -> Result<NoteMeta> {
     let file = note_path(&vault, &path)?;
+    let created = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| frontmatter_field(&text, "created"));
+    let content = compose_frontmatter(&title, &tags, created.as_deref(), &body);
     atomic::write(&file, content.as_bytes())
         .map_err(|cause| Error::Notes(format!("写笔记失败：{cause}")))?;
     let text = std::fs::read_to_string(&file)
@@ -187,9 +201,25 @@ fn meta_from_file(file: &Path, root: &Path, text: &str) -> Result<NoteMeta> {
         path: relative,
         title,
         tags,
+        excerpt: excerpt_of(strip_frontmatter(text)),
         updated,
         size: stat.len(),
     })
+}
+
+/// 正文首行摘要：跳过空行与 Markdown 标题行，截断 80 字符。
+fn excerpt_of(body: &str) -> String {
+    let first = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or_default();
+    if first.chars().count() <= 80 {
+        first.to_owned()
+    } else {
+        let head: String = first.chars().take(80).collect();
+        format!("{head}…")
+    }
 }
 
 /// 轻量 frontmatter 解析：`---` 开头块内的 `title:` 与 `tags: [a, b]`。
@@ -222,6 +252,42 @@ fn strip_frontmatter(text: &str) -> &str {
         Some(end) => rest[end + 4..].trim_start_matches('\n'),
         None => text,
     }
+}
+
+/// 取 frontmatter 中的单值字段（如 created），不含 title/tags 的通用读取。
+fn frontmatter_field(text: &str, key: &str) -> Option<String> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    let prefix = format!("{key}:");
+    rest[..end].lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(|value| value.trim().to_owned())
+    })
+}
+
+/// 拼装 frontmatter + 正文：与 parse_frontmatter 同源语义（单测互逆）。
+/// 单值字段压平换行防止破坏块结构；tags 用逗号分隔的字面列表。
+fn compose_frontmatter(title: &str, tags: &[String], created: Option<&str>, body: &str) -> String {
+    let flat_title = title.replace(['\n', '\r'], " ");
+    let safe_tags: Vec<String> = tags
+        .iter()
+        .map(|tag| {
+            tag.replace(['\n', '\r', ',', '[', ']'], " ")
+                .trim()
+                .to_owned()
+        })
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    let mut front = format!(
+        "---\ntitle: {flat_title}\ntags: [{}]\n",
+        safe_tags.join(", ")
+    );
+    if let Some(date) = created {
+        front.push_str(&format!("created: {date}\n"));
+    }
+    front.push_str("---\n\n");
+    front.push_str(body);
+    front
 }
 
 /// 文件名安全化：仅保留字母数字/汉字/连字符。
@@ -258,6 +324,24 @@ mod tests {
 
         assert_eq!(strip_frontmatter("无 frontmatter"), "无 frontmatter");
         assert!(parse_frontmatter("no frontmatter").is_none());
+    }
+
+    #[test]
+    fn 拼装与解析互逆且保留created() {
+        let tags = vec!["rust".to_owned(), "工具".to_owned()];
+        let composed = compose_frontmatter("我的笔记", &tags, Some("2026-09-03"), "正文第一行");
+        let (title, parsed_tags) = parse_frontmatter(&composed).expect("拼装结果应可解析");
+        assert_eq!(title, "我的笔记");
+        assert_eq!(parsed_tags, tags);
+        assert_eq!(strip_frontmatter(&composed), "正文第一行");
+        assert_eq!(
+            frontmatter_field(&composed, "created").as_deref(),
+            Some("2026-09-03")
+        );
+
+        // 换行/逗号等破坏块结构的字符被压平。
+        let hostile = compose_frontmatter("a\nb", &["x,y".to_owned()], None, "body");
+        assert!(hostile.starts_with("---\ntitle: a b\ntags: [x y]\n---\n\nbody"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ export const IPC_COMMANDS = [
   'terminal_write',
   'terminal_resize',
   'terminal_kill',
-  'terminal_list',
+  'terminal_replay',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -328,6 +328,7 @@ export interface FrozenMonitor {
 // terminal_*（终端域，M4）
 // ---------------------------------------------------------------------------
 
+/** `terminal_spawn` 的返回：会话 id + 实际解析出的 shell（标签默认标题用）。 */
 export interface TerminalInfo {
   id: number;
   shell: string;
@@ -359,6 +360,8 @@ export interface NoteMeta {
   path: string;
   title: string;
   tags: string[];
+  /** 正文首行摘要（跳过标题行，截断 80 字符）。 */
+  excerpt: string;
   /** 文件修改时间（毫秒时间戳）。 */
   updated: number;
   size: number;

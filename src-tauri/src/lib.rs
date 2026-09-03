@@ -220,7 +220,7 @@ pub fn run() {
             terminal::commands::terminal_write,
             terminal::commands::terminal_resize,
             terminal::commands::terminal_kill,
-            terminal::commands::terminal_list,
+            terminal::commands::terminal_replay,
             notes::commands::notes_list,
             notes::commands::notes_read,
             notes::commands::notes_save,
