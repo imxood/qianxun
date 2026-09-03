@@ -29,7 +29,7 @@ pub enum Error {
     #[error("DSH 未能就绪：{0}")]
     Readiness(String),
 
-    #[error("DSH 安装失败：{0}")]
+    #[error("安装失败：{0}")]
     Install(String),
 
     #[error("搜索失败：{0}")]

@@ -6,7 +6,12 @@
  */
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { call } from '../lib/ipc';
-import type { HarnessEnvironment, HarnessEvent, HarnessStatus } from '../lib/ipc/contract';
+import type {
+  HarnessEnvironment,
+  HarnessEvent,
+  HarnessStatus,
+  InstallProgress,
+} from '../lib/ipc/contract';
 
 const LOG_LIMIT = 2000;
 
@@ -16,17 +21,23 @@ class HarnessStore {
   environmentLoading = $state(false);
   starting = $state(false);
   installing = $state(false);
+  /** 最近一次安装进度事件（环境页进度卡数据源；安装结束即清空）。 */
+  installProgress: InstallProgress | null = $state(null);
   logs: string[] = $state([]);
   /** 进程仍在跑（starting/ready/restarting）时置 true，控制按钮可用性。 */
   busy = $state(false);
   private wired = false;
   private unlisten: UnlistenFn | null = null;
+  private unlistenProgress: UnlistenFn | null = null;
 
   async wire(): Promise<void> {
     if (this.wired) return;
     this.wired = true;
     this.unlisten = await listen<HarnessEvent>('harness://event', (event) => {
       this.ingest(event.payload);
+    });
+    this.unlistenProgress = await listen<InstallProgress>('harness://install-progress', (event) => {
+      this.ingestProgress(event.payload);
     });
     // 已运行实例的当前状态（事件只覆盖未来的变化）。
     try {
@@ -38,7 +49,9 @@ class HarnessStore {
 
   dispose(): void {
     this.unlisten?.();
+    this.unlistenProgress?.();
     this.unlisten = null;
+    this.unlistenProgress = null;
     this.wired = false;
   }
 
@@ -55,6 +68,26 @@ class HarnessStore {
     }
     this.logs.push(`${event.stream === 'stderr' ? '⚠ ' : ''}${event.line}`);
     if (this.logs.length > LOG_LIMIT) this.logs.splice(0, this.logs.length - LOG_LIMIT);
+  }
+
+  private ingestProgress(progress: InstallProgress): void {
+    if (progress.stage === 'done') {
+      this.installProgress = null;
+      return;
+    }
+    if (progress.stage === 'dsh-packages') {
+      // pnpm 每行只带部分维度：缺失的维度沿用上一个事件，展示层免判空。
+      const previous = this.installProgress;
+      if (previous?.stage === 'dsh-packages') {
+        this.installProgress = {
+          ...progress,
+          resolved: progress.resolved ?? previous.resolved,
+          totalHint: progress.totalHint ?? previous.totalHint,
+        };
+        return;
+      }
+    }
+    this.installProgress = progress;
   }
 
   async refreshEnvironment(): Promise<void> {
@@ -87,6 +120,7 @@ class HarnessStore {
       await this.refreshEnvironment();
     } finally {
       this.installing = false;
+      this.installProgress = null;
     }
   }
 
@@ -98,6 +132,7 @@ class HarnessStore {
       await this.refreshEnvironment();
     } finally {
       this.installing = false;
+      this.installProgress = null;
     }
   }
 

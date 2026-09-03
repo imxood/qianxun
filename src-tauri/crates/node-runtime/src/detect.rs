@@ -174,6 +174,16 @@ pub fn plain_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Official release directory spelling: `node-v24.20.0-win-x64`.
+///
+/// The managed store keeps the zip's own top-level directory (rename-free
+/// extraction), so release directories there do not wear a bare version for a
+/// name the way nvm's `v22.14.0` does. `Version::parse` already drops the
+/// `-win-x64` style tails; only the `node-v` prefix needs help.
+fn release_dir_version(name: &str) -> Option<Version> {
+    Version::parse(name.strip_prefix("node-v")?)
+}
+
 /// Paths worth probing, in the order they should win ties.
 fn candidates(managed: Option<&Path>) -> Vec<(PathBuf, Source)> {
     let mut candidates: Vec<(PathBuf, Source)> = Vec::new();
@@ -289,7 +299,9 @@ fn push_if_file(path: PathBuf, source: Source, out: &mut Vec<(PathBuf, Source)>)
 /// Scan a version-manager store: one directory per installed release.
 ///
 /// `suffix` is the path from a release directory down to the directory holding
-/// the executable, which differs per manager.
+/// the executable, which differs per manager. A release directory is either
+/// named after its bare version (`v22.14.0`) or, in the managed store, after
+/// the official archive's top-level directory (`node-v22.14.0-win-x64`).
 fn collect_versioned(
     root: Option<PathBuf>,
     suffix: &[&str],
@@ -308,7 +320,8 @@ fn collect_versioned(
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| {
             let name = entry.file_name();
-            let version = Version::parse(&name.to_string_lossy())?;
+            let text = name.to_string_lossy();
+            let version = Version::parse(&text).or_else(|| release_dir_version(&text))?;
             let mut executable = entry.path();
             for part in suffix {
                 executable.push(part);
@@ -371,5 +384,34 @@ mod tests {
             plainly(r"\\build\tools\node.exe"),
             r"\\build\tools\node.exe"
         );
+    }
+}
+
+#[cfg(test)]
+mod release_names {
+    use super::{release_dir_version, Version};
+
+    #[test]
+    fn official_release_directories_wear_their_version() {
+        assert_eq!(
+            release_dir_version("node-v24.20.0-win-x64"),
+            Some(Version::new(24, 20, 0))
+        );
+        assert_eq!(
+            release_dir_version("node-v22.19.0-darwin-arm64"),
+            Some(Version::new(22, 19, 0))
+        );
+        assert_eq!(
+            release_dir_version("node-v24.20.0"),
+            Some(Version::new(24, 20, 0))
+        );
+    }
+
+    #[test]
+    fn unrelated_directory_names_are_rejected() {
+        assert_eq!(release_dir_version("v24.20.0"), None);
+        assert_eq!(release_dir_version("installation"), None);
+        assert_eq!(release_dir_version("node"), None);
+        assert_eq!(release_dir_version("node-tools"), None);
     }
 }

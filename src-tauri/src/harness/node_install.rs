@@ -10,14 +10,17 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use super::install::{run_with_limits, INSTALL_TOTAL_TIMEOUT, PIPE_DRAIN_TIMEOUT};
+use super::install::{
+    hide_console_window, run_with_limits, INSTALL_TOTAL_TIMEOUT, PIPE_DRAIN_TIMEOUT,
+};
 use super::supervisor::Stream;
+use super::InstallProgress;
 use crate::error::{Error, Result};
 use crate::Settings;
 
-/// 千寻自带的 Node 版本：22.x LTS 里被验证存在且满足
+/// 千寻自带的 Node 版本：当前 LTS 线上被验证存在且满足
 /// `node_runtime::MINIMUM_SUPPORTED` 的具体版本。升级只改这里。
-pub const NODE_VERSION: &str = "22.19.0";
+pub const NODE_VERSION: &str = "24.20.0";
 
 /// Windows x64 zip 的文件名（官方与 npmmirror 同名同内容）。
 fn archive_name() -> String {
@@ -74,6 +77,7 @@ impl NodeInstallPlan {
             .arg("--fail")
             // 静默进度条：curl 的进度用 \r 刷新、不换行，行读取器看不到
             // 活动；改为完全静默 + 放宽空闲时限（下载几百 MB 慢网常见）。
+            // 进度改由「落盘字节轮询」上报，见 download_verify_extract。
             .arg("--no-progress-meter")
             .arg("--show-error")
             .arg("--output")
@@ -82,6 +86,7 @@ impl NodeInstallPlan {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        hide_console_window(&mut command);
         command
     }
 }
@@ -109,14 +114,16 @@ pub fn plan(settings: &Settings, managed_dir: &Path) -> Result<NodeInstallPlan> 
 }
 
 /// 执行安装：逐源尝试「SHASUMS → zip → 校验 → 解压 → 复核」。
-/// 每一步的输出都实时进日志面板。
-pub async fn install<R>(
+/// 每一步的输出都实时进日志面板，字节级进度经 progress 事件上报。
+pub async fn install<R, P>(
     settings: &Settings,
     managed_dir: &Path,
     report: R,
+    progress: P,
 ) -> Result<Option<String>>
 where
     R: Fn(Stream, String) + Clone + Send + 'static,
+    P: Fn(InstallProgress) + Clone + Send + 'static,
 {
     // 幂等入口：已有满足最低版本的 Node 就不动。
     if let Some(found) = managed_node_version(managed_dir).await {
@@ -134,7 +141,7 @@ where
             archive: managed_dir.join(archive_name()),
             extracted: managed_dir.join(format!("node-v{NODE_VERSION}-win-x64")),
         };
-        match download_verify_extract(&attempt, report.clone()).await {
+        match download_verify_extract(&attempt, report.clone(), progress.clone()).await {
             Ok(()) => {
                 // 装完必须真的能被探测到并满足最低版本——信复核不信退出码。
                 return match managed_node_version(managed_dir).await {
@@ -157,15 +164,21 @@ where
     Err(last_failure.unwrap_or_else(|| Error::Install("没有可用的下载源".to_owned())))
 }
 
-async fn download_verify_extract<R>(plan: &NodeInstallPlan, report: R) -> Result<()>
+async fn download_verify_extract<R, P>(plan: &NodeInstallPlan, report: R, progress: P) -> Result<()>
 where
     R: Fn(Stream, String) + Clone + Send + 'static,
+    P: Fn(InstallProgress) + Clone + Send + 'static,
 {
     report(
         Stream::Stdout,
         format!("从源「{}」获取 Node v{NODE_VERSION}", plan.source_label),
     );
+    let source = plan.source_label.to_owned();
+
     // 1. SHASUMS256.txt（几 KB；官方与镜像同源同内容）。
+    progress(InstallProgress::NodeManifest {
+        source: source.clone(),
+    });
     let shasums_path = plan.archive.with_extension("SHASUMS256.txt");
     fetch(
         plan.curl_command(&plan.url("SHASUMS256.txt"), &shasums_path),
@@ -179,21 +192,79 @@ where
     // 2. zip 本体。已存在且校验通过就复用（断点续传由重下替代）。
     if !archive_matches(&plan.archive, &expected) {
         let _ = std::fs::remove_file(&plan.archive);
-        fetch(
-            plan.curl_command(&plan.url(&archive_name()), &plan.archive),
+        let url = plan.url(&archive_name());
+        // 总大小来自 HEAD 探测；源不配合时进度卡退化为只显示已下载。
+        let total_bytes = remote_content_length(&plan.curl, &url).await;
+        let downloaded_now = || {
+            std::fs::metadata(&plan.archive)
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        };
+        let emit_download = {
+            let progress = progress.clone();
+            let source = source.clone();
+            let url = url.clone();
+            move |downloaded_bytes: u64| {
+                progress(InstallProgress::NodeDownload {
+                    source: source.clone(),
+                    url: url.clone(),
+                    total_bytes,
+                    downloaded_bytes,
+                })
+            }
+        };
+        emit_download(downloaded_now());
+        // 轮询任务：curl 静默下载时落盘字节是唯一可信进度；500ms 足够
+        // 平滑（前端进度条带过渡动画），又不至于刷爆事件通道。
+        let watcher = {
+            let progress = progress.clone();
+            let source = source.clone();
+            let url = url.clone();
+            let archive = plan.archive.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(500));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticker.tick().await;
+                    let downloaded_bytes = std::fs::metadata(&archive)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0);
+                    progress(InstallProgress::NodeDownload {
+                        source: source.clone(),
+                        url: url.clone(),
+                        total_bytes,
+                        downloaded_bytes,
+                    });
+                }
+            })
+        };
+        let outcome = fetch(
+            plan.curl_command(&url, &plan.archive),
             report.clone(),
             "下载 Node 发行包",
         )
-        .await?;
+        .await;
+        watcher.abort();
+        outcome?;
+        // 收尾补一发最终字节数：轮询已停，别让进度条停在 99%。
+        emit_download(downloaded_now());
     }
 
     // 3. 校验。
+    progress(InstallProgress::NodeFinalize {
+        source: source.clone(),
+        activity: "校验 SHA-256".to_owned(),
+    });
     if !archive_matches(&plan.archive, &expected) {
         let _ = std::fs::remove_file(&plan.archive);
         return Err(Error::Install("SHA-256 校验失败".to_owned()));
     }
 
     // 4. 解压（覆盖式：清掉旧目录再解，不留半截混合状态）。
+    progress(InstallProgress::NodeFinalize {
+        source: source.clone(),
+        activity: "解压".to_owned(),
+    });
     let _ = std::fs::remove_dir_all(&plan.extracted);
     unzip(
         &plan.archive,
@@ -203,6 +274,35 @@ where
         return Err(Error::Install("压缩包里没有 node.exe".to_owned()));
     }
     Ok(())
+}
+
+/// HEAD 探测发行包大小（重定向链取最后一个 content-length）。
+/// 探测失败不阻断安装：没有总大小也能如实显示已下载字节。
+async fn remote_content_length(curl: &Path, url: &str) -> Option<u64> {
+    let mut command = tokio::process::Command::new(curl);
+    command
+        .arg("--head")
+        .arg("--location")
+        .arg("--silent")
+        .arg("--max-time")
+        .arg("15")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut command);
+    let attempt = tokio::time::timeout(Duration::from_secs(20), command.output()).await;
+    let output = attempt.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let headers = String::from_utf8_lossy(&output.stdout);
+    headers
+        .lines()
+        .rfind(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|line| line.split(':').nth(1))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|length| *length > 0)
 }
 
 async fn fetch<R>(command: tokio::process::Command, report: R, label: &'static str) -> Result<()>
@@ -284,7 +384,7 @@ mod tests {
         let root = scratch("live");
         let settings = Settings::default();
         let plan = plan(&settings, &root).expect("计划");
-        download_verify_extract(&plan, |_, _| {})
+        download_verify_extract(&plan, |_, _| {}, |_| {})
             .await
             .expect("下载校验解压");
         let node = plan.extracted.join("node.exe");
@@ -340,8 +440,12 @@ mod tests {
         let root = scratch("plan");
         let plan = plan(&settings, &root).expect("plan");
         assert!(plan.dist.ends_with(&format!("/v{NODE_VERSION}")));
-        assert!(plan.archive.ends_with("node-v22.19.0-win-x64.zip"));
-        assert!(plan.extracted.ends_with("node-v22.19.0-win-x64"));
+        assert!(plan
+            .archive
+            .ends_with(format!("node-v{NODE_VERSION}-win-x64.zip")));
+        assert!(plan
+            .extracted
+            .ends_with(format!("node-v{NODE_VERSION}-win-x64")));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

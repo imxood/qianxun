@@ -128,7 +128,9 @@ impl InstallPlan {
     }
 }
 
-fn hide_console_window(command: &mut Command) {
+/// CREATE_NO_WINDOW：子进程走重定向管道汇报，控制台宿主不许在外壳上
+/// 闪现（npm/curl 通用；node_install 复用）。
+pub(super) fn hide_console_window(command: &mut Command) {
     #[cfg(windows)]
     {
         // npm 与生命周期脚本走重定向管道汇报；CREATE_NO_WINDOW 阻止

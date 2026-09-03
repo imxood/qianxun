@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use super::install;
 use super::supervisor::{Status, Stream, Supervisor};
-use super::Environment;
+use super::{Environment, InstallProgress};
 use crate::error::{Error, Result};
 
 /// 托管域自身的运行状态：supervisor + 安装互斥。
@@ -69,15 +69,18 @@ pub async fn harness_stop(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
-/// 安装（或重装）DSH。pnpm 的每一行输出都通过日志事件实时转发。
+/// 安装（或重装）DSH。pnpm 的每一行输出都通过日志事件实时转发，
+/// 包数推进经进度事件驱动环境页进度卡。
 #[tauri::command]
 pub async fn harness_install(app: AppHandle) -> Result<()> {
     let state = app.state::<crate::AppState>();
     if state.harness.installing.swap(true, Ordering::SeqCst) {
         return Err(Error::AlreadyInstalling);
     }
+    let progress = super::progress_sink(&app);
     let outcome = perform_install(&app).await;
     state.harness.installing.store(false, Ordering::SeqCst);
+    progress(InstallProgress::Done);
 
     match &outcome {
         Ok(()) => state
@@ -104,12 +107,19 @@ pub async fn harness_install_node(app: AppHandle) -> Result<String> {
     supervisor.note(Stream::Stdout, "开始安装 Node 运行时".to_owned());
     let settings = crate::settings_snapshot(&app)?;
     let managed_dir = crate::paths::managed_node_dir(&app)?;
-    let outcome = super::node_install::install(&settings, &managed_dir, {
-        let supervisor = Arc::clone(&supervisor);
-        move |stream, line| supervisor.note(stream, line)
-    })
+    let progress = super::progress_sink(&app);
+    let outcome = super::node_install::install(
+        &settings,
+        &managed_dir,
+        {
+            let supervisor = Arc::clone(&supervisor);
+            move |stream, line| supervisor.note(stream, line)
+        },
+        progress.clone(),
+    )
     .await;
     state.harness.installing.store(false, Ordering::SeqCst);
+    progress(InstallProgress::Done);
     match &outcome {
         Ok(version) => {
             if let Some(version) = version {
@@ -139,11 +149,20 @@ async fn perform_install(app: &AppHandle) -> Result<()> {
         format!("正在安装 {} 到 {}", plan.spec, plan.target.display()),
     );
 
-    // 先幂等备好 pnpm 工具，再走事务安装（staging → 校验 → 晋升）。
+    // 先幂等备好 pnpm 工具，再走事务安装（备份 → 直装 → 校验 → 清理）。
     let tool_reporter = Arc::clone(&supervisor);
     install::ensure_pnpm_tool(&plan, move |stream, line| tool_reporter.note(stream, line)).await?;
+    // pnpm 的 Progress 行顺便解析成进度事件：环境页能看到包数推进。
     let reporter = Arc::clone(&supervisor);
-    install::run_transactional(&plan, move |stream, line| reporter.note(stream, line)).await?;
+    let dsh_progress = super::progress_sink(app);
+    let registry = plan.registry.clone();
+    install::run_transactional(&plan, move |stream, line| {
+        for event in super::parse_dsh_progress(&line, &registry) {
+            dsh_progress(event);
+        }
+        reporter.note(stream, line);
+    })
+    .await?;
 
     // pnpm 可能成功退出却装出别的东西——信文件不信退出码。
     install::check_installed(&crate::paths::harness_dir(app)?)?;
