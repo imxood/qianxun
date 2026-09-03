@@ -1,14 +1,37 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import { search } from '../../stores/search.svelte';
   import { settings } from '../../stores/settings.svelte';
 
   // 草稿可编辑；根目录切换成功后由 store 回填（writable derived 的双向同步）。
   let draft = $state('');
+  let historyOpen = $state(false);
+  let picking = $state(false);
 
   const history = $derived(settings.current?.search.rootHistory ?? []);
 
-  function submit(): Promise<void> {
-    return search.open(draft.trim()).then(() => void remember());
+  /** 原生目录选择器：选完即打开索引，不再要求手输路径。 */
+  async function pickDirectory(): Promise<void> {
+    picking = true;
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === 'string' && selected.trim()) {
+        await submit(selected);
+      }
+    } finally {
+      picking = false;
+    }
+  }
+
+  async function submit(root: string): Promise<void> {
+    historyOpen = false;
+    await search.open(root);
+    await remember();
+  }
+
+  function submitDraft(): void {
+    const root = draft.trim() || search.rootInput.trim();
+    if (root) void submit(root);
   }
 
   /** 成功打开后把根目录记入历史（最近优先、去重、截断 8 条）。 */
@@ -26,42 +49,102 @@
 </script>
 
 <div class="space-y-2">
-  <div class="flex gap-2">
-    <input
-      class="min-w-0 flex-1 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
-      type="text"
-      list="search-root-history"
-      placeholder="搜索根目录（绝对路径）"
-      value={search.status?.root ?? draft}
-      oninput={(event) => (draft = event.currentTarget.value)}
-      onkeydown={(event) => {
-        if (event.key === 'Enter') void submit();
-      }}
-    />
-    <datalist id="search-root-history">
-      {#each history as item (item)}
-        <option value={item}></option>
-      {/each}
-    </datalist>
+  <div class="flex items-center gap-2">
     <button
-      class="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
-      onclick={() => void submit()}
+      class="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+      disabled={picking}
+      onclick={() => void pickDirectory()}
     >
-      打开
+      <svg
+        viewBox="0 0 24 24"
+        class="size-4"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+      </svg>
+      {picking ? '选择中…' : '选择目录'}
     </button>
+
+    <div class="relative min-w-0 flex-1">
+      <input
+        class="w-full rounded-md border border-line bg-surface px-3 py-1.5 pr-8 text-sm placeholder:text-muted/60"
+        type="text"
+        placeholder="或粘贴目录路径"
+        value={search.status?.root ?? draft}
+        oninput={(event) => (draft = event.currentTarget.value)}
+        onkeydown={(event) => {
+          if (event.key === 'Enter') submitDraft();
+          if (event.key === 'Escape') historyOpen = false;
+        }}
+      />
+      {#if history.length > 0}
+        <button
+          class="absolute inset-y-0 right-0 flex w-8 items-center justify-center text-muted transition-colors hover:text-fg"
+          aria-label="最近目录"
+          aria-expanded={historyOpen}
+          onclick={() => (historyOpen = !historyOpen)}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="size-4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+        {#if historyOpen}
+          <button
+            class="fixed inset-0 z-10 cursor-default"
+            aria-label="关闭历史列表"
+            tabindex="-1"
+            onclick={() => (historyOpen = false)}
+          ></button>
+          <div
+            class="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-md border border-line bg-card shadow-lg"
+          >
+            {#each history as item (item)}
+              <button
+                class="block w-full truncate px-3 py-2 text-left text-xs text-fg transition-colors hover:bg-accent-soft"
+                title={item}
+                onclick={() => void submit(item)}
+              >
+                {item}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+    </div>
   </div>
-  <p class="text-xs text-muted">
+
+  <div class="flex h-5 items-center gap-2 text-xs">
     {#if search.openError}
       <span class="text-danger">{search.openError}</span>
     {:else if search.status?.root}
-      {search.status.root} ·
+      <span class="rounded-full bg-accent-soft px-2 py-0.5 text-muted">
+        已索引 {search.status.files} 个文件
+      </span>
       {#if search.scanning}
-        <span class="text-accent">索引扫描中…（已见 {search.status.files} 个文件）</span>
-      {:else}
-        {search.status.files} 个文件{search.status.watcherReady ? ' · 实时监听中' : ''}
+        <span class="flex items-center gap-1 text-accent">
+          <span
+            class="inline-block size-3 animate-spin rounded-full border-2 border-line border-t-accent"
+            aria-hidden="true"
+          ></span>
+          索引中…
+        </span>
+      {:else if search.status.watcherReady}
+        <span class="text-muted">实时监听</span>
       {/if}
+      <span class="truncate text-muted/70" title={search.status.root}>{search.status.root}</span>
     {:else}
-      尚未选择根目录。输入一个目录并回车，索引在后台建立。
+      <span class="text-muted">选择目录后即可搜索文件与内容</span>
     {/if}
-  </p>
+  </div>
 </div>
