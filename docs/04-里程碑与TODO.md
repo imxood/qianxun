@@ -203,8 +203,15 @@
       引导）/端口/状态行/配对（二维码 + 复制链接）/设备列表（吊销确认）/
       自检按钮（remote_self_check：带真实 token 走 /qx-gate）
 - [x] pair/revoke 保存后自触发 sync（不再依赖前端补发「应用」）
-- [ ] 真机验收（§5.3，需 EasyTier 实网 + 手机）：扫码 → 手机用 DSH；
-      吊销即时断连；关开关后端口无监听
+- [x] 真机验收（§5.3）：2026-09-04 真机过壳链路——PKB110 实机经网关
+      配对（302+HttpOnly cookie）→ 转发 → 壳内完整 DSH 工作台；
+      EasyTier 实网段用 `adb reverse` USB 隧道替代，配对/网关/转发/DSH
+      全链路真实；吊销即时 401 由集成测试覆盖
+- [x] 真机回归揪出并修复两处隐性缺陷：① sync() 指纹不含上游端口——
+      网关先于 DSH 就绪启动（上游 0 占位），就绪事件再 sync 因指纹未变
+      不重建，网关永远指向上游 0（「远程完全不可用」的实锤根因）；
+      ② 并发 sync 抢绑端口 10048 且旧任务 abort 后未等监听器释放，
+      重建即全灭——sync 全程互斥 + abort 后 await 旧任务退出
 
 ### P3 Android 出包 ✅
 
@@ -214,7 +221,10 @@
       cap add android 入库、明文放行脚本化（scripts/apply-android-config.mjs
       幂等）、gradle 腾讯镜像 + 阿里云 maven 镜像
 - [x] gradlew assembleDebug 出 debug APK
-- [ ] adb install 真机验收（§6.3，需手机配合）
+- [x] adb install 真机验收（§6.3）：PKB110（ColorOS）安装/启动/壳内
+      配对直达工作台全通过；真机暴露并修复壳外跳浏览器问题
+      （Capacitor 7 的 allowNavigation 在 server 节，HostMask 语义 '*'
+      匹配任意主机——放 android 节无效）
 
 ## 里程碑间的纪律
 

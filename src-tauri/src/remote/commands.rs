@@ -9,9 +9,12 @@ use crate::error::{Error, Result};
 use crate::remote::{self, gateway::GatewayHandle, RemoteDevice};
 
 /// 网关运行态：Some = 监听中。锁内持 JoinHandle，停机经 shutdown 通道。
+/// `sync_lock`：sync 全程互斥——DSH 就绪与设置保存可能并发触发两次
+/// sync，并发重建会在「旧监听器尚未释放」时抢绑同一端口（实测 10048）。
 #[derive(Default)]
 pub struct RemoteState {
     pub running: Mutex<Option<GatewayHandle>>,
+    pub sync_lock: tokio::sync::Mutex<()>,
 }
 
 /// 一块网卡（一个 IP 一行；EasyTier 识别按接口名/友好名包含判定）。
@@ -228,10 +231,18 @@ pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
     }
 }
 
-/// 启动配置指纹：enabled/bind/port/devices 任一变化都会改变它。
+/// 启动配置指纹：enabled/bind/port/devices/upstream 任一变化都会改变它。
 /// sync 用它决定「保留运行中的网关」还是「停旧起新」——设备表是网关
-/// 启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）。
-fn fingerprint(enabled: bool, bind_ip: &str, port: u16, devices: &[RemoteDevice]) -> u64 {
+/// 启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）；
+/// upstream 必须参与：启动早于 DSH 就绪时上游是占位 0 端口，就绪事件
+/// 再 sync 时指纹必须变化才会重建（否则网关永远指向上游 0——实测复现）。
+fn fingerprint(
+    enabled: bool,
+    bind_ip: &str,
+    port: u16,
+    devices: &[RemoteDevice],
+    upstream: Option<&str>,
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -239,6 +250,7 @@ fn fingerprint(enabled: bool, bind_ip: &str, port: u16, devices: &[RemoteDevice]
     bind_ip.hash(&mut hasher);
     port.hash(&mut hasher);
     devices.hash(&mut hasher);
+    upstream.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -246,8 +258,11 @@ fn fingerprint(enabled: bool, bind_ip: &str, port: u16, devices: &[RemoteDevice]
 /// DSH origin 由 supervisor 状态提供；DSH 未跑时网关照常监听
 /// （请求会得到「上游不可达」提示），DSH 起来即通。
 pub async fn sync(app: AppHandle) {
+    // 全程互斥（见 RemoteState::sync_lock 注释）。
+    let state = app.state::<crate::AppState>();
+    let _serial = state.remote.sync_lock.lock().await;
+
     let (should_run, bind_ip, port, devices, upstream) = {
-        let state = app.state::<crate::AppState>();
         let settings = state
             .settings
             .lock()
@@ -264,11 +279,11 @@ pub async fn sync(app: AppHandle) {
             origin,
         )
     };
-    let desired = fingerprint(should_run, &bind_ip, port, &devices);
+    let desired = fingerprint(should_run, &bind_ip, port, &devices, upstream.as_deref());
 
     // 指纹没变且任务健在才保留；否则（含吊销/配对/换网卡换端口）重建网关。
-    {
-        let state = app.state::<crate::AppState>();
+    // std 锁不跨 await：先在锁内取出待停句柄，锁外再 abort+等待。
+    let (keep, stale) = {
         let mut running = state
             .remote
             .running
@@ -278,17 +293,17 @@ pub async fn sync(app: AppHandle) {
             && running
                 .as_ref()
                 .is_some_and(|handle| !handle.task.is_finished() && handle.fingerprint == desired);
-        if !keep {
-            if let Some(handle) = running.take() {
-                let _ = handle.shutdown.send(true);
-                handle.task.abort();
-            }
-        } else {
-            return; // 网关在跑且配置未变。
-        }
+        (keep, if keep { None } else { running.take() })
+    };
+    if let Some(handle) = stale {
+        let _ = handle.shutdown.send(true);
+        let task = handle.task;
+        task.abort();
+        // 等旧任务真正结束（监听器随之释放）再绑新端口——
+        // abort 只是「请求取消」，不等它就会 10048 竞态（实测）。
+        let _ = task.await;
     }
-
-    if !should_run {
+    if keep || !should_run {
         return;
     }
     // 上游未知（DSH 未跑/未就绪）：网关仍然监听（等 DSH），
@@ -340,34 +355,54 @@ mod tests {
             created_at: 0,
             revoked: false,
         };
-        let base = fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device));
+        let base = fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device), None);
         // 配置没变 → 指纹稳定（keep 的前提）。
         assert_eq!(
             base,
-            fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device))
+            fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device), None)
         );
         // 新配对（设备表变化）→ 指纹变化。
         let paired = RemoteDevice {
             created_at: 1,
             ..device.clone()
         };
-        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[paired]));
+        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[paired], None));
         // 吊销 → 指纹变化。
         let revoked = RemoteDevice {
             revoked: true,
             ..device.clone()
         };
-        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[revoked]));
-        // 换网卡 / 换端口 / 开关 → 指纹变化。
+        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[revoked], None));
+        // 换网卡 / 换端口 / 开关 / 上游就绪 → 指纹变化。
         assert_ne!(
             base,
-            fingerprint(true, "10.0.0.2", 17400, std::slice::from_ref(&device))
+            fingerprint(true, "10.0.0.2", 17400, std::slice::from_ref(&device), None)
         );
         assert_ne!(
             base,
-            fingerprint(true, "10.0.0.1", 17401, std::slice::from_ref(&device))
+            fingerprint(true, "10.0.0.1", 17401, std::slice::from_ref(&device), None)
         );
-        assert_ne!(base, fingerprint(false, "10.0.0.1", 17400, &[device]));
+        assert_ne!(
+            base,
+            fingerprint(
+                false,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                None
+            )
+        );
+        // 上游从占位（None）变为真实端口 → 指纹变化（DSH 就绪重建的依据）。
+        assert_ne!(
+            base,
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                Some("127.0.0.1:17300")
+            )
+        );
     }
 
     /// 完整 HTTP 栈集成：上游 mock + 网关真实监听——配对 302 发 cookie、
