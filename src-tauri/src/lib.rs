@@ -234,6 +234,7 @@ pub fn run() {
             remote::commands::remote_status,
             remote::commands::remote_pair,
             remote::commands::remote_revoke,
+            remote::commands::remote_self_check,
             sync::commands::sync_status,
             sync::commands::sync_init,
             sync::commands::sync_pull,

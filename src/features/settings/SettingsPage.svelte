@@ -1,16 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import QRCode from 'qrcode';
   import { call } from '../../lib/ipc';
   import type {
     AppMetaResult,
     BridgeStatus,
-    NetInterface,
-    RemoteDevice,
-    RemoteStatus,
     SyncStatus,
     ThemePreference,
   } from '../../lib/ipc/contract';
+  import { nav } from '../../stores/nav.svelte';
   import { settings } from '../../stores/settings.svelte';
   import { theme } from '../../stores/theme.svelte';
   import Switch from '../../components/Switch.svelte';
@@ -47,8 +44,6 @@
         // 版本获取失败不影响设置编辑，状态栏已单独展示该错误。
         meta = null;
       }
-      await loadInterfaces();
-      await refreshRemote();
       await refreshSync();
     })();
   });
@@ -187,80 +182,6 @@
       bridgeError = error instanceof Error ? error.message : String(error);
     } finally {
       bridgeBusy = false;
-    }
-  }
-
-  // ---- 远程网关（R1） ----
-  let remoteStatus = $state<RemoteStatus | null>(null);
-  let interfaces = $state<NetInterface[]>([]);
-  let remoteEnabled = $state(false);
-  let remoteBind = $state('');
-  let remotePort = $state(17400);
-  let remoteError = $state('');
-  let pairUrl = $state('');
-  let pairCanvas: HTMLCanvasElement | null = $state(null);
-
-  const remoteDevices = $derived<RemoteDevice[]>(settings.current?.remote.devices ?? []);
-
-  $effect(() => {
-    if (settings.current) {
-      remoteEnabled = settings.current.remote.enabled;
-      remoteBind = settings.current.remote.bindIp;
-      remotePort = settings.current.remote.port;
-    }
-  });
-
-  $effect(() => {
-    if (pairUrl && pairCanvas) {
-      void QRCode.toCanvas(pairCanvas, pairUrl, { width: 180 });
-    }
-  });
-
-  async function refreshRemote(): Promise<void> {
-    try {
-      remoteStatus = await call<RemoteStatus>('remote_status');
-    } catch {
-      remoteStatus = null;
-    }
-  }
-
-  async function loadInterfaces(): Promise<void> {
-    interfaces = await call<NetInterface[]>('remote_interfaces');
-  }
-
-  async function applyRemote(): Promise<void> {
-    remoteError = '';
-    try {
-      await settings.update({
-        remote: { enabled: remoteEnabled, bindIp: remoteBind, port: Number(remotePort) },
-      });
-      await refreshRemote();
-    } catch (error) {
-      remoteError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function pairDevice(): Promise<void> {
-    remoteError = '';
-    const name = window.prompt('设备名（如：我的手机）');
-    if (!name) return;
-    try {
-      await applyRemote(); // 先确保网关按当前配置在跑。
-      pairUrl = await call<string>('remote_pair', { name });
-      await refreshRemote();
-    } catch (error) {
-      remoteError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function revokeDevice(id: string): Promise<void> {
-    remoteError = '';
-    try {
-      await call('remote_revoke', { id });
-      // 吊销立即生效：重建网关设备表。
-      await applyRemote();
-    } catch (error) {
-      remoteError = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -571,105 +492,19 @@
     </div>
   </section>
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">远程访问</h2>
-    <p class="text-xs text-muted">手机等设备经 EasyTier 网络访问 DSH；关闭时不监听任何端口。</p>
-    <div class="flex flex-wrap items-center gap-3">
-      <label class="flex items-center gap-2 text-sm">
-        <Switch
-          checked={remoteEnabled}
-          onchange={(value) => (remoteEnabled = value)}
-          label="启用远程网关"
-        />
-        启用网关
-      </label>
-      <label for="remote-bind" class="text-sm text-muted">绑定网卡</label>
-      <select
-        id="remote-bind"
-        class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm disabled:opacity-40"
-        disabled={!remoteEnabled}
-        bind:value={remoteBind}
-      >
-        <option value="" disabled>选择网卡地址…</option>
-        {#each interfaces as item (item.ip)}
-          <option value={item.ip}>
-            {item.easytier ? '⚡ ' : ''}{item.ip}（{item.name}）
-          </option>
-        {/each}
-      </select>
-      <label for="remote-port" class="text-sm text-muted">端口</label>
-      <input
-        id="remote-port"
-        class="w-24 rounded-md border border-line bg-surface px-2 py-1.5 text-sm disabled:opacity-40"
-        type="number"
-        min="1024"
-        max="65535"
-        disabled={!remoteEnabled}
-        bind:value={remotePort}
-      />
+  <section class="space-y-2 rounded-lg border border-line bg-card p-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-medium">远程访问</h2>
       <button
-        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
-        onclick={() => void applyRemote()}
+        class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
+        onclick={() => nav.go('remote')}
       >
-        应用
+        打开远程页
       </button>
     </div>
-    {#if remoteStatus}
-      <p class="text-xs text-muted">
-        {remoteStatus.listening
-          ? `监听中：${remoteStatus.listening}${remoteStatus.dshRunning ? '' : '（DSH 未运行）'}`
-          : '未监听'}
-        · 已配对 {remoteStatus.activeCount}/{remoteStatus.deviceCount} 台
-      </p>
-    {/if}
-    {#if remoteError}<p class="text-sm text-danger">{remoteError}</p>{/if}
-
-    <div class="flex items-center gap-2">
-      <button
-        class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-40"
-        disabled={!remoteEnabled || !remoteBind}
-        onclick={() => void pairDevice()}
-      >
-        配对新设备
-      </button>
-      <span class="text-xs text-muted">生成一次性二维码，手机扫码即入</span>
-    </div>
-    {#if pairUrl}
-      <div class="flex items-start gap-3 rounded-md border border-line bg-surface p-3">
-        <canvas bind:this={pairCanvas} class="rounded bg-white p-1" width="180" height="180"
-        ></canvas>
-        <div class="min-w-0 flex-1 space-y-1">
-          <p class="break-all text-xs text-muted">{pairUrl}</p>
-          <button
-            class="rounded border border-line px-2 py-1 text-xs hover:bg-accent-soft"
-            onclick={() => void navigator.clipboard.writeText(pairUrl)}
-          >
-            复制链接
-          </button>
-        </div>
-      </div>
-    {/if}
-
-    {#if remoteDevices.length > 0}
-      <ul class="divide-y divide-line rounded-md border border-line">
-        {#each remoteDevices as device (device.id)}
-          <li class="flex items-center gap-2 px-3 py-1.5 text-sm">
-            <span class={device.revoked ? 'text-muted line-through' : ''}>{device.name}</span>
-            <span class="text-xs text-muted">{device.id}</span>
-            {#if device.revoked}
-              <span class="text-xs text-danger">已吊销</span>
-            {:else}
-              <button
-                class="ml-auto rounded px-2 py-0.5 text-xs text-danger hover:bg-danger/10"
-                onclick={() => void revokeDevice(device.id)}
-              >
-                吊销
-              </button>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
+    <p class="text-xs text-muted">
+      远程访问已升格为一级页面：启用网关、配对设备、自检都在「远程」页完成。
+    </p>
   </section>
 
   <section class="space-y-3 rounded-lg border border-line bg-card p-4">

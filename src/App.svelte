@@ -12,6 +12,7 @@
   import FilesPage from './features/search/FilesPage.svelte';
   import GrepPage from './features/search/GrepPage.svelte';
   import TerminalPage from './features/terminal/TerminalPage.svelte';
+  import RemotePage from './features/remote/RemotePage.svelte';
   import NotesPage from './features/notes/NotesPage.svelte';
   import SettingsPage from './features/settings/SettingsPage.svelte';
   import type { PageId } from './stores/nav.svelte';
@@ -81,6 +82,11 @@
       {#if nav.visited.terminal}
         <div class="absolute inset-0 overflow-hidden {show('terminal')}">
           <TerminalPage />
+        </div>
+      {/if}
+      {#if nav.visited.remote}
+        <div class="absolute inset-0 overflow-y-auto p-6 {show('remote')}">
+          <RemotePage />
         </div>
       {/if}
       {#if nav.visited.notes}

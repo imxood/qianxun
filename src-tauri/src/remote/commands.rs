@@ -110,6 +110,8 @@ pub fn remote_pair(app: AppHandle, name: String) -> Result<String> {
     settings.remote.devices.push(device);
     crate::settings::save(&path, &settings)?;
     drop(settings);
+    // 新 token 必须进网关快照：指纹变化 → sync 停旧起新（即时可配对）。
+    tauri::async_runtime::spawn(sync(app));
     Ok(url)
 }
 
@@ -126,7 +128,104 @@ pub fn remote_revoke(app: AppHandle, id: String) -> Result<()> {
     }
     crate::settings::save(&path, &settings)?;
     drop(settings);
+    // 吊销即时生效：指纹变化 → sync 重建网关 → 旧 cookie 全断（R1）。
+    tauri::async_runtime::spawn(sync(app));
     Ok(())
+}
+
+/// 自检结果：「能不能用」从猜测变成一眼可见（设计 §5.2）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfCheck {
+    pub ok: bool,
+    pub detail: String,
+    pub latency_ms: u64,
+}
+
+/// 自检：本机带真实设备 token 请求网关 `/qx-gate`，302 + cookie = 健康。
+#[tauri::command]
+pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
+    let state = app.state::<crate::AppState>();
+    let (addr, token) = {
+        let running = state
+            .remote
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            running.as_ref().map(|handle| handle.local_addr.to_string()),
+            settings
+                .remote
+                .devices
+                .iter()
+                .find(|d| !d.revoked)
+                .map(|d| d.token.clone()),
+        )
+    };
+    let Some(addr) = addr else {
+        return SelfCheck {
+            ok: false,
+            detail: "网关未监听：先启用远程并选择网卡".to_owned(),
+            latency_ms: 0,
+        };
+    };
+    let Some(token) = token else {
+        return SelfCheck {
+            ok: false,
+            detail: "无已配对设备：先配对一台设备再自检".to_owned(),
+            latency_ms: 0,
+        };
+    };
+
+    let url = format!("http://{addr}/qx-gate?token={token}");
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(cause) => {
+            return SelfCheck {
+                ok: false,
+                detail: format!("HTTP 客户端构建失败：{cause}"),
+                latency_ms: 0,
+            }
+        }
+    };
+    let started = std::time::Instant::now();
+    let latency = || started.elapsed().as_millis() as u64;
+    match client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let healthy = response.status() == reqwest::StatusCode::FOUND
+                && response.headers().contains_key(reqwest::header::SET_COOKIE);
+            if healthy {
+                SelfCheck {
+                    ok: true,
+                    detail: format!("网关工作正常（{}ms）", latency()),
+                    latency_ms: latency(),
+                }
+            } else {
+                SelfCheck {
+                    ok: false,
+                    detail: format!("异常响应 {}（{}ms）", response.status(), latency()),
+                    latency_ms: latency(),
+                }
+            }
+        }
+        Err(cause) => SelfCheck {
+            ok: false,
+            detail: format!("请求失败：{cause}"),
+            latency_ms: latency(),
+        },
+    }
 }
 
 /// 启动配置指纹：enabled/bind/port/devices 任一变化都会改变它。

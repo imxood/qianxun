@@ -53,6 +53,7 @@ export const IPC_COMMANDS = [
   'remote_status',
   'remote_pair',
   'remote_revoke',
+  'remote_self_check',
   'sync_status',
   'sync_init',
   'sync_pull',
@@ -454,6 +455,13 @@ export interface RemoteStatus {
   deviceCount: number;
   activeCount: number;
   dshRunning: boolean;
+}
+
+/** remote_self_check 返回：网关健康自检（带真实 token 走 /qx-gate）。 */
+export interface SelfCheck {
+  ok: boolean;
+  detail: string;
+  latencyMs: number;
 }
 
 // ---------------------------------------------------------------------------
