@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use fff_search::{
     FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions, GrepMode, GrepSearchOptions,
-    PaginationArgs, QueryParser, SharedFrecency,
+    PaginationArgs, QueryParser, SharedFilePicker, SharedFrecency,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -121,40 +121,71 @@ pub struct DriveInfo {
     pub free_bytes: u64,
 }
 
-/// 打开（或切换）搜索根目录：重建索引并立即返回，进度走轮询。
+/// 打开（或切换）搜索根目录：激活索引立即返回，进度走轮询。
+/// 同根重复点击零开销；切回暖缓存里的根零重建（watcher 一直在增量维护）；
+/// 只有冷根才新建 picker——旧激活索引进暖缓存（LRU，容量见 mod.rs）。
 #[tauri::command]
 pub fn search_open(root: String, state: State<'_, crate::AppState>) -> Result<SearchOpen> {
     let canonical = normalize_root(Path::new(&root))?;
     let search = &state.search;
-    if let Some(current) = search.root() {
-        if current == canonical {
-            return Ok(SearchOpen {
-                root: current.to_string_lossy().into_owned(),
-                generation: search.generation(),
-                rebuilt: false,
-            });
-        }
+    if search.root().as_ref() == Some(&canonical) {
+        return Ok(SearchOpen {
+            root: canonical.to_string_lossy().into_owned(),
+            generation: search.generation(),
+            rebuilt: false,
+        });
     }
 
-    // 换根：作废旧搜索，重建 picker（后台扫描 + watcher）。
+    // 换根：作废旧搜索，世代 +1。
     search.cancel_search();
     let generation = search.bump_generation();
+
+    // 暖切换：目标根此前打开过 → 整 Arc 换回，watcher 一直在维护它。
+    if let Some(warm_picker) = search.take_warm(&canonical) {
+        let previous = search.picker();
+        search.set_picker(warm_picker);
+        if let Some(previous_root) = search.root() {
+            search.stash_warm(previous_root, previous);
+        }
+        search.set_root(Some(canonical.clone()));
+        return Ok(SearchOpen {
+            root: canonical.to_string_lossy().into_owned(),
+            generation,
+            rebuilt: false,
+        });
+    }
+
+    // 冷根：新建 picker（后台扫描 + watcher）。校验失败直接报错，
+    // 不动现有激活索引与暖缓存。注意 new_with_shared_state 是就地
+    // 初始化传入的 SharedFilePicker（返回 ()），所以冷建必须传新 Arc，
+    // 激活 Arc 才能原封不动进暖缓存。
+    let fresh_shared = SharedFilePicker::default();
     FilePicker::new_with_shared_state(
-        search.picker().clone(),
+        fresh_shared.clone(),
         SharedFrecency::default(),
         FilePickerOptions {
             base_path: canonical.to_string_lossy().into_owned(),
             mode: FFFMode::Ai,
             watch: true,
             follow_symlinks: false,
-            enable_fs_root_scanning: false,
-            enable_home_dir_scanning: false,
+            // fff 默认拒绝文件系统根/用户主目录（防应用误索引全盘）。
+            // 这里的根只来自用户显式动作（点盘符胶囊 / 选目录），即知情
+            // 放行——否则 Everything 式全盘搜索无从谈起（真机回归：
+            // 点 C:\ 盘符胶囊直接报「无法索引」）。扫描是渐进的，
+            // 进度走 search_status 轮询；全盘索引不预热、不默认开启。
+            enable_fs_root_scanning: true,
+            enable_home_dir_scanning: true,
             enable_mmap_cache: false,
             enable_content_indexing: false,
             cache_budget: None,
         },
     )
     .map_err(|cause| Error::Search(format!("无法索引 {}：{cause}", canonical.display())))?;
+    let previous = search.picker();
+    search.set_picker(fresh_shared);
+    if let Some(previous_root) = search.root() {
+        search.stash_warm(previous_root, previous);
+    }
     search.set_root(Some(canonical.clone()));
     Ok(SearchOpen {
         root: canonical.to_string_lossy().into_owned(),
@@ -167,8 +198,8 @@ pub fn search_open(root: String, state: State<'_, crate::AppState>) -> Result<Se
 #[tauri::command]
 pub fn search_status(state: State<'_, crate::AppState>) -> Result<SearchStatus> {
     let search = &state.search;
-    let guard = search
-        .picker()
+    let picker = search.picker();
+    let guard = picker
         .read()
         .map_err(|cause| Error::Search(cause.to_string()))?;
     Ok(match guard.as_ref() {
@@ -207,9 +238,8 @@ pub fn search_files(
             total_files: 0,
         });
     }
-    let guard = state
-        .search
-        .picker()
+    let picker_arc = state.search.picker();
+    let guard = picker_arc
         .read()
         .map_err(|cause| Error::Search(cause.to_string()))?;
     let picker = guard
@@ -319,8 +349,8 @@ pub async fn search_content(
             // 每分片独立取读锁：锁不跨分片持有，换根/状态轮询不再被长搜索拖住。
             // guard、grep 结果（借用 picker）、映射产物同块开始同块销毁。
             let (chunk_items, chunk_files, next_offset) = {
-                let guard = search
-                    .picker()
+                let picker_arc = search.picker();
+                let guard = picker_arc
                     .read()
                     .map_err(|cause| Error::Search(cause.to_string()))?;
                 let Some(picker) = guard.as_ref() else {
@@ -557,7 +587,7 @@ fn hit_matches_glob(relative: &str, pattern: &str) -> bool {
 /// 等待扫描完成（供集成测试；UI 走轮询）。
 #[tauri::command]
 pub async fn search_wait_ready(app: AppHandle, timeout_ms: Option<u64>) -> Result<bool> {
-    let shared = app.state::<crate::AppState>().search.picker().clone();
+    let shared = app.state::<crate::AppState>().search.picker();
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(10_000));
     Ok(shared.wait_for_scan(timeout))
 }
@@ -806,5 +836,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 真实盘符根可作搜索根（回归：fff 默认拒绝文件系统根，盘符胶囊
+    /// 一点就报「无法索引 \\?\C:\」——需显式放行 enable_fs_root_scanning，
+    /// 与 search_open 的实际选项保持一致）。
+    /// #[ignore]：真扫全盘（渐进），仅手动运行验证。
+    #[test]
+    #[ignore]
+    fn 真实盘符根可作搜索根() {
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
+        let root = normalize_root(Path::new(&format!("{drive}\\"))).expect("盘符根");
+        let shared = SharedFilePicker::default();
+        let built = FilePicker::new_with_shared_state(
+            shared.clone(),
+            SharedFrecency::default(),
+            FilePickerOptions {
+                base_path: root.to_string_lossy().into_owned(),
+                mode: FFFMode::Ai,
+                watch: true,
+                follow_symlinks: false,
+                enable_fs_root_scanning: true,
+                enable_home_dir_scanning: true,
+                enable_mmap_cache: false,
+                enable_content_indexing: false,
+                cache_budget: None,
+            },
+        );
+        assert!(built.is_ok(), "盘符根应可作为搜索根：{:?}", built.err());
+        // 渐进扫描：轮询等待开始收录（大根首批判次可能要几秒）。
+        let started = std::time::Instant::now();
+        let files = loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let files = {
+                let guard = shared.read().expect("读");
+                guard.as_ref().expect("picker").live_file_count()
+            };
+            if files > 0 || started.elapsed() > Duration::from_secs(60) {
+                break files;
+            }
+        };
+        println!(
+            "盘符根收录首批 {files} 个文件，耗时 {:.1?}",
+            started.elapsed()
+        );
+        assert!(files > 0, "盘符根扫描 60s 内应开始收录文件");
     }
 }
