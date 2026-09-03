@@ -5,7 +5,21 @@ import globals from 'globals';
 import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
-  { ignores: ['dist/', 'node_modules/', 'src-tauri/target/', 'src-tauri/gen/', 'src-tauri/src/'] },
+  {
+    ignores: [
+      'dist/',
+      'node_modules/',
+      'src-tauri/target/',
+      'src-tauri/gen/',
+      'src-tauri/src/',
+      // Android 构建产物与生成物（Capacitor 模板拷贝）：非外壳源码，不 lint。
+      'mobile/android/build/',
+      'mobile/android/.gradle/',
+      'mobile/android/app/build/',
+      'mobile/android/capacitor-cordova-android-plugins/',
+      'mobile/node_modules/',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   ...svelte.configs['flat/recommended'],

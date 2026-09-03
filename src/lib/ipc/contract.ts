@@ -26,6 +26,7 @@ export const IPC_COMMANDS = [
   'search_content',
   'search_cancel',
   'search_wait_ready',
+  'search_list_drives',
   'shots_capture',
   'shots_overlay_ready',
   'shots_set_hotkey',
@@ -39,7 +40,7 @@ export const IPC_COMMANDS = [
   'terminal_write',
   'terminal_resize',
   'terminal_kill',
-  'terminal_list',
+  'terminal_replay',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -52,6 +53,7 @@ export const IPC_COMMANDS = [
   'remote_status',
   'remote_pair',
   'remote_revoke',
+  'remote_self_check',
   'sync_status',
   'sync_init',
   'sync_pull',
@@ -268,6 +270,9 @@ export interface FileHit {
   score: number;
   /** 文件名内的匹配区间（字节偏移，UTF-8 切片高亮）。 */
   offsets: Array<[number, number]>;
+  /** 大小（字节）与修改时间（毫秒）——结果表排序列；stat 失败记 0。 */
+  size: number;
+  mtime: number;
 }
 
 export interface FilesPage {
@@ -292,14 +297,34 @@ export interface GrepOptions {
   smartCase: boolean;
   beforeContext: number;
   afterContext: number;
+  /** 文件名 glob 过滤（`*.rs` 按文件名；含 `/` 按相对路径）。空 = 不过滤。 */
+  glob?: string;
 }
 
 export interface GrepPage {
   items: GrepHit[];
   filesSearched: number;
   filesWithMatches: number;
+  /** 流式循环下非 0 仅表示「已中断」，前端不再手动翻页。 */
   nextFileOffset: number;
   aborted: boolean;
+}
+
+/** search_content 的流式分片（Tauri Channel 推送）。 */
+export interface GrepProgress {
+  items: GrepHit[];
+  filesSearched: number;
+  filesWithMatches: number;
+}
+
+/** 一个逻辑盘（search_list_drives 返回项，搜索根选择器）。 */
+export interface DriveInfo {
+  /** 形如 `C:\` 的根路径。 */
+  path: string;
+  /** fixed | removable | network | cdrom | ramdisk */
+  kind: string;
+  totalBytes: number;
+  freeBytes: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +353,7 @@ export interface FrozenMonitor {
 // terminal_*（终端域，M4）
 // ---------------------------------------------------------------------------
 
+/** `terminal_spawn` 的返回：会话 id + 实际解析出的 shell（标签默认标题用）。 */
 export interface TerminalInfo {
   id: number;
   shell: string;
@@ -359,6 +385,8 @@ export interface NoteMeta {
   path: string;
   title: string;
   tags: string[];
+  /** 正文首行摘要（跳过标题行，截断 80 字符）。 */
+  excerpt: string;
   /** 文件修改时间（毫秒时间戳）。 */
   updated: number;
   size: number;
@@ -427,6 +455,13 @@ export interface RemoteStatus {
   deviceCount: number;
   activeCount: number;
   dshRunning: boolean;
+}
+
+/** remote_self_check 返回：网关健康自检（带真实 token 走 /qx-gate）。 */
+export interface SelfCheck {
+  ok: boolean;
+  detail: string;
+  latencyMs: number;
 }
 
 // ---------------------------------------------------------------------------

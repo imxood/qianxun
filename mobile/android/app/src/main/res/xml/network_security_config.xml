@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 千寻移动壳：放行明文 HTTP（网关地址为 EasyTier 虚拟网 IP，
+     network_security_config 不支持按网段放行，见 scripts/apply-android-config.mjs 头注）。 -->
+<network-security-config>
+  <base-config cleartextTrafficPermitted="true">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+</network-security-config>

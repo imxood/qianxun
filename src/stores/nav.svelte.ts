@@ -6,6 +6,7 @@ export type PageId =
   | 'search-files'
   | 'search-grep'
   | 'terminal'
+  | 'remote'
   | 'notes'
   | 'settings';
 

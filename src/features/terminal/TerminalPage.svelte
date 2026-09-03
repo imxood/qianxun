@@ -1,17 +1,20 @@
 <script lang="ts">
   /**
    * 终端页（M4）：多标签宿主。标签条 + 全部 pane 常驻（CSS 隐藏保活）。
-   * 运行中的标签关闭需确认；退出的标签自动移除。
+   * 运行中的标签关闭需确认（自定义对话框——WebView2 原生 confirm 不可靠）；
+   * 退出的标签保留尾输出并标灰；启动失败的标签显示原因并可重试。
    */
   import { onMount } from 'svelte';
   import { call } from '../../lib/ipc';
   import { settings } from '../../stores/settings.svelte';
+  import ConfirmDialog from '../../components/ConfirmDialog.svelte';
   import TerminalPane from './TerminalPane.svelte';
 
-  type Tab = { id: number; title: string; alive: boolean };
+  type Tab = { id: number; title: string; alive: boolean; error: string | null };
 
   let tabs = $state<Tab[]>([]);
   let activeId = $state<number | null>(null);
+  let closeTarget: Tab | null = $state(null);
 
   const prefs = $derived(
     settings.current?.terminal ?? {
@@ -25,28 +28,56 @@
     void newTab();
   });
 
-  async function newTab(): Promise<void> {
+  /** 标签默认标题 = 解析后的 shell 名（pwsh / powershell / 自定义路径基名）。 */
+  function shellTitle(shell: string): string {
+    if (shell === 'auto') return '终端';
+    const name = shell.replaceAll('\\', '/').split('/').pop() ?? shell;
+    return name.replace(/\.exe$/i, '');
+  }
+
+  async function newTab(cwd: string | null = null): Promise<void> {
     try {
-      const id = await call<number>('terminal_spawn', {
+      const info = await call<{ id: number; shell: string }>('terminal_spawn', {
         shell: prefs.shell,
-        cwd: null,
+        cwd,
         cols: 80,
         rows: 24,
       });
-      tabs = [...tabs, { id, title: `终端 ${id}`, alive: true }];
-      activeId = id;
+      tabs = [...tabs, { id: info.id, title: shellTitle(info.shell), alive: true, error: null }];
+      activeId = info.id;
     } catch (error) {
-      tabs = [...tabs, { id: -Date.now(), title: '启动失败', alive: false }];
+      // 失败原因上屏（错误窗格），不再只进 console。
+      const message = error instanceof Error ? error.message : String(error);
+      tabs = [...tabs, { id: -Date.now(), title: '启动失败', alive: false, error: message }];
       activeId = tabs[tabs.length - 1]?.id ?? null;
-      console.error(error);
     }
   }
 
-  function closeTab(tab: Tab): void {
-    if (tab.alive && !window.confirm(`「${tab.title}」仍在运行，关闭将结束进程。确定？`)) {
+  function requestClose(tab: Tab): void {
+    if (tab.alive) {
+      closeTarget = tab;
       return;
     }
-    void call('terminal_kill', { id: tab.id }).finally(() => remove(tab.id));
+    void removeTab(tab);
+  }
+
+  function confirmClose(): void {
+    const tab = closeTarget;
+    closeTarget = null;
+    if (tab) void removeTab(tab);
+  }
+
+  async function removeTab(tab: Tab): Promise<void> {
+    try {
+      await call('terminal_kill', { id: tab.id });
+    } finally {
+      remove(tab.id);
+    }
+  }
+
+  function retry(tab: Tab): void {
+    remove(tab.id);
+    void newTab();
   }
 
   function remove(id: number): void {
@@ -88,7 +119,7 @@
           aria-label="关闭标签"
           onclick={(event) => {
             event.stopPropagation();
-            closeTab(tab);
+            requestClose(tab);
           }}>×</span
         >
       </button>
@@ -105,8 +136,25 @@
   <div class="relative min-h-0 flex-1">
     {#each tabs as tab (tab.id)}
       <div class="absolute inset-0 {activeId === tab.id ? '' : 'hidden'}">
-        {#if tab.id > 0}
-          <TerminalPane id={tab.id} {prefs} onExit={onPaneExit} onTitle={onPaneTitle} />
+        {#if tab.error !== null}
+          <div class="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+            <p class="text-sm text-fg">终端启动失败</p>
+            <p class="max-w-md text-xs leading-5 text-muted">{tab.error}</p>
+            <button
+              class="rounded-md bg-accent-soft px-3 py-1.5 text-xs text-fg transition-colors hover:bg-accent-soft/70"
+              onclick={() => retry(tab)}
+            >
+              重试
+            </button>
+          </div>
+        {:else}
+          <TerminalPane
+            id={tab.id}
+            active={activeId === tab.id}
+            {prefs}
+            onExit={onPaneExit}
+            onTitle={onPaneTitle}
+          />
         {/if}
       </div>
     {/each}
@@ -117,3 +165,13 @@
     {/if}
   </div>
 </section>
+
+<ConfirmDialog
+  open={closeTarget !== null}
+  title="关闭终端"
+  message={closeTarget ? `「${closeTarget.title}」仍在运行，关闭将结束该 shell 的进程。确定？` : ''}
+  confirmLabel="结束进程"
+  danger
+  onconfirm={confirmClose}
+  oncancel={() => (closeTarget = null)}
+/>

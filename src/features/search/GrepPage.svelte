@@ -1,8 +1,9 @@
 <script lang="ts">
   import { search } from '../../stores/search.svelte';
+  import { contextMenu, type MenuItem } from '../../lib/menu.svelte';
   import { sliceByByteOffsets, type GrepHit } from '../../lib/ipc/contract';
   import { fileIconClass, FILE_ICON_PATH, splitPath } from './fileIcon';
-  import { locateInExplorer } from './locate';
+  import { absolutePath, copyMenuItems, copyText, locateInExplorer, openFile } from './locate';
   import RootBar from './RootBar.svelte';
 
   // 结果按文件分组渲染（一次搜索的命中天然按文件聚集）。
@@ -27,10 +28,6 @@
       : [...collapsed, path];
   }
 
-  function line(hit: GrepHit): string {
-    return `${hit.lineNumber}`;
-  }
-
   function clampContext(value: number): number {
     return Math.min(10, Math.max(0, Number.isNaN(value) ? 1 : Math.round(value)));
   }
@@ -40,9 +37,45 @@
     const lines = clampContext(value);
     search.grepOptions = { ...search.grepOptions, beforeContext: lines, afterContext: lines };
   }
+
+  /** 切一个开关（regex / smartCase / wholeWord），改完立即重搜。 */
+  function flip(key: 'regex' | 'smartCase'): void {
+    search.grepOptions = { ...search.grepOptions, [key]: !search.grepOptions[key] };
+    search.scheduleGrep();
+  }
+
+  function toggleWholeWord(): void {
+    search.grepWholeWord = !search.grepWholeWord;
+    search.scheduleGrep();
+  }
+
+  function setGlob(value: string): void {
+    search.grepGlob = value;
+    search.scheduleGrep();
+  }
+
+  function menuForFile(path: string): MenuItem[] {
+    return [
+      { label: '打开文件', onclick: () => openFile(path) },
+      { label: '打开所在位置', onclick: () => locateInExplorer(path) },
+      ...copyMenuItems(path),
+    ];
+  }
+
+  function hitMenu(event: MouseEvent, hit: GrepHit): void {
+    event.stopPropagation();
+    contextMenu.show(event, [
+      { label: '打开文件', onclick: () => openFile(hit.path) },
+      {
+        label: `复制 路径:${hit.lineNumber}`,
+        onclick: () => void copyText(`${absolutePath(hit.path) ?? hit.path}:${hit.lineNumber}`),
+      },
+      ...copyMenuItems(hit.path),
+    ]);
+  }
 </script>
 
-<section class="mx-auto w-full max-w-4xl space-y-4">
+<section class="mx-auto w-full max-w-5xl space-y-4">
   <RootBar />
 
   <div class="flex items-center gap-2">
@@ -65,9 +98,10 @@
       <input
         class="min-w-0 flex-1 bg-transparent px-2.5 py-2 font-mono text-sm placeholder:text-muted/60 focus:outline-none"
         type="text"
-        placeholder={search.status?.root ? '搜索文件内容，回车确认' : '先选择目录'}
+        placeholder={search.status?.root ? '搜索文件内容（流式出结果，无需回车）' : '先选择目录'}
         disabled={!search.status?.root}
         bind:value={search.grepQuery}
+        oninput={() => search.scheduleGrep()}
         onkeydown={(event) => {
           if (event.key === 'Enter') void search.runGrep();
           if (event.key === 'Escape') {
@@ -83,8 +117,7 @@
           : 'text-muted hover:text-fg'}"
         title="正则表达式"
         aria-pressed={search.grepOptions.regex}
-        onclick={() =>
-          (search.grepOptions = { ...search.grepOptions, regex: !search.grepOptions.regex })}
+        onclick={() => flip('regex')}
       >
         .*
       </button>
@@ -94,160 +127,147 @@
           : 'text-muted hover:text-fg'}"
         title="智能大小写（全小写时忽略大小写）"
         aria-pressed={search.grepOptions.smartCase}
-        onclick={() =>
-          (search.grepOptions = {
-            ...search.grepOptions,
-            smartCase: !search.grepOptions.smartCase,
-          })}
+        onclick={() => flip('smartCase')}
       >
         Aa
+      </button>
+      <button
+        class="border-l border-line px-2.5 font-mono text-xs transition-colors {search.grepWholeWord
+          ? 'bg-accent-soft text-accent'
+          : 'text-muted hover:text-fg'}"
+        title="整词匹配"
+        aria-pressed={search.grepWholeWord}
+        onclick={toggleWholeWord}
+      >
+        w
       </button>
     </div>
 
     <label class="flex shrink-0 items-center gap-1.5 text-xs text-muted">
       上下文
       <input
-        class="w-12 rounded border border-line bg-surface px-1.5 py-1 text-right"
+        class="w-12 rounded border border-line bg-surface px-1.5 py-1 text-right text-xs"
         type="number"
         min="0"
         max="10"
         value={search.grepOptions.beforeContext}
         onchange={(event) => setContext(Number(event.currentTarget.value))}
       />
-      行
     </label>
-
     {#if search.grepBusy}
       <button
-        class="shrink-0 rounded-md border border-line px-3 py-2 text-sm transition-colors hover:bg-accent-soft"
+        class="shrink-0 rounded-md border border-line px-2.5 py-1.5 text-xs transition-colors hover:bg-accent-soft"
         onclick={() => void search.cancelGrep()}
       >
-        取消
-      </button>
-    {:else}
-      <button
-        class="shrink-0 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
-        disabled={!search.status?.root || !search.grepQuery.trim()}
-        onclick={() => void search.runGrep()}
-      >
-        搜索
+        停止
       </button>
     {/if}
   </div>
 
-  {#if search.grepResult}
-    <div class="flex items-center gap-3 text-xs text-muted">
-      <span>
-        {search.grepResult.filesWithMatches} 个文件 · {search.grepResult.items.length} 条匹配
+  <div class="flex items-center gap-2 text-xs">
+    <input
+      class="w-56 rounded border border-line bg-surface px-2 py-1 font-mono text-xs placeholder:text-muted/60"
+      type="text"
+      placeholder="文件过滤，如 *.rs 或 src/**"
+      value={search.grepGlob}
+      oninput={(event) => setGlob(event.currentTarget.value)}
+    />
+    {#if search.grepBusy}
+      <span class="flex items-center gap-1.5 text-accent">
+        <span
+          class="inline-block size-3 animate-spin rounded-full border-2 border-line border-t-accent"
+          aria-hidden="true"
+        ></span>
+        已扫描 {search.grepResult?.filesSearched ?? 0} 个文件
       </span>
-      {#if search.grepBusy}
-        <span class="flex items-center gap-1 text-accent">
-          <span
-            class="inline-block size-3 animate-spin rounded-full border-2 border-line border-t-accent"
-            aria-hidden="true"
-          ></span>
-          搜索中…
-        </span>
-      {/if}
-      {#if search.grepResult.aborted}
-        <span class="text-danger">已取消</span>
-      {/if}
-    </div>
+    {:else if search.grepResult}
+      <span class="text-muted">
+        {search.grepResult.filesWithMatches} 个文件 · {search.grepResult.items.length} 处命中
+      </span>
+    {/if}
+    {#if search.grepError}
+      <span class="text-danger">{search.grepError}</span>
+    {:else if search.grepResult?.aborted}
+      <span class="text-muted">已停止（取消或达到 2000 条上限——试试缩小范围或加文件过滤）</span>
+    {/if}
+  </div>
 
-    <div class="space-y-3">
+  {#if groups.length > 0}
+    <div class="divide-y divide-line/60 overflow-hidden rounded-lg border border-line bg-card">
       {#each groups as [path, hits] (path)}
-        {@const isCollapsed = collapsed.includes(path)}
-        {@const parts = splitPath(path)}
-        <div class="overflow-hidden rounded-lg border border-line bg-card">
-          <div class="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5">
-            <button
-              class="flex min-w-0 flex-1 items-center gap-2 text-left"
-              onclick={() => toggleGroup(path)}
-              aria-expanded={!isCollapsed}
+        {@const { directory, name } = splitPath(path)}
+        <div class="group">
+          <button
+            class="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-accent-soft/40"
+            title={path}
+            onclick={() => toggleGroup(path)}
+            oncontextmenu={(event) => contextMenu.show(event, menuForFile(path))}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              class="size-4 shrink-0 {fileIconClass(path)}"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
             >
-              <svg
-                viewBox="0 0 24 24"
-                class="size-3.5 shrink-0 text-muted transition-transform {isCollapsed
-                  ? ''
-                  : 'rotate-90'}"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                aria-hidden="true"
-              >
-                <path d="M9 6l6 6-6 6" />
-              </svg>
-              <svg
-                viewBox="0 0 24 24"
-                class="size-4 shrink-0 {fileIconClass(path)}"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d={FILE_ICON_PATH} />
-              </svg>
-              <span class="truncate font-mono text-xs text-fg" title={path}>
-                {#if parts.directory}<span class="text-muted/70">{parts.directory}</span
-                  >{/if}{parts.name}
-              </span>
-            </button>
-            <span class="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 text-xs text-muted">
-              {hits.length}
+              <path d={FILE_ICON_PATH} />
+            </svg>
+            <span class="min-w-0 truncate font-mono text-sm">
+              <span class="text-muted/70">{directory}</span><span class="text-fg">{name}</span>
             </span>
-            <button
-              class="shrink-0 text-xs text-muted transition-colors hover:text-fg"
-              onclick={() => locateInExplorer(path)}
+            <span class="ml-auto shrink-0 text-xs text-muted">{hits.length}</span>
+            <svg
+              viewBox="0 0 24 24"
+              class="size-3.5 shrink-0 text-muted transition-transform {collapsed.includes(path)
+                ? ''
+                : 'rotate-180'}"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              aria-hidden="true"
             >
-              定位
-            </button>
-          </div>
-          {#if !isCollapsed}
-            <div class="divide-y divide-line/50">
-              {#each hits as hit, hitIndex (hit.path + hit.lineNumber + hit.col + hitIndex)}
-                <div class="px-3 py-1 font-mono text-xs leading-relaxed">
-                  {#each hit.contextBefore as context, contextIndex (hit.lineNumber + '-b' + contextIndex)}
-                    <p class="whitespace-pre-wrap break-all pl-10 text-muted/60">{context}</p>
-                  {/each}
-                  <p class="whitespace-pre-wrap break-all">
-                    <span class="inline-block w-8 select-none text-right text-muted"
-                      >{line(hit)}</span
-                    >
-                    <span class="ml-2"
-                      >{#each sliceByByteOffsets(hit.lineContent, hit.offsets) as segment, segmentIndex (hit.lineNumber + '-s' + segmentIndex)}{#if segment.matched}<mark
-                            class="rounded bg-accent-soft text-fg">{segment.text}</mark
-                          >{:else}{segment.text}{/if}{/each}</span
-                    >
-                  </p>
-                  {#each hit.contextAfter as context, contextIndex (hit.lineNumber + '-a' + contextIndex)}
-                    <p class="whitespace-pre-wrap break-all pl-10 text-muted/60">{context}</p>
-                  {/each}
-                </div>
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {#if !collapsed.includes(path)}
+            <div class="pb-2">
+              {#each hits as hit (path + hit.lineNumber)}
+                <button
+                  class="block w-full px-3 py-0.5 text-left transition-colors hover:bg-accent-soft/30"
+                  onclick={() => openFile(hit.path)}
+                  oncontextmenu={(event) => hitMenu(event, hit)}
+                >
+                  <span class="w-12 inline-block text-right font-mono text-xs text-muted/60"
+                    >{hit.lineNumber}</span
+                  >
+                  <span class="ml-2 font-mono text-sm text-fg">
+                    {#each sliceByByteOffsets(hit.lineContent, hit.offsets) as segment, i (path + hit.lineNumber + i)}{#if segment.matched}<mark
+                          class="rounded bg-accent-soft px-0.5 text-fg">{segment.text}</mark
+                        >{:else}{segment.text}{/if}{/each}
+                  </span>
+                </button>
               {/each}
             </div>
           {/if}
         </div>
       {/each}
     </div>
-
-    {#if search.grepResult.nextFileOffset > 0}
-      <div class="flex justify-center">
-        <button
-          class="rounded-md border border-line px-4 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-50"
-          disabled={search.grepBusy}
-          onclick={() => void search.runGrep(true)}
-        >
-          加载更多
-        </button>
-      </div>
-    {/if}
+  {:else if search.grepBusy}
+    <div class="flex flex-col items-center gap-1 py-16 text-center">
+      <p class="text-sm text-muted">正在扫描…结果流式到达</p>
+    </div>
+  {:else if search.grepResult}
+    <div class="flex flex-col items-center gap-1 py-16 text-center">
+      <p class="text-sm text-fg">无匹配内容</p>
+      <p class="text-xs text-muted">试试 .* 正则、w 整词或放宽文件过滤</p>
+    </div>
   {:else if search.status?.root}
     <div class="flex flex-col items-center gap-1 py-16 text-center">
       <p class="text-sm text-fg">输入内容开始搜索</p>
-      <p class="text-xs text-muted">.* 切换正则 · Aa 切换智能大小写 · 回车搜索</p>
+      <p class="text-xs text-muted">.* 正则 · Aa 智能大小写 · w 整词 · 文件过滤 glob · 即输即搜</p>
     </div>
   {/if}
 </section>

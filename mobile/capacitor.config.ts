@@ -21,6 +21,11 @@ const config: CapacitorConfig = {
     androidScheme: 'https',
     // 壳页自己就是入口；网关 URL 由 www/index.html 在运行时接管。
     hostname: 'app.qianxun.local',
+    // 网关地址是 http://<IP>:17400（EasyTier IP 因组网而异）——不放行
+    // 应用内导航的话 location.replace 会弹系统选择器跳到外部浏览器
+    // （真机实测）。Capacitor 7 从 server.allowNavigation 读取，
+    // HostMask 语义下 '*' 匹配任意主机。
+    allowNavigation: ['*'],
   },
 };
 

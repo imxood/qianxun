@@ -72,6 +72,16 @@ tokio-tungstenite = "0.26"
 futures-util = "0.3"
 # 网卡枚举（绑定地址选择 + EasyTier 识别）。
 if-addrs = "0.13"
+# grep 结果的 glob 过滤（M2 深化）：glob→正则。fff 自用版本不外露。
+regex = "1"
 # 设备配对 token。
 rand = "0.8"
 tauri-plugin-dialog = "2.7.3"
+
+[target.'cfg(windows)'.dependencies]
+# 盘符枚举（搜索根选择器，M2 深化）：与 proc-guard 同一条 windows-sys 主线，
+# 只多开 Storage_FileSystem 一个 feature 门。
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
