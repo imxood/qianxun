@@ -1,0 +1,29 @@
+[package]
+# 千寻自有 crate：进程树托管。
+name = "proc-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Spawn child processes whose entire tree is guaranteed to die with the parent"
+
+[dependencies]
+# 独立声明而非继承：这个 crate 设计为可整体搬进其他项目，
+# 只声明自己用到的那部分 tokio。
+tokio = { version = "1", default-features = false, features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+# 与 Tauri 已带入的同一条主线，依赖树只多一份绑定不多个版本。
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    # CreateJobObjectW 的签名带 SECURITY_ATTRIBUTES，windows-sys 按
+    # 签名触及的每个类型单独开 feature 门。
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "time", "io-util", "process"] }

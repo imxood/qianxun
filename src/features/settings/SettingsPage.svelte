@@ -1,0 +1,756 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import QRCode from 'qrcode';
+  import { call } from '../../lib/ipc';
+  import type {
+    AppMetaResult,
+    BridgeStatus,
+    NetInterface,
+    RemoteDevice,
+    RemoteStatus,
+    SyncStatus,
+    ThemePreference,
+  } from '../../lib/ipc/contract';
+  import { settings } from '../../stores/settings.svelte';
+  import { theme } from '../../stores/theme.svelte';
+  import Switch from '../../components/Switch.svelte';
+
+  let meta: AppMetaResult | null = $state(null);
+  let saveError: string | null = $state(null);
+  let portInput: string = $state('');
+  let pinnedInput: string = $state('');
+  let registryInput: string = $state('');
+
+  const themeOptions: Array<{ value: ThemePreference; label: string }> = [
+    { value: 'system', label: '跟随系统' },
+    { value: 'light', label: '浅色' },
+    { value: 'dark', label: '深色' },
+  ];
+
+  // 端口合法区间：避开系统保留段，也避开 0（那是动态端口，与 ADR-002 相悖）。
+  const portValid = $derived(
+    /^[1-9][0-9]{2,4}$/.test(portInput) && Number(portInput) >= 1024 && Number(portInput) <= 65535,
+  );
+  // 端口 10000 常被本机其他 DSH 实例占用：合法但强烈不建议。
+  const portClashesStudio = $derived(portValid && Number(portInput) === 10000);
+
+  const pinnedValid = $derived(pinnedInput === '' || /^[0-9A-Za-z.-]+$/.test(pinnedInput));
+  const registryValid = $derived(
+    ['official', 'npmmirror'].includes(registryInput) || /^https?:\/\/.+/.test(registryInput),
+  );
+
+  onMount(() => {
+    void (async () => {
+      try {
+        meta = await call<AppMetaResult>('app_meta');
+      } catch {
+        // 版本获取失败不影响设置编辑，状态栏已单独展示该错误。
+        meta = null;
+      }
+      await loadInterfaces();
+      await refreshRemote();
+      await refreshSync();
+    })();
+  });
+
+  // 设置加载完成后把输入框回显（一次性同步，之后由输入事件维护）。
+  $effect(() => {
+    if (settings.current && !portInput) {
+      portInput = String(settings.current.dsh.port);
+      pinnedInput = settings.current.dsh.pinnedVersion;
+      registryInput = settings.current.mirrors.npmRegistry;
+    }
+  });
+
+  async function save(patch: Parameters<typeof settings.update>[0]): Promise<void> {
+    try {
+      saveError = null;
+      await settings.update(patch);
+    } catch (error) {
+      saveError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function onTheme(value: ThemePreference): void {
+    theme.set(value);
+    void save({ theme: value });
+  }
+
+  // ---- 截屏热键（录制式输入框）----
+  let hotkeyRecording = $state(false);
+  let hotkeyDraft = $state('');
+  let hotkeyError = $state('');
+
+  $effect(() => {
+    if (settings.current && !hotkeyDraft && !hotkeyRecording) {
+      hotkeyDraft = settings.current.hotkeys.screenshot;
+    }
+  });
+
+  /** 把键盘事件翻译成 Tauri 快捷键语法（"Ctrl+Alt+A" 形态）。 */
+  function accelFrom(event: KeyboardEvent): string | null {
+    if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return null;
+    const parts: string[] = [];
+    if (event.ctrlKey || event.metaKey) parts.push('Ctrl');
+    if (event.altKey) parts.push('Alt');
+    if (event.shiftKey) parts.push('Shift');
+    const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+    parts.push(key);
+    const accel = parts.join('+');
+    // 至少一个修饰键 + 一个普通键，避免吞掉单键输入。
+    if (parts.length < 2) return null;
+    return accel;
+  }
+
+  function onHotkeyKeydown(event: KeyboardEvent): void {
+    event.preventDefault();
+    if (event.key === 'Escape') {
+      hotkeyRecording = false;
+      return;
+    }
+    const accel = accelFrom(event);
+    if (accel) {
+      hotkeyDraft = accel;
+      hotkeyRecording = false;
+    }
+  }
+
+  async function applyHotkey(): Promise<void> {
+    hotkeyError = '';
+    try {
+      const accel = hotkeyDraft.trim();
+      if (accel) {
+        // 先试注册（占用/非法立即报错），成功再落设置。
+        await call('shots_set_hotkey', { accel });
+      } else {
+        await call('shots_clear_hotkey');
+      }
+      await settings.update({ hotkeys: { screenshot: accel } });
+    } catch (error) {
+      hotkeyError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  // ---- 终端偏好 ----
+  let terminalShell = $state('auto');
+  let terminalFontInput = $state(13);
+  let terminalScrollInput = $state(5000);
+  let terminalError = $state('');
+
+  $effect(() => {
+    if (settings.current) {
+      terminalShell = settings.current.terminal.shell;
+      terminalFontInput = settings.current.terminal.fontSize;
+      terminalScrollInput = settings.current.terminal.scrollback;
+    }
+  });
+
+  async function applyTerminal(): Promise<void> {
+    terminalError = '';
+    try {
+      await settings.update({
+        terminal: {
+          shell: terminalShell,
+          fontSize: Number(terminalFontInput),
+          scrollback: Number(terminalScrollInput),
+        },
+      });
+    } catch (error) {
+      terminalError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  // ---- DSH 笔记桥（M6） ----
+  let bridge = $state<BridgeStatus | null>(null);
+  let bridgeBusy = $state(false);
+  let bridgeError = $state('');
+  const vaultReady = $derived((settings.current?.notes.vaultDir ?? '').trim().length > 0);
+
+  $effect(() => {
+    if (settings.current) void refreshBridge();
+  });
+
+  async function refreshBridge(): Promise<void> {
+    try {
+      bridge = await call<BridgeStatus>('bridge_status');
+    } catch {
+      bridge = null;
+    }
+  }
+
+  async function deployBridge(): Promise<void> {
+    bridgeBusy = true;
+    bridgeError = '';
+    try {
+      bridge = await call<BridgeStatus>('bridge_deploy');
+    } catch (error) {
+      bridgeError = error instanceof Error ? error.message : String(error);
+    } finally {
+      bridgeBusy = false;
+    }
+  }
+
+  // ---- 远程网关（R1） ----
+  let remoteStatus = $state<RemoteStatus | null>(null);
+  let interfaces = $state<NetInterface[]>([]);
+  let remoteEnabled = $state(false);
+  let remoteBind = $state('');
+  let remotePort = $state(17400);
+  let remoteError = $state('');
+  let pairUrl = $state('');
+  let pairCanvas: HTMLCanvasElement | null = $state(null);
+
+  const remoteDevices = $derived<RemoteDevice[]>(settings.current?.remote.devices ?? []);
+
+  $effect(() => {
+    if (settings.current) {
+      remoteEnabled = settings.current.remote.enabled;
+      remoteBind = settings.current.remote.bindIp;
+      remotePort = settings.current.remote.port;
+    }
+  });
+
+  $effect(() => {
+    if (pairUrl && pairCanvas) {
+      void QRCode.toCanvas(pairCanvas, pairUrl, { width: 180 });
+    }
+  });
+
+  async function refreshRemote(): Promise<void> {
+    try {
+      remoteStatus = await call<RemoteStatus>('remote_status');
+    } catch {
+      remoteStatus = null;
+    }
+  }
+
+  async function loadInterfaces(): Promise<void> {
+    interfaces = await call<NetInterface[]>('remote_interfaces');
+  }
+
+  async function applyRemote(): Promise<void> {
+    remoteError = '';
+    try {
+      await settings.update({
+        remote: { enabled: remoteEnabled, bindIp: remoteBind, port: Number(remotePort) },
+      });
+      await refreshRemote();
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function pairDevice(): Promise<void> {
+    remoteError = '';
+    const name = window.prompt('设备名（如：我的手机）');
+    if (!name) return;
+    try {
+      await applyRemote(); // 先确保网关按当前配置在跑。
+      pairUrl = await call<string>('remote_pair', { name });
+      await refreshRemote();
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function revokeDevice(id: string): Promise<void> {
+    remoteError = '';
+    try {
+      await call('remote_revoke', { id });
+      // 吊销立即生效：重建网关设备表。
+      await applyRemote();
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  // ---- 同步（S1 第一阶段：vault 走 git） ----
+  let syncStatus = $state<SyncStatus | null>(null);
+  let syncBusy = $state(false);
+  let syncError = $state('');
+  let syncLog = $state<string[]>([]);
+
+  async function refreshSync(): Promise<void> {
+    try {
+      syncStatus = await call<SyncStatus>('sync_status');
+    } catch (error) {
+      syncError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function syncAction(command: 'sync_init' | 'sync_pull' | 'sync_push'): Promise<void> {
+    syncBusy = true;
+    syncError = '';
+    syncLog = [];
+    try {
+      syncLog = (await call<string[]>(command)) ?? [];
+      await refreshSync();
+    } catch (error) {
+      syncError = error instanceof Error ? error.message : String(error);
+    } finally {
+      syncBusy = false;
+    }
+  }
+</script>
+
+<section class="mx-auto max-w-2xl space-y-6">
+  <h1 class="text-xl font-semibold">设置</h1>
+
+  {#if settings.loadError}
+    <div class="rounded-lg border border-danger bg-danger/10 p-4 text-sm">
+      <p class="font-medium">设置加载失败</p>
+      <p class="mt-1 text-muted">{settings.loadError}</p>
+      <button class="mt-2 text-accent hover:underline" onclick={() => void settings.load()}>
+        重试
+      </button>
+    </div>
+  {:else if !settings.current}
+    <p class="text-sm text-muted">正在加载设置…</p>
+  {:else}
+    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+      <h2 class="text-sm font-medium">外观</h2>
+      <div class="flex gap-2">
+        {#each themeOptions as option (option.value)}
+          <button
+            class="rounded-md border px-3 py-1.5 text-sm transition-colors {theme.preference ===
+            option.value
+              ? 'border-accent bg-accent-soft text-fg'
+              : 'border-line text-muted hover:text-fg'}"
+            onclick={() => onTheme(option.value)}
+          >
+            {option.label}
+          </button>
+        {/each}
+      </div>
+    </section>
+
+    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+      <h2 class="text-sm font-medium">窗口行为</h2>
+      <label class="flex items-center justify-between text-sm">
+        <span>关闭窗口时隐藏到托盘（托盘菜单可退出）</span>
+        <Switch
+          label="关闭时隐藏到托盘"
+          checked={settings.current.window.closeToTray}
+          onchange={(value) => void save({ window: { closeToTray: value } })}
+        />
+      </label>
+      <label class="flex items-center justify-between text-sm">
+        <span>启动时最小化（不弹出窗口）</span>
+        <Switch
+          label="启动时最小化"
+          checked={settings.current.window.startMinimized}
+          onchange={(value) => void save({ window: { startMinimized: value } })}
+        />
+      </label>
+    </section>
+
+    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+      <h2 class="text-sm font-medium">DSH</h2>
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">固定端口</span>
+        <input
+          class="w-32 rounded-md border border-line bg-surface px-2 py-1 text-right invalid:border-danger"
+          type="text"
+          inputmode="numeric"
+          bind:value={portInput}
+          onblur={() => {
+            if (portValid) void save({ dsh: { port: Number(portInput) } });
+          }}
+        />
+      </div>
+      <p class="text-xs {portValid ? 'text-muted' : 'text-danger'}">
+        {portValid
+          ? '范围 1024–65535；端口被占用时启动会显式报错，可一键换端口。'
+          : '端口必须在 1024–65535 之间。'}
+      </p>
+      {#if portClashesStudio}
+        <p class="text-xs text-danger">
+          10000 是保留端口（常被本机其他 DSH 实例使用），请换一个端口避免冲突。
+        </p>
+      {/if}
+
+      <label class="flex items-center justify-between text-sm">
+        <span>随千寻启动自动拉起 DSH</span>
+        <Switch
+          label="随千寻启动 DSH"
+          checked={settings.current.dsh.autostart}
+          onchange={(value) => void save({ dsh: { autostart: value } })}
+        />
+      </label>
+
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">DSH_HOME</span>
+        <select
+          class="rounded-md border border-line bg-surface px-2 py-1"
+          value={settings.current.dsh.home}
+          onchange={(event) => {
+            const value = event.currentTarget.value as 'isolated' | 'system';
+            void save({ dsh: { home: value } });
+          }}
+        >
+          <option value="isolated">隔离（推荐，与系统 ~/.dsh 互不干扰）</option>
+          <option value="system">系统 ~/.dsh（与外部实例共用，可能冲突）</option>
+        </select>
+      </div>
+
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">锁定版本</span>
+        <input
+          class="w-40 rounded-md border border-line bg-surface px-2 py-1 text-right invalid:border-danger"
+          type="text"
+          placeholder="留空 = latest"
+          bind:value={pinnedInput}
+          onblur={() => {
+            if (pinnedValid) void save({ dsh: { pinnedVersion: pinnedInput.trim() } });
+          }}
+        />
+      </div>
+      <p class="text-xs text-muted">
+        填 npm 精确版本号（如 0.1.1-rc.2）可锁定安装与升级目标；留空跟随 latest。
+      </p>
+
+      <label class="flex items-center justify-between text-sm">
+        <span>端口被占用时允许本次随机端口</span>
+        <Switch
+          label="允许随机端口回退"
+          checked={settings.current.dsh.allowRandomFallback}
+          onchange={(value) => void save({ dsh: { allowRandomFallback: value } })}
+        />
+      </label>
+    </section>
+
+    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+      <h2 class="text-sm font-medium">镜像源</h2>
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">Node 下载源</span>
+        <select
+          class="rounded-md border border-line bg-surface px-2 py-1"
+          value={settings.current.mirrors.nodeBinary}
+          onchange={(event) => {
+            const value = event.currentTarget.value as 'auto' | 'official' | 'npmmirror';
+            void save({ mirrors: { nodeBinary: value } });
+          }}
+        >
+          <option value="auto">自动（官方优先，失败转 npmmirror）</option>
+          <option value="official">仅官方</option>
+          <option value="npmmirror">仅 npmmirror</option>
+        </select>
+      </div>
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">npm registry</span>
+        <input
+          class="w-56 rounded-md border border-line bg-surface px-2 py-1 invalid:border-danger"
+          type="text"
+          list="registry-presets"
+          bind:value={registryInput}
+          onblur={() => {
+            if (registryValid) void save({ mirrors: { npmRegistry: registryInput.trim() } });
+          }}
+        />
+        <datalist id="registry-presets">
+          <option value="npmmirror">npmmirror（淘宝源）</option>
+          <option value="official">npm 官方</option>
+        </datalist>
+      </div>
+      <p class="text-xs {registryValid ? 'text-muted' : 'text-danger'}">
+        {registryValid
+          ? 'npmmirror / official，或以 http(s):// 开头的自定义 registry 地址。'
+          : '只能填 npmmirror、official 或 http(s):// 开头的地址。'}
+      </p>
+    </section>
+  {/if}
+
+  {#if saveError}
+    <p class="text-sm text-danger">保存失败：{saveError}</p>
+  {/if}
+
+  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+    <h2 class="text-sm font-medium">快捷键</h2>
+    <div class="flex items-center gap-3">
+      <label for="hotkey-screenshot" class="w-28 shrink-0 text-sm text-muted">截屏</label>
+      <input
+        id="hotkey-screenshot"
+        class="w-44 rounded-md border border-line bg-surface px-3 py-1.5 text-center font-mono text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+        type="text"
+        readonly
+        placeholder="点击录制"
+        value={hotkeyRecording ? '按下组合键…（Esc 取消）' : hotkeyDraft}
+        onclick={() => (hotkeyRecording = true)}
+        onkeydown={onHotkeyKeydown}
+      />
+      <button
+        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
+        onclick={() => void applyHotkey()}
+      >
+        应用
+      </button>
+    </div>
+    <p class="text-xs text-muted">
+      需至少一个修饰键（Ctrl / Alt / Shift）+ 普通键。留空后应用 = 停用热键。
+    </p>
+    {#if hotkeyError}
+      <p class="text-sm text-danger">{hotkeyError}</p>
+    {/if}
+  </section>
+
+  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+    <h2 class="text-sm font-medium">终端</h2>
+    <div class="flex items-center gap-3">
+      <label for="term-shell" class="w-28 shrink-0 text-sm text-muted">Shell</label>
+      <select
+        id="term-shell"
+        class="flex-1 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
+        value={terminalShell}
+        onchange={(event) => (terminalShell = event.currentTarget.value)}
+      >
+        <option value="auto">自动（pwsh 优先）</option>
+        <option value="pwsh.exe">pwsh</option>
+        <option value="powershell.exe">Windows PowerShell</option>
+        <option value="cmd.exe">cmd</option>
+      </select>
+    </div>
+    <div class="flex items-center gap-3">
+      <label for="term-font" class="w-28 shrink-0 text-sm text-muted">字号</label>
+      <input
+        id="term-font"
+        class="w-24 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
+        type="number"
+        min="8"
+        max="32"
+        bind:value={terminalFontInput}
+      />
+      <label for="term-scroll" class="ml-4 w-28 shrink-0 text-sm text-muted">回滚行数</label>
+      <input
+        id="term-scroll"
+        class="w-28 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
+        type="number"
+        min="100"
+        max="100000"
+        step="100"
+        bind:value={terminalScrollInput}
+      />
+      <button
+        class="ml-auto rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
+        onclick={() => void applyTerminal()}
+      >
+        应用
+      </button>
+    </div>
+    <p class="text-xs text-muted">对新建的终端标签生效（已开的标签保持原样）。</p>
+    {#if terminalError}
+      <p class="text-sm text-danger">{terminalError}</p>
+    {/if}
+  </section>
+
+  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+    <h2 class="text-sm font-medium">DSH 笔记桥</h2>
+    <p class="text-xs text-muted">
+      把千寻笔记库以 qx-bridge 插件注入千寻所辖 DSH：agent 获得 note_search / note_read / note_write
+      工具，笔记页解锁 AI 整理。 变更后需重启 DSH 生效。
+    </p>
+    {#if bridge}
+      <ul class="space-y-1 text-xs">
+        <li>{bridge.deployed ? '✓' : '✗'} 插件文件{bridge.deployed ? '已就位' : '未部署'}</li>
+        <li>
+          {bridge.patchEntry ? '✓' : '✗'} profile 装配条目{bridge.patchEntry ? '已写入' : '未写入'}
+        </li>
+        <li>
+          {bridge.vaultMatch ? '✓' : '✗'} 笔记库配置{bridge.vaultMatch
+            ? '一致'
+            : '不一致（重新部署即可对齐）'}
+        </li>
+        <li>{bridge.dshRunning ? '⏳ DSH 运行中：重启后加载桥' : 'DSH 未运行：下次启动加载'}</li>
+      </ul>
+      <p class="truncate text-xs text-muted" title={bridge.pluginDir}>{bridge.pluginDir}</p>
+    {:else}
+      <p class="text-xs text-muted">读取状态中…</p>
+    {/if}
+    <div class="flex items-center gap-2">
+      <button
+        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
+        disabled={bridgeBusy || !vaultReady}
+        onclick={() => void deployBridge()}
+      >
+        {bridgeBusy ? '部署中…' : '部署 / 修复'}
+      </button>
+      {#if !vaultReady}
+        <span class="text-xs text-muted">先到笔记页初始化笔记库</span>
+      {/if}
+      {#if bridgeError}<span class="text-sm text-danger">{bridgeError}</span>{/if}
+    </div>
+  </section>
+
+  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+    <h2 class="text-sm font-medium">远程访问（EasyTier）</h2>
+    <p class="text-xs text-muted">
+      网关是 DSH 的唯一远程暴露面：DSH 始终只听回环，手机等设备经 EasyTier
+      虚拟网访问配对链接。关闭时零监听。
+    </p>
+    <div class="flex flex-wrap items-center gap-3">
+      <label class="flex items-center gap-2 text-sm">
+        <Switch
+          checked={remoteEnabled}
+          onchange={(value) => (remoteEnabled = value)}
+          label="启用远程网关"
+        />
+        启用网关
+      </label>
+      <label for="remote-bind" class="text-sm text-muted">绑定网卡</label>
+      <select
+        id="remote-bind"
+        class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm disabled:opacity-40"
+        disabled={!remoteEnabled}
+        bind:value={remoteBind}
+      >
+        <option value="" disabled>选择网卡地址…</option>
+        {#each interfaces as item (item.ip)}
+          <option value={item.ip}>
+            {item.easytier ? '⚡ ' : ''}{item.ip}（{item.name}）
+          </option>
+        {/each}
+      </select>
+      <label for="remote-port" class="text-sm text-muted">端口</label>
+      <input
+        id="remote-port"
+        class="w-24 rounded-md border border-line bg-surface px-2 py-1.5 text-sm disabled:opacity-40"
+        type="number"
+        min="1024"
+        max="65535"
+        disabled={!remoteEnabled}
+        bind:value={remotePort}
+      />
+      <button
+        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
+        onclick={() => void applyRemote()}
+      >
+        应用
+      </button>
+    </div>
+    {#if remoteStatus}
+      <p class="text-xs text-muted">
+        {remoteStatus.listening
+          ? `监听中：${remoteStatus.listening}${remoteStatus.dshRunning ? '' : '（DSH 未运行：起 DSH 后即通）'}`
+          : '未监听'}
+        · 已配对 {remoteStatus.activeCount}/{remoteStatus.deviceCount} 台
+      </p>
+    {/if}
+    {#if remoteError}<p class="text-sm text-danger">{remoteError}</p>{/if}
+
+    <div class="flex items-center gap-2">
+      <button
+        class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-40"
+        disabled={!remoteEnabled || !remoteBind}
+        onclick={() => void pairDevice()}
+      >
+        配对新设备
+      </button>
+      <span class="text-xs text-muted">配对 = 生成一次性链接 + 二维码，手机扫码即入</span>
+    </div>
+    {#if pairUrl}
+      <div class="flex items-start gap-3 rounded-md border border-line bg-surface p-3">
+        <canvas bind:this={pairCanvas} class="rounded bg-white p-1" width="180" height="180"
+        ></canvas>
+        <div class="min-w-0 flex-1 space-y-1">
+          <p class="break-all text-xs text-muted">{pairUrl}</p>
+          <button
+            class="rounded border border-line px-2 py-1 text-xs hover:bg-accent-soft"
+            onclick={() => void navigator.clipboard.writeText(pairUrl)}
+          >
+            复制链接
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    {#if remoteDevices.length > 0}
+      <ul class="divide-y divide-line rounded-md border border-line">
+        {#each remoteDevices as device (device.id)}
+          <li class="flex items-center gap-2 px-3 py-1.5 text-sm">
+            <span class={device.revoked ? 'text-muted line-through' : ''}>{device.name}</span>
+            <span class="text-xs text-muted">{device.id}</span>
+            {#if device.revoked}
+              <span class="text-xs text-danger">已吊销</span>
+            {:else}
+              <button
+                class="ml-auto rounded px-2 py-0.5 text-xs text-danger hover:bg-danger/10"
+                onclick={() => void revokeDevice(device.id)}
+              >
+                吊销
+              </button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
+
+  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+    <h2 class="text-sm font-medium">同步（第一阶段：笔记库）</h2>
+    <p class="text-xs text-muted">
+      笔记库以 git 同步：推送 = 自动提交本地改动并 push；拉取 = rebase。 凭据与密钥永不同步（仅
+      vault 一个目录）。
+    </p>
+    {#if syncStatus}
+      {#if !syncStatus.gitAvailable}
+        <p class="text-sm text-danger">系统未安装 git：装好 Git for Windows 后刷新。</p>
+      {:else if !syncStatus.initialized}
+        <p class="text-sm text-muted">笔记库还不是 git 仓。</p>
+        <button
+          class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-40"
+          disabled={syncBusy || !vaultReady}
+          onclick={() => void syncAction('sync_init')}
+        >
+          初始化 git 仓
+        </button>
+      {:else}
+        <p class="text-xs text-muted">
+          未提交 {syncStatus.dirty} 处
+          {#if syncStatus.hasRemote}
+            · 领先 {syncStatus.ahead ?? '?'} · 落后 {syncStatus.behind ?? '?'}
+          {:else}
+            ·（无远端：加 remote 后可推拉，本地仓本身已是快照）
+          {/if}
+        </p>
+        <div class="flex items-center gap-2">
+          <button
+            class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-40"
+            disabled={syncBusy || !syncStatus.hasRemote}
+            title={syncStatus.hasRemote ? '' : '先在终端里给仓加 remote'}
+            onclick={() => void syncAction('sync_push')}
+          >
+            推送
+          </button>
+          <button
+            class="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-accent-soft disabled:opacity-40"
+            disabled={syncBusy || !syncStatus.hasRemote}
+            onclick={() => void syncAction('sync_pull')}
+          >
+            拉取
+          </button>
+          <button
+            class="rounded-md px-2 py-1.5 text-xs text-muted hover:bg-accent-soft"
+            onclick={() => void refreshSync()}
+          >
+            刷新
+          </button>
+        </div>
+      {/if}
+    {/if}
+    {#if syncError}<p class="text-sm text-danger">{syncError}</p>{/if}
+    {#if syncLog.length > 0}
+      <pre class="max-h-32 overflow-y-auto rounded-md bg-bg p-2 text-xs text-muted">{syncLog.join(
+          '\n',
+        )}</pre>
+    {/if}
+  </section>
+
+  <section class="space-y-1 rounded-lg border border-line bg-card p-4 text-xs text-muted">
+    <h2 class="text-sm font-medium text-fg">关于</h2>
+    {#if meta}
+      <p>千寻 v{meta.version} · {meta.identifier}</p>
+      <p>Tauri 2 + Svelte 5 · 全部里程碑核心已交付</p>
+    {:else}
+      <p>版本信息不可用</p>
+    {/if}
+  </section>
+</section>

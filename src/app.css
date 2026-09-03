@@ -1,0 +1,66 @@
+@import 'tailwindcss';
+
+/* 千寻用 .dark 类切换暗色（而非跟随系统的媒体查询），因为用户可以在
+   设置里显式覆盖系统偏好。@custom-variant 让 dark: 前缀走类判定。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 设计 token 全部集中在这里（编码规范 §前端：token 集中在 lib/design/ 的
+   约定落在本文件 + 后续组件目录）。语义命名，组件只允许用语义色。 */
+:root {
+  --qx-bg: oklch(0.975 0.004 260);
+  --qx-surface: oklch(1 0 0);
+  --qx-card: oklch(1 0 0);
+  --qx-fg: oklch(0.245 0.02 262);
+  --qx-muted: oklch(0.52 0.02 262);
+  --qx-line: oklch(0.905 0.008 262);
+  --qx-accent: oklch(0.55 0.19 265);
+  --qx-accent-fg: oklch(0.99 0.005 265);
+  --qx-accent-soft: oklch(0.945 0.03 265);
+  --qx-danger: oklch(0.58 0.21 25);
+}
+
+.dark {
+  --qx-bg: oklch(0.185 0.014 262);
+  --qx-surface: oklch(0.225 0.016 262);
+  --qx-card: oklch(0.245 0.017 262);
+  --qx-fg: oklch(0.93 0.008 262);
+  --qx-muted: oklch(0.68 0.015 262);
+  --qx-line: oklch(0.32 0.018 262);
+  --qx-accent: oklch(0.7 0.16 265);
+  --qx-accent-fg: oklch(0.17 0.02 265);
+  --qx-accent-soft: oklch(0.3 0.05 265);
+  --qx-danger: oklch(0.68 0.18 25);
+}
+
+@theme inline {
+  --color-bg: var(--qx-bg);
+  --color-surface: var(--qx-surface);
+  --color-card: var(--qx-card);
+  --color-fg: var(--qx-fg);
+  --color-muted: var(--qx-muted);
+  --color-line: var(--qx-line);
+  --color-accent: var(--qx-accent);
+  --color-accent-fg: var(--qx-accent-fg);
+  --color-accent-soft: var(--qx-accent-soft);
+  --color-danger: var(--qx-danger);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-fg antialiased;
+  font-family:
+    'Segoe UI',
+    'Microsoft YaHei',
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+/* 自绘标题栏窗口的默认字体大小由组件自行控制，这里只给全局基线。 */
+#app {
+  height: 100%;
+}

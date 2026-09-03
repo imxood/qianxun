@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>千寻</title>
+    <script>
+      // 首帧前按系统偏好上色，避免暗色用户看到一闪白屏；真实主题在设置
+      // 加载完成后由 theme store 覆盖。这段必须是内联同步脚本。
+      if (matchMedia('(prefers-color-scheme: dark)').matches) {
+        document.documentElement.classList.add('dark');
+      }
+    </script>
+    <style>
+      /* 启动屏：纯静态内联样式，不依赖任何 JS/CSS 包。dev 模式下 Vite 要
+         逐个模块拉取整张依赖图（CodeMirror/xterm/页面组件…），这几秒里
+         #app 是空的——启动屏负责让这段时间呈现品牌画面而非白屏。颜色
+         与 app.css 的设计 token 保持一致（html.dark 由上面脚本先行置好）。 */
+      :root {
+        --qx-splash-bg: oklch(0.975 0.004 260);
+        --qx-splash-fg: oklch(0.245 0.02 262);
+        --qx-splash-muted: oklch(0.52 0.02 262);
+        --qx-splash-line: oklch(0.905 0.008 262);
+        --qx-splash-accent: oklch(0.55 0.19 265);
+      }
+      :root.dark {
+        --qx-splash-bg: oklch(0.185 0.014 262);
+        --qx-splash-fg: oklch(0.93 0.008 262);
+        --qx-splash-muted: oklch(0.68 0.015 262);
+        --qx-splash-line: oklch(0.32 0.018 262);
+        --qx-splash-accent: oklch(0.7 0.16 265);
+      }
+      #qx-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: center;
+        justify-content: center;
+        background: var(--qx-splash-bg);
+        color: var(--qx-splash-fg);
+        font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+        user-select: none;
+      }
+      .qx-splash__ring {
+        width: 22px;
+        height: 22px;
+        border-radius: 9999px;
+        border: 2px solid var(--qx-splash-line);
+        border-top-color: var(--qx-splash-accent);
+        animation: qx-spin 0.8s linear infinite;
+      }
+      .qx-splash__title {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+      }
+      .qx-splash__sub {
+        font-size: 12px;
+        color: var(--qx-splash-muted);
+      }
+      @keyframes qx-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="qx-splash" role="status" aria-label="千寻启动中">
+      <div class="qx-splash__ring"></div>
+      <div class="qx-splash__title">千寻</div>
+      <div class="qx-splash__sub">Qianxun · 正在启动…</div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+[package]
+# 千寻自有 crate：Node 运行时探测。
+name = "node-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Locate a usable Node.js runtime across PATH, nvm, fnm, volta and system installs"
+
+[dependencies]
+proc-guard = { path = "../proc-guard" }
+serde = { version = "1", features = ["derive"] }
+dirs = "6"

@@ -1,0 +1,74 @@
+[package]
+name = "qianxun"
+version = "0.1.0"
+edition = "2021"
+description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
+
+[workspace]
+# 两个移植 crate 与主包同仓同构建；src-tauri 即 workspace 根。
+members = ["crates/proc-guard", "crates/node-runtime"]
+
+[lib]
+name = "qianxun_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "qianxun"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-single-instance = "2"
+# 打开文件 / 资源管理器定位（搜索结果操作，M2）。
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# 日志时间戳。只要 clock（本地时间），其余特性关闭以控制依赖面。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 托管域：supervisor/安装器需要异步进程、管道、定时与网络探测；
+# 只开用到的 feature，不引入默认的 fs/信号面。
+tokio = { version = "1", default-features = false, features = [
+    "process",
+    "io-util",
+    "net",
+    "time",
+    "sync",
+    "macros",
+    "rt",
+] }
+# 就绪行解析出的 URL 需要严格校验（回环/端口），不信任子进程输出。
+url = "2"
+# 工作区/家目录定位（node-runtime 也依赖它）。
+dirs = "6"
+# Node 发行版校验（SHASUMS256.txt）与 zip 解包；只开 deflate。
+sha2 = "0.10"
+zip = { version = "6", default-features = false, features = ["deflate"] }
+# 搜索双页（M2，架构 §4.9）：文件名搜索与内容搜索 SDK，均为 MIT。
+fff-search = "0.10.6"
+fff-grep = "0.10.6"
+# 移植 crate：进程树回收 + Node 探测。
+proc-guard = { path = "crates/proc-guard" }
+node-runtime = { path = "crates/node-runtime" }
+tauri-plugin-clipboard-manager = "2.3.3"
+xcap = "0.9.8"
+tauri-plugin-global-shortcut = "2.3.2"
+base64 = "0.23.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+portable-pty = "0.9.0"
+# 远程网关（R1，架构 §4.5）：DSH 回环唯一暴露面——axum 终结 HTTP/WS，
+# reqwest 流式转发 /api（含 SSE），tokio-tungstenite 桥两条 WS 下行。
+axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "stream",
+    "json",
+] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+# 网卡枚举（绑定地址选择 + EasyTier 识别）。
+if-addrs = "0.13"
+# 设备配对 token。
+rand = "0.8"

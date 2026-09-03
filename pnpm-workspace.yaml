@@ -1,0 +1,4 @@
+# pnpm 11 的依赖构建脚本审批（编码规范 §12：白名单制）。
+# esbuild 的 postinstall 用于校验/回退平台二进制安装。
+allowBuilds:
+  esbuild: true

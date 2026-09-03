@@ -1,0 +1,16 @@
+{
+  "name": "qianxun-mobile",
+  "private": true,
+  "version": "0.1.0",
+  "description": "千寻移动壳（R2）：加载远程网关 URL 的 Capacitor 壳。",
+  "scripts": {
+    "add:android": "cap add android",
+    "sync": "cap sync android",
+    "open": "cap open android"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7",
+    "@capacitor/core": "^7",
+    "@capacitor/android": "^7"
+  }
+}

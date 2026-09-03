@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <title>千寻</title>
+    <style>
+      :root {
+        --bg: #f6f6f8;
+        --card: #ffffff;
+        --fg: #1c1c1e;
+        --muted: #7a7a80;
+        --accent: #3b82f6;
+        --border: #e3e3e8;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #17171a;
+          --card: #1f1f23;
+          --fg: #ececf1;
+          --muted: #8a8a92;
+          --border: #2c2c31;
+        }
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          sans-serif;
+      }
+      main {
+        /* 安全区：viewport-fit=cover 下的系统栏避让 */
+        padding: calc(env(safe-area-inset-top) + 32px) 20px calc(env(safe-area-inset-bottom) + 32px);
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-height: 100%;
+        box-sizing: border-box;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0;
+      }
+      p.hint {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0;
+        line-height: 1.6;
+      }
+      input {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        color: var(--fg);
+        font-size: 15px;
+        padding: 12px 14px;
+        outline: none;
+      }
+      button {
+        background: var(--accent);
+        border: none;
+        border-radius: 10px;
+        color: #fff;
+        font-size: 15px;
+        font-weight: 600;
+        padding: 13px 0;
+      }
+      button.secondary {
+        background: var(--card);
+        border: 1px solid var(--border);
+        color: var(--fg);
+        font-weight: 400;
+      }
+      #error {
+        color: #ef4444;
+        font-size: 13px;
+        min-height: 1em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>千寻 · 移动壳</h1>
+      <p class="hint">
+        粘贴千寻「远程访问」设置页生成的配对链接（形如
+        <code>http://10.x.x.x:17400/qx-gate?token=…</code>）。 配对一次即记住， 以后直接进入工作台。
+      </p>
+      <input id="url" type="url" placeholder="http://<EasyTier-IP>:17400/qx-gate?token=…" />
+      <button id="go">进入工作台</button>
+      <p id="error"></p>
+      <button id="reset" class="secondary" hidden>忘记地址，重新配对</button>
+    </main>
+    <script>
+      const KEY = 'qx.gatewayUrl';
+      const saved = localStorage.getItem(KEY);
+      const input = document.getElementById('url');
+      const error = document.getElementById('error');
+      const reset = document.getElementById('reset');
+      if (saved) {
+        location.replace(saved);
+        reset.hidden = false;
+      }
+      reset.addEventListener('click', () => {
+        localStorage.removeItem(KEY);
+        location.reload();
+      });
+      document.getElementById('go').addEventListener('click', () => {
+        const url = input.value.trim();
+        if (!/^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/qx-gate\?token=/.test(url)) {
+          error.textContent = '链接形态不对：应来自千寻设置页的配对二维码/复制链接。';
+          return;
+        }
+        localStorage.setItem(KEY, url);
+        location.replace(url);
+      });
+    </script>
+  </body>
+</html>
