@@ -1,8 +1,10 @@
 //! 截屏域 IPC 命令与全局热键管理。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use base64::Engine;
 use serde::Serialize;
@@ -42,6 +44,12 @@ pub struct ShotsState {
     registered: Mutex<Option<String>>,
     /// 覆盖窗会话进行中（防重复触发热键）。
     overlay_active: AtomicBool,
+    /// 会话代号：每次开会话递增，兜底定时器据此作废旧会话。
+    session: AtomicU64,
+    /// 待首帧就绪上报的覆盖窗 label（全部就绪才亮窗，消除黑屏空窗期）。
+    pending_ready: Mutex<HashSet<String>>,
+    /// 亮窗时要聚焦的覆盖窗（光标所在屏）。
+    focus_label: Mutex<Option<String>>,
 }
 
 /// 捕获所有显示器到冻结帧目录。返回每屏一张 PNG 的清单。
@@ -228,6 +236,27 @@ pub fn start_session(app: &AppHandle) {
 
 fn open_overlays_impl(app: &AppHandle) -> Result<()> {
     let frozen = capture_all(app)?;
+    if frozen.is_empty() {
+        return Err(Error::Screenshot("没有可用的显示器".into()));
+    }
+    let state = app.state::<ShotsState>();
+    // 亮窗门控：覆盖窗先隐藏，等各屏页面画好首帧（overlay_ready 上报）再一起亮出，
+    // 消除热键后 WebView 未绘制 / 底图未解码的一瞬黑屏。
+    let generation = state.session.fetch_add(1, Ordering::AcqRel) + 1;
+    {
+        let mut pending = state.pending_ready.lock().unwrap();
+        pending.clear();
+        pending.extend(
+            frozen
+                .iter()
+                .map(|monitor| format!("{OVERLAY_LABEL_PREFIX}{}", monitor.index)),
+        );
+    }
+    *state.focus_label.lock().unwrap() = Some(format!(
+        "{OVERLAY_LABEL_PREFIX}{}",
+        focus_monitor_index(&frozen, cursor_position(app))
+    ));
+
     for monitor in &frozen {
         let label = format!("{OVERLAY_LABEL_PREFIX}{}", monitor.index);
         // 旧窗残留（异常路径）先清。
@@ -249,7 +278,7 @@ fn open_overlays_impl(app: &AppHandle) -> Result<()> {
             .skip_taskbar(true)
             .always_on_top(true)
             .shadow(false)
-            .focused(true)
+            .visible(false) // overlay_ready 上报首帧后由 reveal_overlays 亮出并聚焦
             .position(
                 monitor.x as f64 / monitor.scale,
                 monitor.y as f64 / monitor.scale,
@@ -261,7 +290,72 @@ fn open_overlays_impl(app: &AppHandle) -> Result<()> {
             .build()
             .map_err(|cause| Error::Screenshot(format!("建覆盖窗失败：{cause}")))?;
     }
+
+    // 兜底：页面异常没能上报就绪时强制亮窗（用户至少还能框选或 Esc 退出）。
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if handle.state::<ShotsState>().session.load(Ordering::Acquire) == generation {
+            reveal_overlays(&handle);
+        }
+    });
     Ok(())
+}
+
+/// 当前光标的虚拟屏幕坐标（物理像素）；拿不到时 None（聚焦回退第一屏）。
+fn cursor_position(app: &AppHandle) -> Option<(f64, f64)> {
+    let position = app.cursor_position().ok()?;
+    Some((position.x, position.y))
+}
+
+/// 光标所在的显示器下标（亮窗后聚焦该屏，"在哪屏触发就在哪屏选"）；
+/// 光标不在任何屏上时回退第一个。
+fn focus_monitor_index(frozen: &[FrozenMonitor], cursor: Option<(f64, f64)>) -> usize {
+    let Some((cursor_x, cursor_y)) = cursor else {
+        return 0;
+    };
+    frozen
+        .iter()
+        .position(|monitor| {
+            let left = f64::from(monitor.x);
+            let top = f64::from(monitor.y);
+            left <= cursor_x
+                && cursor_x < left + f64::from(monitor.width)
+                && top <= cursor_y
+                && cursor_y < top + f64::from(monitor.height)
+        })
+        .unwrap_or(0)
+}
+
+/// 亮出全部覆盖窗并聚焦目标屏（全部就绪 / 兜底超时共用；幂等）。
+fn reveal_overlays(app: &AppHandle) {
+    let focus = app
+        .state::<ShotsState>()
+        .focus_label
+        .lock()
+        .unwrap()
+        .clone();
+    let overlays = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with(OVERLAY_LABEL_PREFIX))
+        .collect::<Vec<_>>();
+    for (_, window) in &overlays {
+        let _ = window.show();
+    }
+    let target = focus
+        .filter(|label| overlays.iter().any(|(existing, _)| existing == label))
+        .or_else(|| overlays.first().map(|(label, _)| label.clone()));
+    if let Some(label) = target {
+        if let Some((_, window)) = overlays.iter().find(|(existing, _)| *existing == label) {
+            let _ = window.set_focus();
+        }
+    }
+    app.state::<ShotsState>()
+        .pending_ready
+        .lock()
+        .unwrap()
+        .clear();
 }
 
 /// 覆盖窗全部关闭时解除会话锁（lib.rs 的窗口销毁事件调用）。
@@ -276,6 +370,21 @@ pub fn overlay_closed(app: &AppHandle) {
             .overlay_active
             .store(false, Ordering::Release);
     }
+}
+
+/// 覆盖窗前端首帧就绪上报：全部屏就绪后统一亮窗（消除热键后的黑屏空窗期）。
+#[tauri::command]
+pub fn shots_overlay_ready(app: AppHandle, label: String) -> Result<()> {
+    let state = app.state::<ShotsState>();
+    let remaining = {
+        let mut pending = state.pending_ready.lock().unwrap();
+        pending.remove(&label);
+        pending.len()
+    };
+    if remaining == 0 {
+        reveal_overlays(&app);
+    }
+    Ok(())
 }
 
 /// 手动关闭全部覆盖窗（前端 Esc 取消走窗口 close，殊途同归到销毁事件）。
@@ -332,6 +441,39 @@ mod tests {
         assert_eq!(urlencode("aZ09-_.~"), "aZ09-_.~");
         assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
         assert!(urlencode("千寻").starts_with("%E5%8D%83"));
+    }
+
+    fn monitor(index: usize, x: i32, y: i32, width: i32, height: i32) -> FrozenMonitor {
+        FrozenMonitor {
+            index,
+            x,
+            y,
+            width,
+            height,
+            scale: 1.0,
+            image: String::new(),
+        }
+    }
+
+    #[test]
+    fn 聚焦屏取光标所在显示器并兜底第一屏() {
+        let frozen = vec![
+            monitor(0, 0, 0, 1920, 1080),
+            monitor(1, 1920, 0, 2560, 1440),
+        ];
+        // 光标在第二屏 → 聚焦第二屏。
+        assert_eq!(focus_monitor_index(&frozen, Some((3000.0, 100.0))), 1);
+        // 光标在第一屏 → 第一屏。
+        assert_eq!(focus_monitor_index(&frozen, Some((10.0, 900.0))), 0);
+        // 光标悬在屏外（多屏间隙）/拿不到 → 回退第一屏。
+        assert_eq!(focus_monitor_index(&frozen, Some((1900.0, 2000.0))), 0);
+        assert_eq!(focus_monitor_index(&frozen, None), 0);
+        // 负坐标屏（第二屏在主屏左侧）也能命中。
+        let nested = vec![
+            monitor(0, -2560, 0, 2560, 1440),
+            monitor(1, 0, 0, 1920, 1080),
+        ];
+        assert_eq!(focus_monitor_index(&nested, Some((-100.0, 50.0))), 0);
     }
 
     /// 真实显示器捕获链路（本机有屏才能跑）：枚举 → 截图 → PNG 落盘非空。

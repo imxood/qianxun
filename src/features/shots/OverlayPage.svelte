@@ -5,8 +5,9 @@
    * → 标注工具栏（矩形/椭圆/箭头/画笔/马赛克/文字 + 撤销重做）
    * → 产出（复制/保存/贴图/退出）。双击选区 = 复制；Esc = 退出。
    */
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
+  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { call } from '../../lib/ipc';
 
   // ---- URL 参数 ----
@@ -45,16 +46,20 @@
   let strokeWidth = $state(4);
   let shapes = $state<Shape[]>([]);
   let redoStack = $state<Shape[]>([]);
+  // 当前选中的标注（shapes 下标）：「选择」工具下可拖动 / 缩放 / 删除。
+  let selected = $state<number | null>(null);
   let message = $state('');
   let working = $state(false);
 
   // 拖拽上下文（不参与渲染，普通变量即可）
-  let drag: null | {
-    kind: 'new' | 'move' | 'resize';
-    handle?: number; // 0..7 顺时针自左上
-    origin: Rect;
-    start: { x: number; y: number };
-  } = null;
+  type Pt = { x: number; y: number };
+  type Drag =
+    | { kind: 'new'; origin: Rect; start: Pt }
+    | { kind: 'move'; origin: Rect; start: Pt }
+    | { kind: 'resize'; handle: number; origin: Rect; start: Pt }
+    | { kind: 'shape-move'; index: number; origin: Shape; start: Pt }
+    | { kind: 'shape-resize'; index: number; handle: number; origin: Shape; start: Pt };
+  let drag: Drag | null = null;
   let liveShape: Shape | null = null;
   let textDraft = $state<{ x: number; y: number; value: string } | null>(null);
 
@@ -106,13 +111,35 @@
   }
 
   // ---- 初始化 ----
+  // 首帧就绪上报：覆盖窗默认隐藏，全部屏画好第一帧后由 Rust 统一亮窗，
+  // 消除热键后 WebView 未绘制 / 底图未解码的一瞬黑屏。
+  let readySent = false;
+  function signalReady(): void {
+    if (readySent) return;
+    readySent = true;
+    // 不用 rAF 确认合成：窗口隐藏期间 WebView 暂停渲染管线，rAF 不会触发，
+    // 只能干等兜底。画布位图在 show 时由合成器直接呈现，画完即报即可。
+    void call('shots_overlay_ready', { label: getCurrentWebviewWindow().label }).catch(() => {});
+  }
+
   onMount(() => {
     dpr = window.devicePixelRatio || 1;
     const image = new Image();
+    // asset protocol 相对页面是跨源：不带 crossOrigin 时画布会被污染，
+    // 导出 toDataURL 报 "Tainted canvases may not be exported"。
+    // asset protocol 返回 Access-Control-Allow-Origin，匿名 CORS 拉取即可保持画布干净。
+    image.crossOrigin = 'anonymous';
     image.onload = () => {
       baseImage = image;
-      render();
+      // 先等 Svelte 把底图尺寸写进 canvas 再绘制：状态更新是异步落 DOM，
+      // 立即 render() 会画在 0×0 画布上，随后尺寸落位又把画布清空 → 亮窗全黑。
+      void tick().then(() => {
+        render();
+        signalReady();
+      });
     };
+    // 底图缺失也要上报亮窗：用户至少还能框选或 Esc 退出。
+    image.onerror = () => signalReady();
     image.src = convertFileSrc(imagePath);
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -120,7 +147,24 @@
           textDraft = null;
           return;
         }
+        // 先取消标注选中，再退出截屏。
+        if (tool === 'none' && selected !== null) {
+          selected = null;
+          render();
+          return;
+        }
         void exitAll();
+      } else if (
+        (event.key === 'Delete' || event.key === 'Backspace') &&
+        tool === 'none' &&
+        selected !== null
+      ) {
+        event.preventDefault();
+        const target = selected;
+        shapes = shapes.filter((_, index) => index !== target);
+        redoStack = [];
+        selected = null;
+        render();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -173,6 +217,30 @@
       for (const shape of shapes) drawShape(ctx, shape);
       if (liveShape) drawShape(ctx, liveShape);
       ctx.restore();
+    }
+
+    // 选中标注的编辑框：虚线框 + 可缩放形状的 8 手柄（仅「选择」工具下显示）。
+    if (phase === 'selected' && tool === 'none' && selected !== null) {
+      const shape = shapes[selected];
+      if (shape) {
+        const box = outlineBox(shape);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+        ctx.lineWidth = 1 * dpr;
+        ctx.setLineDash([5 * dpr, 4 * dpr]);
+        ctx.strokeRect(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
+        ctx.setLineDash([]);
+        if (shapeResizable(shape)) {
+          const size = 7 * dpr;
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+          for (const [x, y] of boxHandlePositions(box)) {
+            ctx.fillRect(x - size / 2, y - size / 2, size, size);
+            ctx.strokeRect(x - size / 2, y - size / 2, size, size);
+          }
+        }
+        ctx.restore();
+      }
     }
   }
 
@@ -296,6 +364,7 @@
           point.y >= sel.y1 &&
           point.y <= sel.y2
         ) {
+          selected = null;
           textDraft = { x: point.x, y: point.y, value: '' };
         }
         return;
@@ -320,15 +389,49 @@
           drag = { kind: 'new', origin: { ...selection }, start: point };
           shapes = [];
           redoStack = [];
+          selected = null;
           return;
         }
+        selected = null;
         liveShape = beginShape(tool, point, color, strokeWidth);
         return;
       }
       return;
     }
     if (phase === 'selected' && tool === 'none') {
-      // 手柄 or 移动 or 重开。
+      // 1) 已选中形状：优先试它自己的缩放手柄。
+      if (selected !== null) {
+        const current = shapes[selected];
+        if (current && shapeResizable(current)) {
+          const handle = hitBoxHandle(outlineBox(current), point);
+          if (handle >= 0) {
+            drag = {
+              kind: 'shape-resize',
+              index: selected,
+              handle,
+              origin: cloneShape(current),
+              start: point,
+            };
+            return;
+          }
+        }
+      }
+      // 2) 点到任意标注：选中并进入拖动。
+      const hit = hitShapeIndex(point);
+      if (hit >= 0) {
+        const shape = shapes[hit];
+        if (shape) {
+          selected = hit;
+          drag = { kind: 'shape-move', index: hit, origin: cloneShape(shape), start: point };
+          render();
+        }
+        return;
+      }
+      // 3) 空白处：先取消选中，再按选区手柄 / 移动 / 重开处理。
+      if (selected !== null) {
+        selected = null;
+        render();
+      }
       const handle = hitHandle(point);
       if (handle >= 0) {
         drag = { kind: 'resize', handle, origin: { ...selection }, start: point };
@@ -399,6 +502,14 @@
       };
     } else if (drag?.kind === 'resize') {
       selection = resizeTo(drag.origin, drag.handle!, point);
+    } else if (drag?.kind === 'shape-move') {
+      shapes[drag.index] = translateShape(
+        drag.origin,
+        point.x - drag.start.x,
+        point.y - drag.start.y,
+      );
+    } else if (drag?.kind === 'shape-resize') {
+      shapes[drag.index] = resizeShape(drag.origin as RectShape, drag.handle, point);
     }
     if (liveShape) {
       if (
@@ -426,7 +537,152 @@
     return next;
   }
 
+  // ---- 标注编辑（选中 / 拖动 / 缩放 / 删除）----
+
+  type RectShape = Extract<Shape, { rect: Rect }>;
+
+  /** 只有画框类形状支持缩放；箭头 / 画笔 / 文字只支持拖动。 */
+  function shapeResizable(shape: Shape): shape is RectShape {
+    return shape.type === 'rect' || shape.type === 'ellipse' || shape.type === 'mosaic';
+  }
+
+  function shapeBBox(shape: Shape): Rect {
+    switch (shape.type) {
+      case 'rect':
+      case 'ellipse':
+      case 'mosaic':
+        return norm(shape.rect);
+      case 'arrow':
+        return norm({ x1: shape.from.x, y1: shape.from.y, x2: shape.to.x, y2: shape.to.y });
+      case 'pen': {
+        const xs = shape.points.map((p) => p.x);
+        const ys = shape.points.map((p) => p.y);
+        return {
+          x1: Math.min(...xs),
+          y1: Math.min(...ys),
+          x2: Math.max(...xs),
+          y2: Math.max(...ys),
+        };
+      }
+      case 'text': {
+        const lines = shape.text.split('\n');
+        const context = canvas?.getContext('2d');
+        let width = shape.size * Math.max(...lines.map((line) => line.length));
+        if (context) {
+          context.font = `${shape.size}px "Segoe UI", "Microsoft YaHei", sans-serif`;
+          width = Math.max(...lines.map((line) => context.measureText(line).width));
+        }
+        return {
+          x1: shape.at.x,
+          y1: shape.at.y,
+          x2: shape.at.x + width,
+          y2: shape.at.y + lines.length * shape.size * 1.25,
+        };
+      }
+    }
+  }
+
+  /** 编辑框 = 包围盒外扩（描边宽 + 余量）：虚线画在框上，手柄也布在框上。 */
+  function outlineBox(shape: Shape): Rect {
+    const box = shapeBBox(shape);
+    const pad = ('width' in shape ? shape.width / 2 : 2 * dpr) + 3 * dpr;
+    return { x1: box.x1 - pad, y1: box.y1 - pad, x2: box.x2 + pad, y2: box.y2 + pad };
+  }
+
+  function cloneShape(shape: Shape): Shape {
+    return JSON.parse(JSON.stringify(shape)) as Shape;
+  }
+
+  function distToSegment(point: Pt, from: Pt, to: Pt): number {
+    const deltaX = to.x - from.x;
+    const deltaY = to.y - from.y;
+    const lengthSq = deltaX * deltaX + deltaY * deltaY;
+    const t =
+      lengthSq === 0 ? 0 : ((point.x - from.x) * deltaX + (point.y - from.y) * deltaY) / lengthSq;
+    const clamped = Math.max(0, Math.min(1, t));
+    return Math.hypot(point.x - (from.x + clamped * deltaX), point.y - (from.y + clamped * deltaY));
+  }
+
+  function hitShape(shape: Shape, point: Pt): boolean {
+    const slack = 6 * dpr;
+    if (shape.type === 'arrow') {
+      return distToSegment(point, shape.from, shape.to) <= shape.width / 2 + slack;
+    }
+    if (shape.type === 'pen') {
+      const tolerance = shape.width / 2 + slack;
+      for (let index = 1; index < shape.points.length; index++) {
+        const from = shape.points[index - 1];
+        const to = shape.points[index];
+        if (from && to && distToSegment(point, from, to) <= tolerance) return true;
+      }
+      return false;
+    }
+    const box = outlineBox(shape);
+    return point.x >= box.x1 && point.x <= box.x2 && point.y >= box.y1 && point.y <= box.y2;
+  }
+
+  /** 自上而下找第一个命中的标注。 */
+  function hitShapeIndex(point: Pt): number {
+    for (let index = shapes.length - 1; index >= 0; index--) {
+      const shape = shapes[index];
+      if (shape && hitShape(shape, point)) return index;
+    }
+    return -1;
+  }
+
+  function translateShape(shape: Shape, deltaX: number, deltaY: number): Shape {
+    switch (shape.type) {
+      case 'rect':
+      case 'ellipse':
+      case 'mosaic':
+        return {
+          ...shape,
+          rect: {
+            x1: shape.rect.x1 + deltaX,
+            y1: shape.rect.y1 + deltaY,
+            x2: shape.rect.x2 + deltaX,
+            y2: shape.rect.y2 + deltaY,
+          },
+        };
+      case 'arrow':
+        return {
+          ...shape,
+          from: { x: shape.from.x + deltaX, y: shape.from.y + deltaY },
+          to: { x: shape.to.x + deltaX, y: shape.to.y + deltaY },
+        };
+      case 'pen':
+        return {
+          ...shape,
+          points: shape.points.map((p) => ({ x: p.x + deltaX, y: p.y + deltaY })),
+        };
+      case 'text':
+        return { ...shape, at: { x: shape.at.x + deltaX, y: shape.at.y + deltaY } };
+    }
+  }
+
+  /** 框类形状缩放：手柄动对应边，另一侧为锚；限制最小尺寸。 */
+  function resizeShape(shape: RectShape, handle: number, point: Pt): RectShape {
+    const minSize = 8 * dpr;
+    const rect = resizeTo(norm(shape.rect), handle, point);
+    if (rect.x2 - rect.x1 < minSize) {
+      if (handle === 0 || handle === 3 || handle === 5) rect.x1 = rect.x2 - minSize;
+      else rect.x2 = rect.x1 + minSize;
+    }
+    if (rect.y2 - rect.y1 < minSize) {
+      if (handle === 0 || handle === 1 || handle === 2) rect.y1 = rect.y2 - minSize;
+      else rect.y2 = rect.y1 + minSize;
+    }
+    return { ...shape, rect };
+  }
+
   function onMouseUp(): void {
+    if (drag && (drag.kind === 'shape-move' || drag.kind === 'shape-resize')) {
+      // 标注编辑是一次新改动，使重做历史失效。
+      redoStack = [];
+      drag = null;
+      render();
+      return;
+    }
     if (drag) {
       const sel = norm(selection);
       const tooSmall = sel.x2 - sel.x1 < 8 || sel.y2 - sel.y1 < 8;
@@ -460,19 +716,23 @@
     render();
   }
 
-  function hitHandle(point: { x: number; y: number }): number {
-    const sel = norm(selection);
-    const positions: Array<[number, number]> = [
-      [sel.x1, sel.y1],
-      [(sel.x1 + sel.x2) / 2, sel.y1],
-      [sel.x2, sel.y1],
-      [sel.x1, (sel.y1 + sel.y2) / 2],
-      [sel.x2, (sel.y1 + sel.y2) / 2],
-      [sel.x1, sel.y2],
-      [(sel.x1 + sel.x2) / 2, sel.y2],
-      [sel.x2, sel.y2],
+  /** 8 手柄的标准布点（顺时针自左上），裁剪选区与形状编辑框共用。 */
+  function boxHandlePositions(box: Rect): Array<[number, number]> {
+    return [
+      [box.x1, box.y1],
+      [(box.x1 + box.x2) / 2, box.y1],
+      [box.x2, box.y1],
+      [box.x1, (box.y1 + box.y2) / 2],
+      [box.x2, (box.y1 + box.y2) / 2],
+      [box.x1, box.y2],
+      [(box.x1 + box.x2) / 2, box.y2],
+      [box.x2, box.y2],
     ];
+  }
+
+  function hitBoxHandle(box: Rect, point: { x: number; y: number }): number {
     const radius = 7 * dpr;
+    const positions = boxHandlePositions(box);
     for (let index = 0; index < positions.length; index++) {
       const position = positions[index];
       if (!position) continue;
@@ -480,6 +740,10 @@
       if (Math.abs(point.x - x) <= radius && Math.abs(point.y - y) <= radius) return index;
     }
     return -1;
+  }
+
+  function hitHandle(point: { x: number; y: number }): number {
+    return hitBoxHandle(norm(selection), point);
   }
 
   const HANDLE_CURSORS = [
@@ -496,10 +760,17 @@
   function updateCursor(point: { x: number; y: number }): void {
     if (!canvas) return;
     let cursor = 'crosshair';
-    if (phase === 'selected') {
-      const handle = hitHandle(point);
+    if (phase === 'selected' && tool === 'none') {
+      const current = selected !== null ? shapes[selected] : undefined;
+      // 已选中形状的手柄优先提示缩放方向。
+      const shapeHandle =
+        current && shapeResizable(current) ? hitBoxHandle(outlineBox(current), point) : -1;
+      const handle = shapeHandle >= 0 ? shapeHandle : hitHandle(point);
       if (handle >= 0) {
         cursor = HANDLE_CURSORS[handle] ?? 'crosshair';
+      } else if (hitShapeIndex(point) >= 0) {
+        // 悬停在标注上：提示可拖动。
+        cursor = 'move';
       } else {
         const sel = norm(selection);
         const inside =
@@ -510,8 +781,11 @@
     canvas.style.cursor = cursor;
   }
 
-  function onDoubleClick(): void {
-    if (phase === 'selected' && !textDraft) void produce('copy');
+  function onDoubleClick(event: MouseEvent): void {
+    if (phase !== 'selected' || textDraft) return;
+    // 双击标注是编辑意图，不触发"双击复制"。
+    if (tool === 'none' && hitShapeIndex(toPhysical(event)) >= 0) return;
+    void produce('copy');
   }
 
   function commitText(): void {
@@ -550,6 +824,8 @@
     if (!last) return;
     redoStack = [...redoStack, last];
     shapes = shapes.slice(0, -1);
+    // 选中的标注被撤销掉时清空选中。
+    if (selected !== null && selected >= shapes.length) selected = null;
     render();
   }
 
@@ -665,6 +941,8 @@
           onclick={() => {
             tool = item.id;
             if (item.id !== 'text') textDraft = null;
+            // 切到绘图工具即退出标注编辑态。
+            if (item.id !== 'none') selected = null;
           }}
         >
           <svg
@@ -713,15 +991,45 @@
       <span class="mx-1 h-5 w-px bg-white/15"></span>
 
       <button
-        class="rounded px-2 py-1 text-xs text-neutral-300 hover:bg-white/10 disabled:opacity-40"
+        class="flex size-8 items-center justify-center rounded text-neutral-300 transition-colors hover:bg-white/10 disabled:opacity-40"
+        title="撤销"
+        aria-label="撤销"
         disabled={shapes.length === 0}
-        onclick={undo}>撤销</button
+        onclick={undo}
       >
+        <svg
+          viewBox="0 0 24 24"
+          class="size-4"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M9 14 4 9l5-5"></path>
+          <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"></path>
+        </svg>
+      </button>
       <button
-        class="rounded px-2 py-1 text-xs text-neutral-300 hover:bg-white/10 disabled:opacity-40"
+        class="flex size-8 items-center justify-center rounded text-neutral-300 transition-colors hover:bg-white/10 disabled:opacity-40"
+        title="重做"
+        aria-label="重做"
         disabled={redoStack.length === 0}
-        onclick={redo}>重做</button
+        onclick={redo}
       >
+        <svg
+          viewBox="0 0 24 24"
+          class="size-4"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="m15 14 5-5-5-5"></path>
+          <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5 5.5 5.5 0 0 0 9.5 20H13"></path>
+        </svg>
+      </button>
 
       <span class="mx-1 h-5 w-px bg-white/15"></span>
 

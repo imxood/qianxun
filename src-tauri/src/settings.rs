@@ -171,7 +171,7 @@ pub struct SearchSettings {
     pub root_history: Vec<String>,
 }
 
-/// 截屏热键（M3）：Tauri 快捷键语法，如 "Alt+A"。空串 = 不注册。
+/// 截屏热键（M3）：Tauri 快捷键语法，如 "Ctrl+Shift+A"。空串 = 不注册。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HotkeysSettings {
@@ -180,8 +180,9 @@ pub struct HotkeysSettings {
 
 impl Default for HotkeysSettings {
     fn default() -> Self {
+        // Alt+A 与微信截屏冲突，默认改用 Ctrl+Shift+A。
         Self {
-            screenshot: "Alt+A".to_owned(),
+            screenshot: "Ctrl+Shift+A".to_owned(),
         }
     }
 }
@@ -533,5 +534,10 @@ mod tests {
         assert!(apply_patch(&current, &patch).is_err());
         let patch = serde_json::json!({ "dsh": { "port": "17300" } });
         assert!(apply_patch(&current, &patch).is_err());
+    }
+
+    #[test]
+    fn 默认截屏热键不与微信冲突() {
+        assert_eq!(HotkeysSettings::default().screenshot, "Ctrl+Shift+A");
     }
 }
