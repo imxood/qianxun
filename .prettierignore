@@ -2,3 +2,8 @@ node_modules
 dist
 src-tauri
 pnpm-lock.yaml
+mobile/android/build
+mobile/android/.gradle
+mobile/android/app/build
+mobile/android/capacitor-cordova-android-plugins/build
+mobile/android/local.properties
