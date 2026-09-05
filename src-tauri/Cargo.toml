@@ -1,6 +1,6 @@
 [package]
 name = "qianxun"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
