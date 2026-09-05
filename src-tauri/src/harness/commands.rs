@@ -55,6 +55,22 @@ pub fn harness_status(state: State<'_, crate::AppState>) -> Status {
     state.harness.supervisor.status()
 }
 
+/// DSH 页 iframe 应加载的回环入口地址（`http://127.0.0.1:17400`）。
+/// DSH 0.1.2 的 Strict cookie 在跨站 iframe 里不可携带（401 死循环），
+/// iframe 一律走本机网关的回环端：cookie 由服务端持有（见 dsh_upstream
+/// 模块文档）。None = 网关尚未监听成功（前端给出明确提示，不静默回退直连）。
+#[tauri::command]
+pub fn harness_proxy_url(state: State<'_, crate::AppState>) -> Option<String> {
+    let running = state
+        .remote
+        .running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    running
+        .as_ref()
+        .map(|handle| format!("http://{}", handle.loopback_addr))
+}
+
 /// 启动 DSH 并返回它服务的 origin。
 #[tauri::command]
 pub async fn harness_start(app: AppHandle) -> Result<String> {

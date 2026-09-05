@@ -6,6 +6,7 @@
 mod atomic;
 mod bridge;
 mod child_output;
+mod dsh_upstream;
 mod error;
 mod harness;
 mod logging;
@@ -145,6 +146,10 @@ pub fn run() {
             app.manage(shots::commands::ShotsState::default());
             app.manage(terminal::commands::TerminalState::default());
             forward_events(handle, &supervisor);
+            // 远程/回环双端网关：setup 即占位监听 127.0.0.1:17400（DSH 页
+            // iframe 立刻有稳定地址），启用远程时再额外绑 LAN。DSH 就绪事件
+            // 由 forward_events 同步触发，热更新上游。
+            tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
             tray::build(handle)?;
 
             // 截屏热键随设置恢复（空串 = 不注册；失败不阻断启动，日志可见）。
@@ -180,7 +185,6 @@ pub fn run() {
                     }
                 })?;
             }
-
 
             // 远程网关：设置里启用过就恢复监听（上游 origin 等 DSH 就绪事件补）。
             tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
@@ -218,6 +222,7 @@ pub fn run() {
             settings::commands::settings_update,
             harness::commands::harness_environment,
             harness::commands::harness_status,
+            harness::commands::harness_proxy_url,
             harness::commands::harness_start,
             harness::commands::harness_stop,
             harness::commands::harness_install,
@@ -287,8 +292,8 @@ fn forward_events(app: &AppHandle, supervisor: &Arc<Supervisor>) {
             match &event {
                 Event::Status(status) => {
                     tray::reflect_status(status);
-                    let _ = handle.emit(EVENT_CHANNEL, &event);
-                    // DSH 就绪/停止都触发网关同步：上游 origin 出现或消失。
+                    // DSH 就绪/停止触发网关同步：上游 origin 出现或消失，
+                    // 回环 iframe 与 LAN 设备共享同一套更新。
                     if matches!(
                         status,
                         harness::supervisor::Status::Ready { .. }
@@ -296,6 +301,7 @@ fn forward_events(app: &AppHandle, supervisor: &Arc<Supervisor>) {
                     ) {
                         tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
                     }
+                    let _ = handle.emit(EVENT_CHANNEL, &event);
                 }
                 Event::Log { .. } => {
                     let _ = handle.emit(EVENT_CHANNEL, &event);

@@ -1,91 +1,53 @@
-//! 网关本体：axum 服务 + DSH 回环转发 + WS 双向桥。
+//! 网关本体：axum 服务 + 回环/局域网双端 + DSH 回环转发。
 //!
-//! DSH 0.1.2 起自带浏览器鉴权：就绪 URL 里的启动 token 只用于 `GET /`
-//! 兑换一张 Host 绑定的签名 cookie，`/api/*` 与 WS 升级只认 cookie
-//! （token 直接放 query 不被接受）。所以网关在启动时（及 cookie 缺失
-//! /失效时）替远程设备完成兑换：token 与 cookie 都留在服务端，手机
-//! 侧只持有千寻自己的 `qx_token`。
+//! 一个进程一个 axum Router，但绑两个 socket——**永远**绑 `127.0.0.1:port`
+//! 给本地外壳用（DSH 页 iframe、Notes 页 fetch），**按需**绑 `bind_ip:port`
+//! 给局域网用（手机扫描）。两条入口走同一份共享状态：回环请求免 qx_token
+//! 但要走 Host/Origin 栅栏（挡浏览器侧 drive-by 与 DNS rebinding），
+//! 局域网请求必须带 qx_token。端口固定 17400，iframe URL 永不变。
+//!
+//! DSH 0.1.2 起的浏览器鉴权由共享原语 dsh_upstream 在服务端完成
+//! （token 与 cookie 都留在千寻侧，回环/局域网都一样）。
 
+use std::future::IntoFuture;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{
-        ws::{WebSocket, WebSocketUpgrade},
-        State,
-    },
+    extract::{ws::WebSocketUpgrade, OriginalUri, State},
     http::{HeaderMap, Request, Response, StatusCode},
-    response::IntoResponse,
     routing::any,
     Router,
 };
-use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use tokio::sync::watch;
-use tokio_tungstenite::tungstenite::http::Request as HttpRequest;
 
+use crate::dsh_upstream::{self, plain, query_param, Upstream};
 use crate::remote::RemoteDevice;
 
-/// DSH 签名 cookie 的名字前缀（@deepseek-ai/dsh-client-connection）。
-const DSH_COOKIE_PREFIX: &str = "dsh-auth-";
-
-/// 单次兑换/转发允许的耗时；网关在回环与 EasyTier 网内，给小超时。
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
-const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// 转发请求体的缓冲上限（64 MiB）：重试需要可重放的体，但拒绝无界内存。
-const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-
-/// 跳过转发的逐跳头（RFC 7230；cookie/set-cookie 由两端各自管理）。
-const HOP_HEADERS: [&str; 9] = [
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "set-cookie",
-];
-
-/// 手机侧不该漏给 DSH 的头：
-/// - `host`：DSH 的 Host/Origin 栅栏按 Host 判定，必须让它看到网关→DSH
-///   的真实 authority（reqwest 按 URL 自动设置）；
-/// - `cookie`：`qx_token` 是网关层凭据，不归 DSH；
-/// - `origin`：手机页面的 origin 是网关，原样转发会被 DSH 栅栏 403。
-const SKIP_UPSTREAM_HEADERS: [&str; 3] = ["host", "cookie", "origin"];
-
-/// 运行中的网关句柄：停止信号 + 任务 + 实际监听地址（绑定成功的证明）+
-/// 启动配置指纹（sync 用它判断「配置没变才保留」，设备表是启动快照）。
+/// 运行中的网关句柄：停止信号 + 监督任务 + 监听地址 + 启动配置指纹。
+/// `lan_addr = None` 表示只绑了回环（远程功能未启用）。
 pub struct GatewayHandle {
     pub shutdown: watch::Sender<bool>,
     pub task: tokio::task::JoinHandle<()>,
-    pub local_addr: std::net::SocketAddr,
+    /// LAN 监听地址；未启用远程时为 None。
+    pub lan_addr: Option<SocketAddr>,
+    /// 回环监听地址（永远存在）。DSH 页 iframe URL 即 `http://{loopback_addr}`。
+    pub loopback_addr: SocketAddr,
     pub fingerprint: u64,
 }
 
-/// 网关共享状态：DSH origin（host:port）+ 设备表快照（每次启动重建）+
-/// 服务端持有的 DSH 启动 token 与其兑换出的签名 cookie。
+/// 网关共享状态：上游原语（origin/启动 URL/cookie）+ 设备表快照 +
+/// 当前回环地址（用于 Host 路由分发）。
 #[derive(Clone)]
 pub struct GatewayState {
-    pub upstream: String,
+    pub upstream: Upstream,
     pub devices: Arc<Vec<RemoteDevice>>,
-    pub client: reqwest::Client,
-    /// DSH 就绪 URL 里的启动 token；空 = 旧版 DSH，无浏览器鉴权。
-    pub launch_token: Option<String>,
-    /// 兑换出的 `dsh-auth-*` cookie（Name=Value），跨请求复用。
-    dsh_cookie: Arc<tokio::sync::Mutex<Option<String>>>,
+    pub loopback_addr: SocketAddr,
 }
 
 impl GatewayState {
-    fn upstream_host(&self) -> &str {
-        self.upstream
-            .trim_start_matches("http://")
-            .trim_end_matches('/')
-    }
-
-    /// cookie/query 命中任一未吊销 token？
+    /// 设备鉴权（仅局域网入口走）。
     fn token_valid(&self, presented: &str) -> bool {
         !presented.is_empty()
             && self
@@ -94,130 +56,146 @@ impl GatewayState {
                 .any(|device| !device.revoked && device.token == presented)
     }
 
-    /// 取回上游可用的 DSH cookie：优先缓存，缺失时兑换一次。
-    async fn ensure_cookie(&self) -> Option<String> {
-        let mut cached = self.dsh_cookie.lock().await;
-        if let Some(cookie) = cached.as_ref() {
-            return Some(cookie.clone());
-        }
-        let cookie = exchange_cookie(self).await?;
-        *cached = Some(cookie.clone());
-        Some(cookie)
-    }
-
-    /// 缓存作废并强制重兑（上游 401 = cookie 失效，比如 DSH_HOME 被换）。
-    async fn refresh_cookie(&self) -> Option<String> {
-        let mut cached = self.dsh_cookie.lock().await;
-        *cached = None;
-        let cookie = exchange_cookie(self).await?;
-        *cached = Some(cookie.clone());
-        Some(cookie)
+    /// 当前请求来自回环入口？靠 Host 头与本机回环端口比对——同进程绑了
+    /// 多个 socket，但只有真正命中回环 listener 的请求才匹配此端口。
+    fn is_loopback(&self, headers: &HeaderMap) -> bool {
+        let Some(host) = headers.get("host").and_then(|value| value.to_str().ok()) else {
+            return false;
+        };
+        let Some((name, port)) = host.rsplit_once(':') else {
+            return false;
+        };
+        port == self.loopback_addr.port().to_string()
+            && matches!(name, "127.0.0.1" | "localhost" | "[::1]")
     }
 }
 
-/// 用启动 token 向 DSH `GET /?token=…` 兑换签名 cookie（Name=Value）。
-/// 失败返回 None（DSH 未就绪/旧版无鉴权/token 不对）。
-async fn exchange_cookie(state: &GatewayState) -> Option<String> {
-    let token = state.launch_token.as_deref().filter(|t| !t.is_empty())?;
-    let url = format!("http://{}/?token={token}", state.upstream_host());
-    let response = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(EXCHANGE_TIMEOUT)
-        .build()
-        .ok()?
-        .get(&url)
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_redirection() {
-        return None;
-    }
-    response
-        .headers()
-        .get_all(reqwest::header::SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .find_map(|value| {
-            let pair = value.split(';').next()?.trim();
-            pair.starts_with(DSH_COOKIE_PREFIX).then(|| pair.to_owned())
-        })
-}
-
-/// 启动网关。绑定失败（地址不可用/被占）即返错，不留半开状态。
+/// 启动网关。永远绑回环 `127.0.0.1:port`；`bind_ip` 非空时同时绑局域网。
 /// fingerprint = 启动配置指纹（commands::fingerprint），存入句柄供 sync 比对。
-/// `launch_token` 是 DSH 就绪 URL 里的启动 token（空 = 旧版无鉴权）。
+/// `upstream` 是 DSH origin（host:port）；`dsh_url` 是 DSH 就绪时打印的
+/// 完整 URL（已含 `?token=`）—— 兑换 cookie 时整段打过去；None = DSH 未就绪。
 pub async fn start(
     bind_ip: &str,
     port: u16,
     upstream: String,
-    launch_token: String,
+    dsh_url: Option<String>,
     devices: Vec<RemoteDevice>,
     fingerprint: u64,
 ) -> Result<GatewayHandle, String> {
-    let bind: std::net::SocketAddr = format!("{bind_ip}:{port}")
+    let loopback_bind: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
-        .map_err(|cause| format!("绑定地址不合法（{bind_ip}:{port}）：{cause}"))?;
+        .map_err(|cause| format!("回环地址不合法：{cause}"))?;
+    let upstream_state = Upstream::new(upstream, dsh_url.clone());
+    let loopback_listener = tokio::net::TcpListener::bind(loopback_bind)
+        .await
+        .map_err(|cause| format!("回环监听失败（{loopback_bind}）：{cause}"))?;
+    let loopback_addr = loopback_listener
+        .local_addr()
+        .map_err(|cause| cause.to_string())?;
+
     let state = GatewayState {
-        upstream,
+        upstream: upstream_state.clone(),
         devices: Arc::new(devices),
-        client: reqwest::Client::new(),
-        launch_token: (!launch_token.is_empty()).then_some(launch_token),
-        dsh_cookie: Arc::new(tokio::sync::Mutex::new(None)),
+        loopback_addr,
     };
-    // 顺手把登录兑换做掉：首个扫码请求就不必等一次兑换往返。
-    if state.launch_token.is_some() {
-        match state.ensure_cookie().await {
-            Some(_) => {
-                crate::logging::log("info", "远程网关已向 DSH 兑换登录 cookie");
-            }
-            None => {
-                crate::logging::log(
-                    "warn",
-                    "远程网关暂未取得 DSH 登录 cookie（DSH 未就绪？）；转发时会自动重试",
-                );
-            }
+    // 顺手把登录兑换做掉：首个请求就不必等一次兑换往返。
+    if dsh_url.is_some() {
+        match upstream_state.ensure_cookie().await {
+            Some(_) => crate::logging::log("info", "网关已向 DSH 兑换登录 cookie"),
+            None => crate::logging::log(
+                "warn",
+                "网关暂未取得 DSH 登录 cookie（DSH 未就绪？）；转发时会自动重试",
+            ),
         }
     }
-    // 专用路由先于兜底：两条 WS 下行各自成桥，其余路径统一转发。
+    // `/api/remote.mux` 是 DSH 唯一的 WS mux 路径（@deepseek-ai/dsh-api-gateway
+    // 注册的 registerUpgrade 唯一项）。WS 路由必须显式列出——走兜底
+    // handler 时 forward 走的是 reqwest，不能转发 WS 升级（要 tokio-tungstenite
+    // 桥），会变 404。
     let app = Router::new()
-        .route("/api/events.mux", any(ws_handler))
-        .route("/api/events.host", any(ws_handler))
+        .route("/api/remote.mux", any(ws_handler))
         .route("/{*rest}", any(handler))
         .route("/", any(handler))
-        .with_state(state);
+        .with_state(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|cause| format!("网关监听失败（{bind}）：{cause}"))?;
-    let local_addr = listener.local_addr().map_err(|cause| cause.to_string())?;
+    // 可选绑局域网——失败时不让半开状态出现，调用方决定是否回退到回环
+    // 唯一模式。bind_ip 与回环同地址（127.0.0.1）时直接跳过 LAN，避免双绑
+    // 同一 socket 报错。
+    let (lan_addr, lan_listener) = if !bind_ip.is_empty() && bind_ip != "127.0.0.1" {
+        let lan_bind: SocketAddr = format!("{bind_ip}:{port}")
+            .parse()
+            .map_err(|cause| format!("绑定地址不合法（{bind_ip}:{port}）：{cause}"))?;
+        let listener = tokio::net::TcpListener::bind(lan_bind)
+            .await
+            .map_err(|cause| format!("网关监听失败（{lan_bind}）：{cause}"))?;
+        let local = listener.local_addr().map_err(|cause| cause.to_string())?;
+        (Some(local), Some(listener))
+    } else {
+        (None, None)
+    };
+
+    // 单个监督任务托起所有 server，共享同一停止信号——任一 server 退出就
+    // 结束整组（restart 由 sync 层重新建）。
     let (shutdown, mut signal) = watch::channel(false);
     let task = tokio::spawn(async move {
-        let server = axum::serve(listener, app);
+        // axum 0.8 的 Serve 实现 IntoFuture（不是直接 Future），select! 接受
+        // 两者但 Either 要 Future 形态——用 .into_future() 统一一下。
+        let loopback_server = axum::serve(loopback_listener, app.clone()).into_future();
+        let lan_server: futures_util::future::Either<
+            std::future::Pending<Result<(), std::io::Error>>,
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>,
+        > = match lan_listener {
+            Some(listener) => futures_util::future::Either::Right(Box::pin(
+                axum::serve(listener, app).into_future(),
+            )),
+            None => futures_util::future::Either::Left(std::future::pending()),
+        };
         tokio::select! {
-            result = server => {
+            _ = signal.changed() => {
+                // 停机请求：丢弃所有 server（连接随之关闭）。
+                // 落日志：网关每重建一次就杀光全部 SSE/WS 连接，
+                // 「连接异常」类问题先看这里有没有意外停机。
+                crate::logging::log(
+                    "info",
+                    "网关停止：经由网关的全部连接（HTTP/SSE/WS）随即断开",
+                );
+            }
+            result = loopback_server => {
                 if let Err(cause) = result {
-                    crate::logging::log("warn", &format!("远程网关退出：{cause}"));
+                    crate::logging::log("warn", &format!("回环网关退出：{cause}"));
                 }
             }
-            _ = signal.changed() => {
-                // 停机请求：丢弃 server（连接随之关闭）。
+            result = lan_server => {
+                if let Err(cause) = result {
+                    crate::logging::log("warn", &format!("局域网网关退出：{cause}"));
+                }
             }
         }
     });
     Ok(GatewayHandle {
         shutdown,
         task,
-        local_addr,
+        lan_addr,
+        loopback_addr,
         fingerprint,
     })
 }
 
-/// 统一入口：配对外，其余全部 HTTP 转发（含 SSE 流响应）。
+/// 统一入口：按 Host 头分发——回环走栅栏免鉴权，局域网走设备配对。
 async fn handler(State(state): State<GatewayState>, request: Request<Body>) -> Response<Body> {
     let path = request.uri().path().to_owned();
     let query = request.uri().query().unwrap_or_default().to_owned();
 
-    // 配对入口：/qx-gate?token=…（唯一免鉴权路径）。
+    if state.is_loopback(&request.headers()) {
+        // 回环入口：栅栏通过即转发（含 SSE 流响应与 DSH 页面本身）。
+        if !access_allowed(&request.headers()) {
+            crate::logging::log("warn", &format!("[http] 拒绝非本机外壳来源请求：{path}"));
+            return plain(StatusCode::FORBIDDEN, "非本机外壳来源，拒绝访问");
+        }
+        return dsh_upstream::forward(&state.upstream, request).await;
+    }
+
+    // 局域网入口：配对 → 鉴权 → 转发（含 SSE 流响应）。
     if path == "/qx-gate" {
         let token = query_param(&query, "token");
         if state.token_valid(&token) {
@@ -225,43 +203,78 @@ async fn handler(State(state): State<GatewayState>, request: Request<Body>) -> R
         }
         return plain(StatusCode::UNAUTHORIZED, "无效或已吊销的配对 token");
     }
-
     if !authorized(&state, &query, &request.headers().clone()) {
         return plain(
             StatusCode::UNAUTHORIZED,
             "未配对设备：请用千寻生成的配对链接打开 /qx-gate?token=…",
         );
     }
-
-    forward(&state, request).await
+    dsh_upstream::forward(&state.upstream, request).await
 }
 
-/// WS 下行桥入口：鉴权后升级，浏览器 ↔ DSH 帧级透传（保留原始路径）。
-/// 上游连接携带兑换出的 DSH cookie；没有（旧版 DSH）就裸连。
+/// WS 下行桥入口：按 Host 头分发鉴权。两条入口都升级为 WS 双向桥。
 async fn ws_handler(
     State(state): State<GatewayState>,
-    uri: axum::extract::OriginalUri,
+    uri: OriginalUri,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response<Body> {
-    if !authorized(&state, uri.query().unwrap_or(""), &headers) {
+    let path = uri.path().to_owned();
+    if state.is_loopback(&headers) {
+        if !access_allowed(&headers) {
+            crate::logging::log(
+                "warn",
+                &format!("[ws] 拒绝非本机外壳来源的 WS 升级：{path}"),
+            );
+            return plain(StatusCode::FORBIDDEN, "非本机外壳来源，拒绝访问");
+        }
+    } else if !authorized(&state, uri.query().unwrap_or(""), &headers) {
+        crate::logging::log("warn", &format!("[ws] 拒绝未配对设备的 WS 升级：{path}"));
         return plain(StatusCode::UNAUTHORIZED, "未配对设备");
     }
-    let upstream_url = format!("ws://{}{}", state.upstream_host(), uri.path());
-    let mut request = match HttpRequest::builder().uri(&upstream_url).body(()) {
-        Ok(request) => request,
-        Err(cause) => return plain(StatusCode::BAD_GATEWAY, &format!("上游请求构造失败：{cause}")),
-    };
-    if let Some(cookie) = state.ensure_cookie().await {
-        if let Ok(value) = cookie.parse() {
-            request.headers_mut().insert("cookie", value);
-        }
-    }
-    ws.on_upgrade(move |client| bridge_ws(client, request))
-        .into_response()
+    dsh_upstream::upgrade_ws(&state.upstream, ws, &path).await
 }
 
-/// 鉴权：cookie（常规与 WS 升级请求都带）优先，query 兜底。
+/// 回环入口的栅栏：
+/// - `Host` 必须是回环名带端口——挡 DNS rebinding（rebind 后 Host 是攻击域）；
+/// - `Origin` 出现时（浏览器对跨站 fetch/XHR/WS 必带）必须是外壳或回环
+///   http 源——挡任意网页对本端口的 drive-by POST/WS。GET 导航与同源
+///   子资源不带 Origin，放行。
+fn access_allowed(headers: &HeaderMap) -> bool {
+    let host_ok = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(loopback_authority);
+    if !host_ok {
+        return false;
+    }
+    match headers.get("origin").and_then(|value| value.to_str().ok()) {
+        None | Some("") => true,
+        Some(origin) => origin_allowed(origin),
+    }
+}
+
+/// Host 形如 `127.0.0.1:17301`（IPv6 字面量带方括号）；必须是回环名。
+fn loopback_authority(host: &str) -> bool {
+    let Some((name, port)) = host.rsplit_once(':') else {
+        return false;
+    };
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    matches!(name, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// 允许的 Origin：桌面外壳（tauri.localhost，Tauri v2 Windows 语义）与
+/// 回环 http 源（DSH 页自身、dev server 的 shell 页）。
+fn origin_allowed(origin: &str) -> bool {
+    origin == "http://tauri.localhost"
+        || origin == "https://tauri.localhost"
+        || origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("http://localhost:")
+}
+
+/// 局域网鉴权：cookie（常规与 WS 升级请求都带）优先，query 兜底。
 fn authorized(state: &GatewayState, query: &str, headers: &HeaderMap) -> bool {
     let cookie_token = headers
         .get(axum::http::header::COOKIE)
@@ -277,201 +290,6 @@ fn authorized(state: &GatewayState, query: &str, headers: &HeaderMap) -> bool {
         query_param(query, "token")
     };
     state.token_valid(&token)
-}
-
-/// 双向桥：浏览器 WS ↔ DSH WS（帧级透传，ping/pong/close 各自终结）。
-async fn bridge_ws(client: WebSocket, upstream: HttpRequest<()>) {
-    let Ok((upstream, _)) = tokio_tungstenite::connect_async(upstream).await else {
-        return; // 上游不可达：直接关客户端（浏览器会自动重连）。
-    };
-    let (mut client_tx, mut client_rx) = client.split();
-    let (mut upstream_tx, mut upstream_rx) = upstream.split();
-    let to_upstream = async {
-        while let Some(Ok(frame)) = client_rx.next().await {
-            if upstream_tx.send(to_tungstenite(frame)).await.is_err() {
-                break;
-            }
-        }
-    };
-    let to_client = async {
-        while let Some(Ok(frame)) = upstream_rx.next().await {
-            if client_tx.send(to_axum(frame)).await.is_err() {
-                break;
-            }
-        }
-    };
-    tokio::join!(to_upstream, to_client);
-    let _ = client_tx.close().await;
-    let _ = upstream_tx.close().await;
-}
-
-/// axum WS 帧 → tungstenite 帧（字节语义透传）。
-fn to_tungstenite(frame: axum::extract::ws::Message) -> tokio_tungstenite::tungstenite::Message {
-    use axum::extract::ws::Message as In;
-    use tokio_tungstenite::tungstenite::Message as Out;
-    match frame {
-        In::Text(text) => Out::Text(text.as_str().to_owned().into()),
-        In::Binary(bytes) => Out::Binary(bytes.to_vec().into()),
-        In::Ping(bytes) => Out::Ping(bytes.to_vec().into()),
-        In::Pong(bytes) => Out::Pong(bytes.to_vec().into()),
-        In::Close(frame) => {
-            Out::Close(frame.map(
-                |close| tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                    code: close.code.into(),
-                    reason: close.reason.as_str().to_owned().into(),
-                },
-            ))
-        }
-    }
-}
-
-/// tungstenite 帧 → axum WS 帧。
-fn to_axum(frame: tokio_tungstenite::tungstenite::Message) -> axum::extract::ws::Message {
-    use axum::extract::ws::Message as Out;
-    use tokio_tungstenite::tungstenite::Message as In;
-    match frame {
-        In::Text(text) => Out::Text(text.as_str().to_owned().into()),
-        In::Binary(bytes) => Out::Binary(bytes.to_vec().into()),
-        In::Ping(bytes) => Out::Ping(bytes.to_vec().into()),
-        In::Pong(bytes) => Out::Pong(bytes.to_vec().into()),
-        In::Close(frame) => Out::Close(frame.map(|close| axum::extract::ws::CloseFrame {
-            code: close.code.into(),
-            reason: close.reason.as_str().to_owned().into(),
-        })),
-        In::Frame(_) => Out::Binary(Vec::new().into()),
-    }
-}
-
-/// HTTP 转发：方法/路径透传，响应流式回写（SSE 也走这条路）。
-/// 手机侧头按 [`SKIP_UPSTREAM_HEADERS`] 剥除，换上网关持有的 DSH
-/// cookie；上游 401 时强制重兑一次再试（cookie 失效自愈）。
-async fn forward(state: &GatewayState, request: Request<Body>) -> Response<Body> {
-    let (parts, body) = request.into_parts();
-    let url = format!(
-        "http://{}{}{}",
-        state.upstream_host(),
-        parts.uri.path(),
-        parts
-            .uri
-            .query()
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default()
-    );
-    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
-    // 请求体先缓冲成字节：POST 载荷都很小，换来 401 重试可以原样重放
-    // （流式体只能消费一次）。超限即拒绝，不给无界内存机会。
-    let body_bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(cause) => {
-            return plain(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                &format!("请求体无法缓冲：{cause}"),
-            )
-        }
-    };
-
-    let build_request = move |cookie: &Option<String>| {
-        let mut outgoing = state
-            .client
-            .request(method.clone(), &url)
-            .timeout(UPSTREAM_TIMEOUT);
-        for (name, value) in parts.headers.iter() {
-            if HOP_HEADERS.contains(&name.as_str())
-                || SKIP_UPSTREAM_HEADERS.contains(&name.as_str())
-                || name.as_str().starts_with("sec-fetch-")
-            {
-                continue;
-            }
-            if let Ok(header_value) = value.to_str() {
-                outgoing = outgoing.header(name.as_str(), header_value);
-            }
-        }
-        if let Some(cookie) = cookie {
-            outgoing = outgoing.header(reqwest::header::COOKIE, cookie);
-        }
-        if !body_bytes.is_empty() {
-            outgoing = outgoing.body(body_bytes.clone());
-        }
-        outgoing
-    };
-
-    let cookie = state.ensure_cookie().await;
-    match build_request(&cookie).send().await {
-        Ok(upstream) if upstream.status() == reqwest::StatusCode::UNAUTHORIZED && cookie.is_some() => {
-            // cookie 失效（如 DSH_HOME 被替换）：重兑一次，失败就把 401 原样回给手机。
-            let Some(fresh) = state.refresh_cookie().await else {
-                return relay(upstream).await;
-            };
-            match build_request(&Some(fresh)).send().await {
-                Ok(retried) => relay(retried).await,
-                Err(cause) => unreachable_upstream(&cause),
-            }
-        }
-        Ok(upstream) => relay(upstream).await,
-        Err(cause) => unreachable_upstream(&cause),
-    }
-}
-
-/// 把上游响应转成网关响应：流式回写，逐跳头与 DSH 的 set-cookie 不外泄。
-async fn relay(upstream: reqwest::Response) -> Response<Body> {
-    let mut response = Response::builder().status(upstream.status().as_u16());
-    for (name, value) in upstream.headers().iter() {
-        if HOP_HEADERS.contains(&name.as_str()) {
-            continue;
-        }
-        response = response.header(name.clone(), value.clone());
-    }
-    let stream = upstream.bytes_stream().map_err(std::io::Error::other);
-    response
-        .body(Body::from_stream(stream))
-        .unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "响应构造失败"))
-}
-
-fn unreachable_upstream(cause: &reqwest::Error) -> Response<Body> {
-    plain(
-        StatusCode::BAD_GATEWAY,
-        &format!("DSH 上游不可达（{cause}）：请确认千寻内 DSH 正在运行"),
-    )
-}
-
-// ---- 小工具 ----
-
-fn query_param(query: &str, key: &str) -> String {
-    for pair in query.split('&') {
-        let mut split = pair.splitn(2, '=');
-        if split.next() == Some(key) {
-            return split.next().map(url_decode).unwrap_or_default();
-        }
-    }
-    String::new()
-}
-
-/// 极简 percent-decode（token 只含 hex，够用）。
-fn url_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&text[index + 1..index + 3], 16) {
-                out.push(byte);
-                index += 3;
-                continue;
-            }
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn plain(status: StatusCode, text: &str) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(Body::from(text.to_owned()))
-        .unwrap_or_else(|_| Response::new(Body::from(text.to_owned())))
 }
 
 fn response_with_cookie(token: &str) -> Response<Body> {
@@ -507,4 +325,70 @@ pub fn new_device_id() -> String {
         "dev-{}-{suffix}",
         chrono::Local::now().format("%Y%m%d%H%M%S")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{access_allowed, loopback_authority, origin_allowed};
+    use axum::http::HeaderMap;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                axum::http::header::HeaderName::from_lowercase(name.as_bytes()).unwrap(),
+                axum::http::header::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn host必须是回环名带端口() {
+        assert!(loopback_authority("127.0.0.1:17400"));
+        assert!(loopback_authority("localhost:17400"));
+        assert!(loopback_authority("[::1]:17400"));
+        assert!(!loopback_authority("evil.com:17400"));
+        assert!(!loopback_authority("127.0.0.1"));
+        assert!(!loopback_authority("127.0.0.1:"));
+        assert!(!loopback_authority("127.0.0.1:abc"));
+    }
+
+    #[test]
+    fn origin允许外壳与回环() {
+        assert!(origin_allowed("http://tauri.localhost"));
+        assert!(origin_allowed("http://127.0.0.1:5180"));
+        assert!(origin_allowed("http://localhost:5180"));
+        assert!(!origin_allowed("https://evil.com"));
+        assert!(!origin_allowed("http://evil.com"));
+        assert!(!origin_allowed("null"));
+    }
+
+    #[test]
+    fn 栅栏组合判定() {
+        // 常规 iframe 导航：Host 回环、无 Origin → 放行。
+        assert!(access_allowed(&headers(&[("host", "127.0.0.1:17400")])));
+        // 外壳 fetch：tauri.localhost → 放行。
+        assert!(access_allowed(&headers(&[
+            ("host", "127.0.0.1:17400"),
+            ("origin", "http://tauri.localhost"),
+        ])));
+        // DSH 页内 WS：回环 origin → 放行。
+        assert!(access_allowed(&headers(&[
+            ("host", "127.0.0.1:17400"),
+            ("origin", "http://127.0.0.1:17400"),
+        ])));
+        // 驱动式攻击：Host 对但 Origin 是任意网页 → 拒。
+        assert!(!access_allowed(&headers(&[
+            ("host", "127.0.0.1:17400"),
+            ("origin", "https://evil.com"),
+        ])));
+        // DNS rebinding：Host 是攻击域 → 拒。
+        assert!(!access_allowed(&headers(&[
+            ("host", "evil.com:17400"),
+            ("origin", "http://tauri.localhost"),
+        ])));
+        // 无 Host（构造残缺请求）→ 拒。
+        assert!(!access_allowed(&headers(&[])));
+    }
 }

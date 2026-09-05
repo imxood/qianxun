@@ -42,7 +42,9 @@
   let organizeInstruction = $state('');
   let organizeResult = $state('');
   let organizeError = $state('');
-  const dshOrigin = $derived(harness.status.phase === 'ready' ? harness.status.origin : '');
+  // 整理请求走回环代理：外壳页面直连 DSH origin 是跨站 fetch，0.1.2 起
+  // 会被 Strict cookie 鉴权 401（cookie 由服务端持有，见 harness::proxy）。
+  const dshProxyBase = $derived(harness.status.phase === 'ready' ? harness.proxyUrl : '');
 
   const vault = $derived(settings.current?.notes.vaultDir ?? '');
   const dark = $derived(theme.resolved === 'dark');
@@ -235,7 +237,7 @@
     organizeError = '';
     organizeResult = '';
     try {
-      const response = await fetch(`${dshOrigin}/qx/notes/organize`, {
+      const response = await fetch(`${dshProxyBase}/qx/notes/organize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -340,8 +342,8 @@
         <span class="ml-auto flex items-center gap-2">
           <button
             class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
-            title={dshOrigin ? 'AI 整理（经 qx-bridge）' : 'DSH 未运行：先启动 DSH 并部署桥'}
-            disabled={!dshOrigin || organizing}
+            title={dshProxyBase ? 'AI 整理（经 qx-bridge）' : 'DSH 未运行：先启动 DSH 并部署桥'}
+            disabled={!dshProxyBase || organizing}
             onclick={() => {
               organizeOpen = !organizeOpen;
               organizeError = '';
@@ -400,7 +402,7 @@
             />
             <button
               class="rounded bg-accent px-2.5 py-1 text-xs text-white hover:bg-accent/90 disabled:opacity-40"
-              disabled={organizing || !dshOrigin}
+              disabled={organizing || !dshProxyBase}
               onclick={() => void runOrganize()}
             >
               {organizing ? '生成中…' : '生成'}
@@ -420,7 +422,7 @@
               收起
             </button>
           </div>
-          {#if !dshOrigin}
+          {#if !dshProxyBase}
             <p class="text-xs text-muted">DSH 未运行或桥未部署：先启动 DSH（并在设置页部署桥）。</p>
           {/if}
           {#if organizeError}<p class="text-xs text-danger">{organizeError}</p>{/if}

@@ -617,8 +617,8 @@ mod tests {
 
     use super::{
         check_installed, entry_of, install_spec, npm_cli_candidates, recover_interrupted_install,
-        remove_dir_if_exists, runtime_complete, runtime_version, InstallPlan, PACKAGE, PNPM_SPEC,
-        PINNED_VERSION,
+        remove_dir_if_exists, runtime_complete, runtime_version, InstallPlan, PACKAGE,
+        PINNED_VERSION, PNPM_SPEC,
     };
 
     fn write_runtime(root: &Path, version: Option<&str>) {
@@ -729,7 +729,10 @@ mod tests {
         fs::create_dir_all(live.join("node_modules")).expect("残骸");
         fs::write(
             root.join("dsh-install.json"),
-            format!(r#"{{"schema":1,"package":"{PACKAGE}","spec":"{}"}}"#, install_spec()),
+            format!(
+                r#"{{"schema":1,"package":"{PACKAGE}","spec":"{}"}}"#,
+                install_spec()
+            ),
         )
         .expect("journal");
 
@@ -752,7 +755,10 @@ mod tests {
         write_runtime(&backup, Some("0.1.0"));
         fs::write(
             root.join("dsh-install.json"),
-            format!(r#"{{"schema":1,"package":"{PACKAGE}","spec":"{}"}}"#, install_spec()),
+            format!(
+                r#"{{"schema":1,"package":"{PACKAGE}","spec":"{}"}}"#,
+                install_spec()
+            ),
         )
         .expect("journal");
 

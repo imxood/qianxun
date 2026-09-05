@@ -16,6 +16,7 @@ export const IPC_COMMANDS = [
   'settings_update',
   'harness_environment',
   'harness_status',
+  'harness_proxy_url',
   'harness_start',
   'harness_stop',
   'harness_install',
@@ -200,14 +201,21 @@ export type HarnessStatus =
   | { phase: 'starting' }
   | {
       phase: 'ready';
-      /** 仅 scheme://host:port；token 单独给，凭据不进展示字段。 */
+      /** scheme://host:port，去 token 的干净 origin（展示、托盘等用）。 */
       origin: string;
-      /** DSH 0.1.2+ 的进程启动 token（旧版为空串）。 */
-      token: string;
+      /**
+       * 含 `?token=` 的完整 URL。仅供「在系统浏览器打开」（顶层导航不受
+       * SameSite 限制）；DSH 页 iframe 走 `harness_proxy_url` 的回环代理
+       * （Strict cookie 在跨站 iframe 不可携带，cookie 由服务端持有）。
+       */
+      url: string;
       pid: number;
     }
   | { phase: 'restarting'; attempt: number; delayMs: number }
   | { phase: 'failed'; reason: string };
+
+/** harness_proxy_url 返回：DSH 回环代理地址（http://127.0.0.1:<port>）；未启动 = null。 */
+export type HarnessProxyUrlResult = string | null;
 
 export type HarnessStream = 'stdout' | 'stderr';
 

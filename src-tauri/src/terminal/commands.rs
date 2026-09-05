@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
@@ -67,16 +67,14 @@ pub struct TerminalState {
 
 impl TerminalState {
     fn next_pin_id(&self) -> u64 {
-        let counter = self
-            .next_pin_id
-            .get_or_init(|| {
-                AtomicU64::new(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(1),
-                )
-            });
+        let counter = self.next_pin_id.get_or_init(|| {
+            AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(1),
+            )
+        });
         counter.fetch_add(1, Ordering::AcqRel)
     }
 }
@@ -131,6 +129,10 @@ pub fn terminal_spawn(
         .unwrap_or("")
         .to_ascii_lowercase();
     if matches!(basename.as_str(), "pwsh.exe" | "powershell.exe") {
+        // -NoExit 必须紧跟 -Command 前：PowerShell 的 -Command 默认跑完即退
+        //（不像 bash -c 那样会进入交互），不传 -NoExit 终端启动后立刻看到
+        // 「进程已退出」。-NoExit 让钩子（prompt 函数）跑完后继续进入交互。
+        command.arg("-NoExit");
         command.arg("-Command");
         command.arg(PWSH_CWD_HOOK);
     }
@@ -387,9 +389,8 @@ pub fn terminal_clear(state: State<'_, TerminalState>, id: u64) -> Result<()> {
 
 fn pinned_dir(app: &AppHandle) -> Result<PathBuf> {
     let dir = crate::paths::data_dir(app)?.join("terminals");
-    std::fs::create_dir_all(&dir).map_err(|cause| {
-        Error::Terminal(format!("创建终端数据目录失败：{cause}"))
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|cause| Error::Terminal(format!("创建终端数据目录失败：{cause}")))?;
     Ok(dir)
 }
 
@@ -432,7 +433,10 @@ pub fn terminal_pin(
             return Err(Error::Terminal(format!("会话不存在或已退出：{id}")));
         };
         // 显式局部守卫：块尾的临时 MutexGuard 会把借用拖到 sessions 之后。
-        let guard = session.replay.lock().unwrap_or_else(PoisonError::into_inner);
+        let guard = session
+            .replay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         guard.clone()
     };
     let pin_id = match state

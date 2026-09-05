@@ -68,7 +68,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "json",
 ] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 # 网卡枚举（绑定地址选择 + EasyTier 识别）。
 if-addrs = "0.13"

@@ -66,16 +66,21 @@ pub enum Stream {
 pub enum Status {
     Stopped,
     Starting,
-    /// `origin` 只含 scheme://host:port（展示与转发用）；DSH 0.1.2 起
-    /// 的进程启动 token 单独放 `token`，供 WebView 登录与网关兑换
-    /// cookie——两者不混，凭据不进展示字段。旧版 DSH 无 token 时为空串。
+    /// `origin` 只含 scheme://host:port（展示、NotesPage 走 `/qx/*` 桥调用
+    /// 用）；`url` 是带 `?token=` 的完整 URL（DSH 页 iframe 与远程页打开）。
+    /// 整段持有不拆 token——拆出又拼回容易在 IPC 传输里漏字符。
     Ready {
         origin: String,
-        token: String,
+        url: String,
         pid: u32,
     },
-    Restarting { attempt: u32, delay_ms: u64 },
-    Failed { reason: String },
+    Restarting {
+        attempt: u32,
+        delay_ms: u64,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 /// 前端应响应的事件。
@@ -204,11 +209,11 @@ impl Supervisor {
         self.publish(Status::Starting);
 
         match Arc::clone(&self).launch_once(&plan).await {
-            Ok((child, origin, token)) => {
+            Ok((child, origin, url)) => {
                 let pid = child.id().unwrap_or_default();
                 self.publish(Status::Ready {
                     origin: origin.clone(),
-                    token: token.clone(),
+                    url,
                     pid,
                 });
                 tokio::spawn(async move { self.supervise(child, plan).await });
@@ -246,6 +251,7 @@ impl Supervisor {
     }
 
     /// 跑一次启动尝试直到就绪（或失败）。
+    /// 返回 (Child, origin, url)：origin 干净（去 token），url 完整。
     async fn launch_once(self: Arc<Self>, plan: &LaunchPlan) -> Result<(Child, String, String)> {
         let mut command = plan.to_command();
         let mut child = self
@@ -274,8 +280,11 @@ impl Supervisor {
             announced = ready_rx => match announced {
                 Ok(Ready::At(url)) => match self.validate_fixed_port(&url, plan) {
                     // child 不能在 select 臂里移动：另一条臂的 child.wait()
-                    // 还在借用它。这里只产出 (origin, token)，进程在下面接管。
-                    Ok(()) => split_ready(&url).map_err(Error::Readiness),
+                    // 还在借用它。这里只产出 (origin, url)，进程在下面接管。
+                    Ok(()) => readiness::origin_of(&url)
+                        .ok_or_else(|| "就绪地址无法解析 origin".to_owned())
+                        .map(|origin| (origin, url))
+                        .map_err(Error::Readiness),
                     Err(reason) => Err(Error::Readiness(reason)),
                 },
                 Ok(Ready::Rejected(reason)) => Err(Error::Readiness(reason)),
@@ -295,7 +304,7 @@ impl Supervisor {
         };
 
         match outcome {
-            Ok((origin, token)) => Ok((child, origin, token)),
+            Ok((origin, url)) => Ok((child, origin, url)),
             Err(failure) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -469,9 +478,9 @@ impl Supervisor {
             }
 
             match Arc::clone(&self).launch_once(plan).await {
-                Ok((child, origin, token)) => {
+                Ok((child, origin, url)) => {
                     let pid = child.id().unwrap_or_default();
-                    self.publish(Status::Ready { origin, token, pid });
+                    self.publish(Status::Ready { origin, url, pid });
                     return Some(child);
                 }
                 Err(failure) => self.record(Stream::Stderr, format!("重启失败：{failure}")),
@@ -524,14 +533,6 @@ fn with_startup_stderr(failure: Error, stderr: &[String]) -> Error {
         return failure;
     }
     Error::Readiness(format!("{failure}\n{}", stderr.join("\n")))
-}
-
-/// 拆分就绪 URL：对外 origin（展示/转发）+ 启动 token（WebView/网关用）。
-fn split_ready(url: &str) -> std::result::Result<(String, String), String> {
-    let origin = readiness::origin_of(url)
-        .ok_or_else(|| "就绪地址无法解析 origin".to_owned())?;
-    let token = readiness::token_of(url).unwrap_or_default();
-    Ok((origin, token))
 }
 
 /// 固定端口预检：在 Node 启动之前就拒绝被占用的端口，

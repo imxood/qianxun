@@ -70,7 +70,7 @@ pub fn remote_status(app: AppHandle) -> RemoteStatus {
         .lock()
         .unwrap()
         .as_ref()
-        .map(|handle| handle.local_addr.to_string());
+        .and_then(|handle| handle.lan_addr.as_ref().map(|a| a.to_string()));
     let dsh_running = matches!(
         state.harness.supervisor.status(),
         crate::harness::supervisor::Status::Starting
@@ -160,7 +160,9 @@ pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (
-            running.as_ref().map(|handle| handle.local_addr.to_string()),
+            running
+                .as_ref()
+                .and_then(|handle| handle.lan_addr.as_ref().map(|a| a.to_string())),
             settings
                 .remote
                 .devices
@@ -231,20 +233,21 @@ pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
     }
 }
 
-/// 启动配置指纹：enabled/bind/port/devices/upstream 任一变化都会改变它。
-/// sync 用它决定「保留运行中的网关」还是「停旧起新」——设备表是网关
-/// 启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）；
+/// 启动配置指纹：enabled/bind/port/devices/upstream/dsh_url 任一变化都
+/// 会改变它。sync 用它决定「保留运行中的网关」还是「停旧起新」——设备表
+/// 是网关启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）；
 /// upstream 必须参与：启动早于 DSH 就绪时上游是占位 0 端口，就绪事件
 /// 再 sync 时指纹必须变化才会重建（否则网关永远指向上游 0——实测复现）。
-/// DSH 启动 token 刻意不参与：DSH 崩溃自愈（revive）后端口不变，重建
-/// 只会带来无谓断连；旧 cookie 依然有效（DSH 的签名密钥持久化在
-/// DSH_HOME），真正失效时转发路径会 401 重兑自愈。
+/// dsh_url（DSH 启动 token）参与：DSH revive 后 token 变化时也重建网关，
+/// 保证 `Upstream` 始终持有最新的换 cookie 入口（cookie 本身因签名密钥
+/// 持久化多半仍有效，但重兑路径必须用新 token）。
 fn fingerprint(
     enabled: bool,
     bind_ip: &str,
     port: u16,
     devices: &[RemoteDevice],
     upstream: Option<&str>,
+    dsh_url: Option<&str>,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -254,42 +257,61 @@ fn fingerprint(
     port.hash(&mut hasher);
     devices.hash(&mut hasher);
     upstream.hash(&mut hasher);
+    dsh_url.hash(&mut hasher);
     hasher.finish()
 }
 
 /// 设置变更后的同步入口：指纹一致且任务存活 → 保留；否则停旧起新。
 /// DSH origin 由 supervisor 状态提供；DSH 未跑时网关照常监听
 /// （请求会得到「上游不可达」提示），DSH 起来即通。
+///
+/// **回环永远在**——即使远程未启用，DSH 页 iframe 也要工作。LAN 仅在
+/// `enabled && !bind_ip.is_empty()` 时才绑。两条 socket 共享同一 Router。
 pub async fn sync(app: AppHandle) {
     // 全程互斥（见 RemoteState::sync_lock 注释）。
     let state = app.state::<crate::AppState>();
     let _serial = state.remote.sync_lock.lock().await;
 
-    let (should_run, bind_ip, port, devices, upstream, launch_token) = {
+    let (should_bind_lan, bind_ip, port, devices, upstream, dsh_url) = {
         let settings = state
             .settings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // origin 之外还要 DSH 的启动 token：网关要替远程设备兑换签名
-        // cookie（token/cookie 都留在服务端，不进配对 URL）。
-        let (origin, token) = match state.harness.supervisor.status() {
-            crate::harness::supervisor::Status::Ready {
-                origin, token, ..
-            } => (Some(origin), token),
-            _ => (None, String::new()),
+        // DSH 就绪后取完整 URL（gateway 替远程设备兑换签名 cookie 时整段打过去，
+        // 不再单独抽 token 字段）；upstream 仍只装 host:port，供转发与 WS 桥构造 URL。
+        let (upstream, dsh_url) = match state.harness.supervisor.status() {
+            crate::harness::supervisor::Status::Ready { origin, url, .. } => {
+                (Some(origin), Some(url))
+            }
+            _ => (None, None),
         };
+        let should_bind_lan = settings.remote.enabled && !settings.remote.bind_ip.is_empty();
         (
-            settings.remote.enabled && !settings.remote.bind_ip.is_empty(),
+            should_bind_lan,
             settings.remote.bind_ip.clone(),
             settings.remote.port,
             settings.remote.devices.clone(),
-            origin,
-            token,
+            upstream,
+            dsh_url,
         )
     };
-    let desired = fingerprint(should_run, &bind_ip, port, &devices, upstream.as_deref());
+    // 回环永远要起；LAN 只在启用时绑——start() 内部据此分支。
+    // 注意：传空的 bind_ip 而不是缺省值，让 fingerprint 能反映「是否 LAN」。
+    let effective_bind_ip = if should_bind_lan {
+        bind_ip.clone()
+    } else {
+        String::new()
+    };
+    let desired = fingerprint(
+        should_bind_lan,
+        &effective_bind_ip,
+        port,
+        &devices,
+        upstream.as_deref(),
+        dsh_url.as_deref(),
+    );
 
-    // 指纹没变且任务健在才保留；否则（含吊销/配对/换网卡换端口）重建网关。
+    // 指纹没变且任务健在才保留；否则（含吊销/配对/换网卡换端口/远程开关）重建。
     // std 锁不跨 await：先在锁内取出待停句柄，锁外再 abort+等待。
     let (keep, stale) = {
         let mut running = state
@@ -297,10 +319,9 @@ pub async fn sync(app: AppHandle) {
             .running
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let keep = should_run
-            && running
-                .as_ref()
-                .is_some_and(|handle| !handle.task.is_finished() && handle.fingerprint == desired);
+        let keep = running
+            .as_ref()
+            .is_some_and(|handle| !handle.task.is_finished() && handle.fingerprint == desired);
         (keep, if keep { None } else { running.take() })
     };
     if let Some(handle) = stale {
@@ -311,34 +332,49 @@ pub async fn sync(app: AppHandle) {
         // abort 只是「请求取消」，不等它就会 10048 竞态（实测）。
         let _ = task.await;
     }
-    if keep || !should_run {
+    if keep {
         return;
     }
     // 上游未知（DSH 未跑/未就绪）：网关仍然监听（等 DSH），
     // 上游地址用占位，DSH 就绪事件会再触发 sync 重建。
     let upstream = upstream.unwrap_or_else(|| "127.0.0.1:0".to_owned());
+    // 重建必落日志（含指纹输入）：连续两次重建对比即可定位哪个字段
+    // 在翻转——网关每重建一次就杀光全部 SSE/WS 连接，抖动必须可见。
+    crate::logging::log(
+        "info",
+        &format!(
+            "网关重建：lan={should_bind_lan} bind={effective_bind_ip}:{port} 设备={} 上游={upstream} dsh_url={}",
+            devices.len(),
+            dsh_url.is_some(),
+        ),
+    );
     match remote::gateway::start(
-        &bind_ip,
+        &effective_bind_ip,
         port,
         upstream.clone(),
-        launch_token,
+        dsh_url,
         devices,
         desired,
     )
     .await
     {
         Ok(handle) => {
-            let addr = handle.local_addr.to_string();
-            let state = app.state::<crate::AppState>();
+            let log = match handle.lan_addr {
+                Some(lan) => format!(
+                    "回环 {} + 局域网 {lan}（上游 {upstream}）",
+                    handle.loopback_addr
+                ),
+                None => format!("仅回环 {}（上游 {upstream}）", handle.loopback_addr),
+            };
             *state
                 .remote
                 .running
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-            crate::logging::log("info", &format!("远程网关监听 {addr}（上游 {upstream}）"));
+            crate::logging::log("info", &format!("网关监听 {log}"));
         }
         Err(cause) => {
-            crate::logging::log("warn", &format!("远程网关启动失败：{cause}"));
+            crate::logging::log("warn", &format!("网关启动失败：{cause}"));
         }
     }
 }
@@ -372,32 +408,66 @@ mod tests {
             created_at: 0,
             revoked: false,
         };
-        let base = fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device), None);
+        let base = fingerprint(
+            true,
+            "10.0.0.1",
+            17400,
+            std::slice::from_ref(&device),
+            None,
+            None,
+        );
         // 配置没变 → 指纹稳定（keep 的前提）。
         assert_eq!(
             base,
-            fingerprint(true, "10.0.0.1", 17400, std::slice::from_ref(&device), None)
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                None,
+                None,
+            )
         );
         // 新配对（设备表变化）→ 指纹变化。
         let paired = RemoteDevice {
             created_at: 1,
             ..device.clone()
         };
-        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[paired], None));
+        assert_ne!(
+            base,
+            fingerprint(true, "10.0.0.1", 17400, &[paired], None, None)
+        );
         // 吊销 → 指纹变化。
         let revoked = RemoteDevice {
             revoked: true,
             ..device.clone()
         };
-        assert_ne!(base, fingerprint(true, "10.0.0.1", 17400, &[revoked], None));
+        assert_ne!(
+            base,
+            fingerprint(true, "10.0.0.1", 17400, &[revoked], None, None)
+        );
         // 换网卡 / 换端口 / 开关 / 上游就绪 → 指纹变化。
         assert_ne!(
             base,
-            fingerprint(true, "10.0.0.2", 17400, std::slice::from_ref(&device), None)
+            fingerprint(
+                true,
+                "10.0.0.2",
+                17400,
+                std::slice::from_ref(&device),
+                None,
+                None
+            )
         );
         assert_ne!(
             base,
-            fingerprint(true, "10.0.0.1", 17401, std::slice::from_ref(&device), None)
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17401,
+                std::slice::from_ref(&device),
+                None,
+                None
+            )
         );
         assert_ne!(
             base,
@@ -406,7 +476,8 @@ mod tests {
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
-                None
+                None,
+                None,
             )
         );
         // 上游从占位（None）变为真实端口 → 指纹变化（DSH 就绪重建的依据）。
@@ -417,7 +488,39 @@ mod tests {
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
-                Some("127.0.0.1:17300")
+                Some("127.0.0.1:17300"),
+                None,
+            )
+        );
+        // DSH 启动 token（dsh_url）变化 → 指纹变化（revive 重建的依据）。
+        assert_ne!(
+            base,
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                Some("127.0.0.1:17300"),
+                Some("http://127.0.0.1:17300/?token=AAA"),
+            )
+        );
+        // DSH token 变而 origin 不变 → 指纹仍变。
+        assert_ne!(
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                Some("127.0.0.1:17300"),
+                Some("http://127.0.0.1:17300/?token=AAA"),
+            ),
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                Some("127.0.0.1:17300"),
+                Some("http://127.0.0.1:17300/?token=BBB"),
             )
         );
     }
@@ -446,16 +549,18 @@ mod tests {
         };
 
         let handle = remote::gateway::start(
-            "127.0.0.1",
+            "127.0.0.2",
             0,
             upstream_addr.to_string(),
-            String::new(),
+            None,
             vec![device.clone()],
             1,
         )
         .await
         .expect("网关启动");
-        let base = format!("http://{}", handle.local_addr);
+        // 局域网端（qx_token 鉴权）走 127.0.0.2 listener；回环端（无鉴权）
+        // 走 127.0.0.1 listener——本测试只覆盖 LAN 路径。
+        let base = format!("http://{}", handle.lan_addr.expect("LAN 应绑定"));
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -514,16 +619,16 @@ mod tests {
             ..device
         };
         let handle2 = remote::gateway::start(
-            "127.0.0.1",
+            "127.0.0.2",
             0,
             upstream_addr.to_string(),
-            String::new(),
+            None,
             vec![revoked],
             2,
         )
         .await
         .expect("网关二启动");
-        let base2 = format!("http://{}", handle2.local_addr);
+        let base2 = format!("http://{}", handle2.lan_addr.expect("LAN 应绑定"));
         let status = client
             .get(format!("{base2}/"))
             .header(reqwest::header::COOKIE, cookie)
@@ -586,9 +691,7 @@ mod tests {
         }
 
         async fn dsh_mock(
-            axum::extract::State(seen): axum::extract::State<
-                Arc<tokio::sync::Mutex<Vec<String>>>,
-            >,
+            axum::extract::State(seen): axum::extract::State<Arc<tokio::sync::Mutex<Vec<String>>>>,
             request: axum::extract::Request,
         ) -> axum::response::Response {
             let observed = observe(request);
@@ -634,16 +737,16 @@ mod tests {
         };
         let device_token = device.token.clone();
         let handle = remote::gateway::start(
-            "127.0.0.1",
+            "127.0.0.2",
             0,
             upstream_addr.to_string(),
-            LAUNCH_TOKEN.to_owned(),
+            Some(format!("http://{upstream_addr}/?token={LAUNCH_TOKEN}")),
             vec![device],
             7,
         )
         .await
         .expect("网关启动");
-        let base = format!("http://{}", handle.local_addr);
+        let base = format!("http://{}", handle.lan_addr.expect("LAN 应绑定"));
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()

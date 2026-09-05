@@ -5,7 +5,11 @@
 //! 决定千寻把 WebView 指向哪里，所以必须校验而不是照单全收：
 //! 被托管的子进程不能靠打印一行输出就把外壳引向任意地址。
 //! scheme/回环/显式端口的校验不放宽；query 里的 token 原样保留，
-//! 供桌面 WebView 与远程网关做登录兑换。
+//! 由 supervisor 整段 url 持有，状态机对外同时提供：
+//! - `url`：含 `?token=` 的完整 URL（DSH 页 iframe、远程页打开）；
+//! - `origin`：去除 query 的 scheme://host:port（展示、NotesPage 走
+//!   `/qx/*` 桥调用）。
+//! 不再做 token 字符串单独解析——拆出又拼回容易在传输里漏字符。
 
 /// 就绪行的前缀标记。
 const READY_PREFIX: &str = "dsh web: ";
@@ -43,37 +47,26 @@ pub fn parse(line: &str) -> Option<Ready> {
         )));
     }
 
-    // 完整 URL 原样上交（含 query）；展示用 origin、鉴权用 token，
-    // 由 supervisor 经 origin_of/token_of 拆分。
+    // 完整 URL 原样上交（含 query）。
     Some(Ready::At(url.to_string()))
 }
 
 /// 从就绪 URL 里取 origin（scheme://host:port，无路径无 query）。
-/// 状态机对外只暴露 origin，token 单独走 [`token_of`]，避免凭据
-/// 混进展示与遥测字段。
 pub fn origin_of(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
         .map(|parsed| parsed.origin().ascii_serialization())
 }
 
-/// 从就绪 URL 里取 `?token=` 的值（旧版 DSH 没有 token 时返回 None）。
-pub fn token_of(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(name, _)| name == "token")
-        .map(|(_, value)| value.into_owned())
-}
-
-/// 从就绪 origin 里取端口号，用于固定端口一致性校验（ADR-002）。
-pub fn port_of(origin: &str) -> Option<u16> {
-    url::Url::parse(origin).ok()?.port()
+/// 从就绪 URL/origin 里取端口号，用于固定端口一致性校验（ADR-002）
+/// 与托盘 tooltip 显示。
+pub fn port_of(url: &str) -> Option<u16> {
+    url::Url::parse(url).ok()?.port()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_of, parse, port_of, token_of, Ready};
+    use super::{origin_of, parse, port_of, Ready};
 
     #[test]
     fn 接受dsh实际打印的格式() {
@@ -86,17 +79,11 @@ mod tests {
     #[test]
     fn 接受携带启动token的格式且完整保留() {
         let url = "http://127.0.0.1:17300/?token=rDZi5RscXXBARf98sSqQf5ultgjYQ2M14eGXq436gEw";
-        assert_eq!(parse(&format!("dsh web: {url}")), Some(Ready::At(url.into())));
-        assert_eq!(token_of(url).as_deref(), Some("rDZi5RscXXBARf98sSqQf5ultgjYQ2M14eGXq436gEw"));
         assert_eq!(
-            origin_of(url).as_deref(),
-            Some("http://127.0.0.1:17300")
+            parse(&format!("dsh web: {url}")),
+            Some(Ready::At(url.into()))
         );
-    }
-
-    #[test]
-    fn 旧版无token时token_of为空() {
-        assert_eq!(token_of("http://127.0.0.1:17300/"), None);
+        assert_eq!(origin_of(url).as_deref(), Some("http://127.0.0.1:17300"));
     }
 
     #[test]

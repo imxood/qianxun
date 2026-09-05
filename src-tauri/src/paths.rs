@@ -22,7 +22,11 @@ pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf> {
     // debug 构建（`pnpm dev` 跑出的二进制）装到 ~/.qianxun_dev，与安装版
     // 的 ~/.qianxun 完全分离——debug 期间重装 DSH、改设置、刷固定版本都
     // 不会污染生产数据。第一次启用 dev 构建会按完整流程装一份 DSH。
-    let folder = if cfg!(debug_assertions) { "qianxun_dev" } else { "qianxun" };
+    let folder = if cfg!(debug_assertions) {
+        "qianxun_dev"
+    } else {
+        "qianxun"
+    };
     let home = app
         .path()
         .home_dir()

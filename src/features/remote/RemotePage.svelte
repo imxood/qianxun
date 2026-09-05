@@ -1,13 +1,15 @@
 <script lang="ts">
   /**
    * 远程页（一级入口，设计 §5.2）：启用开关 / 网卡（EasyTier ⚡ 置顶）/
-   * 端口 / 状态行 / 配对（二维码 + 复制链接）/ 设备列表（吊销需确认）/
+   * 端口 / 状态行 / 配对（二维码 + 复制链接）/ 设备列表（删除需确认）/
    * 自检（本机带 token 走 /qx-gate，「能不能用」一眼可见）。
    */
   import { onMount } from 'svelte';
   import QRCode from 'qrcode';
+  import { openUrl } from '@tauri-apps/plugin-opener';
   import { call } from '../../lib/ipc';
   import type { NetInterface, RemoteDevice, RemoteStatus, SelfCheck } from '../../lib/ipc/contract';
+  import { harness } from '../../stores/harness.svelte';
   import { settings } from '../../stores/settings.svelte';
   import ConfirmDialog from '../../components/ConfirmDialog.svelte';
   import PromptDialog from '../../components/PromptDialog.svelte';
@@ -27,12 +29,14 @@
   let pairCanvas: HTMLCanvasElement | null = $state(null);
   let revokeTarget: RemoteDevice | null = $state(null);
 
-  // 吊销的沉底，其余按配对时间倒序。
+  // 设备按未删在前 + 配对时间倒序排。
   const devices = $derived(
     [...(settings.current?.remote.devices ?? [])].sort(
       (a, b) => Number(a.revoked) - Number(b.revoked) || b.createdAt - a.createdAt,
     ),
   );
+  /** DSH 启动时的完整 URL（含 `?token=`），用来在系统浏览器打开。 */
+  const dshUrl = $derived(harness.status.phase === 'ready' ? harness.status.url : '');
   const easytierAbsent = $derived(
     interfaces.length > 0 && !interfaces.some((item) => item.easytier),
   );
@@ -41,6 +45,7 @@
   );
 
   onMount(() => {
+    void harness.wire();
     void refresh();
     void loadInterfaces();
   });
@@ -150,6 +155,14 @@
     }
   }
 
+  /** 在系统浏览器打开本机 DSH Web（带启动 token）。 */
+  function openDsh(): void {
+    if (!dshUrl) return;
+    void openUrl(dshUrl).catch((cause: unknown) => {
+      error = cause instanceof Error ? cause.message : String(cause);
+    });
+  }
+
   async function copyPairLink(): Promise<void> {
     try {
       await navigator.clipboard.writeText(pairUrl);
@@ -240,6 +253,15 @@
           DSH {status.dshRunning ? '运行中' : '未运行（网关已就绪，DSH 起来即通）'}
         </span>
         <span class="text-muted">设备 {status.activeCount}/{status.deviceCount}</span>
+        {#if dshUrl}
+          <button
+            class="shrink-0 rounded px-1.5 py-0.5 text-muted transition-colors hover:bg-accent-soft hover:text-fg"
+            title="在系统浏览器打开 DSH Web 界面（带启动 token）"
+            onclick={openDsh}
+          >
+            打开 DSH Web
+          </button>
+        {/if}
       {:else}
         <span class="text-muted">状态加载中…</span>
       {/if}
@@ -298,14 +320,14 @@
             <span class="shrink-0 text-xs text-muted">{formatDate(device.createdAt)}</span>
             {#if device.revoked}
               <span class="shrink-0 rounded bg-surface px-1.5 py-0.5 text-xs text-muted"
-                >已吊销</span
+                >已删除</span
               >
             {:else}
               <button
                 class="shrink-0 rounded px-1.5 py-0.5 text-xs text-danger transition-colors hover:bg-danger/10"
                 onclick={() => (revokeTarget = device)}
               >
-                吊销
+                删除
               </button>
             {/if}
           </li>
@@ -346,10 +368,10 @@
 />
 <ConfirmDialog
   open={revokeTarget !== null}
-  title="吊销设备"
-  message="吊销后该设备的已登录会话将立即断开，需要重新配对才能再次访问。确定吊销「{revokeTarget?.name ??
+  title="删除设备"
+  message="删除后该设备的已登录会话将立即断开，需要重新配对才能再次访问。确定删除「{revokeTarget?.name ??
     ''}」？"
-  confirmLabel="吊销"
+  confirmLabel="删除"
   danger
   onconfirm={() => void confirmRevoke()}
   oncancel={() => (revokeTarget = null)}

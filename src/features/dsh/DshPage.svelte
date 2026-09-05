@@ -8,30 +8,25 @@
   });
 
   // 状态就绪即加载 iframe；重启/断线由 reload 钩子自动恢复。
-  const ready = $derived(harness.status.phase === 'ready');
-  const origin = $derived(harness.status.phase === 'ready' ? harness.status.origin : '');
-  const launchToken = $derived(harness.status.phase === 'ready' ? harness.status.token : '');
-  // DSH 0.1.2 起 index 需要启动 token（换取签名 cookie）；旧版 token 为空
-  // 串时退回裸 origin。重启后 origin 不变，iframe 不会自动重载：origin 每次变化
-  // 就换一个无害查询参数强制刷新。effect 只读 origin、只写 frameSrc——写自己
-  // 读不到的状态才不会自环（reloadToken++ 的先读后写曾把 effect 变成死循环，
-  // 未捕获异常卡死整个调度器，表现为「进了 DSH 页就点不动任何页面」）。
-  let reloadSeq = 0;
-  let frameSrc = $state('');
+  const ready = $derived(harness.status.phase === 'ready' && harness.proxyUrl !== null);
+  // DSH 0.1.2 起浏览器认证 cookie 为 SameSite=Strict：跨站 iframe
+  // （tauri.localhost 内嵌 127.0.0.1）永远不携带，直连必 401。iframe 一律
+  // 走回环代理（harness_proxy_url），cookie 由服务端持有，浏览器侧零
+  // cookie。代理进程内绑定一次端口不变；DSH revive 由代理热吸收，iframe
+  // 无需重载——地址自始至终就是同一个。
+  const dshUrl = $derived(harness.proxyUrl ?? '');
+
+  // DSH 已就绪而代理地址还没拿到（wire 与 setup 监听的启动竞态）时补拉。
   $effect(() => {
-    reloadSeq += 1;
-    const base = origin ? `${origin}/` : '';
-    const query = launchToken
-      ? `token=${encodeURIComponent(launchToken)}&qx=${reloadSeq}`
-      : `qx=${reloadSeq}`;
-    frameSrc = base ? `${base}?${query}` : '';
+    if (harness.status.phase === 'ready' && harness.proxyUrl === null) {
+      void harness.refreshProxyUrl();
+    }
   });
 
-  // 首屏防白屏：iframe 文档加载完成前用主题色浮层盖住。配合外壳的后台
-  // 预热（DSH 就绪即挂载本页），正常点进来时浮层早已消失，只剩兜底作用。
+  // 首屏防白屏：iframe 文档加载完成前用主题色浮层盖住。
   let frameLoaded = $state(false);
   $effect(() => {
-    void frameSrc;
+    void dshUrl;
     frameLoaded = false;
   });
 
@@ -43,12 +38,25 @@
   };
 </script>
 
-{#if ready}
+{#if harness.status.phase === 'ready' && !ready}
+  <div class="flex h-full w-full items-center justify-center bg-bg">
+    <div class="max-w-md space-y-3 text-center">
+      <p class="text-sm text-muted">
+        DSH 已就绪，但回环代理尚未监听成功。请查看「环境」页日志； 也可<button
+          class="text-accent underline-offset-2 hover:underline"
+          onclick={() => void harness.refreshProxyUrl()}
+        >
+          重试获取代理地址</button
+        >。
+      </p>
+    </div>
+  </div>
+{:else if ready}
   <div class="relative h-full w-full bg-bg">
     <iframe
       title="DSH"
       class="h-full w-full border-0"
-      src={frameSrc}
+      src={dshUrl}
       sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups"
       onload={() => (frameLoaded = true)}
     ></iframe>

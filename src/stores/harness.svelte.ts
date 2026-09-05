@@ -17,6 +17,11 @@ const LOG_LIMIT = 2000;
 
 class HarnessStore {
   status: HarnessStatus = $state({ phase: 'stopped' });
+  /**
+   * DSH 回环代理地址（iframe 同站承载：Strict cookie 跨站不可携带，
+   * cookie 留服务端）。进程内绑定一次终身不变；null = 代理未监听成功。
+   */
+  proxyUrl: string | null = $state(null);
   environment: HarnessEnvironment | null = $state(null);
   environmentLoading = $state(false);
   starting = $state(false);
@@ -45,6 +50,7 @@ class HarnessStore {
     } catch {
       // 状态拿不到不阻塞页面：显示默认的「未运行」。
     }
+    await this.refreshProxyUrl();
   }
 
   dispose(): void {
@@ -96,6 +102,15 @@ class HarnessStore {
       this.environment = await call<HarnessEnvironment>('harness_environment');
     } finally {
       this.environmentLoading = false;
+    }
+  }
+
+  /** 补拉代理地址（wire 与 setup 的监听竞态兜底；幂等）。 */
+  async refreshProxyUrl(): Promise<void> {
+    try {
+      this.proxyUrl = await call<string | null>('harness_proxy_url');
+    } catch {
+      // 拿不到保持 null：DSH 页会给出明确提示，不静默回退直连。
     }
   }
 
