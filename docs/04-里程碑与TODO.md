@@ -13,7 +13,7 @@
 - [x] 移植底座：`paths` / `error` / `logging` / `atomic` / `window` / `tray` / `single_instance`
 - [x] 设置系统：settings.json 读写（原子写 + schemaVersion）+ 设置 IPC + 空设置页
 - [x] 外壳骨架：标题栏 + 侧栏导航（空页占位）+ 主题（深/浅/跟随系统）+ 状态栏
-- [x] 应用标识与命名：`com.qianxun.app`、窗口标题"千寻"
+- [x] 应用标识与命名：`com.qianxun.desktop`、窗口标题"千寻"
 
 **验收**：`pnpm tauri dev` 打开千寻窗口，导航/主题/托盘可用，门禁全绿。
 
