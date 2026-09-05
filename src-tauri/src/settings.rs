@@ -371,7 +371,18 @@ fn parse(text: &str) -> Result<Settings> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|error| Error::SettingsInvalid(error.to_string()))?;
     validate(&settings)?;
-    Ok(settings)
+    Ok(migrate(settings))
+}
+
+/// 字段级就地迁移（读入后、使用前）：旧默认值跟走到新默认。
+/// 用户显式配置过的其它值原样保留。
+fn migrate(mut settings: Settings) -> Settings {
+    // 网关端口：17400 是历史默认；持久化过旧默认的设置文件迁移到
+    // 按构建模式的新默认（release 23090 / debug 23091）。
+    if settings.remote.port == crate::remote::LEGACY_GATEWAY_PORT {
+        settings.remote.port = crate::remote::default_gateway_port();
+    }
+    settings
 }
 
 pub fn save(path: &Path, settings: &Settings) -> Result<()> {
@@ -472,6 +483,16 @@ mod tests {
         assert!(parse(r#"{"dsh": {"home": "shared"}}"#).is_err());
         assert!(parse(r#"{"mirrors": {"nodeBinary": "cnpm"}}"#).is_err());
         assert!(parse(r#"{"mirrors": {"npmRegistry": "npmmirror.com"}}"#).is_err());
+    }
+
+    #[test]
+    fn 旧默认网关端口迁移到按模式新默认() {
+        // 持久化过旧默认 17400 的设置文件 → 迁移到当前构建模式的新默认。
+        let settings = parse(r#"{"remote": {"port": 17400}}"#).unwrap();
+        assert_eq!(settings.remote.port, crate::remote::default_gateway_port());
+        // 用户显式配置过的其它端口原样保留，不被迁移波及。
+        let custom = parse(r#"{"remote": {"port": 30000}}"#).unwrap();
+        assert_eq!(custom.remote.port, 30000);
     }
 
     #[test]

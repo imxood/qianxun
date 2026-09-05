@@ -146,9 +146,10 @@ pub fn run() {
             app.manage(shots::commands::ShotsState::default());
             app.manage(terminal::commands::TerminalState::default());
             forward_events(handle, &supervisor);
-            // 远程/回环双端网关：setup 即占位监听 127.0.0.1:17400（DSH 页
-            // iframe 立刻有稳定地址），启用远程时再额外绑 LAN。DSH 就绪事件
-            // 由 forward_events 同步触发，热更新上游。
+            // 远程/回环双端网关：setup 即占位监听回环网关端口（默认
+            // release 23090 / debug 23091，DSH 页 iframe 立刻有稳定地址），
+            // 启用远程时再额外绑 LAN。DSH 就绪事件由 forward_events
+            // 同步触发，热更新上游。
             tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
             tray::build(handle)?;
 

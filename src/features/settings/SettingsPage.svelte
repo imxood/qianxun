@@ -14,7 +14,6 @@
 
   let meta: AppMetaResult | null = $state(null);
   let saveError: string | null = $state(null);
-  let portInput: string = $state('');
   let registryInput: string = $state('');
   /** 千寻锁定的 DSH 安装说明符（Rust 侧单一事实源）。 */
   let installSpec: string | null = $state(null);
@@ -24,13 +23,6 @@
     { value: 'light', label: '浅色' },
     { value: 'dark', label: '深色' },
   ];
-
-  // 端口合法区间：避开系统保留段，也避开 0（那是动态端口，与 ADR-002 相悖）。
-  const portValid = $derived(
-    /^[1-9][0-9]{2,4}$/.test(portInput) && Number(portInput) >= 1024 && Number(portInput) <= 65535,
-  );
-  // 端口 10000 常被本机其他 DSH 实例占用：合法但强烈不建议。
-  const portClashesStudio = $derived(portValid && Number(portInput) === 10000);
 
   const registryValid = $derived(
     ['official', 'npmmirror'].includes(registryInput) || /^https?:\/\/.+/.test(registryInput),
@@ -55,8 +47,7 @@
 
   // 设置加载完成后把输入框回显（一次性同步，之后由输入事件维护）。
   $effect(() => {
-    if (settings.current && !portInput) {
-      portInput = String(settings.current.dsh.port);
+    if (settings.current && !registryInput) {
       registryInput = settings.current.mirrors.npmRegistry;
     }
   });
@@ -272,23 +263,13 @@
     <section class="space-y-3 rounded-lg border border-line bg-card p-4">
       <h2 class="text-sm font-medium">DSH</h2>
       <div class="flex items-center justify-between gap-4 text-sm">
-        <span class="shrink-0">固定端口</span>
-        <input
-          class="w-32 rounded-md border border-line bg-surface px-2 py-1 text-right invalid:border-danger"
-          type="text"
-          inputmode="numeric"
-          bind:value={portInput}
-          onblur={() => {
-            if (portValid) void save({ dsh: { port: Number(portInput) } });
-          }}
-        />
+        <span class="shrink-0">端口</span>
+        <span class="font-mono text-xs text-muted">随机（OS 分配）</span>
       </div>
-      <p class="text-xs {portValid ? 'text-muted' : 'text-danger'}">
-        {portValid ? '1024–65535' : '范围 1024–65535'}
+      <p class="text-xs text-muted">
+        每次启动由操作系统分配一个随机空闲端口，永不与其它服务冲突；
+        实际端口见「环境」页状态与日志。
       </p>
-      {#if portClashesStudio}
-        <p class="text-xs text-danger">10000 常被本机其他 DSH 实例占用，建议更换。</p>
-      {/if}
 
       <label class="flex items-center justify-between text-sm">
         <span>随千寻启动 DSH</span>
@@ -323,15 +304,6 @@
       <p class="text-xs text-muted">
         DSH 版本由千寻锁定并经过验收，随千寻更新而升级；本页不可修改。
       </p>
-
-      <label class="flex items-center justify-between text-sm">
-        <span>端口占用时改用随机端口</span>
-        <Switch
-          label="允许随机端口回退"
-          checked={settings.current.dsh.allowRandomFallback}
-          onchange={(value) => void save({ dsh: { allowRandomFallback: value } })}
-        />
-      </label>
     </section>
 
     <section class="space-y-3 rounded-lg border border-line bg-card p-4">

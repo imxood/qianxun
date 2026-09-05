@@ -235,12 +235,11 @@ pub fn launch_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<Launch
         profile: DEFAULT_PROFILE.to_owned(),
         workspace: environment.workspace,
         host: BIND_HOST.to_owned(),
-        // 固定端口（ADR-002）；只有用户显式允许随机 fallback 时才传 0。
-        port: if settings.dsh.allow_random_fallback {
-            0
-        } else {
-            settings.dsh.port
-        },
+        // ADR-002 修订：启动端口恒为 0（OS 分配随机空闲端口）。内核层面
+        // 保证端口可用，「被占用重试」没有存在的必要；debug 与安装版
+        // 同时启动 DSH 也各拿各的端口。settings.dsh.port 与
+        // allow_random_fallback 保留为历史字段，不再参与启动。
+        port: 0,
         dsh_home: (settings.dsh.home != DSH_HOME_SYSTEM)
             .then(|| paths::dsh_home(app))
             .transpose()?,

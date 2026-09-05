@@ -4,7 +4,8 @@
 //! 给本地外壳用（DSH 页 iframe、Notes 页 fetch），**按需**绑 `bind_ip:port`
 //! 给局域网用（手机扫描）。两条入口走同一份共享状态：回环请求免 qx_token
 //! 但要走 Host/Origin 栅栏（挡浏览器侧 drive-by 与 DNS rebinding），
-//! 局域网请求必须带 qx_token。端口固定 17400，iframe URL 永不变。
+//! 局域网请求必须带 qx_token。端口按构建模式默认 23090/23091，实例内
+//! 恒定——iframe URL 永不变（DSH revive 热吸收的前提）。
 //!
 //! DSH 0.1.2 起的浏览器鉴权由共享原语 dsh_upstream 在服务端完成
 //! （token 与 cookie 都留在千寻侧，回环/局域网都一样）。
