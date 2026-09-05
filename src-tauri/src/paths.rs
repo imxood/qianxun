@@ -1,5 +1,12 @@
-//! 应用数据目录与关键文件路径。全部经 Tauri 的 path resolver 取得，
-//! 不假设固定位置——安装版、便携版行为保持一致。
+//! 应用数据目录与关键文件路径。
+//!
+//! 数据根（无 mode 隔离时安装版与 dev 版会互相覆盖——上一轮讨论点）：
+//! - 安装版（release）：`%USERPROFILE%\.qianxun`
+//! - 调试版（`pnpm dev`）：`%USERPROFILE%\.qianxun_dev`
+//!
+//! 沿用 Unix 风格的 dotfile 约定，便于直接 ls 查问题；debug 用 `_dev`
+//! 后缀隔离，让开发期间重装/改设置/换 DSH 都不动生产数据。旧版基于
+//! `app_data_dir()` 的位置将不再写入。
 //!
 //! 各文件职责见 docs/02-技术架构.md §4.1：
 //! - settings.json：设置唯一持久化事实（settings 模块独占读写）；
@@ -11,11 +18,16 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::{Error, Result};
 
-fn data_dir(app: &AppHandle) -> Result<PathBuf> {
-    let dir = app
+pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf> {
+    // debug 构建（`pnpm dev` 跑出的二进制）装到 ~/.qianxun_dev，与安装版
+    // 的 ~/.qianxun 完全分离——debug 期间重装 DSH、改设置、刷固定版本都
+    // 不会污染生产数据。第一次启用 dev 构建会按完整流程装一份 DSH。
+    let folder = if cfg!(debug_assertions) { "qianxun_dev" } else { "qianxun" };
+    let home = app
         .path()
-        .app_data_dir()
-        .map_err(|cause| Error::DataDir(cause.to_string()))?;
+        .home_dir()
+        .map_err(|cause| Error::DataDir(format!("解析用户主目录失败：{cause}")))?;
+    let dir = home.join(format!(".{folder}"));
     std::fs::create_dir_all(&dir).map_err(|cause| Error::DataDir(cause.to_string()))?;
     Ok(dir)
 }

@@ -236,6 +236,9 @@ pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
 /// 启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）；
 /// upstream 必须参与：启动早于 DSH 就绪时上游是占位 0 端口，就绪事件
 /// 再 sync 时指纹必须变化才会重建（否则网关永远指向上游 0——实测复现）。
+/// DSH 启动 token 刻意不参与：DSH 崩溃自愈（revive）后端口不变，重建
+/// 只会带来无谓断连；旧 cookie 依然有效（DSH 的签名密钥持久化在
+/// DSH_HOME），真正失效时转发路径会 401 重兑自愈。
 fn fingerprint(
     enabled: bool,
     bind_ip: &str,
@@ -262,14 +265,18 @@ pub async fn sync(app: AppHandle) {
     let state = app.state::<crate::AppState>();
     let _serial = state.remote.sync_lock.lock().await;
 
-    let (should_run, bind_ip, port, devices, upstream) = {
+    let (should_run, bind_ip, port, devices, upstream, launch_token) = {
         let settings = state
             .settings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let origin = match state.harness.supervisor.status() {
-            crate::harness::supervisor::Status::Ready { origin, .. } => Some(origin),
-            _ => None,
+        // origin 之外还要 DSH 的启动 token：网关要替远程设备兑换签名
+        // cookie（token/cookie 都留在服务端，不进配对 URL）。
+        let (origin, token) = match state.harness.supervisor.status() {
+            crate::harness::supervisor::Status::Ready {
+                origin, token, ..
+            } => (Some(origin), token),
+            _ => (None, String::new()),
         };
         (
             settings.remote.enabled && !settings.remote.bind_ip.is_empty(),
@@ -277,6 +284,7 @@ pub async fn sync(app: AppHandle) {
             settings.remote.port,
             settings.remote.devices.clone(),
             origin,
+            token,
         )
     };
     let desired = fingerprint(should_run, &bind_ip, port, &devices, upstream.as_deref());
@@ -309,7 +317,16 @@ pub async fn sync(app: AppHandle) {
     // 上游未知（DSH 未跑/未就绪）：网关仍然监听（等 DSH），
     // 上游地址用占位，DSH 就绪事件会再触发 sync 重建。
     let upstream = upstream.unwrap_or_else(|| "127.0.0.1:0".to_owned());
-    match remote::gateway::start(&bind_ip, port, upstream.clone(), devices, desired).await {
+    match remote::gateway::start(
+        &bind_ip,
+        port,
+        upstream.clone(),
+        launch_token,
+        devices,
+        desired,
+    )
+    .await
+    {
         Ok(handle) => {
             let addr = handle.local_addr.to_string();
             let state = app.state::<crate::AppState>();
@@ -432,6 +449,7 @@ mod tests {
             "127.0.0.1",
             0,
             upstream_addr.to_string(),
+            String::new(),
             vec![device.clone()],
             1,
         )
@@ -495,10 +513,16 @@ mod tests {
             revoked: true,
             ..device
         };
-        let handle2 =
-            remote::gateway::start("127.0.0.1", 0, upstream_addr.to_string(), vec![revoked], 2)
-                .await
-                .expect("网关二启动");
+        let handle2 = remote::gateway::start(
+            "127.0.0.1",
+            0,
+            upstream_addr.to_string(),
+            String::new(),
+            vec![revoked],
+            2,
+        )
+        .await
+        .expect("网关二启动");
         let base2 = format!("http://{}", handle2.local_addr);
         let status = client
             .get(format!("{base2}/"))
@@ -509,5 +533,166 @@ mod tests {
             .status();
         assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
         let _ = handle2.shutdown.send(true);
+    }
+
+    /// DSH 0.1.2 浏览器鉴权全链路：网关用启动 token 兑换签名 cookie，
+    /// 手机请求经网关携带 cookie 到上游；手机的 Host/Origin/Sec-Fetch
+    /// 头不透传（DSH 的 Host/Origin 栅栏只认上游 authority）。
+    #[tokio::test]
+    async fn 网关兑换cookie并注入转发() {
+        use std::sync::Arc;
+
+        const LAUNCH_TOKEN: &str = "tok-launch-0123456789";
+        const DSH_COOKIE: &str = "dsh-auth-test=signed-value";
+
+        /// 模拟 DSH：/?token=… 兑换 303+cookie；其余请求要求 cookie，
+        /// 并把观察到的 Host/Origin/Sec-Fetch 记下来供断言。
+        struct Observed {
+            summary: String,
+            cookie: String,
+            is_exchange: bool,
+        }
+
+        /// 同步拆解请求为纯数据：request 在 await 前就消亡，保证 future 是
+        /// Send（Body 非 Sync，任何对它的借用跨 await 都会让 Handler 失败）。
+        fn observe(request: axum::extract::Request) -> Observed {
+            let header = |name: &str| {
+                request
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let cookie = header("cookie");
+            let summary = format!(
+                "host={}|origin={}|site={}|cookie={}",
+                header("host"),
+                header("origin"),
+                header("sec-fetch-site"),
+                cookie,
+            );
+            let is_exchange = request.method() == axum::http::Method::GET
+                && request
+                    .uri()
+                    .query()
+                    .unwrap_or_default()
+                    .contains("token=tok-launch");
+            Observed {
+                summary,
+                cookie,
+                is_exchange,
+            }
+        }
+
+        async fn dsh_mock(
+            axum::extract::State(seen): axum::extract::State<
+                Arc<tokio::sync::Mutex<Vec<String>>>,
+            >,
+            request: axum::extract::Request,
+        ) -> axum::response::Response {
+            let observed = observe(request);
+            seen.lock().await.push(observed.summary);
+            let response = if observed.is_exchange {
+                axum::response::Response::builder()
+                    .status(303)
+                    .header("set-cookie", format!("{DSH_COOKIE}; Max-Age=60; Path=/"))
+                    .body(axum::body::Body::empty())
+                    .unwrap()
+            } else if observed.cookie == DSH_COOKIE {
+                axum::response::Response::builder()
+                    .status(200)
+                    .body(axum::body::Body::from("dsh-authed"))
+                    .unwrap()
+            } else {
+                axum::response::Response::builder()
+                    .status(401)
+                    .body(axum::body::Body::from("unauthorized"))
+                    .unwrap()
+            };
+            response
+        }
+
+        let seen: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::default();
+        let upstream_app = axum::Router::new()
+            .route("/", axum::routing::any(dsh_mock))
+            .with_state(seen.clone());
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("上游绑定");
+        let upstream_addr = upstream_listener.local_addr().expect("上游地址");
+        tokio::spawn(async move {
+            let _ = axum::serve(upstream_listener, upstream_app).await;
+        });
+
+        let device = RemoteDevice {
+            id: "dev-test-2".to_owned(),
+            name: "测试机".to_owned(),
+            token: "ef".repeat(32),
+            created_at: 0,
+            revoked: false,
+        };
+        let device_token = device.token.clone();
+        let handle = remote::gateway::start(
+            "127.0.0.1",
+            0,
+            upstream_addr.to_string(),
+            LAUNCH_TOKEN.to_owned(),
+            vec![device],
+            7,
+        )
+        .await
+        .expect("网关启动");
+        let base = format!("http://{}", handle.local_addr);
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client");
+
+        // 手机先配对：/qx-gate?token=… → 302 + qx_token cookie。
+        let pair = client
+            .get(format!("{base}/qx-gate?token={device_token}"))
+            .send()
+            .await
+            .expect("配对请求");
+        assert_eq!(pair.status(), reqwest::StatusCode::FOUND);
+        let qx_cookie = pair
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next().map(str::to_owned))
+            .expect("应下发 qx_token cookie");
+
+        // 手机请求：带的 origin/sec-fetch-site 是网关 authority，必须被剥掉。
+        let response = client
+            .get(format!("{base}/"))
+            .header("origin", base.clone())
+            .header("sec-fetch-site", "cross-site")
+            .header(reqwest::header::COOKIE, qx_cookie)
+            .send()
+            .await
+            .expect("转发请求");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.expect("正文"), "dsh-authed");
+
+        // 第一次 = 网关兑换（无 origin，Host 是上游 authority）；
+        // 第二次 = 手机请求转发（有 cookie，无 origin/sec-fetch/host 透传）。
+        let entries = seen.lock().await.clone();
+        assert_eq!(entries.len(), 2, "实际观察到的上游请求：{entries:?}");
+        let authority = format!("host={upstream_addr}");
+        assert!(
+            entries[0].starts_with(&authority) && entries[0].contains("cookie="),
+            "兑换请求形态异常：{}",
+            entries[0]
+        );
+        assert!(
+            entries[1].starts_with(&authority)
+                && entries[1].contains("origin=")
+                && !entries[1].contains("origin=http")
+                && entries[1].ends_with(&format!("cookie={DSH_COOKIE}")),
+            "转发请求形态异常：{}",
+            entries[1]
+        );
+        let _ = handle.shutdown.send(true);
     }
 }

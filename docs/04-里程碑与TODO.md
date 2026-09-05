@@ -226,6 +226,24 @@
       （Capacitor 7 的 allowNavigation 在 server 节，HostMask 语义 '*'
       匹配任意主机——放 android 节无效）
 
+## V0.2.1 · DSH 0.1.2 适配 + 外壳整合（2026-09-05）
+
+- [x] DSH 版本硬编码（ADR-013）：`install::PINNED_VERSION` 随千寻版本
+      锁定（当前 0.1.2-rc.1），删用户可编辑的 dsh.pinnedVersion——
+      软件版本 ↔ DSH 版本一一对应，改版本=升级千寻
+- [x] DSH 0.1.2 浏览器鉴权适配：readiness 保留就绪 URL 完整 token
+      （回环/http/显式端口校验不放宽）；Status::Ready 拆分 origin+token
+      （凭据不进展示字段）；DSH iframe 用 token URL 兑换签名 cookie
+- [x] 网关代持 DSH 鉴权：启动时（及上游 401 时）用 token 兑换
+      dsh-auth-* 签名 cookie 并注入每次上游转发与 WS 桥；token 与
+      DSH cookie 均不出网关进程；转发剥除手机侧 Host/Origin/Sec-Fetch
+      （DSH 的 Host/Origin 栅栏按上游 authority 判定）；集成测试覆盖
+      兑换→注入→剥除全链路
+- [x] 外壳导航整合：「环境」+「控制台」合并为一级「环境」页
+      （自上而下：检查 Node → 检查 DSH → 启动/停止 → 日志铺满剩余
+      空间，安装/启动日志全程可见）；「DSH」保持为 DeepSeek Harness
+      聊天页（iframe），启动入口收敛到环境页
+
 ## 里程碑间的纪律
 
 1. 任何里程碑开工前，先读 `03-编码规范`，门禁脚本必须已在跑；

@@ -11,6 +11,7 @@
 /** 全部 IPC 命令。新增命令时在这里登记，Rust 侧同名实现。 */
 export const IPC_COMMANDS = [
   'app_meta',
+  'app_toggle_devtools',
   'settings_get',
   'settings_update',
   'harness_environment',
@@ -41,6 +42,12 @@ export const IPC_COMMANDS = [
   'terminal_resize',
   'terminal_kill',
   'terminal_replay',
+  'terminal_clear',
+  'terminal_pin',
+  'terminal_unpin',
+  'terminal_pin_resume',
+  'terminal_pinned_list',
+  'terminal_pinned_replay',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -110,7 +117,6 @@ export interface DshSettings {
   versionStrategy: DshVersionStrategy;
   autostart: boolean;
   home: DshHomePolicy;
-  pinnedVersion: string;
 }
 
 export interface MirrorsSettings {
@@ -192,7 +198,14 @@ export interface HarnessEnvironment {
 export type HarnessStatus =
   | { phase: 'stopped' }
   | { phase: 'starting' }
-  | { phase: 'ready'; origin: string; pid: number }
+  | {
+      phase: 'ready';
+      /** 仅 scheme://host:port；token 单独给，凭据不进展示字段。 */
+      origin: string;
+      /** DSH 0.1.2+ 的进程启动 token（旧版为空串）。 */
+      token: string;
+      pid: number;
+    }
   | { phase: 'restarting'; attempt: number; delayMs: number }
   | { phase: 'failed'; reason: string };
 
@@ -374,6 +387,14 @@ export interface TerminalSettings {
   shell: string;
   fontSize: number;
   scrollback: number;
+}
+
+/** terminal_pinned_list 的返回项：一条固定（PIN）终端的元数据。 */
+export interface PinnedTerminal {
+  pinId: number;
+  title: string;
+  shell: string;
+  cwd: string | null;
 }
 
 // ---------------------------------------------------------------------------

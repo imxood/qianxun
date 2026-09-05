@@ -23,8 +23,16 @@ use crate::error::{Error, Result};
 /// DSH 的 npm 包名。
 pub const PACKAGE: &str = "@deepseek-ai/dsh";
 
-/// 未设置锁定版本时装 latest（设置 dsh.pinnedVersion 可钉死精确版本）。
-pub const LATEST_SPEC: &str = "@deepseek-ai/dsh@latest";
+/// 千寻这个版本锁定的 DSH 版本（ADR-002/013：软件版本 ↔ DSH 版本一一对应）。
+/// 由千寻验证后随版本发布，用户不可改——改了就没有验证意义。
+/// 升级 DSH = 升级千寻：改这里、跑全部验收、发版。
+pub const PINNED_VERSION: &str = "0.1.2-rc.1";
+
+/// 安装说明符：始终钉死精确版本，绝不 `latest`——latest 装出未验证
+/// 的上游版本，等于把运行时的正确性交给运气。
+pub fn install_spec() -> String {
+    format!("{PACKAGE}@{PINNED_VERSION}")
+}
 
 const JOURNAL_VERSION: u8 = 1;
 const INSTALL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -608,9 +616,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        check_installed, entry_of, npm_cli_candidates, recover_interrupted_install,
-        remove_dir_if_exists, runtime_complete, runtime_version, InstallPlan, LATEST_SPEC, PACKAGE,
-        PNPM_SPEC,
+        check_installed, entry_of, install_spec, npm_cli_candidates, recover_interrupted_install,
+        remove_dir_if_exists, runtime_complete, runtime_version, InstallPlan, PACKAGE, PNPM_SPEC,
+        PINNED_VERSION,
     };
 
     fn write_runtime(root: &Path, version: Option<&str>) {
@@ -640,8 +648,9 @@ mod tests {
     }
 
     #[test]
-    fn 默认安装说明符是latest() {
-        assert_eq!(LATEST_SPEC, format!("{PACKAGE}@latest"));
+    fn 安装说明符钉死精确版本() {
+        assert_eq!(install_spec(), format!("{PACKAGE}@{PINNED_VERSION}"));
+        assert!(!install_spec().contains("latest"));
     }
 
     #[test]
@@ -663,7 +672,7 @@ mod tests {
             npm_cli: Path::new("npm-cli.js").to_path_buf(),
             target: Path::new("runtime").to_path_buf(),
             pnpm_tool_dir: Path::new("pnpm-tool").to_path_buf(),
-            spec: LATEST_SPEC.to_owned(),
+            spec: install_spec(),
             registry: "https://registry.npmmirror.com/".to_owned(),
         };
         let arguments = plan
@@ -720,7 +729,7 @@ mod tests {
         fs::create_dir_all(live.join("node_modules")).expect("残骸");
         fs::write(
             root.join("dsh-install.json"),
-            format!(r#"{{"schema":1,"package":"{PACKAGE}","spec":"{LATEST_SPEC}"}}"#),
+            format!(r#"{{"schema":1,"package":"{PACKAGE}","spec":"{}"}}"#, install_spec()),
         )
         .expect("journal");
 
@@ -743,7 +752,7 @@ mod tests {
         write_runtime(&backup, Some("0.1.0"));
         fs::write(
             root.join("dsh-install.json"),
-            format!(r#"{{"schema":1,"package":"{PACKAGE}","spec":"{LATEST_SPEC}"}}"#),
+            format!(r#"{{"schema":1,"package":"{PACKAGE}","spec":"{}"}}"#, install_spec()),
         )
         .expect("journal");
 

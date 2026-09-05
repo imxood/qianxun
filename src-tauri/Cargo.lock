@@ -4071,6 +4071,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "url",
+ "webview2-com",
+ "windows-core 0.61.2",
  "windows-sys 0.60.2",
  "xcap",
  "zip",

@@ -86,10 +86,6 @@ fn default_dsh_home() -> String {
     DSH_HOME_ISOLATED.to_owned()
 }
 
-fn default_pinned_version() -> String {
-    String::new()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DshSettings {
@@ -99,8 +95,6 @@ pub struct DshSettings {
     pub autostart: bool,
     /// ADR-009：见 `DSH_HOME_ISOLATED` 常量说明。
     pub home: String,
-    /// 锁定安装的 DSH 版本（pinned 策略用）。空 = 安装 latest。
-    pub pinned_version: String,
 }
 
 impl Default for DshSettings {
@@ -111,7 +105,6 @@ impl Default for DshSettings {
             version_strategy: DshVersionStrategy::default(),
             autostart: true,
             home: default_dsh_home(),
-            pinned_version: default_pinned_version(),
         }
     }
 }
@@ -250,14 +243,6 @@ impl Default for Settings {
     }
 }
 
-/// npm 版本号形态：1.2.3 / 0.1.1-rc.2（预发布段仅字母数字点连字符）。
-fn plausible_version(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))
-}
-
 fn validate(settings: &Settings) -> Result<()> {
     if settings.schema_version != SCHEMA_VERSION {
         return Err(Error::SettingsInvalid(format!(
@@ -276,11 +261,6 @@ fn validate(settings: &Settings) -> Result<()> {
             "dsh.home 只能是 isolated 或 system，当前为 {}",
             settings.dsh.home
         )));
-    }
-    if !settings.dsh.pinned_version.is_empty() && !plausible_version(&settings.dsh.pinned_version) {
-        return Err(Error::SettingsInvalid(
-            "dsh.pinnedVersion 必须是 npm 版本号（如 0.1.1-rc.2）或留空".to_owned(),
-        ));
     }
     let node_sources = [
         NODE_BINARY_AUTO,
@@ -457,6 +437,8 @@ mod tests {
 
     #[test]
     fn 完整文件往返一致() {
+        // pinnedVersion 是历史字段：DSH 版本现在由千寻硬编码，样例里
+        // 保留旧值验证向后兼容（未知字段被忽略，round-trip 后消失）。
         let text = r#"{
             "schemaVersion": 1,
             "theme": "dark",
@@ -488,7 +470,6 @@ mod tests {
     #[test]
     fn 非法home与镜像值被拒绝() {
         assert!(parse(r#"{"dsh": {"home": "shared"}}"#).is_err());
-        assert!(parse(r#"{"dsh": {"pinnedVersion": "a b"}}"#).is_err());
         assert!(parse(r#"{"mirrors": {"nodeBinary": "cnpm"}}"#).is_err());
         assert!(parse(r#"{"mirrors": {"npmRegistry": "npmmirror.com"}}"#).is_err());
     }

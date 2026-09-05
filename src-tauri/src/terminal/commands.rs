@@ -7,11 +7,12 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, OnceLock};
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::error::{Error, Result};
@@ -21,6 +22,12 @@ const OUTPUT_EVENT: &str = "terminal://output";
 const EXIT_EVENT: &str = "terminal://exit";
 /// 回放缓冲上限（字节）：够覆盖 shell 横幅 + 一屏历史，内存代价可忽略。
 const REPLAY_CAP: usize = 64 * 1024;
+
+/// pwsh / powershell 的 cwd 跟踪钩子：把默认 prompt 换成「先发 OSC 7
+/// （file:// URL 报告当前目录）再渲染原 prompt」。无空格写法，规避
+/// CreateProcess 命令行引号问题；profile 加载后运行，用户自定义 prompt
+///（如 oh-my-posh）经由 $__qxp 保留。
+const PWSH_CWD_HOOK: &str = "$__qxp=$function:prompt;function global:prompt{$d=$PWD.ProviderPath;$u=$d.Replace('\\','/');[Console]::Write(([char]27)+']7;file:///'+$u+([char]7));if($__qxp){&$__qxp}else{'PS '+$d+'> '}}";
 
 /// 输出事件负载。
 #[derive(Serialize, Clone)]
@@ -52,6 +59,26 @@ struct Session {
 pub struct TerminalState {
     sessions: Mutex<HashMap<u64, Session>>,
     next_id: AtomicU64,
+    /// 会话 id → 固定（PIN）记录 id。会话退出时据此刷新 PIN 回放。
+    pins: Mutex<HashMap<u64, u64>>,
+    /// PIN 记录 id 计数器：跨重启用毫秒时间戳初始化，避免覆盖旧文件。
+    next_pin_id: OnceLock<AtomicU64>,
+}
+
+impl TerminalState {
+    fn next_pin_id(&self) -> u64 {
+        let counter = self
+            .next_pin_id
+            .get_or_init(|| {
+                AtomicU64::new(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(1),
+                )
+            });
+        counter.fetch_add(1, Ordering::AcqRel)
+    }
 }
 
 /// 会话信息（spawn 的返回值：id + 实际 shell，标签默认标题用）。
@@ -60,6 +87,25 @@ pub struct TerminalState {
 pub struct TerminalInfo {
     pub id: u64,
     pub shell: String,
+}
+
+/// 一个固定（PIN）终端的元数据（不含回放正文）。
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PinnedTerminal {
+    pub pin_id: u64,
+    pub title: String,
+    pub shell: String,
+    pub cwd: Option<String>,
+}
+
+/// PIN 记录的完整落盘形态（元数据 + 回放正文）。
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PinnedRecord {
+    #[serde(flatten)]
+    meta: PinnedTerminal,
+    replay: String,
 }
 
 /// 启动一个 PTY 会话，返回 id 与解析后的 shell。输出/退出走事件。
@@ -76,6 +122,17 @@ pub fn terminal_spawn(
     let mut command = CommandBuilder::new(&shell);
     if let Some(dir) = cwd.filter(|text| !text.is_empty()) {
         command.cwd(dir);
+    }
+    // pwsh/powershell 注入 prompt 钩子：前端经 OSC 7 跟踪 cwd（PIN 恢复用）。
+    let basename = shell
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(basename.as_str(), "pwsh.exe" | "powershell.exe") {
+        command.arg("-Command");
+        command.arg(PWSH_CWD_HOOK);
     }
 
     let pair = portable_pty::native_pty_system()
@@ -170,6 +227,38 @@ pub fn terminal_spawn(
             );
             {
                 let state = app.state::<TerminalState>();
+                // PIN 会话退出：用最终回放刷新记录（下次启动恢复到此刻）。
+                let pin_id = state
+                    .pins
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&id)
+                    .copied();
+                if let Some(pin_id) = pin_id {
+                    let replay = state
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&id)
+                        .map(|session| {
+                            session
+                                .replay
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .clone()
+                        });
+                    if let Some(replay) = replay {
+                        if let Ok(mut record) = read_pinned_record(&app, pin_id) {
+                            record.replay = replay;
+                            let _ = write_pinned_record(&app, &record);
+                        }
+                    }
+                    state
+                        .pins
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
+                }
                 state
                     .sessions
                     .lock()
@@ -257,6 +346,13 @@ pub fn terminal_kill(state: State<'_, TerminalState>, id: u64) -> Result<()> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&id);
+    // 会话没了，PIN 关联一并解除（记录文件保留与否由前端语义决定：
+    // 活标签关闭=不要了 → 先 unpin 再 kill）。
+    state
+        .pins
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&id);
     if let Some(session) = session {
         let mut killer = session
             .killer
@@ -266,6 +362,171 @@ pub fn terminal_kill(state: State<'_, TerminalState>, id: u64) -> Result<()> {
         let _ = killer.kill();
     }
     Ok(())
+}
+
+/// 清空终端：前端负责清 xterm 视口与滚动缓冲，这里清回放缓冲，
+/// 避免下次挂载/重放把旧内容带回来。
+#[tauri::command]
+pub fn terminal_clear(state: State<'_, TerminalState>, id: u64) -> Result<()> {
+    if let Some(session) = state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&id)
+    {
+        session
+            .replay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+    Ok(())
+}
+
+// ---- PIN：固定终端，跨启动恢复 cwd 与历史输出 ----
+
+fn pinned_dir(app: &AppHandle) -> Result<PathBuf> {
+    let dir = crate::paths::data_dir(app)?.join("terminals");
+    std::fs::create_dir_all(&dir).map_err(|cause| {
+        Error::Terminal(format!("创建终端数据目录失败：{cause}"))
+    })?;
+    Ok(dir)
+}
+
+fn pinned_path(app: &AppHandle, pin_id: u64) -> Result<PathBuf> {
+    Ok(pinned_dir(app)?.join(format!("pin-{pin_id}.json")))
+}
+
+fn write_pinned_record(app: &AppHandle, record: &PinnedRecord) -> Result<()> {
+    let path = pinned_path(app, record.meta.pin_id)?;
+    let json = serde_json::to_string(record)
+        .map_err(|cause| Error::Terminal(format!("PIN 记录序列化失败：{cause}")))?;
+    crate::atomic::write(&path, json.as_bytes())
+        .map_err(|cause| Error::Terminal(format!("写入 PIN 记录失败：{cause}")))
+}
+
+fn read_pinned_record(app: &AppHandle, pin_id: u64) -> Result<PinnedRecord> {
+    let path = pinned_path(app, pin_id)?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|cause| Error::Terminal(format!("读取 PIN 记录失败：{cause}")))?;
+    serde_json::from_str(&text)
+        .map_err(|cause| Error::Terminal(format!("PIN 记录解析失败：{cause}")))
+}
+
+/// 固定会话：把当前回放 + 元数据落盘。已有 PIN 的会话重复调用 = 刷新。
+#[tauri::command]
+pub fn terminal_pin(
+    app: AppHandle,
+    state: State<'_, TerminalState>,
+    id: u64,
+    title: String,
+    shell: String,
+    cwd: Option<String>,
+) -> Result<u64> {
+    let replay = {
+        let sessions = state
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(session) = sessions.get(&id) else {
+            return Err(Error::Terminal(format!("会话不存在或已退出：{id}")));
+        };
+        // 显式局部守卫：块尾的临时 MutexGuard 会把借用拖到 sessions 之后。
+        let guard = session.replay.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.clone()
+    };
+    let pin_id = match state
+        .pins
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&id)
+    {
+        Some(existing) => *existing,
+        None => state.next_pin_id(),
+    };
+    write_pinned_record(
+        &app,
+        &PinnedRecord {
+            meta: PinnedTerminal {
+                pin_id,
+                title,
+                shell,
+                cwd,
+            },
+            replay,
+        },
+    )?;
+    state
+        .pins
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(id, pin_id);
+    Ok(pin_id)
+}
+
+/// 已有 PIN 记录的会话在新进程里续上（启动恢复路径：不改写回放内容）。
+#[tauri::command]
+pub fn terminal_pin_resume(
+    app: AppHandle,
+    state: State<'_, TerminalState>,
+    id: u64,
+    pin_id: u64,
+) -> Result<()> {
+    read_pinned_record(&app, pin_id)?;
+    state
+        .pins
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(id, pin_id);
+    Ok(())
+}
+
+/// 取消固定：解除关联并删除记录文件。
+#[tauri::command]
+pub fn terminal_unpin(app: AppHandle, state: State<'_, TerminalState>, id: u64) -> Result<()> {
+    let pin_id = state
+        .pins
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&id);
+    if let Some(pin_id) = pin_id {
+        match pinned_path(&app, pin_id) {
+            Ok(path) => {
+                let _ = std::fs::remove_file(path);
+            }
+            Err(cause) => return Err(cause),
+        }
+    }
+    Ok(())
+}
+
+/// 全部固定记录的元数据（启动恢复用；不含回放正文）。
+#[tauri::command]
+pub fn terminal_pinned_list(app: AppHandle) -> Result<Vec<PinnedTerminal>> {
+    let dir = pinned_dir(&app)?;
+    let mut list = Vec::new();
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|cause| Error::Terminal(format!("读取终端数据目录失败：{cause}")))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(record) = serde_json::from_str::<PinnedRecord>(&text) {
+            list.push(record.meta);
+        }
+    }
+    list.sort_by_key(|meta| meta.pin_id);
+    Ok(list)
+}
+
+/// 某条固定记录的历史回放（启动恢复时写进新会话的初始内容）。
+#[tauri::command]
+pub fn terminal_pinned_replay(app: AppHandle, pin_id: u64) -> Result<String> {
+    Ok(read_pinned_record(&app, pin_id)?.replay)
 }
 
 /// shell 解析：auto = pwsh 优先、powershell 兜底；显式路径直接用。

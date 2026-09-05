@@ -15,8 +15,9 @@
   let meta: AppMetaResult | null = $state(null);
   let saveError: string | null = $state(null);
   let portInput: string = $state('');
-  let pinnedInput: string = $state('');
   let registryInput: string = $state('');
+  /** 千寻锁定的 DSH 安装说明符（Rust 侧单一事实源）。 */
+  let installSpec: string | null = $state(null);
 
   const themeOptions: Array<{ value: ThemePreference; label: string }> = [
     { value: 'system', label: '跟随系统' },
@@ -31,7 +32,6 @@
   // 端口 10000 常被本机其他 DSH 实例占用：合法但强烈不建议。
   const portClashesStudio = $derived(portValid && Number(portInput) === 10000);
 
-  const pinnedValid = $derived(pinnedInput === '' || /^[0-9A-Za-z.-]+$/.test(pinnedInput));
   const registryValid = $derived(
     ['official', 'npmmirror'].includes(registryInput) || /^https?:\/\/.+/.test(registryInput),
   );
@@ -44,6 +44,11 @@
         // 版本获取失败不影响设置编辑，状态栏已单独展示该错误。
         meta = null;
       }
+      try {
+        installSpec = (await call<{ installSpec: string }>('harness_environment')).installSpec;
+      } catch {
+        installSpec = null;
+      }
       await refreshSync();
     })();
   });
@@ -52,7 +57,6 @@
   $effect(() => {
     if (settings.current && !portInput) {
       portInput = String(settings.current.dsh.port);
-      pinnedInput = settings.current.dsh.pinnedVersion;
       registryInput = settings.current.mirrors.npmRegistry;
     }
   });
@@ -312,17 +316,13 @@
 
       <div class="flex items-center justify-between gap-4 text-sm">
         <span class="shrink-0">锁定版本</span>
-        <input
-          class="w-40 rounded-md border border-line bg-surface px-2 py-1 text-right invalid:border-danger"
-          type="text"
-          placeholder="留空 = latest"
-          bind:value={pinnedInput}
-          onblur={() => {
-            if (pinnedValid) void save({ dsh: { pinnedVersion: pinnedInput.trim() } });
-          }}
-        />
+        <span class="truncate font-mono text-xs text-muted" title="由千寻版本锁定，不可修改">
+          {installSpec ?? '…'}
+        </span>
       </div>
-      <p class="text-xs text-muted">精确版本号（如 0.1.1-rc.2）；留空跟随 latest。</p>
+      <p class="text-xs text-muted">
+        DSH 版本由千寻锁定并经过验收，随千寻更新而升级；本页不可修改。
+      </p>
 
       <label class="flex items-center justify-between text-sm">
         <span>端口占用时改用随机端口</span>

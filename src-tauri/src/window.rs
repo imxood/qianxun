@@ -92,3 +92,20 @@ pub fn persist_geometry(app: &AppHandle) {
         }
     }
 }
+
+/// 开/关开发者工具（F12 由前端捕获后调用）。
+/// 浏览器加速键已整体关闭（Ctrl+Shift+C 误触的根因），devtools 的
+/// 唯一入口收敛到这条命令。
+#[tauri::command]
+pub fn app_toggle_devtools(app: AppHandle) -> crate::error::Result<()> {
+    let Some(window) = front(&app) else {
+        return Ok(());
+    };
+    if window.is_devtools_open() {
+        window.close_devtools();
+    } else {
+        window.open_devtools();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}

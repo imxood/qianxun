@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { call } from './lib/ipc';
   import TitleBar from './components/TitleBar.svelte';
   import SideNav from './components/SideNav.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ContextMenuLayer from './components/ContextMenuLayer.svelte';
   import OverviewPage from './features/overview/OverviewPage.svelte';
   import EnvPage from './features/env/EnvPage.svelte';
-  import ConsolePage from './features/console/ConsolePage.svelte';
   import DshPage from './features/dsh/DshPage.svelte';
   import FilesPage from './features/search/FilesPage.svelte';
   import GrepPage from './features/search/GrepPage.svelte';
@@ -46,6 +46,17 @@
     };
   });
 
+  /**
+   * 开发者工具的显式开关：浏览器加速键已在 Rust 侧关闭（Ctrl+Shift+C
+   * 误触的根因），F12 在这里接管开与关（Rust 命令实现）。
+   */
+  function toggleDevtools(event: KeyboardEvent): void {
+    if (event.key !== 'F12') return;
+    event.preventDefault();
+    event.stopPropagation();
+    void call('app_toggle_devtools').catch(() => {});
+  }
+
   // 设置到达后同步主题偏好（启动时与每次保存后各一次）。
   $effect(() => {
     if (settings.current) theme.set(settings.current.theme);
@@ -67,6 +78,8 @@
   // iframe 文档全部原样保留；invisible 元素不接收指针事件、不进 Tab 焦点序。
   const show = (page: PageId): string => (nav.page === page ? '' : 'invisible');
 </script>
+
+<svelte:window onkeydown={toggleDevtools} />
 
 <div class="flex h-full flex-col overflow-hidden bg-bg">
   <TitleBar />
@@ -100,13 +113,8 @@
         </div>
       {/if}
       {#if nav.visited.env}
-        <div class="absolute inset-0 overflow-y-auto p-6 {show('env')}">
+        <div class="absolute inset-0 overflow-hidden {show('env')}">
           <EnvPage />
-        </div>
-      {/if}
-      {#if nav.visited.console}
-        <div class="absolute inset-0 overflow-y-auto p-6 {show('console')}">
-          <ConsolePage />
         </div>
       {/if}
       {#if nav.visited['search-files']}

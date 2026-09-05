@@ -10,15 +10,21 @@
   // 状态就绪即加载 iframe；重启/断线由 reload 钩子自动恢复。
   const ready = $derived(harness.status.phase === 'ready');
   const origin = $derived(harness.status.phase === 'ready' ? harness.status.origin : '');
-  // 重启后 origin 不变，iframe 不会自动重载：origin 每次变化就换一个
-  // 无害查询参数强制刷新。effect 只读 origin、只写 frameSrc——写自己读不到
-  // 的状态才不会自环（reloadToken++ 的先读后写曾把 effect 变成死循环，
+  const launchToken = $derived(harness.status.phase === 'ready' ? harness.status.token : '');
+  // DSH 0.1.2 起 index 需要启动 token（换取签名 cookie）；旧版 token 为空
+  // 串时退回裸 origin。重启后 origin 不变，iframe 不会自动重载：origin 每次变化
+  // 就换一个无害查询参数强制刷新。effect 只读 origin、只写 frameSrc——写自己
+  // 读不到的状态才不会自环（reloadToken++ 的先读后写曾把 effect 变成死循环，
   // 未捕获异常卡死整个调度器，表现为「进了 DSH 页就点不动任何页面」）。
   let reloadSeq = 0;
   let frameSrc = $state('');
   $effect(() => {
     reloadSeq += 1;
-    frameSrc = origin ? `${origin}${origin.includes('?') ? '&' : '?'}qx=${reloadSeq}` : '';
+    const base = origin ? `${origin}/` : '';
+    const query = launchToken
+      ? `token=${encodeURIComponent(launchToken)}&qx=${reloadSeq}`
+      : `qx=${reloadSeq}`;
+    frameSrc = base ? `${base}?${query}` : '';
   });
 
   // 首屏防白屏：iframe 文档加载完成前用主题色浮层盖住。配合外壳的后台
@@ -30,10 +36,10 @@
   });
 
   const statusText: Record<string, string> = {
-    stopped: 'DSH 未运行。',
+    stopped: 'DSH 未运行。可在「环境」页启动，或：',
     starting: 'DSH 启动中…首次启动需加载插件，稍慢。',
     restarting: 'DSH 异常退出，正在自动重启…',
-    failed: 'DSH 启动失败，详见控制台日志。',
+    failed: 'DSH 启动失败，详见「环境」页日志。',
   };
 </script>
 
@@ -85,7 +91,7 @@
           class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
           onclick={() => nav.go('env')}
         >
-          检查环境
+          查看环境与日志
         </button>
       </div>
     </div>

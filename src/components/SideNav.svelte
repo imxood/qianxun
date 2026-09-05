@@ -9,11 +9,6 @@
       icon: 'M4 7h16M4 7a2 2 0 012-2h2m10 0a2 2 0 012 2M6 5v14m12-14v14M6 19h12',
     },
     {
-      id: 'console',
-      label: '控制台',
-      icon: 'M4 5h16v14H4zM7 9l3 3-3 3m6 0h4',
-    },
-    {
       id: 'dsh',
       label: 'DSH',
       icon: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5',

@@ -1,7 +1,6 @@
 export type PageId =
   | 'overview'
   | 'env'
-  | 'console'
   | 'dsh'
   | 'search-files'
   | 'search-grep'

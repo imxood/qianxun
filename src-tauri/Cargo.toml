@@ -85,3 +85,7 @@ windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
 ] }
+# 终端域（M4）：关闭 WebView2 浏览器加速键（Ctrl+Shift+C/I、Ctrl+Shift+V
+# 原样粘贴），复制/粘贴/开发者工具改由外壳自行接管。版本对齐 wry。
+webview2-com = "0.38"
+windows-core = "0.61"

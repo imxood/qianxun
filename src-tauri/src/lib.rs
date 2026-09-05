@@ -160,6 +160,28 @@ pub fn run() {
             // 桥自愈：部署过但插件文件被 DSH 重装清掉时静默补齐（M6）。
             bridge::commands::heal(handle);
 
+            // 关闭 WebView2 浏览器加速键：Ctrl+Shift+C 不再误开 devtools
+            // 元素选择器、Ctrl+Shift+V 不再触发「原样粘贴」（双重粘贴的
+            // 元凶）。开发者工具保留：F12 / Ctrl+Shift+I 由前端显式开关。
+            #[cfg(windows)]
+            if let Some(main) = app.get_webview_window("main") {
+                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                use windows_core::Interface;
+                main.with_webview(move |webview| unsafe {
+                    let controller = webview.controller();
+                    let Ok(core) = controller.CoreWebView2() else {
+                        return;
+                    };
+                    let Ok(settings) = core.Settings() else {
+                        return;
+                    };
+                    if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
+                        let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+                    }
+                })?;
+            }
+
+
             // 远程网关：设置里启用过就恢复监听（上游 origin 等 DSH 就绪事件补）。
             tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
 
@@ -217,11 +239,18 @@ pub fn run() {
             shots::commands::shots_pin,
             shots::commands::shots_close_overlays,
             shots::commands::shots_open_pin,
+            window::app_toggle_devtools,
             terminal::commands::terminal_spawn,
             terminal::commands::terminal_write,
             terminal::commands::terminal_resize,
             terminal::commands::terminal_kill,
             terminal::commands::terminal_replay,
+            terminal::commands::terminal_clear,
+            terminal::commands::terminal_pin,
+            terminal::commands::terminal_unpin,
+            terminal::commands::terminal_pin_resume,
+            terminal::commands::terminal_pinned_list,
+            terminal::commands::terminal_pinned_replay,
             notes::commands::notes_list,
             notes::commands::notes_read,
             notes::commands::notes_save,
