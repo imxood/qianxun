@@ -24,10 +24,15 @@
   >
     {#each contextMenu.items as item (item.label)}
       <button
-        class="block w-full px-3 py-1.5 text-left text-xs transition-colors hover:bg-accent-soft {item.danger
+        class="block w-full px-3 py-1.5 text-left text-xs transition-colors {item.disabled
+          ? 'cursor-not-allowed text-muted/50'
+          : 'hover:bg-accent-soft'} {item.danger && !item.disabled
           ? 'text-danger'
-          : 'text-fg'}"
+          : item.disabled
+            ? ''
+            : 'text-fg'}"
         role="menuitem"
+        aria-disabled={item.disabled || undefined}
         onclick={() => contextMenu.run(item)}
       >
         {item.label}

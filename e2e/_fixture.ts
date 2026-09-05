@@ -46,7 +46,9 @@ export type QxFixture = {
 };
 
 export const test = base.extend<QxFixture>({
-  app: async (_fixtures, use) => {
+  // Playwright 要求首参必须是解构模式；本 fixture 不依赖任何其它 fixture。
+  // eslint-disable-next-line no-empty-pattern
+  app: async ({}, use) => {
     // 保险一：二进制必须来自 target/debug。
     expect(
       TAURI_BIN,

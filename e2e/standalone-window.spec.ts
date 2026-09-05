@@ -176,13 +176,12 @@ test.describe('独立窗口标题栏', () => {
     const title = standalone.getByText('终端 · 千寻');
     const box = await title.boundingBox();
     expect(box).toBeTruthy();
+    // 最大化带 OS 动画：轮询等待终态，不赌固定延时。
     await standalone.mouse.dblclick(box!.x + box!.width / 2, box!.y + box!.height / 2);
-    await standalone.waitForTimeout(400);
-    expect(await maximizedOf()).toBe(true);
+    await expect.poll(maximizedOf, { timeout: 5_000 }).toBe(true);
 
     await standalone.mouse.dblclick(box!.x + box!.width / 2, box!.y + box!.height / 2);
-    await standalone.waitForTimeout(400);
-    expect(await maximizedOf()).toBe(false);
+    await expect.poll(maximizedOf, { timeout: 5_000 }).toBe(false);
   });
 });
 

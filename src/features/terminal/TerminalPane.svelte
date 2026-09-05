@@ -59,6 +59,7 @@
   let pasteFromClipboard: (() => void) | null = null;
   let clearPane: (() => void) | null = null;
   let selectionText: (() => string) | null = null;
+  let clearSelection: (() => void) | null = null;
 
   // keep-alive 重见：visibility 切换不触发 ResizeObserver，主动补一次 fit。
   $effect(() => {
@@ -80,18 +81,48 @@
     return path.replaceAll('/', '\\');
   }
 
-  function menu(event: MouseEvent): void {
+  /**
+   * 右键菜单：有选区 → 复制；粘贴（剪贴板为空或不可读时灰显）；清空。
+   * 剪贴板探测在菜单弹出前异步完成（右键本身构成 user activation，
+   * WebView2 下 readText 可用），失败按禁用处理——点击也必然失败。
+   */
+  async function menu(event: MouseEvent): Promise<void> {
     const selection = selectionText?.() ?? '';
-    const items: Array<{ label: string; onclick?: () => void }> = [];
+    let clipboard: string | null;
+    try {
+      clipboard = await navigator.clipboard.readText();
+    } catch {
+      clipboard = null; // 权限拒绝等：粘贴必然失败，菜单里按禁用呈现。
+    }
+    const pasteDisabled = clipboard === null || clipboard.length === 0;
+
+    const items: Array<{ label: string; onclick?: () => void; disabled?: boolean }> = [];
     if (selection) {
       items.push({
         label: '复制',
         onclick: () => navigator.clipboard.writeText(selection).catch(() => {}),
       });
     }
-    items.push({ label: '粘贴', onclick: () => pasteFromClipboard?.() });
+    items.push({ label: '粘贴', disabled: pasteDisabled, onclick: () => pasteFromClipboard?.() });
     items.push({ label: '清空', onclick: () => clearPane?.() });
     contextMenu.show(event, items);
+  }
+
+  /**
+   * 点击选中内容即复制（Windows Terminal 习惯）：左键在已有选区上
+   * 按下 → 复制并清除选区，且拦截掉 xterm 的默认 mousedown（否则它
+   * 会立刻开始新的选区）。带修饰键的点击留给扩展选区语义。
+   */
+  function onHostMouseDownCapture(event: MouseEvent): void {
+    if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
+      return;
+    }
+    const text = selectionText?.();
+    if (!text) return;
+    navigator.clipboard.writeText(text).catch(() => {});
+    clearSelection?.();
+    event.stopPropagation();
+    event.preventDefault();
   }
 
   onMount(() => {
@@ -129,6 +160,10 @@
     };
     pasteFromClipboard = doPaste;
     selectionText = () => terminal.getSelection();
+    clearSelection = () => terminal.clearSelection();
+    // 点击选中内容即复制：capture 阶段在宿主上拦下，先于 xterm 的
+    // mousedown 处理（否则选区立刻被新选择取代）。
+    host!.addEventListener('mousedown', onHostMouseDownCapture, true);
     clearPane = (): void => {
       // 视口 + 滚动缓冲 + Rust 侧回放缓冲一起清，重放/恢复不再带旧内容。
       terminal.clear();

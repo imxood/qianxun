@@ -9,6 +9,8 @@ export interface MenuItem {
   onclick?: () => void;
   /** 危险动作红色显示（如删除）。 */
   danger?: boolean;
+  /** 禁用：灰显且不响应点击（如剪贴板为空时的「粘贴」）。 */
+  disabled?: boolean;
 }
 
 class ContextMenuStore {
@@ -35,6 +37,7 @@ class ContextMenuStore {
   }
 
   run(item: MenuItem): void {
+    if (item.disabled) return;
     this.close();
     item.onclick?.();
   }

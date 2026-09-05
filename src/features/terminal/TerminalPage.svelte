@@ -398,6 +398,8 @@
   let dragStartY = 0;
   let dragMoved = false;
   let suppressClick = false;
+  /** 拖拽影像：跟随鼠标的浮起标签卡片（松手/Esc 消失）。 */
+  let ghost: { x: number; y: number; title: string; pinned: boolean } | null = $state(null);
   const tabEls = new SvelteMap<number, HTMLElement>();
 
   function tabRef(node: HTMLElement, id: number): { destroy(): void } {
@@ -409,6 +411,13 @@
     };
   }
 
+  /** 结束拖拽：影像消散、状态复位（重排结果保留）。 */
+  function endDrag(): void {
+    dragId = null;
+    dragMoved = false;
+    ghost = null;
+  }
+
   function tabPointerDown(event: PointerEvent, tab: Tab): void {
     if (event.button !== 0) return;
     // × 关闭钮自带点击语义，不作为拖拽起点。
@@ -417,6 +426,7 @@
     dragMoved = false;
     dragStartX = event.clientX;
     dragStartY = event.clientY;
+    ghost = null;
     (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
   }
 
@@ -428,6 +438,14 @@
       if (Math.hypot(dx, dy) < 5) return;
       dragMoved = true;
     }
+    // 影像跟随鼠标（略偏右下，不遮住落点）。
+    const dragged = tabs.find((tab) => tab.id === dragId);
+    ghost = {
+      x: event.clientX,
+      y: event.clientY,
+      title: dragged?.title ?? '',
+      pinned: dragged?.pinned !== null,
+    };
     const from = tabs.findIndex((tab) => tab.id === dragId);
     if (from < 0) return;
     const target = insertionIndex(event.clientX);
@@ -453,12 +471,24 @@
   function tabPointerUp(event: PointerEvent, tab: Tab): void {
     if (dragId !== tab.id) return;
     suppressClick = dragMoved;
-    dragId = null;
-    dragMoved = false;
     const button = event.currentTarget as HTMLButtonElement;
     if (button.hasPointerCapture(event.pointerId)) {
       button.releasePointerCapture(event.pointerId);
     }
+    endDrag();
+  }
+
+  /** 拖拽中被系统打断（窗口失焦/右键等）：复位，不留悬挂影像。 */
+  function tabPointerCancel(): void {
+    suppressClick = false;
+    endDrag();
+  }
+
+  /** Esc 取消拖拽：影像消散，已发生的重排保留。 */
+  function cancelDragOnEscape(event: KeyboardEvent): void {
+    if (event.key !== 'Escape' || dragId === null) return;
+    suppressClick = true;
+    endDrag();
   }
 
   function tabClick(tab: Tab): void {
@@ -469,6 +499,8 @@
     activeId = tab.id;
   }
 </script>
+
+<svelte:window onkeydown={cancelDragOnEscape} />
 
 <section class="flex h-full flex-col overflow-hidden">
   <div
@@ -495,7 +527,7 @@
           tab.id
             ? 'bg-accent-soft font-medium text-fg'
             : 'text-muted hover:bg-accent-soft/60'} {dragId === tab.id
-            ? 'relative z-10 opacity-70 ring-1 ring-accent shadow-lg'
+            ? 'relative z-0 opacity-30'
             : ''}"
           role="tab"
           aria-selected={activeId === tab.id}
@@ -507,6 +539,7 @@
           onpointerdown={(event) => tabPointerDown(event, tab)}
           onpointermove={tabPointerMove}
           onpointerup={(event) => tabPointerUp(event, tab)}
+          onpointercancel={tabPointerCancel}
           title="{tab.title}{tab.pinned !== null
             ? '（已固定）'
             : ''}——双击重命名，右键更多，拖拽排序"
@@ -538,6 +571,19 @@
       +
     </button>
   </div>
+
+  <!-- 拖拽影像：跟随鼠标的浮起标签卡片（越出标签条也不被裁剪）。 -->
+  {#if ghost}
+    <div
+      class="pointer-events-none fixed z-50 flex max-w-44 -translate-y-1/2 scale-105 items-center gap-1.5 rounded-md border border-accent bg-card px-2.5 py-1 text-xs text-fg opacity-90 shadow-xl"
+      style="left: {ghost.x + 10}px; top: {ghost.y}px;"
+    >
+      {#if ghost.pinned}
+        <span class="shrink-0 text-[10px] text-accent">📌</span>
+      {/if}
+      <span class="truncate">{ghost.title}</span>
+    </div>
+  {/if}
 
   <div class="relative min-h-0 flex-1">
     {#each tabs as tab (tab.id)}
