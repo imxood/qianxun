@@ -130,7 +130,7 @@ mod tests {
     /// 暖缓存语义：命中即移除（切回激活位）、未命中 None、
     /// 容量 LRU（超过 WARM_CACHE_CAP 淘汰最旧）。
     #[test]
-    fn 暖缓存命中移除与LRU淘汰() {
+    fn 暖缓存命中移除与_lru_淘汰() {
         let state = SearchState::new();
         let a = SharedFilePicker::default();
         let b = SharedFilePicker::default();

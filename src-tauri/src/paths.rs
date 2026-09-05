@@ -19,6 +19,14 @@ use tauri::{AppHandle, Manager};
 use crate::error::{Error, Result};
 
 pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf> {
+    // 测试/便携覆盖：QIANXUN_DATA_DIR 显式指定数据根（e2e 用一次性临时
+    // 目录做到完全隔离——不读用户设置、不恢复用户 PIN、不碰生产数据）。
+    if let Some(override_dir) = std::env::var_os("QIANXUN_DATA_DIR").filter(|text| !text.is_empty())
+    {
+        let dir = PathBuf::from(override_dir);
+        std::fs::create_dir_all(&dir).map_err(|cause| Error::DataDir(cause.to_string()))?;
+        return Ok(dir);
+    }
     // debug 构建（`pnpm dev` 跑出的二进制）装到 ~/.qianxun_dev，与安装版
     // 的 ~/.qianxun 完全分离——debug 期间重装 DSH、改设置、刷固定版本都
     // 不会污染生产数据。第一次启用 dev 构建会按完整流程装一份 DSH。

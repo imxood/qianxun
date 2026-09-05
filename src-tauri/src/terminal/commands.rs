@@ -20,6 +20,8 @@ use crate::error::{Error, Result};
 /// 事件通道（前端 listen 后按会话 id 过滤）。
 const OUTPUT_EVENT: &str = "terminal://output";
 const EXIT_EVENT: &str = "terminal://exit";
+/// 会话转移事件：目标窗口的前端据此把会话收进本地标签列表。
+const TRANSFER_EVENT: &str = "terminal://transferred";
 /// 回放缓冲上限（字节）：够覆盖 shell 横幅 + 一屏历史，内存代价可忽略。
 const REPLAY_CAP: usize = 64 * 1024;
 
@@ -55,9 +57,21 @@ struct Session {
     replay: Mutex<String>,
 }
 
+/// 会话的归属与展示元数据。Rust 持有一份权威副本，供跨窗口转移
+/// （新窗口重建标签需要 title/shell/cwd）与重挂载恢复（terminal_sessions）使用。
+/// title 为 None 表示前端尚未重命名，展示时用 shell 名兜底。
+struct SessionMeta {
+    window_label: String,
+    title: Option<String>,
+    shell: String,
+    cwd: Option<String>,
+}
+
 #[derive(Default)]
 pub struct TerminalState {
     sessions: Mutex<HashMap<u64, Session>>,
+    /// 会话元数据（与 sessions 同生命周期：exit 监视线程一并清理）。
+    metas: Mutex<HashMap<u64, SessionMeta>>,
     next_id: AtomicU64,
     /// 会话 id → 固定（PIN）记录 id。会话退出时据此刷新 PIN 回放。
     pins: Mutex<HashMap<u64, u64>>,
@@ -107,9 +121,11 @@ struct PinnedRecord {
 }
 
 /// 启动一个 PTY 会话，返回 id 与解析后的 shell。输出/退出走事件。
+/// 会话归属调用方所在窗口（window.label()），跨窗口转移走 terminal_transfer。
 #[tauri::command]
 pub fn terminal_spawn(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, TerminalState>,
     shell: Option<String>,
     cwd: Option<String>,
@@ -118,7 +134,7 @@ pub fn terminal_spawn(
 ) -> Result<TerminalInfo> {
     let shell = resolve_shell(shell.as_deref());
     let mut command = CommandBuilder::new(&shell);
-    if let Some(dir) = cwd.filter(|text| !text.is_empty()) {
+    if let Some(dir) = cwd.as_ref().filter(|text| !text.is_empty()) {
         command.cwd(dir);
     }
     // pwsh/powershell 注入 prompt 钩子：前端经 OSC 7 跟踪 cwd（PIN 恢复用）。
@@ -163,11 +179,12 @@ pub fn terminal_spawn(
     let killer = child.clone_killer();
 
     let id = state.next_id.fetch_add(1, Ordering::AcqRel);
-    state
-        .sessions
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        sessions.insert(
             id,
             Session {
                 master: pair.master,
@@ -176,6 +193,20 @@ pub fn terminal_spawn(
                 replay: Mutex::new(String::new()),
             },
         );
+        state
+            .metas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id,
+                SessionMeta {
+                    window_label: window.label().to_owned(),
+                    title: None,
+                    shell: shell.clone(),
+                    cwd: cwd.clone(),
+                },
+            );
+    }
 
     // 输出泵：PTY → 前端。每块读即发（读是阻塞的，攒批只会徒增延迟）；
     // 同时写入回放缓冲，供监听晚到的前端补齐横幅与提示符。
@@ -263,6 +294,11 @@ pub fn terminal_spawn(
                 }
                 state
                     .sessions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
+                state
+                    .metas
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&id);
@@ -385,6 +421,142 @@ pub fn terminal_clear(state: State<'_, TerminalState>, id: u64) -> Result<()> {
     Ok(())
 }
 
+// ---- 跨窗口：独立窗口的会话清单 / 转移 / 窗口关闭清理 ----
+
+/// 会话快照：terminal_sessions 的返回项（前端重建标签所需的最小集）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshot {
+    pub id: u64,
+    /// Rust 侧存的重命名标题；None = 前端用 shell 名兜底。
+    pub title: Option<String>,
+    pub shell: String,
+    pub cwd: Option<String>,
+    pub pin_id: Option<u64>,
+}
+
+/// 列出归属某窗口的存活会话（前端重挂载恢复用）。
+/// label 缺省 = 调用方所在窗口。
+#[tauri::command]
+pub fn terminal_sessions(
+    window: tauri::WebviewWindow,
+    state: State<'_, TerminalState>,
+    label: Option<String>,
+) -> Result<Vec<SessionSnapshot>> {
+    let owner = label.unwrap_or_else(|| window.label().to_owned());
+    let metas = state.metas.lock().unwrap_or_else(PoisonError::into_inner);
+    let pins = state.pins.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut list: Vec<SessionSnapshot> = metas
+        .iter()
+        .filter(|(_, meta)| meta.window_label == owner)
+        .map(|(id, meta)| SessionSnapshot {
+            id: *id,
+            title: meta.title.clone(),
+            shell: meta.shell.clone(),
+            cwd: meta.cwd.clone(),
+            pin_id: pins.get(id).copied(),
+        })
+        .collect();
+    list.sort_by_key(|snapshot| snapshot.id);
+    Ok(list)
+}
+
+/// 把会话转移给目标窗口：改归属元数据 + 广播事件。目标窗口前端收到
+/// `terminal://transferred` 后用本地标签接管（xterm 历史经回放缓冲补齐）。
+/// 参数保持扁平与 IPC 合同一一对应（tauri 命令入参不做嵌套结构）。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn terminal_transfer(
+    app: AppHandle,
+    state: State<'_, TerminalState>,
+    id: u64,
+    target: String,
+    title: String,
+    shell: String,
+    cwd: Option<String>,
+    pin_id: Option<u64>,
+) -> Result<()> {
+    // 目标窗口必须真实存在（main 常驻；独立窗口可能已被用户关掉）。
+    if target != "main" && app.get_webview_window(&target).is_none() {
+        return Err(Error::Window(format!("目标窗口不存在：{target}")));
+    }
+    {
+        let mut metas = state.metas.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(meta) = metas.get_mut(&id) else {
+            return Err(Error::Terminal(format!(
+                "会话不存在或已退出：{id}（转移仅支持运行中的终端）"
+            )));
+        };
+        meta.window_label = target.clone();
+        meta.title = Some(title.clone());
+        meta.shell = shell.clone();
+        meta.cwd = cwd.clone();
+    }
+    if let Some(pin_id) = pin_id {
+        // PIN 关联随会话走：记录文件不变，只跟着换窗口。
+        state
+            .pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, pin_id);
+    }
+    let _ = app.emit(
+        TRANSFER_EVENT,
+        TransferEvent {
+            id,
+            window_label: target,
+            title,
+            shell,
+            cwd,
+            pin_id,
+        },
+    );
+    Ok(())
+}
+
+/// 转移事件负载（目标窗口前端消费；其余窗口按归属过滤丢弃）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TransferEvent {
+    id: u64,
+    window_label: String,
+    title: String,
+    shell: String,
+    cwd: Option<String>,
+    pin_id: Option<u64>,
+}
+
+/// 杀掉归属某窗口的全部会话（独立窗口销毁时调用）。
+/// 不从表里移除：exit 监视线程照常收尾——PIN 记录用最终回放刷新
+/// （固定终端关窗 = 进程退出语义，下次启动仍可恢复）。
+pub fn kill_window_sessions(app: &AppHandle, label: &str) -> usize {
+    let state = app.state::<TerminalState>();
+    let ids: Vec<u64> = {
+        let metas = state.metas.lock().unwrap_or_else(PoisonError::into_inner);
+        metas
+            .iter()
+            .filter(|(_, meta)| meta.window_label == label)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut killed = 0;
+    for id in ids {
+        if let Some(session) = sessions.get(&id) {
+            let _ = session
+                .killer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .kill();
+            killed += 1;
+        }
+    }
+    killed
+}
+
 // ---- PIN：固定终端，跨启动恢复 cwd 与历史输出 ----
 
 fn pinned_dir(app: &AppHandle) -> Result<PathBuf> {
@@ -494,19 +666,27 @@ pub fn terminal_unpin(app: AppHandle, state: State<'_, TerminalState>, id: u64) 
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&id);
     if let Some(pin_id) = pin_id {
-        match pinned_path(&app, pin_id) {
-            Ok(path) => {
-                let _ = std::fs::remove_file(path);
-            }
-            Err(cause) => return Err(cause),
-        }
+        let path = pinned_path(&app, pin_id)?;
+        let _ = std::fs::remove_file(path);
     }
     Ok(())
 }
 
 /// 全部固定记录的元数据（启动恢复用；不含回放正文）。
+/// 已被存活会话持有的 PIN 不返回：一条 PIN 只属于一个窗口，
+/// 否则两个终端 UI 会同时恢复同一条记录（重复 spawn + 抢写回放）。
 #[tauri::command]
-pub fn terminal_pinned_list(app: AppHandle) -> Result<Vec<PinnedTerminal>> {
+pub fn terminal_pinned_list(
+    app: AppHandle,
+    state: State<'_, TerminalState>,
+) -> Result<Vec<PinnedTerminal>> {
+    let owned: std::collections::HashSet<u64> = state
+        .pins
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .copied()
+        .collect();
     let dir = pinned_dir(&app)?;
     let mut list = Vec::new();
     let entries = std::fs::read_dir(&dir)
@@ -520,6 +700,9 @@ pub fn terminal_pinned_list(app: AppHandle) -> Result<Vec<PinnedTerminal>> {
             continue;
         };
         if let Ok(record) = serde_json::from_str::<PinnedRecord>(&text) {
+            if owned.contains(&record.meta.pin_id) {
+                continue;
+            }
             list.push(record.meta);
         }
     }

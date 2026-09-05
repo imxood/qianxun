@@ -12,6 +12,7 @@
 export const IPC_COMMANDS = [
   'app_meta',
   'app_toggle_devtools',
+  'system_theme',
   'settings_get',
   'settings_update',
   'harness_environment',
@@ -44,11 +45,16 @@ export const IPC_COMMANDS = [
   'terminal_kill',
   'terminal_replay',
   'terminal_clear',
+  'terminal_sessions',
+  'terminal_transfer',
   'terminal_pin',
   'terminal_unpin',
   'terminal_pin_resume',
   'terminal_pinned_list',
   'terminal_pinned_replay',
+  'window_spawn_view',
+  'window_reveal_main',
+  'window_force_close',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -74,9 +80,20 @@ export type IpcCommand = (typeof IPC_COMMANDS)[number];
 export const IPC_EVENTS = [
   'harness://event',
   'harness://install-progress',
+  'system://theme',
   'terminal://output',
   'terminal://exit',
+  'terminal://transferred',
+  'window://closed',
+  'window://close-requested',
 ] as const;
+
+/**
+ * system://theme 事件负载：OS「应用模式」是否为暗色。
+ * WebView2 媒体查询默认恒报 light 不可信，Rust 注册表直读后推送；
+ * ThemeChanged（OS 深浅色切换）时实时再推。
+ */
+export type SystemThemeEvent = boolean;
 
 // ---------------------------------------------------------------------------
 // app_meta
@@ -403,6 +420,48 @@ export interface PinnedTerminal {
   title: string;
   shell: string;
   cwd: string | null;
+}
+
+/** terminal_sessions 的返回项：某窗口名下存活会话的最小快照。 */
+export interface TerminalSessionSnapshot {
+  id: number;
+  /** Rust 侧存的重命名标题；null = 前端用 shell 名兜底。 */
+  title: string | null;
+  shell: string;
+  cwd: string | null;
+  pinId: number | null;
+}
+
+/** terminal_transfer 的入参：把会话转移给目标窗口。 */
+export interface TerminalTransferArgs {
+  id: number;
+  /** 目标窗口 label：'main' 或独立窗口 label。 */
+  target: string;
+  title: string;
+  shell: string;
+  cwd: string | null;
+  pinId: number | null;
+}
+
+/** terminal://transferred 事件负载：目标窗口据此接管标签。 */
+export interface TerminalTransferEvent {
+  id: number;
+  windowLabel: string;
+  title: string;
+  shell: string;
+  cwd: string | null;
+  pinId: number | null;
+}
+
+/** window_spawn_view 的入参：分离某页到独立窗口。 */
+export interface WindowSpawnViewArgs {
+  view: 'terminal' | 'dsh';
+}
+
+/** window://closed 事件负载：主窗据此恢复侧栏项。 */
+export interface StandaloneClosedEvent {
+  label: string;
+  view: 'terminal' | 'dsh';
 }
 
 // ---------------------------------------------------------------------------

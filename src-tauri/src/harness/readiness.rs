@@ -9,6 +9,7 @@
 //! - `url`：含 `?token=` 的完整 URL（DSH 页 iframe、远程页打开）；
 //! - `origin`：去除 query 的 scheme://host:port（展示、NotesPage 走
 //!   `/qx/*` 桥调用）。
+//!
 //! 不再做 token 字符串单独解析——拆出又拼回容易在传输里漏字符。
 
 /// 就绪行的前缀标记。

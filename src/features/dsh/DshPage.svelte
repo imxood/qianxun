@@ -3,6 +3,9 @@
   import { harness } from '../../stores/harness.svelte';
   import { nav } from '../../stores/nav.svelte';
 
+  /** 独立窗口模式：站内跳转（环境页）不可用（主窗布局不在本窗口）。 */
+  let { standalone = false }: { standalone?: boolean } = $props();
+
   onMount(() => {
     void harness.wire();
   });
@@ -36,6 +39,9 @@
     restarting: 'DSH 异常退出，正在自动重启…',
     failed: 'DSH 启动失败，详见「环境」页日志。',
   };
+  const stoppedText = $derived(
+    standalone ? 'DSH 未运行。请先在主窗口的「环境」页启动。' : statusText.stopped,
+  );
 </script>
 
 {#if harness.status.phase === 'ready' && !ready}
@@ -83,10 +89,10 @@
       {:else if harness.status.phase === 'starting' || harness.status.phase === 'restarting'}
         <p class="text-sm text-muted">{statusText[harness.status.phase]}</p>
       {:else}
-        <p class="text-sm text-muted">{statusText.stopped}</p>
+        <p class="text-sm text-muted">{stoppedText}</p>
       {/if}
       <div class="flex justify-center gap-2 pt-1">
-        {#if harness.status.phase === 'stopped' || harness.status.phase === 'failed'}
+        {#if !standalone && (harness.status.phase === 'stopped' || harness.status.phase === 'failed')}
           <button
             class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
             disabled={harness.starting}
@@ -95,12 +101,14 @@
             {harness.starting ? '启动中…' : '启动 DSH'}
           </button>
         {/if}
-        <button
-          class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
-          onclick={() => nav.go('env')}
-        >
-          查看环境与日志
-        </button>
+        {#if !standalone}
+          <button
+            class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
+            onclick={() => nav.go('env')}
+          >
+            查看环境与日志
+          </button>
+        {/if}
       </div>
     </div>
   </div>

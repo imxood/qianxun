@@ -141,10 +141,12 @@ pub async fn start(
         // axum 0.8 的 Serve 实现 IntoFuture（不是直接 Future），select! 接受
         // 两者但 Either 要 Future 形态——用 .into_future() 统一一下。
         let loopback_server = axum::serve(loopback_listener, app.clone()).into_future();
-        let lan_server: futures_util::future::Either<
+        // LAN 未启用时的占位分支（pending）与真实 serve 的 Future 形态统一。
+        type LanServer = futures_util::future::Either<
             std::future::Pending<Result<(), std::io::Error>>,
             std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>,
-        > = match lan_listener {
+        >;
+        let lan_server: LanServer = match lan_listener {
             Some(listener) => futures_util::future::Either::Right(Box::pin(
                 axum::serve(listener, app).into_future(),
             )),
@@ -186,9 +188,9 @@ async fn handler(State(state): State<GatewayState>, request: Request<Body>) -> R
     let path = request.uri().path().to_owned();
     let query = request.uri().query().unwrap_or_default().to_owned();
 
-    if state.is_loopback(&request.headers()) {
+    if state.is_loopback(request.headers()) {
         // 回环入口：栅栏通过即转发（含 SSE 流响应与 DSH 页面本身）。
-        if !access_allowed(&request.headers()) {
+        if !access_allowed(request.headers()) {
             crate::logging::log("warn", &format!("[http] 拒绝非本机外壳来源请求：{path}"));
             return plain(StatusCode::FORBIDDEN, "非本机外壳来源，拒绝访问");
         }

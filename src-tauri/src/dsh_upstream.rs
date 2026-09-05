@@ -320,7 +320,7 @@ pub(crate) async fn upgrade_ws(
     let origin = upstream.origin().await;
     let mut request = match HttpRequest::builder()
         .method("GET")
-        .uri(&format!("ws://{origin}{path}"))
+        .uri(format!("ws://{origin}{path}"))
         // Host 显式给：HTTP/1.1 硬性要求，Node 侧的 DSH 缺 Host 直接 400；
         // 不赌 tungstenite 是否代填。
         .header("Host", &origin)

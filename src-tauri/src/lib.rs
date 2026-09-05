@@ -167,23 +167,12 @@ pub fn run() {
 
             // 关闭 WebView2 浏览器加速键：Ctrl+Shift+C 不再误开 devtools
             // 元素选择器、Ctrl+Shift+V 不再触发「原样粘贴」（双重粘贴的
-            // 元凶）。开发者工具保留：F12 / Ctrl+Shift+I 由前端显式开关。
+            // 元凶）。同时把主题色方案设为 AUTO（prefers-color-scheme
+            // 跟随 OS，「跟随系统」主题才能在暗色系统下生效）。
+            // 开发者工具保留：F12 / Ctrl+Shift+I 由前端显式开关。
             #[cfg(windows)]
             if let Some(main) = app.get_webview_window("main") {
-                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
-                use windows_core::Interface;
-                main.with_webview(move |webview| unsafe {
-                    let controller = webview.controller();
-                    let Ok(core) = controller.CoreWebView2() else {
-                        return;
-                    };
-                    let Ok(settings) = core.Settings() else {
-                        return;
-                    };
-                    if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
-                        let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
-                    }
-                })?;
+                window::apply_webview_preferences(&main);
             }
 
             // 远程网关：设置里启用过就恢复监听（上游 origin 等 DSH 就绪事件补）。
@@ -201,19 +190,32 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 「关到托盘」只约束主窗；覆盖窗/贴图窗的关闭就是关闭。
-                if window.label() == "main" {
-                    window::on_close_requested(window, api);
+            let label = window.label().to_owned();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // 「关到托盘」只约束主窗；覆盖窗/贴图窗的关闭就是关闭。
+                    if label == "main" {
+                        window::on_close_requested(window, api);
+                    } else if label.starts_with(window::STANDALONE_PREFIX) {
+                        // 独立窗口：转交前端确认（有活动终端时弹窗），
+                        // 确认后走 window_force_close 真正销毁。
+                        window::on_standalone_close_requested(window, api);
+                    }
                 }
-            }
-            if let tauri::WindowEvent::Destroyed = event {
-                if window
-                    .label()
-                    .starts_with(shots::commands::OVERLAY_LABEL_PREFIX)
-                {
-                    shots::commands::overlay_closed(window.app_handle());
+                tauri::WindowEvent::Destroyed => {
+                    if label.starts_with(shots::commands::OVERLAY_LABEL_PREFIX) {
+                        shots::commands::overlay_closed(window.app_handle());
+                    }
+                    if label.starts_with(window::STANDALONE_PREFIX) {
+                        window::on_standalone_destroyed(window.app_handle(), &label);
+                    }
                 }
+                tauri::WindowEvent::ThemeChanged(_) => {
+                    // OS 深浅色切换：重设 webview 配色 + 广播事件，
+                    // 「跟随系统」主题立即切换。
+                    window::on_theme_changed(window.app_handle());
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -245,12 +247,18 @@ pub fn run() {
             shots::commands::shots_close_overlays,
             shots::commands::shots_open_pin,
             window::app_toggle_devtools,
+            window::system_theme,
+            window::window_spawn_view,
+            window::window_reveal_main,
+            window::window_force_close,
             terminal::commands::terminal_spawn,
             terminal::commands::terminal_write,
             terminal::commands::terminal_resize,
             terminal::commands::terminal_kill,
             terminal::commands::terminal_replay,
             terminal::commands::terminal_clear,
+            terminal::commands::terminal_sessions,
+            terminal::commands::terminal_transfer,
             terminal::commands::terminal_pin,
             terminal::commands::terminal_unpin,
             terminal::commands::terminal_pin_resume,
