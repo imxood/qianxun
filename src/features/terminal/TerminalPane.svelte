@@ -17,6 +17,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { call } from '../../lib/ipc';
   import { contextMenu } from '../../lib/menu.svelte';
+  import { oscPathToWindows } from '../../lib/utils/osc';
   import type {
     TerminalExitEvent,
     TerminalOutputEvent,
@@ -86,19 +87,7 @@
     requestAnimationFrame(() => syncSize?.());
   });
 
-  /** OSC 7 的 file:// URL → Windows 路径（file:///C:/x/y → C:\x\y）。 */
-  function oscPathToWindows(data: string): string | null {
-    if (!data.startsWith('file://')) return null;
-    let path = data.slice('file://'.length);
-    if (path.startsWith('localhost/')) path = path.slice('localhost/'.length);
-    path = path.startsWith('/') ? path.slice(1) : path;
-    try {
-      path = decodeURIComponent(path);
-    } catch {
-      // 非法百分号编码：按原样使用。
-    }
-    return path.replaceAll('/', '\\');
-  }
+  /** OSC 7 的 file:// URL → Windows 路径（纯函数在 lib/utils/osc，带单测）。 */
 
   /**
    * 右键菜单：有选区 → 复制；粘贴（剪贴板为空/不可读时灰显）；清空。

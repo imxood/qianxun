@@ -390,7 +390,10 @@
 
   function onPaneTitle(id: number, title: string): void {
     const tab = tabs.find((item) => item.id === id);
-    if (tab && title.trim() && !tab.manualTitle) tab.title = title;
+    if (!tab || !title.trim() || tab.manualTitle) return;
+    // cwd 已知时标题权威是「目录名」（OSC 7 驱动）；nushell 等会把 OSC
+    // 标题设成完整路径，不能让它盖掉。cwd 未知时才拿 OSC 标题垫底。
+    if (tab.cwd === null) tab.title = title;
   }
 
   function onPaneCwd(id: number, cwd: string): void {
