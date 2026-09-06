@@ -17,7 +17,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { call } from '../../lib/ipc';
   import { contextMenu } from '../../lib/menu.svelte';
-  import { oscPathToWindows } from '../../lib/utils/osc';
+  import { osc633CwdToWindows, osc99ToWindows, oscPathToWindows } from '../../lib/utils/osc';
   import type {
     TerminalExitEvent,
     TerminalOutputEvent,
@@ -252,11 +252,26 @@
       void call('terminal_write', { id, data });
     });
 
-    // OSC 7：shell prompt 钩子报告 cwd（PIN 恢复用）。返回 false 让
-    // 其他处理器继续（xterm 默认无 7 处理器）。
+    // cwd 上报的三条通道（shell 各有所好，都接）：
+    // - OSC 7：pwsh prompt 钩子（file:// URL）；
+    // - OSC 9;9：nushell/ConEmu 工作目录（nushell 默认 osc7=false，这条
+    //   是它的主通道）；
+    // - OSC 633：VS Code shell 集成（nushell 默认开，属性里带 Cwd）。
+    // 返回 false 让其他处理器继续（xterm 默认无这些处理器）。
+    const reportCwd = (cwd: string): void => onCwd(id, cwd);
     terminal.parser.registerOscHandler(7, (data) => {
       const cwd = oscPathToWindows(data);
-      if (cwd) onCwd(id, cwd);
+      if (cwd) reportCwd(cwd);
+      return false;
+    });
+    terminal.parser.registerOscHandler(9, (data) => {
+      const cwd = osc99ToWindows(data);
+      if (cwd) reportCwd(cwd);
+      return false;
+    });
+    terminal.parser.registerOscHandler(633, (data) => {
+      const cwd = osc633CwdToWindows(data);
+      if (cwd) reportCwd(cwd);
       return false;
     });
 
