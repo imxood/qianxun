@@ -76,6 +76,13 @@
     },
   );
 
+  // 焦点统一接管：activeId 的任何变化（点击切换 / 新建 / PIN 恢复链的
+  // 最后一条 / 转移接管 / 关闭邻居后顺延）都把焦点交给当前终端。
+  // 终端页不可见时（用户在看别的页）focus 无效但无害。
+  $effect(() => {
+    if (activeId !== null) focusPane(activeId);
+  });
+
   onMount(() => {
     const disposers: Array<() => void> = [];
     // 先接管本窗口名下的存活会话（重挂载/独立窗口关闭后的恢复），
@@ -116,7 +123,6 @@
       },
     ];
     activeId = payload.id;
-    focusPane(payload.id);
   }
 
   /** 重挂载恢复：Rust 元数据里归属本窗口的存活会话重建标签。 */
@@ -207,7 +213,6 @@
         },
       ];
       activeId = info.id;
-      focusPane(info.id);
     } catch (error) {
       // 失败原因上屏（错误窗格），不再只进 console。
       const message = error instanceof Error ? error.message : String(error);
@@ -509,7 +514,6 @@
       return;
     }
     activeId = tab.id;
-    focusPane(tab.id);
   }
 
   // ---- 标签条设置弹层：改动即时持久化，TerminalPane 热应用 ----
@@ -592,8 +596,9 @@
         </button>
       {/if}
     {/each}
+    <!-- ml-auto：+ 与 ⚙ 推到标签条行尾，与标签列表之间留弹性空隙。 -->
     <button
-      class="rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg"
+      class="ml-auto rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg"
       title="新建终端"
       data-testid="terminal-new"
       onclick={() => void newTab()}
@@ -709,6 +714,7 @@
             id={tab.id}
             active={activeId === tab.id}
             {prefs}
+            shell={tab.shell}
             initialHistory={tab.restoreFrom !== null ? tab.restoreHistory : ''}
             onExit={onPaneExit}
             onTitle={onPaneTitle}

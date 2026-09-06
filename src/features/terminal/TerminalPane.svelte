@@ -35,6 +35,7 @@
     id,
     active,
     prefs,
+    shell = null,
     initialHistory = '',
     onExit,
     onTitle,
@@ -44,6 +45,8 @@
     id: number;
     active: boolean;
     prefs: TerminalSettings;
+    /** 会话的实际 shell（选清屏命令用；未知按 POSIX clear 处理）。 */
+    shell: string | null;
     /** 恢复的固定终端：启动时写进 xterm 的历史内容。 */
     initialHistory?: string;
     onExit: (id: number) => void;
@@ -100,7 +103,8 @@
   /**
    * 右键菜单：有选区 → 复制；粘贴（剪贴板为空/不可读时灰显）；清空。
    * 剪贴板经 Rust 侧插件读写（clipboard_read_text）：不经 WebView2 的
-   * navigator.clipboard，不会弹系统权限框。
+   * navigator.clipboard，不会弹系统权限框。菜单点击后焦点交回终端
+   * （菜单按钮吃掉焦点，关闭后不回）。
    */
   async function menu(event: MouseEvent): Promise<void> {
     const selection = selectionText?.() ?? '';
@@ -111,13 +115,33 @@
       clipboard = null; // 读取失败：粘贴必然失败，菜单里按禁用呈现。
     }
     const pasteDisabled = clipboard === null || clipboard.length === 0;
+    const refocus = (): void => terminalRef?.focus();
 
     const items: Array<{ label: string; onclick?: () => void; disabled?: boolean }> = [];
     if (selection) {
-      items.push({ label: '复制', onclick: () => void copyText(selection) });
+      items.push({
+        label: '复制',
+        onclick: () => {
+          void copyText(selection);
+          refocus();
+        },
+      });
     }
-    items.push({ label: '粘贴', disabled: pasteDisabled, onclick: () => pasteFromClipboard?.() });
-    items.push({ label: '清空', onclick: () => clearPane?.() });
+    items.push({
+      label: '粘贴',
+      disabled: pasteDisabled,
+      onclick: () => {
+        pasteFromClipboard?.();
+        refocus();
+      },
+    });
+    items.push({
+      label: '清空',
+      onclick: () => {
+        clearPane?.();
+        refocus();
+      },
+    });
     contextMenu.show(event, items);
   }
 
@@ -177,7 +201,10 @@
     const doPaste = (): void => {
       call<string>('clipboard_read_text')
         .then((text) => {
-          if (text) void call('terminal_write', { id, data: text });
+          if (text) {
+            void call('terminal_write', { id, data: text });
+            terminal.focus(); // 粘贴后焦点留在终端（菜单点击会吃掉焦点）。
+          }
         })
         .catch(() => {}); // 读取失败：静默，不影响键盘输入。
     };
@@ -187,11 +214,16 @@
     // 点击选中内容即复制：capture 阶段在宿主上拦下，先于 xterm 的
     // mousedown 处理（否则选区立刻被新选择取代）。
     host!.addEventListener('mousedown', onHostMouseDownCapture, true);
+    // 清屏交给 shell 自己执行（clear/cls）：它会重绘提示符，当前输入行
+    // 原样保留；直接写转义码会连提示符一起抹掉且 shell 不知情。
+    const basename = shell?.replaceAll('\\', '/').split('/').pop()?.toLowerCase() ?? '';
+    const clearCommand = basename === 'cmd.exe' ? 'cls' : 'clear';
     clearPane = (): void => {
-      // 视口 + 滚动缓冲 + Rust 侧回放缓冲一起清，重放/恢复不再带旧内容。
-      terminal.clear();
-      terminal.write('\x1b[2J\x1b[H');
+      void call('terminal_write', { id, data: `${clearCommand}\r` });
+      // Rust 侧回放缓冲一起清，重放/恢复不再带旧内容（当前行的提示符
+      // 由 shell 重绘产生，自然进入新回放）。
       void call('terminal_clear', { id }).catch(() => {});
+      terminal.focus();
     };
     onBind(id, {
       clear: () => clearPane?.(),
