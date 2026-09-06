@@ -180,7 +180,8 @@ impl Default for HotkeysSettings {
     }
 }
 
-/// 终端偏好（M4）：新建标签生效。
+/// 终端偏好：标签条上的终端设置按钮即时生效并持久化（scrollback 对
+/// 已开标签由 xterm 原生支持收缩/扩张；字号/光标经 setOption 热应用）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TerminalSettings {
@@ -188,6 +189,9 @@ pub struct TerminalSettings {
     pub shell: String,
     pub font_size: u32,
     pub scrollback: u32,
+    /// 块（block）/ 竖线（bar）/ 下划线（underline）。
+    pub cursor_style: String,
+    pub cursor_blink: bool,
 }
 
 impl Default for TerminalSettings {
@@ -196,6 +200,8 @@ impl Default for TerminalSettings {
             shell: "auto".to_owned(),
             font_size: 13,
             scrollback: 5000,
+            cursor_style: "block".to_owned(),
+            cursor_blink: true,
         }
     }
 }

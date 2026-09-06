@@ -22,6 +22,7 @@
   import { WINDOW_LABEL } from '../../lib/windowEnv';
   import { shellTitle } from '../../lib/utils/shell';
   import ConfirmDialog from '../../components/ConfirmDialog.svelte';
+  import Switch from '../../components/Switch.svelte';
   import TerminalPane, { type PaneApi } from './TerminalPane.svelte';
   import type {
     PinnedTerminal,
@@ -55,14 +56,23 @@
   let closeTarget: Tab | null = $state(null);
   let renamingId = $state<number | null>(null);
   let renameDraft = $state('');
+  /** 标签条右侧的终端设置弹层。 */
+  let settingsOpen = $state(false);
 
   const paneApis = new SvelteMap<number, PaneApi>();
+
+  /** 激活标签后把焦点交给终端（下一帧：等 DOM 切可见）。 */
+  function focusPane(id: number): void {
+    requestAnimationFrame(() => paneApis.get(id)?.focus());
+  }
 
   const prefs = $derived(
     settings.current?.terminal ?? {
       shell: 'auto',
       fontSize: 13,
       scrollback: 5000,
+      cursorStyle: 'block' as 'block' | 'bar' | 'underline',
+      cursorBlink: true,
     },
   );
 
@@ -106,6 +116,7 @@
       },
     ];
     activeId = payload.id;
+    focusPane(payload.id);
   }
 
   /** 重挂载恢复：Rust 元数据里归属本窗口的存活会话重建标签。 */
@@ -196,6 +207,7 @@
         },
       ];
       activeId = info.id;
+      focusPane(info.id);
     } catch (error) {
       // 失败原因上屏（错误窗格），不再只进 console。
       const message = error instanceof Error ? error.message : String(error);
@@ -497,7 +509,25 @@
       return;
     }
     activeId = tab.id;
+    focusPane(tab.id);
   }
+
+  // ---- 标签条设置弹层：改动即时持久化，TerminalPane 热应用 ----
+
+  function saveTerminalPrefs(patch: {
+    fontSize?: number;
+    cursorStyle?: 'block' | 'bar' | 'underline';
+    cursorBlink?: boolean;
+    scrollback?: number;
+  }): void {
+    void settings.update({ terminal: patch }).catch(() => {});
+  }
+
+  const adjustFontSize = (delta: number): void => {
+    saveTerminalPrefs({ fontSize: Math.min(24, Math.max(8, prefs.fontSize + delta)) });
+  };
+
+  const scrollbackOptions = [1000, 5000, 10000, 50000];
 </script>
 
 <svelte:window onkeydown={cancelDragOnEscape} />
@@ -570,6 +600,81 @@
     >
       +
     </button>
+    <button
+      class="rounded-md px-1.5 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg {settingsOpen
+        ? 'bg-accent-soft text-fg'
+        : ''}"
+      title="终端设置"
+      aria-label="终端设置"
+      data-testid="terminal-settings"
+      onclick={() => (settingsOpen = !settingsOpen)}
+    >
+      ⚙
+    </button>
+    {#if settingsOpen}
+      <!-- 点击别处关闭（透明垫层）；面板悬浮在按钮下方。 -->
+      <button
+        class="fixed inset-0 z-40 cursor-default"
+        aria-label="关闭终端设置"
+        onclick={() => (settingsOpen = false)}
+      ></button>
+      <div
+        class="absolute top-full z-50 mt-1 w-64 space-y-3 rounded-lg border border-line bg-card p-3 shadow-xl"
+      >
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-muted">字号</span>
+          <span class="flex items-center gap-1.5">
+            <button
+              class="rounded border border-line px-1.5 hover:bg-accent-soft"
+              aria-label="减小字号"
+              onclick={() => adjustFontSize(-1)}>−</button
+            >
+            <span class="w-8 text-center font-mono">{prefs.fontSize}</span>
+            <button
+              class="rounded border border-line px-1.5 hover:bg-accent-soft"
+              aria-label="增大字号"
+              onclick={() => adjustFontSize(1)}>+</button
+            >
+          </span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-muted">光标样式</span>
+          <select
+            class="rounded border border-line bg-surface px-1.5 py-0.5"
+            value={prefs.cursorStyle}
+            onchange={(event) =>
+              saveTerminalPrefs({
+                cursorStyle: event.currentTarget.value as 'block' | 'bar' | 'underline',
+              })}
+          >
+            <option value="block">块</option>
+            <option value="bar">竖线</option>
+            <option value="underline">下划线</option>
+          </select>
+        </div>
+        <label class="flex items-center justify-between text-xs">
+          <span class="text-muted">光标闪烁</span>
+          <Switch
+            label="光标闪烁"
+            checked={prefs.cursorBlink}
+            onchange={(value) => saveTerminalPrefs({ cursorBlink: value })}
+          />
+        </label>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-muted">滚动缓冲</span>
+          <select
+            class="rounded border border-line bg-surface px-1.5 py-0.5"
+            value={prefs.scrollback}
+            onchange={(event) =>
+              saveTerminalPrefs({ scrollback: Number(event.currentTarget.value) })}
+          >
+            {#each scrollbackOptions as option (option)}
+              <option value={option}>{option} 行</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+    {/if}
   </div>
 
   <!-- 拖拽影像：跟随鼠标的浮起标签卡片（越出标签条也不被裁剪）。 -->

@@ -23,7 +23,6 @@ tauri-build = { version = "2", features = [] }
 # devtools：release 构建也启用 WebView2 开发者工具（右键菜单「检查」/ F12），
 # 方便现场排查前端问题；调试构建本就默认开启。
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset", "devtools"] }
-tauri-plugin-single-instance = "2"
 # 打开文件 / 资源管理器定位（搜索结果操作，M2）。
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -80,10 +79,12 @@ tauri-plugin-dialog = "2.7.3"
 
 [target.'cfg(windows)'.dependencies]
 # 盘符枚举（搜索根选择器，M2 深化）：与 proc-guard 同一条 windows-sys 主线，
-# 只多开 Storage_FileSystem 一个 feature 门。
+# 只多开 Storage_FileSystem 一个 feature 门。单实例（single_instance 模块）
+# 用 Threading 门：互斥体/事件/等待。
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
 ] }
 # 终端域（M4）：关闭 WebView2 浏览器加速键（Ctrl+Shift+C/I、Ctrl+Shift+V
 # 原样粘贴），复制/粘贴/开发者工具改由外壳自行接管。版本对齐 wry。

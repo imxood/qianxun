@@ -12,6 +12,8 @@
 export const IPC_COMMANDS = [
   'app_meta',
   'app_toggle_devtools',
+  'clipboard_read_text',
+  'clipboard_write_text',
   'system_theme',
   'settings_get',
   'settings_update',
@@ -412,6 +414,9 @@ export interface TerminalSettings {
   shell: string;
   fontSize: number;
   scrollback: number;
+  /** 块（block）/ 竖线（bar）/ 下划线（underline）。 */
+  cursorStyle: 'block' | 'bar' | 'underline';
+  cursorBlink: boolean;
 }
 
 /** terminal_pinned_list 的返回项：一条固定（PIN）终端的元数据。 */

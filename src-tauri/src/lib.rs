@@ -16,6 +16,9 @@ mod remote;
 mod search;
 mod settings;
 mod shots;
+// 路径级单实例（Windows）：同一 exe 只跑一份，安装版与 dev 版并存。
+#[cfg(windows)]
+mod single_instance;
 mod sync;
 mod terminal;
 mod tray;
@@ -75,16 +78,41 @@ struct AppMeta {
     identifier: String,
 }
 
+/// 读剪贴板（终端复制/粘贴用）。走 Tauri 插件在主进程完成，不经
+/// WebView2 的 navigator.clipboard——后者每次调用都会弹系统级剪贴板
+/// 权限框（选中后右键被弹窗打断，体验极差），这里彻底绕开。
+#[tauri::command]
+fn clipboard_read_text(app: tauri::AppHandle) -> error::Result<String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .read_text()
+        .map_err(|cause| error::Error::Window(format!("读取剪贴板失败：{cause}")))
+}
+
+/// 写剪贴板（终端复制用）。
+#[tauri::command]
+fn clipboard_write_text(app: tauri::AppHandle, text: String) -> error::Result<()> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .write_text(text)
+        .map_err(|cause| error::Error::Window(format!("写入剪贴板失败：{cause}")))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // 第二次启动只唤醒已运行的实例。千寻托管着 DSH，
-            // 两个实例同时拉起服务会互相打架——从第一天就挡住。
-            if let Some(existing) = window::front(app) {
-                window::reveal(&existing);
-            }
-        }))
+    // 路径级单实例（Windows，为什么不用官方插件见模块文档）。挂链首：
+    // 第二实例必须在任何插件副作用（热键注册等）之前退场。
+    #[cfg(windows)]
+    let builder = tauri::Builder::default().plugin(single_instance::init(|app| {
+        // 第二次启动只唤醒已运行的实例。千寻托管着 DSH，
+        // 两个实例同时拉起服务会互相打架——从第一天就挡住。
+        if let Some(existing) = window::front(app) {
+            window::reveal(&existing);
+        }
+    }));
+    #[cfg(not(windows))]
+    let builder = tauri::Builder::default();
+    builder
         .plugin(tauri_plugin_opener::init())
         // 原生目录选择器（搜索页选根目录，替代手输绝对路径）。
         .plugin(tauri_plugin_dialog::init())
@@ -221,6 +249,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_meta,
+            clipboard_read_text,
+            clipboard_write_text,
             settings::commands::settings_get,
             settings::commands::settings_update,
             harness::commands::harness_environment,

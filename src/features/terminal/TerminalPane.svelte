@@ -26,6 +26,7 @@
   export interface PaneApi {
     clear(): void;
     paste(): void;
+    focus(): void;
     hasSelection(): boolean;
     copySelection(): boolean;
   }
@@ -60,6 +61,21 @@
   let clearPane: (() => void) | null = null;
   let selectionText: (() => string) | null = null;
   let clearSelection: (() => void) | null = null;
+  /** xterm 实例（onMount 创建；热应用设置的顶层 effect 引用）。 */
+  let terminalRef: Terminal | null = null;
+
+  // 终端设置热应用：标签条设置按钮改动后，已开标签即时生效（含
+  // scrollback——xterm 原生支持收缩/扩张），字号变化后补一次 fit。
+  // terminalRef 就绪前跳过；顶层 effect（onMount 里不能建）。
+  $effect(() => {
+    const terminal = terminalRef;
+    if (!terminal) return;
+    terminal.options.fontSize = prefs.fontSize;
+    terminal.options.cursorStyle = prefs.cursorStyle;
+    terminal.options.cursorBlink = prefs.cursorBlink;
+    terminal.options.scrollback = prefs.scrollback;
+    requestAnimationFrame(() => syncSize?.());
+  });
 
   // keep-alive 重见：visibility 切换不触发 ResizeObserver，主动补一次 fit。
   $effect(() => {
@@ -82,30 +98,36 @@
   }
 
   /**
-   * 右键菜单：有选区 → 复制；粘贴（剪贴板为空或不可读时灰显）；清空。
-   * 剪贴板探测在菜单弹出前异步完成（右键本身构成 user activation，
-   * WebView2 下 readText 可用），失败按禁用处理——点击也必然失败。
+   * 右键菜单：有选区 → 复制；粘贴（剪贴板为空/不可读时灰显）；清空。
+   * 剪贴板经 Rust 侧插件读写（clipboard_read_text）：不经 WebView2 的
+   * navigator.clipboard，不会弹系统权限框。
    */
   async function menu(event: MouseEvent): Promise<void> {
     const selection = selectionText?.() ?? '';
     let clipboard: string | null;
     try {
-      clipboard = await navigator.clipboard.readText();
+      clipboard = await call<string>('clipboard_read_text');
     } catch {
-      clipboard = null; // 权限拒绝等：粘贴必然失败，菜单里按禁用呈现。
+      clipboard = null; // 读取失败：粘贴必然失败，菜单里按禁用呈现。
     }
     const pasteDisabled = clipboard === null || clipboard.length === 0;
 
     const items: Array<{ label: string; onclick?: () => void; disabled?: boolean }> = [];
     if (selection) {
-      items.push({
-        label: '复制',
-        onclick: () => navigator.clipboard.writeText(selection).catch(() => {}),
-      });
+      items.push({ label: '复制', onclick: () => void copyText(selection) });
     }
     items.push({ label: '粘贴', disabled: pasteDisabled, onclick: () => pasteFromClipboard?.() });
     items.push({ label: '清空', onclick: () => clearPane?.() });
     contextMenu.show(event, items);
+  }
+
+  /** 写剪贴板（走主进程插件，避免 WebView2 权限弹窗）。 */
+  async function copyText(text: string): Promise<void> {
+    try {
+      await call('clipboard_write_text', { text });
+    } catch {
+      // 写失败静默：复制不是关键路径。
+    }
   }
 
   /**
@@ -119,7 +141,7 @@
     }
     const text = selectionText?.();
     if (!text) return;
-    navigator.clipboard.writeText(text).catch(() => {});
+    void copyText(text);
     clearSelection?.();
     event.stopPropagation();
     event.preventDefault();
@@ -130,7 +152,8 @@
       fontSize: prefs.fontSize,
       scrollback: prefs.scrollback,
       fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
-      cursorBlink: true,
+      cursorStyle: prefs.cursorStyle,
+      cursorBlink: prefs.cursorBlink,
       theme: {
         background: '#1e1e1e',
       },
@@ -145,18 +168,18 @@
       // DOM 渲染兜底，无需处理。
     }
     fit.fit();
+    terminalRef = terminal;
 
     // 恢复的固定终端：先写历史，再等实时回放（新会话横幅接在后面）。
     if (initialHistory) terminal.write(initialHistory);
 
-    // 剪贴板：Ctrl+Shift+C/V + 右键菜单（WebView2 剪贴板权限策略下尽力而为）。
+    // 剪贴板：Ctrl+Shift+C/V + 右键菜单（经主进程插件，无权限弹窗）。
     const doPaste = (): void => {
-      navigator.clipboard
-        .readText()
+      call<string>('clipboard_read_text')
         .then((text) => {
           if (text) void call('terminal_write', { id, data: text });
         })
-        .catch(() => {}); // 权限/上下文不支持：静默，不影响键盘输入。
+        .catch(() => {}); // 读取失败：静默，不影响键盘输入。
     };
     pasteFromClipboard = doPaste;
     selectionText = () => terminal.getSelection();
@@ -173,11 +196,12 @@
     onBind(id, {
       clear: () => clearPane?.(),
       paste: () => doPaste(),
+      focus: () => terminal.focus(),
       hasSelection: () => terminal.hasSelection(),
       copySelection: () => {
         const selection = terminal.getSelection();
         if (!selection) return false;
-        navigator.clipboard.writeText(selection).catch(() => {});
+        void copyText(selection);
         return true;
       },
     });
@@ -186,7 +210,7 @@
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'c') {
         const selection = terminal.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection).catch(() => {});
+          void copyText(selection);
           return false; // 已由我们复制，无需浏览器接手。
         }
         // 无选中：交给浏览器（这里不是 devtools 快捷键的拦截点）。
