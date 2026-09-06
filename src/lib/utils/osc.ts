@@ -32,12 +32,13 @@ export function oscPathToWindows(data: string): string | null {
 
 /**
  * OSC 9;9（ConEmu「设置当前工作目录」）→ Windows 路径。
- * xterm 的 handler 注册在 identifier 9 上，data 为 `9;9;"D:\path"`。
+ * xterm handler 的 data 已剥掉 identifier 后的第一个分号：
+ * `ESC]9;9;D:\path` → 注册在 9 上的 handler 收到 `9;D:\path`。
  * nushell 默认 osc9_9=true（osc7 反而是关的），这是它上报 cwd 的主通道。
  */
 export function osc99ToWindows(data: string): string | null {
-  if (!data.startsWith('9;9;')) return null;
-  let path = data.slice('9;9;'.length).trim();
+  if (!data.startsWith('9;')) return null;
+  let path = data.slice('9;'.length).trim();
   if (path.length >= 2 && path.startsWith('"') && path.endsWith('"')) {
     path = path.slice(1, -1);
   }

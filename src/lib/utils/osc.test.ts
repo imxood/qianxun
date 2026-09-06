@@ -24,12 +24,12 @@ describe('OSC 7 路径解析', () => {
     expect(oscPathToWindows('file://host/share/dir')).toBeNull();
   });
 
-  it('OSC 9;9（nushell/ConEmu 工作目录）', () => {
-    expect(osc99ToWindows('9;9;"D:\\develop\\git\\maxu"')).toBe('D:\\develop\\git\\maxu');
-    expect(osc99ToWindows('9;9;D:\\develop')).toBe('D:\\develop');
-    expect(osc99ToWindows('9;9;')).toBeNull();
+  it('OSC 9;9（nushell/ConEmu 工作目录，xterm data 语义：剥过一层 9;）', () => {
+    expect(osc99ToWindows('9;"D:\\develop\\git\\maxu"')).toBe('D:\\develop\\git\\maxu');
+    expect(osc99ToWindows('9;D:\\develop')).toBe('D:\\develop');
+    expect(osc99ToWindows('9;')).toBeNull();
     // 进度条等同族序列（9;4）不误吞。
-    expect(osc99ToWindows('9;4;3;50')).toBeNull();
+    expect(osc99ToWindows('4;3;50')).toBeNull();
   });
 
   it('OSC 633（VS Code 集成 Cwd 属性）', () => {
