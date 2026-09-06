@@ -538,7 +538,7 @@
 
 <section class="flex h-full flex-col overflow-hidden">
   <div
-    class="flex select-none items-center gap-1 border-b border-line bg-surface px-2 py-1.5"
+    class="relative flex select-none items-center gap-1 border-b border-line bg-surface px-2 py-1.5"
     role="tablist"
   >
     {#each tabs as tab (tab.id)}
