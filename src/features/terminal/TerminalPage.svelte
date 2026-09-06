@@ -20,7 +20,7 @@
   import { settings } from '../../stores/settings.svelte';
   import { contextMenu } from '../../lib/menu.svelte';
   import { WINDOW_LABEL } from '../../lib/windowEnv';
-  import { shellTitle } from '../../lib/utils/shell';
+  import { folderName, shellTitle } from '../../lib/utils/shell';
   import ConfirmDialog from '../../components/ConfirmDialog.svelte';
   import Switch from '../../components/Switch.svelte';
   import TerminalPane, { type PaneApi } from './TerminalPane.svelte';
@@ -201,7 +201,9 @@
         ...tabs,
         {
           id: info.id,
-          title: shellTitle(info.shell),
+          // 带 cwd 新建（继承激活终端目录）时标题即目录名；否则先显示
+          // shell 名，首个提示符的 OSC 7 上报后再切到目录名。
+          title: cwd ? folderName(cwd) : shellTitle(info.shell),
           alive: true,
           error: null,
           shell: info.shell,
@@ -393,7 +395,10 @@
 
   function onPaneCwd(id: number, cwd: string): void {
     const tab = tabs.find((item) => item.id === id);
-    if (tab) tab.cwd = cwd;
+    if (!tab) return;
+    tab.cwd = cwd;
+    // 未手动重命名的标签跟随当前目录名（cd 一次标题就同步一次）。
+    if (!tab.manualTitle) tab.title = folderName(cwd);
   }
 
   function onPaneBind(id: number, api: PaneApi): void {
@@ -415,8 +420,15 @@
   let dragStartY = 0;
   let dragMoved = false;
   let suppressClick = false;
-  /** 拖拽影像：跟随鼠标的浮起标签卡片（松手/Esc 消失）。 */
-  let ghost: { x: number; y: number; title: string; pinned: boolean } | null = $state(null);
+  /**
+   * 拖拽影像。位置不走 Svelte 状态：进入拖拽时渲染一次，之后 pointermove
+   * 直接写 ghost 元素的 left（每 move 一次 style 写入，零状态开销）；
+   * 垂直位置固定在标签条中心，只有水平跟随——上下晃动不难受。
+   */
+  let ghost: { title: string; pinned: boolean; y: number } | null = $state(null);
+  let ghostEl: HTMLDivElement | null = null;
+  /** 拖拽期间各标签的中点缓存（重排后刷新），move 里不再强制 layout。 */
+  let cachedMids: Array<{ id: number; mid: number }> = [];
   const tabEls = new SvelteMap<number, HTMLElement>();
 
   function tabRef(node: HTMLElement, id: number): { destroy(): void } {
@@ -433,6 +445,8 @@
     dragId = null;
     dragMoved = false;
     ghost = null;
+    ghostEl = null;
+    cachedMids = [];
   }
 
   function tabPointerDown(event: PointerEvent, tab: Tab): void {
@@ -447,6 +461,14 @@
     (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
   }
 
+  /** 缓存各标签中点（进入拖拽时 + 每次重排后调用一次）。 */
+  function refreshMids(): void {
+    cachedMids = tabs.map((tab) => {
+      const rect = tabEls.get(tab.id)?.getBoundingClientRect();
+      return { id: tab.id, mid: rect ? rect.left + rect.width / 2 : 0 };
+    });
+  }
+
   function tabPointerMove(event: PointerEvent): void {
     if (dragId === null) return;
     if (!dragMoved) {
@@ -454,15 +476,18 @@
       const dy = event.clientY - dragStartY;
       if (Math.hypot(dx, dy) < 5) return;
       dragMoved = true;
+      // 影像只渲染一次；垂直锚定标签条中心，此后仅水平跟随鼠标。
+      const dragged = tabs.find((tab) => tab.id === dragId);
+      const barY = tabEls.get(dragId)?.getBoundingClientRect();
+      ghost = {
+        title: dragged?.title ?? '',
+        pinned: dragged?.pinned !== null,
+        y: barY ? barY.top + barY.height / 2 : event.clientY,
+      };
+      refreshMids();
     }
-    // 影像跟随鼠标（略偏右下，不遮住落点）。
-    const dragged = tabs.find((tab) => tab.id === dragId);
-    ghost = {
-      x: event.clientX,
-      y: event.clientY,
-      title: dragged?.title ?? '',
-      pinned: dragged?.pinned !== null,
-    };
+    // 直接写 style：绕过状态更新，move 高频路径零渲染开销。
+    if (ghostEl) ghostEl.style.left = `${event.clientX + 10}px`;
     const from = tabs.findIndex((tab) => tab.id === dragId);
     if (from < 0) return;
     const target = insertionIndex(event.clientX);
@@ -472,17 +497,13 @@
     const [moved] = next.splice(from, 1);
     next.splice(from < target ? target - 1 : target, 0, moved!);
     tabs = next;
+    refreshMids();
   }
 
-  /** 指针 x 落点对应的插入下标（标签中点为界；条末/越界 = 尾部）。 */
+  /** 指针 x 落点对应的插入下标（缓存的标签中点为界；越界 = 尾部）。 */
   function insertionIndex(x: number): number {
-    for (let index = 0; index < tabs.length; index++) {
-      const el = tabEls.get(tabs[index]!.id);
-      if (!el) continue;
-      const rect = el.getBoundingClientRect();
-      if (x < rect.left + rect.width / 2) return index;
-    }
-    return tabs.length;
+    const index = cachedMids.findIndex((entry) => x < entry.mid);
+    return index === -1 ? tabs.length : index;
   }
 
   function tabPointerUp(event: PointerEvent, tab: Tab): void {
@@ -574,7 +595,7 @@
           onpointermove={tabPointerMove}
           onpointerup={(event) => tabPointerUp(event, tab)}
           onpointercancel={tabPointerCancel}
-          title="{tab.title}{tab.pinned !== null
+          title="{tab.cwd ?? tab.title}{tab.pinned !== null
             ? '（已固定）'
             : ''}——双击重命名，右键更多，拖拽排序"
         >
@@ -596,17 +617,17 @@
         </button>
       {/if}
     {/each}
-    <!-- ml-auto：+ 与 ⚙ 推到标签条行尾，与标签列表之间留弹性空隙。 -->
+    <!-- + 紧邻标签列表（好点）；⚙ 独占行尾（ml-auto 撑开弹性空隙）。 -->
     <button
-      class="ml-auto rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg"
-      title="新建终端"
+      class="rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg"
+      title="新建终端（继承当前终端的工作目录）"
       data-testid="terminal-new"
-      onclick={() => void newTab()}
+      onclick={() => void newTab(tabs.find((tab) => tab.id === activeId)?.cwd ?? null)}
     >
       +
     </button>
     <button
-      class="rounded-md px-1.5 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg {settingsOpen
+      class="ml-auto rounded-md px-1.5 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg {settingsOpen
         ? 'bg-accent-soft text-fg'
         : ''}"
       title="终端设置"
@@ -682,11 +703,13 @@
     {/if}
   </div>
 
-  <!-- 拖拽影像：跟随鼠标的浮起标签卡片（越出标签条也不被裁剪）。 -->
+  <!-- 拖拽影像：浮起标签卡片，垂直锚定标签条中心、水平跟随鼠标
+       （left 由 pointermove 直接写 style，不走状态更新）。 -->
   {#if ghost}
     <div
+      bind:this={ghostEl}
       class="pointer-events-none fixed z-50 flex max-w-44 -translate-y-1/2 scale-105 items-center gap-1.5 rounded-md border border-accent bg-card px-2.5 py-1 text-xs text-fg opacity-90 shadow-xl"
-      style="left: {ghost.x + 10}px; top: {ghost.y}px;"
+      style="top: {ghost.y}px;"
     >
       {#if ghost.pinned}
         <span class="shrink-0 text-[10px] text-accent">📌</span>
