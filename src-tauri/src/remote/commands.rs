@@ -766,7 +766,10 @@ mod tests {
             .and_then(|value| value.split(';').next().map(str::to_owned))
             .expect("应下发 qx_token cookie");
 
-        // 手机请求：带的 origin/sec-fetch-site 是网关 authority，必须被剥掉。
+        // 手机请求：带的 origin/sec-fetch-site 是网关 LAN authority，网关
+        // 必须**改写**为上游 DSH 同源（不再裸剥），这样 dshmarket 等插件
+        // 的 same-origin 守卫才能放行。改写规则：Origin 重写为
+        // http://<dsh_origin>，Sec-Fetch-Site 强制 same-origin。
         let response = client
             .get(format!("{base}/"))
             .header("origin", base.clone())
@@ -779,7 +782,8 @@ mod tests {
         assert_eq!(response.text().await.expect("正文"), "dsh-authed");
 
         // 第一次 = 网关兑换（无 origin，Host 是上游 authority）；
-        // 第二次 = 手机请求转发（有 cookie，无 origin/sec-fetch/host 透传）。
+        // 第二次 = 手机请求转发（cookie 由网关换为服务端持有的 dsh-auth；
+        // origin/sec-fetch-site 都被改写为与上游同源）。
         let entries = seen.lock().await.clone();
         assert_eq!(entries.len(), 2, "实际观察到的上游请求：{entries:?}");
         let authority = format!("host={upstream_addr}");
@@ -788,10 +792,15 @@ mod tests {
             "兑换请求形态异常：{}",
             entries[0]
         );
+        let upstream_origin = format!("origin=http://{upstream_addr}");
         assert!(
             entries[1].starts_with(&authority)
-                && entries[1].contains("origin=")
-                && !entries[1].contains("origin=http")
+                // 改写后的 Origin 必须与上游 DSH authority 相同（不能透传
+                // 手机带来的网关 LAN authority）。
+                && entries[1].contains(&upstream_origin)
+                // Sec-Fetch-Site 必须强制为 same-origin。
+                && entries[1].contains("site=same-origin")
+                // 手机带过来的 cookie 不许到上游：调用方 qx_token 永远留在网关。
                 && entries[1].ends_with(&format!("cookie={DSH_COOKIE}")),
             "转发请求形态异常：{}",
             entries[1]

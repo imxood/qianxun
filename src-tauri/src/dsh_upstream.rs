@@ -53,11 +53,16 @@ const HOP_HEADERS: [&str; 9] = [
 /// 调用方不该漏给 DSH 的头：
 /// - `host`：DSH 的 Host/Origin 栅栏按 Host 判定，必须让它看到代理→DSH
 ///   的真实 authority（reqwest 按 URL 自动设置）；
-/// - `cookie`：调用方侧的凭据（qx_token 等）不归 DSH；
-/// - `origin`：调用方页面的 origin（tauri.localhost / 网关）原样转发会被
-///   DSH 栅栏 403；
-/// - `sec-fetch-*`：浏览器对跨站 iframe 的元数据，DSH 不需要也不该据此误判。
-const SKIP_UPSTREAM_HEADERS: [&str; 3] = ["host", "cookie", "origin"];
+/// - `cookie`：调用方侧的凭据（qx_token 等）不归 DSH。
+///
+/// `origin` 与 `sec-fetch-*` **不**剥除：浏览器 → 回环代理 → 上游 DSH 是
+/// 同主机同端口的转发语义（iframe 在 `127.0.0.1:<gateway>` 上发起
+/// XHR/fetch，到 `127.0.0.1:<dsh>` 的 DSH；两者都是回环 127.0.0.1），上
+/// 游 dshmarket 等插件的 same-origin 守卫需要看见 `Origin`/`Sec-Fetch-Site`
+/// 才能放行。**前提是 DSH 仅以回环上游形态被千寻启动**（千寻启动时
+/// `--host` 强制 `127.0.0.1`，见 harness::supervisor）；如果哪天支持非回
+/// 环上游，这条假设需要在网关层重新审视（应只对回环上游合成同源头）。
+const SKIP_UPSTREAM_HEADERS: [&str; 2] = ["host", "cookie"];
 
 /// 共享上游状态：DSH origin（host:port）+ 完整就绪 URL（含 `?token=`）+
 /// 兑换出的签名 cookie。内部字段可热更新（DSH revive 后端口/ token 变化
@@ -192,10 +197,19 @@ async fn exchange_cookie(dsh_url: &str) -> Option<String> {
 }
 
 /// HTTP 转发：方法/路径透传，响应流式回写（SSE 也走这条路）。
-/// 调用方头按 [`SKIP_UPSTREAM_HEADERS`] 剥除，换上服务端持有的 DSH
-/// cookie。上游 401 时无条件作废缓存并重兑一次（覆盖 cookie 失效与首
-/// 批请求与兑换并发赛跑两种情形；无 dsh_url 时 refresh 返回 None，
-/// 把 401 原样回给调用方）。
+/// 调用方头按 [`SKIP_UPSTREAM_HEADERS`] 剥除 host/cookie（host 由
+/// reqwest 按 URL 自动设置，cookie 换成服务端持有的 dsh-auth-*）；
+///
+/// `Origin` 与 `Sec-Fetch-Site` 在网关这一层**改写**为与上游 DSH 同源
+/// 的值，避免透传过来的 iframe 真实 origin（端口不同）触发 DSH 的连
+/// 接栅栏与 dshmarket 等插件的 same-origin 守卫报 403「untrusted origin」。
+/// 前提：DSH 永远以 `127.0.0.1:<port>` 的回环形态被千寻启动（见
+/// harness::supervisor），代理转发的两端是同主机的同源关系，合成同源
+/// 头是合法的。
+///
+/// 上游 401 时无条件作废缓存并重兑一次（覆盖 cookie 失效与首批请求与
+/// 兑换并发赛跑两种情形；无 dsh_url 时 refresh 返回 None，把 401 原样
+/// 回给调用方）。
 pub(crate) async fn forward(upstream: &Upstream, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let url = format!(
@@ -222,20 +236,62 @@ pub(crate) async fn forward(upstream: &Upstream, request: Request<Body>) -> Resp
         }
     };
 
-    let build_request = |client: &reqwest::Client, cookie: &Option<String>| {
+    // 一次锁定上游状态取出 authority，整轮转发（首次 + 401 重试）复用——
+// 401 重试走 build_request 闭包时不能再 .await，否则就不是 Fn 了。
+// DSH revive 期间 origin 会热更新，但 forge 整转发只在一个就绪窗口内，
+// 一次锁拿到的 authority 与 cookie 是同一时刻的快照，自洽。
+let upstream_authority = upstream.inner.lock().await.origin.clone();
+let synthetic_origin = format!("http://{}", upstream_authority);
+let caller_had_origin = parts
+    .headers
+    .iter()
+    .any(|(name, _)| name.as_str() == "origin");
+let caller_had_sec_fetch_site = parts
+    .headers
+    .iter()
+    .any(|(name, _)| name.as_str() == "sec-fetch-site");
+
+let build_request = |client: &reqwest::Client, cookie: &Option<String>| {
         // 不设 .timeout()：转发的也有 SSE/流式响应，总超时会腰斩长连接
         // （原因见 UPSTREAM_CONNECT_TIMEOUT 处注释）。
         let mut outgoing = client.request(method.clone(), &url);
         for (name, value) in parts.headers.iter() {
-            if HOP_HEADERS.contains(&name.as_str())
-                || SKIP_UPSTREAM_HEADERS.contains(&name.as_str())
-                || name.as_str().starts_with("sec-fetch-")
+            if HOP_HEADERS.contains(&name.as_str()) || SKIP_UPSTREAM_HEADERS.contains(&name.as_str())
             {
+                continue;
+            }
+            // Origin 必须**重写**为上游 DSH 的 authority，而非透传 iframe
+            // 真实的 origin（`http://127.0.0.1:<gateway>`）：DSH 的连接栅栏
+            // 按 `Origin === Host` 判定同源，端口不同的两套 origin 一定 403；
+            // dshmarket 的 sameOrigin() 也走同一比较。两边都期望 Origin 等于
+            // 上游 DSH 的 host:port，所以这里覆盖式写最干净。透传会让
+            // dshmarket 全部安装 POST 报 403「untrusted origin」。
+            if name.as_str() == "origin" {
+                outgoing = outgoing.header(reqwest::header::ORIGIN, &synthetic_origin);
+                continue;
+            }
+            // Sec-Fetch-Site：浏览器对跨站 iframe 的元数据，理论上代理无权
+            // 编造。这里把上游视作与 iframe 同主机（都是 127.0.0.1 的回环
+            // 转发），合成 `same-origin` 让 dshmarket 等插件的 same-origin
+            // 守卫走最宽松的快路径；DSH 不依赖此头。
+            if name.as_str() == "sec-fetch-site" {
+                outgoing = outgoing.header("sec-fetch-site", "same-origin");
                 continue;
             }
             if let Ok(header_value) = value.to_str() {
                 outgoing = outgoing.header(name.as_str(), header_value);
             }
+        }
+        // 调用方没带 origin 时也补一个——例如纯 fetch 没设 mode / 不触发
+        // 浏览器 Origin；不补的话 dshmarket fallback 比对 Host 失败。
+        if !caller_had_origin {
+            outgoing = outgoing.header(reqwest::header::ORIGIN, &synthetic_origin);
+        }
+        // 调用方没带 sec-fetch-site 时同样补一个：dshmarket 2026-09-06 的本
+        // 地补丁优先看 Sec-Fetch-Site，没有的话退回 Origin/Host 比对，已
+        // 经会被上一条 Origin 修好；这里补是为了一次过 fast-path。
+        if !caller_had_sec_fetch_site {
+            outgoing = outgoing.header("sec-fetch-site", "same-origin");
         }
         if let Some(cookie) = cookie {
             outgoing = outgoing.header(reqwest::header::COOKIE, cookie);
@@ -558,5 +614,155 @@ mod tests {
         assert_eq!(query_param("a=1&token=ab%20c", "token"), "ab c");
         assert_eq!(query_param("a=1", "b"), "");
         assert_eq!(query_param("token=", "token"), "");
+    }
+
+    // ---- 转发头改写（dshmarket same-origin 守卫的根因修复）----
+
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode as AxStatusCode};
+    use std::sync::Arc;
+
+    /// 拉起一个本地 mock 上游，记下每个请求的 header，跑一次 forward 后
+    /// 把观察到的头与合成逻辑的预期对照。
+    async fn captured_upstream_headers(
+        upstream_origin: &'static str,
+        caller_headers: Vec<(&'static str, &'static str)>,
+    ) -> (axum::http::HeaderMap, axum::http::HeaderMap) {
+        use axum::routing::any;
+        use axum::Router;
+        use std::sync::Mutex as StdMutex;
+
+        let captured: Arc<StdMutex<axum::http::HeaderMap>> =
+            Arc::new(StdMutex::new(axum::http::HeaderMap::new()));
+        let observed_origin: Arc<StdMutex<axum::http::HeaderMap>> =
+            Arc::new(StdMutex::new(axum::http::HeaderMap::new()));
+        let cap = Arc::clone(&captured);
+        let obs = Arc::clone(&observed_origin);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = listener.local_addr().unwrap();
+        let upstream = Upstream::new(
+            format!("127.0.0.1:{}", local.port()),
+            None,
+        );
+        upstream.test_set_cookie("dsh-auth-test=v1.sig").await;
+        let app = Router::new()
+            .route(
+                "/echo",
+                any(move |req: HttpRequest<Body>| {
+                    let cap = Arc::clone(&cap);
+                    let obs = Arc::clone(&obs);
+                    async move {
+                        *cap.lock().unwrap() = req.headers().clone();
+                        // 单独观察 Origin 与 Sec-Fetch-Site，便于断言。
+                        let mut only = axum::http::HeaderMap::new();
+                        for name in ["origin", "sec-fetch-site"] {
+                            if let Some(v) = req.headers().get(name) {
+                                only.insert(name.parse::<axum::http::HeaderName>().unwrap(), v.clone());
+                            }
+                        }
+                        *obs.lock().unwrap() = only;
+                        AxStatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .with_state(());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // 给 server 一瞬间起一下（accept 第一个连接前 listener 已就绪）。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut builder = HttpRequest::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("host", "127.0.0.1:23090")
+            .header("content-type", "application/json");
+        for (k, v) in caller_headers {
+            builder = builder.header(k, v);
+        }
+        let request = builder.body(Body::from("{}")).unwrap();
+        let _ = forward(&upstream, request).await;
+
+        server.abort();
+        let _ = server.await;
+        let _ = upstream_origin; // 静态标记：caller 期望 origin 形如上游 authority
+        let captured_snapshot = captured.lock().unwrap().clone();
+        let observed_snapshot = observed_origin.lock().unwrap().clone();
+        (captured_snapshot, observed_snapshot)
+    }
+
+    #[tokio::test]
+    async fn 调用方未带origin时合成与上游同源的origin() {
+        // 用端口 0 占位：mock 上游拿到的是 OS 派发的真实端口，所以断言
+        // 拿到 origin 后从里面解析端口号不为 0（即 mock 真的可达）。
+        let (_, observed) = captured_upstream_headers(
+            "127.0.0.1:0",
+            vec![], // 完全不带 Origin/Sec-Fetch-Site
+        )
+        .await;
+        let origin = observed
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let port: u16 = origin
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|s| s.parse().ok())
+            .expect("synthetic origin 形如 http://127.0.0.1:<port>");
+        assert!(port > 0, "网关必须为上游 DSH 合成同源 Origin（端口非占位 0）：{origin}");
+        assert_eq!(
+            observed.get("sec-fetch-site").and_then(|v| v.to_str().ok()),
+            Some("same-origin"),
+            "网关必须补 Sec-Fetch-Site=same-origin，让 dshmarket 2026-09-06 补丁走快路径"
+        );
+    }
+
+    #[tokio::test]
+    async fn 调用方iframe的真实origin被改写为上游authority() {
+        // iframe 实际是 `http://127.0.0.1:23090`（网关端口），透传到 DSH
+        // 会被栅栏与 dshmarket 同时判 403——验证我们把它改写成上游 DSH
+        // 的真实 authority（不是透传那个 23090）。
+        let (_, observed) = captured_upstream_headers(
+            "127.0.0.1:0",
+            vec![
+                ("origin", "http://127.0.0.1:23090"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+        )
+        .await;
+        let origin = observed
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            !origin.contains(":23090"),
+            "iframe 真实 origin 必须改写为上游 DSH 的 authority，不能透传 23090：{origin}"
+        );
+        assert!(
+            origin.starts_with("http://127.0.0.1:"),
+            "synthetic origin 形如 http://127.0.0.1:<port>：{origin}"
+        );
+        assert_eq!(
+            observed.get("sec-fetch-site").and_then(|v| v.to_str().ok()),
+            Some("same-origin"),
+            "跨站 Sec-Fetch-Site 也必须改写，否则 dshmarket 直接拒"
+        );
+    }
+
+    #[tokio::test]
+    async fn host与cookie不被透传() {
+        // host 由 reqwest 按 URL 自动设；cookie 由网关换上服务端持有的
+        // dsh-auth-*；两者都不该带着调用方原值去上游。
+        let (captured, _) = captured_upstream_headers(
+            "127.0.0.1:0",
+            vec![("cookie", "qx_token=should-not-leak")],
+        )
+        .await;
+        // 上游看到的是网关代发的 dsh-auth-*，不是调用方的 qx_token。
+        let cookie = captured
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cookie.contains("dsh-auth-test="), "上游 cookie 必须来自服务端持有：{cookie}");
+        assert!(!cookie.contains("qx_token"), "调用方 qx_token 不该泄到上游 DSH：{cookie}");
     }
 }
