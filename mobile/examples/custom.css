@@ -1,0 +1,30 @@
+/* 千寻移动端样式示例 —— 复制到电脑的 <DSH_HOME>/mobile-access/custom.css 生效，
+ * 保存后手机端数秒内自动应用（删掉文件即恢复默认）。 */
+
+/* 输入聚焦时 iOS 自动放大：字号一律 ≥16px */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+/* 表格 / 代码块横向滚动，不撑破屏幕 */
+pre,
+table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* 媒体不越界 */
+img,
+video,
+canvas,
+svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 安全区：底部固定元素避让手势条 */
+[style*='position:fixed'] {
+  padding-bottom: env(safe-area-inset-bottom);
+}

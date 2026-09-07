@@ -173,7 +173,20 @@ pub async fn sync(app: AppHandle) {
     // 上游未知（DSH 未跑/未就绪）：网关仍然监听（等 DSH），
     // 上游地址用占位，DSH 就绪事件会再触发 sync 重建。
     let upstream = upstream.unwrap_or_else(|| "127.0.0.1:0".to_owned());
-    match remote::gateway::start(&bind_ip, port, upstream.clone(), devices).await {
+    // 移动定制层目录（ADR-009 的 DSH_HOME 下，与 dsh-mobile 的惯例同址）；
+    // 定位失败只降级定制层（临时目录），不拦网关。
+    let mobile_access_dir = match crate::paths::dsh_home(&app) {
+        Ok(home) => home.join("mobile-access"),
+        Err(cause) => {
+            crate::logging::log(
+                "warn",
+                &format!("DSH home 定位失败，定制层退回临时目录：{cause}"),
+            );
+            std::env::temp_dir().join("qianxun-mobile-access")
+        }
+    };
+    match remote::gateway::start(&bind_ip, port, upstream.clone(), devices, mobile_access_dir).await
+    {
         Ok(handle) => {
             let addr = handle.local_addr.to_string();
             let state = app.state::<crate::AppState>();

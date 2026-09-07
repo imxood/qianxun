@@ -1,0 +1,36 @@
+buildscript {
+    ext {
+        // 本机 SDK 对齐（D:\programs\Android\Sdk）：platform 36 / build-tools 36.1.0 /
+        // NDK 28.2 均已就位，不触发 SDK 下载。升级 SDK 后可回到 RN 模板默认值。
+        buildToolsVersion = "36.1.0"
+        minSdkVersion = 24
+        compileSdkVersion = 36
+        targetSdkVersion = 36
+        ndkVersion = "28.2.13676358"
+        kotlinVersion = "2.2.0"
+    }
+    repositories {
+        // 国内镜像优先，官方源兜底（gradle/AGP/Kotlin 依赖）。
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+allprojects {
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"

@@ -74,4 +74,6 @@ futures-util = "0.3"
 if-addrs = "0.13"
 # 设备配对 token。
 rand = "0.8"
+# /qx-mobile/info 的电脑主机名（App 端自动命名连接用）。
+hostname = "0.4"
 tauri-plugin-dialog = "2.7.3"

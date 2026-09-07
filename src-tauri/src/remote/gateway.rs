@@ -16,7 +16,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use tokio::sync::watch;
 
-use crate::remote::RemoteDevice;
+use crate::remote::{MobileUi, RemoteDevice};
 
 /// 跳过转发的逐跳头（RFC 7230；cookie/set-cookie 由两端各自管理）。
 const HOP_HEADERS: [&str; 9] = [
@@ -44,6 +44,8 @@ pub struct GatewayState {
     pub upstream: String,
     pub devices: Arc<Vec<RemoteDevice>>,
     pub client: reqwest::Client,
+    /// 移动定制层（/qx-mobile/* 的文件服务）。
+    pub mobile: Arc<MobileUi>,
 }
 
 impl GatewayState {
@@ -53,8 +55,13 @@ impl GatewayState {
             .trim_end_matches('/')
     }
 
+    /// DSH 上游是否就绪（未就绪时 sync() 用 `127.0.0.1:0` 占位）。
+    pub(crate) fn upstream_ready(&self) -> bool {
+        self.upstream != "127.0.0.1:0"
+    }
+
     /// cookie/query 命中任一未吊销 token？
-    fn token_valid(&self, presented: &str) -> bool {
+    pub(crate) fn token_valid(&self, presented: &str) -> bool {
         !presented.is_empty()
             && self
                 .devices
@@ -69,19 +76,29 @@ pub async fn start(
     port: u16,
     upstream: String,
     devices: Vec<RemoteDevice>,
+    mobile_access_dir: std::path::PathBuf,
 ) -> Result<GatewayHandle, String> {
     let bind: std::net::SocketAddr = format!("{bind_ip}:{port}")
         .parse()
         .map_err(|cause| format!("绑定地址不合法（{bind_ip}:{port}）：{cause}"))?;
+    // 定制目录尽力创建：方便用户/agent 直接往里放 custom.css/js。
+    let _ = std::fs::create_dir_all(&mobile_access_dir);
     let state = GatewayState {
         upstream,
         devices: Arc::new(devices),
         client: reqwest::Client::new(),
+        mobile: Arc::new(MobileUi::new(mobile_access_dir)),
     };
-    // 专用路由先于兜底：两条 WS 下行各自成桥，其余路径统一转发。
+    // 专用路由先于兜底：两条 WS 下行、/qx-mobile/* 各自成路，其余路径统一转发。
     let app = Router::new()
         .route("/api/events.mux", any(ws_handler))
         .route("/api/events.host", any(ws_handler))
+        .route("/qx-mobile/info", any(super::mobile_ui::info))
+        .route("/qx-mobile/version", any(super::mobile_ui::version))
+        .route("/qx-mobile/bootstrap.js", any(super::mobile_ui::bootstrap))
+        .route("/qx-mobile/custom.css", any(super::mobile_ui::custom_css))
+        .route("/qx-mobile/custom.js", any(super::mobile_ui::custom_js))
+        .route("/qx-mobile/{*rest}", any(super::mobile_ui::unknown))
         .route("/{*rest}", any(handler))
         .route("/", any(handler))
         .with_state(state);
@@ -151,7 +168,7 @@ async fn ws_handler(
 }
 
 /// 鉴权：cookie（常规与 WS 升级请求都带）优先，query 兜底。
-fn authorized(state: &GatewayState, query: &str, headers: &HeaderMap) -> bool {
+pub(crate) fn authorized(state: &GatewayState, query: &str, headers: &HeaderMap) -> bool {
     let cookie_token = headers
         .get(axum::http::header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -231,7 +248,36 @@ fn to_axum(frame: tokio_tungstenite::tungstenite::Message) -> axum::extract::ws:
     }
 }
 
-/// HTTP 转发：方法/路径/头/体透传，响应流式回写（SSE 也走这条路）。
+/// HTML 注入缓冲上限：DSH 的 index.html 远小于此；超过则放弃注入原样透传。
+const HTML_INJECT_LIMIT: usize = 2 * 1024 * 1024;
+
+/// 注入移动定制层的引导标签（外链同源资源，CSP `self` 放行；defer 不阻塞首屏）。
+const MOBILE_LAYER_SNIPPET: &str = "<link rel=\"stylesheet\" href=\"/qx-mobile/custom.css\" /><script src=\"/qx-mobile/bootstrap.js\" defer></script>";
+
+/// 满足「GET + 200 + text/html + 含 </head>」时，把定制层标签插到 </head> 前。
+/// 纯函数便于测试；任何不满足都返回 None（原样透传，绝不阻断/破坏页面）。
+pub(crate) fn inject_mobile_layer(
+    method: &reqwest::Method,
+    status: u16,
+    content_type: &str,
+    html: &str,
+) -> Option<String> {
+    if *method != reqwest::Method::GET || status != 200 {
+        return None;
+    }
+    if !content_type.to_ascii_lowercase().starts_with("text/html") {
+        return None;
+    }
+    let head_end = html.to_ascii_lowercase().find("</head>")?;
+    Some(format!(
+        "{}{MOBILE_LAYER_SNIPPET}{}",
+        &html[..head_end],
+        &html[head_end..]
+    ))
+}
+
+/// HTTP 转发：方法/路径/头/体透传，响应流式回写（SSE 也走这条路）；
+/// 对 DSH 回来的 HTML 页面注入移动定制层（方案 A 的注入点）。
 async fn forward(state: &GatewayState, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let url = format!(
@@ -246,7 +292,7 @@ async fn forward(state: &GatewayState, request: Request<Body>) -> Response<Body>
     );
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .unwrap_or(reqwest::Method::GET);
-    let mut outgoing = state.client.request(method, &url);
+    let mut outgoing = state.client.request(method.clone(), &url);
     for (name, value) in parts.headers.iter() {
         if HOP_HEADERS.contains(&name.as_str()) {
             continue;
@@ -260,16 +306,65 @@ async fn forward(state: &GatewayState, request: Request<Body>) -> Response<Body>
 
     match outgoing.send().await {
         Ok(upstream) => {
-            let mut response = Response::builder().status(upstream.status().as_u16());
-            for (name, value) in upstream.headers().iter() {
-                if HOP_HEADERS.contains(&name.as_str()) {
-                    continue;
-                }
-                response = response.header(name.clone(), value.clone());
+            let injectable = method == reqwest::Method::GET
+                && upstream.status() == reqwest::StatusCode::OK
+                && upstream
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
+            if !injectable {
+                return stream_upstream(upstream).await;
             }
-            let stream = upstream.bytes_stream().map_err(std::io::Error::other);
-            response
-                .body(Body::from_stream(stream))
+            // HTML 候选：缓冲（≤2MiB）后改写。超限/截断则原样透传，绝不半改。
+            // 上游缓存策略保留（etag/last-modified 丢弃：内容已改写，禁止旧实体复用）。
+            let cache_control = upstream
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut bytes = Vec::new();
+            let mut upstream_stream = upstream.bytes_stream();
+            let mut overflow = false;
+            while let Some(chunk) = upstream_stream.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        bytes.extend_from_slice(&chunk);
+                        if bytes.len() > HTML_INJECT_LIMIT {
+                            overflow = true;
+                            break;
+                        }
+                    }
+                    Err(cause) => {
+                        return plain(StatusCode::BAD_GATEWAY, &format!("DSH 响应中断（{cause}）"))
+                    }
+                }
+            }
+            if overflow {
+                // 超大 HTML：已缓冲部分 + 剩余流拼接透传（放弃注入，体与原文逐字节一致）。
+                let prefix =
+                    futures_util::stream::once(
+                        async move { Ok::<_, std::io::Error>(bytes.into()) },
+                    );
+                let rest = upstream_stream.map_err(std::io::Error::other);
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(Body::from_stream(prefix.chain(rest)))
+                    .unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "响应构造失败"));
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
+                return plain(StatusCode::BAD_GATEWAY, "DSH 页面非 UTF-8，跳过注入");
+            };
+            let body = inject_mobile_layer(&method, 200, "text/html", &text).unwrap_or(text);
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/html; charset=utf-8");
+            if let Some(cache) = cache_control {
+                builder = builder.header("cache-control", cache);
+            }
+            builder
+                .body(Body::from(body))
                 .unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "响应构造失败"))
         }
         Err(cause) => plain(
@@ -277,6 +372,23 @@ async fn forward(state: &GatewayState, request: Request<Body>) -> Response<Body>
             &format!("DSH 上游不可达（{cause}）：请确认千寻内 DSH 正在运行"),
         ),
     }
+}
+
+/// 常规透传：状态/头照抄，体流式回写（SSE 逐块、WS 已在专用路由处理）。
+async fn stream_upstream(upstream: reqwest::Response) -> Response<Body> {
+    let mut response = Response::builder().status(upstream.status().as_u16());
+    for (name, value) in upstream.headers().iter() {
+        if HOP_HEADERS.contains(&name.as_str()) {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            response = response.header(name.as_str(), value);
+        }
+    }
+    let stream = upstream.bytes_stream().map_err(std::io::Error::other);
+    response
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "响应构造失败"))
 }
 
 // ---- 小工具 ----
@@ -310,7 +422,7 @@ fn url_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn plain(status: StatusCode, text: &str) -> Response<Body> {
+pub(crate) fn plain(status: StatusCode, text: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
@@ -351,4 +463,45 @@ pub fn new_device_id() -> String {
         "dev-{}-{suffix}",
         chrono::Local::now().format("%Y%m%d%H%M%S")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GET: reqwest::Method = reqwest::Method::GET;
+
+    #[test]
+    fn 注入_在head结束标签前插入定制层() {
+        let html = "<html><head><title>t</title></head><body></body></html>";
+        let injected =
+            inject_mobile_layer(&GET, 200, "text/html; charset=utf-8", html).expect("应注入");
+        assert!(injected.contains(MOBILE_LAYER_SNIPPET));
+        let position = injected.find(MOBILE_LAYER_SNIPPET).unwrap();
+        assert!(injected[..position].contains("</title>"));
+        let after = &injected[position + MOBILE_LAYER_SNIPPET.len()..];
+        assert!(after.starts_with("</head>"));
+        assert!(after.ends_with("<body></body></html>"));
+    }
+
+    #[test]
+    fn 注入_大小写不敏感且幂等形状() {
+        let html = "<html><HEAD></HEAD><body></body></html>";
+        let injected = inject_mobile_layer(&GET, 200, "text/html", html).expect("应注入");
+        // 插入点在「小写化后首个 </head>」之前，原文其余部分逐字节保留。
+        assert!(injected.ends_with("</HEAD><body></body></html>"));
+    }
+
+    #[test]
+    fn 不注入_条件不满足() {
+        let html = "<html><head></head><body></body></html>";
+        // 非 GET
+        assert!(inject_mobile_layer(&reqwest::Method::POST, 200, "text/html", html).is_none());
+        // 非 200
+        assert!(inject_mobile_layer(&GET, 404, "text/html", html).is_none());
+        // 非 HTML
+        assert!(inject_mobile_layer(&GET, 200, "application/json", "{}").is_none());
+        // 没有 </head>（片段/流式页面）
+        assert!(inject_mobile_layer(&GET, 200, "text/html", "<p>fragment</p>").is_none());
+    }
 }

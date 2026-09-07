@@ -12,6 +12,9 @@
 
 pub mod commands;
 pub mod gateway;
+pub mod mobile_ui;
+
+pub use mobile_ui::MobileUi;
 
 /// 已配对设备（settings.json remote 域持久化）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
