@@ -1,6 +1,6 @@
 [package]
 name = "qianxun"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
@@ -23,7 +23,6 @@ tauri-build = { version = "2", features = [] }
 # devtools：release 构建也启用 WebView2 开发者工具（右键菜单「检查」/ F12），
 # 方便现场排查前端问题；调试构建本就默认开启。
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset", "devtools"] }
-tauri-plugin-single-instance = "2"
 # 打开文件 / 资源管理器定位（搜索结果操作，M2）。
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -68,12 +67,28 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "json",
 ] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 # 网卡枚举（绑定地址选择 + EasyTier 识别）。
 if-addrs = "0.13"
+# grep 结果的 glob 过滤（M2 深化）：glob→正则。fff 自用版本不外露。
+regex = "1"
 # 设备配对 token。
 rand = "0.8"
 # /qx-mobile/info 的电脑主机名（App 端自动命名连接用）。
 hostname = "0.4"
 tauri-plugin-dialog = "2.7.3"
+
+[target.'cfg(windows)'.dependencies]
+# 盘符枚举（搜索根选择器，M2 深化）：与 proc-guard 同一条 windows-sys 主线，
+# 只多开 Storage_FileSystem 一个 feature 门。单实例（single_instance 模块）
+# 用 Threading 门：互斥体/事件/等待。
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+# 终端域（M4）：关闭 WebView2 浏览器加速键（Ctrl+Shift+C/I、Ctrl+Shift+V
+# 原样粘贴），复制/粘贴/开发者工具改由外壳自行接管。版本对齐 wry。
+webview2-com = "0.38"
+windows-core = "0.61"

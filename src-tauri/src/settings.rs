@@ -86,10 +86,6 @@ fn default_dsh_home() -> String {
     DSH_HOME_ISOLATED.to_owned()
 }
 
-fn default_pinned_version() -> String {
-    String::new()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DshSettings {
@@ -99,8 +95,6 @@ pub struct DshSettings {
     pub autostart: bool,
     /// ADR-009：见 `DSH_HOME_ISOLATED` 常量说明。
     pub home: String,
-    /// 锁定安装的 DSH 版本（pinned 策略用）。空 = 安装 latest。
-    pub pinned_version: String,
 }
 
 impl Default for DshSettings {
@@ -111,7 +105,6 @@ impl Default for DshSettings {
             version_strategy: DshVersionStrategy::default(),
             autostart: true,
             home: default_dsh_home(),
-            pinned_version: default_pinned_version(),
         }
     }
 }
@@ -187,7 +180,8 @@ impl Default for HotkeysSettings {
     }
 }
 
-/// 终端偏好（M4）：新建标签生效。
+/// 终端偏好：标签条上的终端设置按钮即时生效并持久化（scrollback 对
+/// 已开标签由 xterm 原生支持收缩/扩张；字号/光标经 setOption 热应用）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TerminalSettings {
@@ -195,6 +189,9 @@ pub struct TerminalSettings {
     pub shell: String,
     pub font_size: u32,
     pub scrollback: u32,
+    /// 块（block）/ 竖线（bar）/ 下划线（underline）。
+    pub cursor_style: String,
+    pub cursor_blink: bool,
 }
 
 impl Default for TerminalSettings {
@@ -203,6 +200,8 @@ impl Default for TerminalSettings {
             shell: "auto".to_owned(),
             font_size: 13,
             scrollback: 5000,
+            cursor_style: "block".to_owned(),
+            cursor_blink: true,
         }
     }
 }
@@ -250,14 +249,6 @@ impl Default for Settings {
     }
 }
 
-/// npm 版本号形态：1.2.3 / 0.1.1-rc.2（预发布段仅字母数字点连字符）。
-fn plausible_version(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))
-}
-
 fn validate(settings: &Settings) -> Result<()> {
     if settings.schema_version != SCHEMA_VERSION {
         return Err(Error::SettingsInvalid(format!(
@@ -276,11 +267,6 @@ fn validate(settings: &Settings) -> Result<()> {
             "dsh.home 只能是 isolated 或 system，当前为 {}",
             settings.dsh.home
         )));
-    }
-    if !settings.dsh.pinned_version.is_empty() && !plausible_version(&settings.dsh.pinned_version) {
-        return Err(Error::SettingsInvalid(
-            "dsh.pinnedVersion 必须是 npm 版本号（如 0.1.1-rc.2）或留空".to_owned(),
-        ));
     }
     let node_sources = [
         NODE_BINARY_AUTO,
@@ -391,7 +377,18 @@ fn parse(text: &str) -> Result<Settings> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|error| Error::SettingsInvalid(error.to_string()))?;
     validate(&settings)?;
-    Ok(settings)
+    Ok(migrate(settings))
+}
+
+/// 字段级就地迁移（读入后、使用前）：旧默认值跟走到新默认。
+/// 用户显式配置过的其它值原样保留。
+fn migrate(mut settings: Settings) -> Settings {
+    // 网关端口：17400 是历史默认；持久化过旧默认的设置文件迁移到
+    // 按构建模式的新默认（release 23090 / debug 23091）。
+    if settings.remote.port == crate::remote::LEGACY_GATEWAY_PORT {
+        settings.remote.port = crate::remote::default_gateway_port();
+    }
+    settings
 }
 
 pub fn save(path: &Path, settings: &Settings) -> Result<()> {
@@ -457,6 +454,8 @@ mod tests {
 
     #[test]
     fn 完整文件往返一致() {
+        // pinnedVersion 是历史字段：DSH 版本现在由千寻硬编码，样例里
+        // 保留旧值验证向后兼容（未知字段被忽略，round-trip 后消失）。
         let text = r#"{
             "schemaVersion": 1,
             "theme": "dark",
@@ -488,9 +487,18 @@ mod tests {
     #[test]
     fn 非法home与镜像值被拒绝() {
         assert!(parse(r#"{"dsh": {"home": "shared"}}"#).is_err());
-        assert!(parse(r#"{"dsh": {"pinnedVersion": "a b"}}"#).is_err());
         assert!(parse(r#"{"mirrors": {"nodeBinary": "cnpm"}}"#).is_err());
         assert!(parse(r#"{"mirrors": {"npmRegistry": "npmmirror.com"}}"#).is_err());
+    }
+
+    #[test]
+    fn 旧默认网关端口迁移到按模式新默认() {
+        // 持久化过旧默认 17400 的设置文件 → 迁移到当前构建模式的新默认。
+        let settings = parse(r#"{"remote": {"port": 17400}}"#).unwrap();
+        assert_eq!(settings.remote.port, crate::remote::default_gateway_port());
+        // 用户显式配置过的其它端口原样保留，不被迁移波及。
+        let custom = parse(r#"{"remote": {"port": 30000}}"#).unwrap();
+        assert_eq!(custom.remote.port, 30000);
     }
 
     #[test]

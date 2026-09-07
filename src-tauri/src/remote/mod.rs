@@ -17,7 +17,7 @@ pub mod mobile_ui;
 pub use mobile_ui::MobileUi;
 
 /// 已配对设备（settings.json remote 域持久化）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDevice {
     pub id: String,
@@ -27,6 +27,21 @@ pub struct RemoteDevice {
     /// 毫秒时间戳。
     pub created_at: i64,
     pub revoked: bool,
+}
+
+/// 历史网关默认端口（迁移基准：settings.json 里持久化的旧默认值
+/// 在加载时迁移到按构建模式的新默认，用户自定义的其它端口原样保留）。
+pub const LEGACY_GATEWAY_PORT: u16 = 17400;
+
+/// 网关默认端口：release 23090 / debug 23091。回环 iframe 与 LAN 设备
+/// 共用同一端口，实例内恒定（iframe 地址不变是 DSH revive 热吸收的
+/// 前提）；debug 用不同端口是为了与安装版并存时互不抢端口。
+pub fn default_gateway_port() -> u16 {
+    if cfg!(debug_assertions) {
+        23091
+    } else {
+        23090
+    }
 }
 
 /// 远程域设置。
@@ -45,7 +60,7 @@ impl Default for RemoteSettings {
         Self {
             enabled: false,
             bind_ip: String::new(),
-            port: 17400,
+            port: default_gateway_port(),
             devices: Vec::new(),
         }
     }

@@ -5,11 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>千寻</title>
     <script>
-      // 首帧前按系统偏好上色，避免暗色用户看到一闪白屏；真实主题在设置
-      // 加载完成后由 theme store 覆盖。这段必须是内联同步脚本。
-      if (matchMedia('(prefers-color-scheme: dark)').matches) {
-        document.documentElement.classList.add('dark');
-      }
+      // 首帧前上色：优先用上次解析出的主题（localStorage 桥，显式偏好
+      // 在系统切换时不闪错色），其次系统偏好；真实主题在设置加载后由
+      // theme store 覆盖并回写。必须是内联同步脚本（WebView2 的
+      // prefers-color-scheme 由 Rust 侧 PreferredColorScheme=AUTO 驱动）。
+      (function () {
+        var saved = null;
+        try {
+          saved = localStorage.getItem('qx-theme');
+        } catch (e) {
+          /* 隐私模式等：忽略，走系统偏好 */
+        }
+        var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+        if (dark) document.documentElement.classList.add('dark');
+      })();
     </script>
     <style>
       /* 启动屏：纯静态内联样式，不依赖任何 JS/CSS 包。dev 模式下 Vite 要

@@ -1,6 +1,6 @@
 {
   "name": "qianxun-mobile",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "千寻移动端（React Native）：多 PC 连接管理、原生扫码配对、DSH 工作台与远程桌面 Surface。",
   "scripts": {

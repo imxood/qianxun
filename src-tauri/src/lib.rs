@@ -6,6 +6,7 @@
 mod atomic;
 mod bridge;
 mod child_output;
+mod dsh_upstream;
 mod error;
 mod harness;
 mod logging;
@@ -15,6 +16,9 @@ mod remote;
 mod search;
 mod settings;
 mod shots;
+// 路径级单实例（Windows）：同一 exe 只跑一份，安装版与 dev 版并存。
+#[cfg(windows)]
+mod single_instance;
 mod sync;
 mod terminal;
 mod tray;
@@ -74,16 +78,41 @@ struct AppMeta {
     identifier: String,
 }
 
+/// 读剪贴板（终端复制/粘贴用）。走 Tauri 插件在主进程完成，不经
+/// WebView2 的 navigator.clipboard——后者每次调用都会弹系统级剪贴板
+/// 权限框（选中后右键被弹窗打断，体验极差），这里彻底绕开。
+#[tauri::command]
+fn clipboard_read_text(app: tauri::AppHandle) -> error::Result<String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .read_text()
+        .map_err(|cause| error::Error::Window(format!("读取剪贴板失败：{cause}")))
+}
+
+/// 写剪贴板（终端复制用）。
+#[tauri::command]
+fn clipboard_write_text(app: tauri::AppHandle, text: String) -> error::Result<()> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .write_text(text)
+        .map_err(|cause| error::Error::Window(format!("写入剪贴板失败：{cause}")))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // 第二次启动只唤醒已运行的实例。千寻托管着 DSH，
-            // 两个实例同时拉起服务会互相打架——从第一天就挡住。
-            if let Some(existing) = window::front(app) {
-                window::reveal(&existing);
-            }
-        }))
+    // 路径级单实例（Windows，为什么不用官方插件见模块文档）。挂链首：
+    // 第二实例必须在任何插件副作用（热键注册等）之前退场。
+    #[cfg(windows)]
+    let builder = tauri::Builder::default().plugin(single_instance::init(|app| {
+        // 第二次启动只唤醒已运行的实例。千寻托管着 DSH，
+        // 两个实例同时拉起服务会互相打架——从第一天就挡住。
+        if let Some(existing) = window::front(app) {
+            window::reveal(&existing);
+        }
+    }));
+    #[cfg(not(windows))]
+    let builder = tauri::Builder::default();
+    builder
         .plugin(tauri_plugin_opener::init())
         // 原生目录选择器（搜索页选根目录，替代手输绝对路径）。
         .plugin(tauri_plugin_dialog::init())
@@ -145,6 +174,11 @@ pub fn run() {
             app.manage(shots::commands::ShotsState::default());
             app.manage(terminal::commands::TerminalState::default());
             forward_events(handle, &supervisor);
+            // 远程/回环双端网关：setup 即占位监听回环网关端口（默认
+            // release 23090 / debug 23091，DSH 页 iframe 立刻有稳定地址），
+            // 启用远程时再额外绑 LAN。DSH 就绪事件由 forward_events
+            // 同步触发，热更新上游。
+            tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
             tray::build(handle)?;
 
             // 截屏热键随设置恢复（空串 = 不注册；失败不阻断启动，日志可见）。
@@ -159,6 +193,16 @@ pub fn run() {
 
             // 桥自愈：部署过但插件文件被 DSH 重装清掉时静默补齐（M6）。
             bridge::commands::heal(handle);
+
+            // 关闭 WebView2 浏览器加速键：Ctrl+Shift+C 不再误开 devtools
+            // 元素选择器、Ctrl+Shift+V 不再触发「原样粘贴」（双重粘贴的
+            // 元凶）。同时把主题色方案设为 AUTO（prefers-color-scheme
+            // 跟随 OS，「跟随系统」主题才能在暗色系统下生效）。
+            // 开发者工具保留：F12 / Ctrl+Shift+I 由前端显式开关。
+            #[cfg(windows)]
+            if let Some(main) = app.get_webview_window("main") {
+                window::apply_webview_preferences(&main);
+            }
 
             // 远程网关：设置里启用过就恢复监听（上游 origin 等 DSH 就绪事件补）。
             tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
@@ -175,27 +219,43 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 「关到托盘」只约束主窗；覆盖窗/贴图窗的关闭就是关闭。
-                if window.label() == "main" {
-                    window::on_close_requested(window, api);
+            let label = window.label().to_owned();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // 「关到托盘」只约束主窗；覆盖窗/贴图窗的关闭就是关闭。
+                    if label == "main" {
+                        window::on_close_requested(window, api);
+                    } else if label.starts_with(window::STANDALONE_PREFIX) {
+                        // 独立窗口：转交前端确认（有活动终端时弹窗），
+                        // 确认后走 window_force_close 真正销毁。
+                        window::on_standalone_close_requested(window, api);
+                    }
                 }
-            }
-            if let tauri::WindowEvent::Destroyed = event {
-                if window
-                    .label()
-                    .starts_with(shots::commands::OVERLAY_LABEL_PREFIX)
-                {
-                    shots::commands::overlay_closed(window.app_handle());
+                tauri::WindowEvent::Destroyed => {
+                    if label.starts_with(shots::commands::OVERLAY_LABEL_PREFIX) {
+                        shots::commands::overlay_closed(window.app_handle());
+                    }
+                    if label.starts_with(window::STANDALONE_PREFIX) {
+                        window::on_standalone_destroyed(window.app_handle(), &label);
+                    }
                 }
+                tauri::WindowEvent::ThemeChanged(_) => {
+                    // OS 深浅色切换：重设 webview 配色 + 广播事件，
+                    // 「跟随系统」主题立即切换。
+                    window::on_theme_changed(window.app_handle());
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
             app_meta,
+            clipboard_read_text,
+            clipboard_write_text,
             settings::commands::settings_get,
             settings::commands::settings_update,
             harness::commands::harness_environment,
             harness::commands::harness_status,
+            harness::commands::harness_proxy_url,
             harness::commands::harness_start,
             harness::commands::harness_stop,
             harness::commands::harness_install,
@@ -207,6 +267,7 @@ pub fn run() {
             search::commands::search_content,
             search::commands::search_cancel,
             search::commands::search_wait_ready,
+            search::commands::search_list_drives,
             shots::commands::shots_capture,
             shots::commands::shots_overlay_ready,
             shots::commands::shots_set_hotkey,
@@ -216,11 +277,24 @@ pub fn run() {
             shots::commands::shots_pin,
             shots::commands::shots_close_overlays,
             shots::commands::shots_open_pin,
+            window::app_toggle_devtools,
+            window::system_theme,
+            window::window_spawn_view,
+            window::window_reveal_main,
+            window::window_force_close,
             terminal::commands::terminal_spawn,
             terminal::commands::terminal_write,
             terminal::commands::terminal_resize,
             terminal::commands::terminal_kill,
-            terminal::commands::terminal_list,
+            terminal::commands::terminal_replay,
+            terminal::commands::terminal_clear,
+            terminal::commands::terminal_sessions,
+            terminal::commands::terminal_transfer,
+            terminal::commands::terminal_pin,
+            terminal::commands::terminal_unpin,
+            terminal::commands::terminal_pin_resume,
+            terminal::commands::terminal_pinned_list,
+            terminal::commands::terminal_pinned_replay,
             notes::commands::notes_list,
             notes::commands::notes_read,
             notes::commands::notes_save,
@@ -233,6 +307,7 @@ pub fn run() {
             remote::commands::remote_status,
             remote::commands::remote_pair,
             remote::commands::remote_revoke,
+            remote::commands::remote_self_check,
             sync::commands::sync_status,
             sync::commands::sync_init,
             sync::commands::sync_pull,
@@ -256,8 +331,8 @@ fn forward_events(app: &AppHandle, supervisor: &Arc<Supervisor>) {
             match &event {
                 Event::Status(status) => {
                     tray::reflect_status(status);
-                    let _ = handle.emit(EVENT_CHANNEL, &event);
-                    // DSH 就绪/停止都触发网关同步：上游 origin 出现或消失。
+                    // DSH 就绪/停止触发网关同步：上游 origin 出现或消失，
+                    // 回环 iframe 与 LAN 设备共享同一套更新。
                     if matches!(
                         status,
                         harness::supervisor::Status::Ready { .. }
@@ -265,6 +340,7 @@ fn forward_events(app: &AppHandle, supervisor: &Arc<Supervisor>) {
                     ) {
                         tauri::async_runtime::spawn(remote::commands::sync(handle.clone()));
                     }
+                    let _ = handle.emit(EVENT_CHANNEL, &event);
                 }
                 Event::Log { .. } => {
                     let _ = handle.emit(EVENT_CHANNEL, &event);

@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "standalone-windows",
+  "description": "独立窗口（终端/DSH 分离窗）：自绘标题栏拖动/双击最大化 + 最小化/最大化/关闭按钮 + 首帧亮窗",
+  "windows": ["standalone-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-show",
+    "core:window:allow-set-focus"
+  ]
+}

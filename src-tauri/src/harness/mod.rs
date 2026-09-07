@@ -138,7 +138,7 @@ pub struct Environment {
     pub minimum_node: node_runtime::Version,
     pub dsh_installed: bool,
     pub dsh_version: Option<String>,
-    /// 下一次安装将使用的包说明符（含锁定版本或 latest）。
+    /// 下一次安装将使用的包说明符（千寻版本锁定的精确 DSH 版本）。
     pub install_spec: String,
     pub dsh_entry: PathBuf,
     pub workspace: PathBuf,
@@ -180,20 +180,11 @@ pub fn environment(app: &tauri::AppHandle, settings: &Settings) -> Environment {
         minimum_node: node_runtime::MINIMUM_SUPPORTED,
         dsh_installed,
         dsh_version,
-        install_spec: install_spec(settings),
+        install_spec: install::install_spec(),
         dsh_entry,
         workspace: paths::workspace_dir(),
         dsh_home: dsh_home(app, settings),
         bundled_node_version: node_install::NODE_VERSION.to_owned(),
-    }
-}
-
-/// 安装说明符：锁定版本优先，否则 latest。
-fn install_spec(settings: &Settings) -> String {
-    if settings.dsh.pinned_version.is_empty() {
-        install::LATEST_SPEC.to_owned()
-    } else {
-        format!("{}@{}", install::PACKAGE, settings.dsh.pinned_version)
     }
 }
 
@@ -244,12 +235,11 @@ pub fn launch_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<Launch
         profile: DEFAULT_PROFILE.to_owned(),
         workspace: environment.workspace,
         host: BIND_HOST.to_owned(),
-        // 固定端口（ADR-002）；只有用户显式允许随机 fallback 时才传 0。
-        port: if settings.dsh.allow_random_fallback {
-            0
-        } else {
-            settings.dsh.port
-        },
+        // ADR-002 修订：启动端口恒为 0（OS 分配随机空闲端口）。内核层面
+        // 保证端口可用，「被占用重试」没有存在的必要；debug 与安装版
+        // 同时启动 DSH 也各拿各的端口。settings.dsh.port 与
+        // allow_random_fallback 保留为历史字段，不再参与启动。
+        port: 0,
         dsh_home: (settings.dsh.home != DSH_HOME_SYSTEM)
             .then(|| paths::dsh_home(app))
             .transpose()?,
@@ -291,7 +281,7 @@ pub fn install_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<Insta
         npm_cli: install::npm_cli(&node.path).ok_or(Error::NpmMissing)?,
         target: paths::harness_dir(app)?,
         pnpm_tool_dir: paths::pnpm_tool_dir(app)?,
-        spec: install_spec(settings),
+        spec: install::install_spec(),
         registry: settings.mirrors.registry_url(),
     })
 }

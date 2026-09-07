@@ -11,10 +11,15 @@
 /** 全部 IPC 命令。新增命令时在这里登记，Rust 侧同名实现。 */
 export const IPC_COMMANDS = [
   'app_meta',
+  'app_toggle_devtools',
+  'clipboard_read_text',
+  'clipboard_write_text',
+  'system_theme',
   'settings_get',
   'settings_update',
   'harness_environment',
   'harness_status',
+  'harness_proxy_url',
   'harness_start',
   'harness_stop',
   'harness_install',
@@ -26,6 +31,7 @@ export const IPC_COMMANDS = [
   'search_content',
   'search_cancel',
   'search_wait_ready',
+  'search_list_drives',
   'shots_capture',
   'shots_overlay_ready',
   'shots_set_hotkey',
@@ -39,7 +45,18 @@ export const IPC_COMMANDS = [
   'terminal_write',
   'terminal_resize',
   'terminal_kill',
-  'terminal_list',
+  'terminal_replay',
+  'terminal_clear',
+  'terminal_sessions',
+  'terminal_transfer',
+  'terminal_pin',
+  'terminal_unpin',
+  'terminal_pin_resume',
+  'terminal_pinned_list',
+  'terminal_pinned_replay',
+  'window_spawn_view',
+  'window_reveal_main',
+  'window_force_close',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -52,6 +69,7 @@ export const IPC_COMMANDS = [
   'remote_status',
   'remote_pair',
   'remote_revoke',
+  'remote_self_check',
   'sync_status',
   'sync_init',
   'sync_pull',
@@ -64,9 +82,20 @@ export type IpcCommand = (typeof IPC_COMMANDS)[number];
 export const IPC_EVENTS = [
   'harness://event',
   'harness://install-progress',
+  'system://theme',
   'terminal://output',
   'terminal://exit',
+  'terminal://transferred',
+  'window://closed',
+  'window://close-requested',
 ] as const;
+
+/**
+ * system://theme 事件负载：OS「应用模式」是否为暗色。
+ * WebView2 媒体查询默认恒报 light 不可信，Rust 注册表直读后推送；
+ * ThemeChanged（OS 深浅色切换）时实时再推。
+ */
+export type SystemThemeEvent = boolean;
 
 // ---------------------------------------------------------------------------
 // app_meta
@@ -108,7 +137,6 @@ export interface DshSettings {
   versionStrategy: DshVersionStrategy;
   autostart: boolean;
   home: DshHomePolicy;
-  pinnedVersion: string;
 }
 
 export interface MirrorsSettings {
@@ -190,9 +218,23 @@ export interface HarnessEnvironment {
 export type HarnessStatus =
   | { phase: 'stopped' }
   | { phase: 'starting' }
-  | { phase: 'ready'; origin: string; pid: number }
+  | {
+      phase: 'ready';
+      /** scheme://host:port，去 token 的干净 origin（展示、托盘等用）。 */
+      origin: string;
+      /**
+       * 含 `?token=` 的完整 URL。仅供「在系统浏览器打开」（顶层导航不受
+       * SameSite 限制）；DSH 页 iframe 走 `harness_proxy_url` 的回环代理
+       * （Strict cookie 在跨站 iframe 不可携带，cookie 由服务端持有）。
+       */
+      url: string;
+      pid: number;
+    }
   | { phase: 'restarting'; attempt: number; delayMs: number }
   | { phase: 'failed'; reason: string };
+
+/** harness_proxy_url 返回：DSH 回环代理地址（http://127.0.0.1:<port>）；未启动 = null。 */
+export type HarnessProxyUrlResult = string | null;
 
 export type HarnessStream = 'stdout' | 'stderr';
 
@@ -268,6 +310,9 @@ export interface FileHit {
   score: number;
   /** 文件名内的匹配区间（字节偏移，UTF-8 切片高亮）。 */
   offsets: Array<[number, number]>;
+  /** 大小（字节）与修改时间（毫秒）——结果表排序列；stat 失败记 0。 */
+  size: number;
+  mtime: number;
 }
 
 export interface FilesPage {
@@ -292,14 +337,34 @@ export interface GrepOptions {
   smartCase: boolean;
   beforeContext: number;
   afterContext: number;
+  /** 文件名 glob 过滤（`*.rs` 按文件名；含 `/` 按相对路径）。空 = 不过滤。 */
+  glob?: string;
 }
 
 export interface GrepPage {
   items: GrepHit[];
   filesSearched: number;
   filesWithMatches: number;
+  /** 流式循环下非 0 仅表示「已中断」，前端不再手动翻页。 */
   nextFileOffset: number;
   aborted: boolean;
+}
+
+/** search_content 的流式分片（Tauri Channel 推送）。 */
+export interface GrepProgress {
+  items: GrepHit[];
+  filesSearched: number;
+  filesWithMatches: number;
+}
+
+/** 一个逻辑盘（search_list_drives 返回项，搜索根选择器）。 */
+export interface DriveInfo {
+  /** 形如 `C:\` 的根路径。 */
+  path: string;
+  /** fixed | removable | network | cdrom | ramdisk */
+  kind: string;
+  totalBytes: number;
+  freeBytes: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +393,7 @@ export interface FrozenMonitor {
 // terminal_*（终端域，M4）
 // ---------------------------------------------------------------------------
 
+/** `terminal_spawn` 的返回：会话 id + 实际解析出的 shell（标签默认标题用）。 */
 export interface TerminalInfo {
   id: number;
   shell: string;
@@ -348,6 +414,59 @@ export interface TerminalSettings {
   shell: string;
   fontSize: number;
   scrollback: number;
+  /** 块（block）/ 竖线（bar）/ 下划线（underline）。 */
+  cursorStyle: 'block' | 'bar' | 'underline';
+  cursorBlink: boolean;
+}
+
+/** terminal_pinned_list 的返回项：一条固定（PIN）终端的元数据。 */
+export interface PinnedTerminal {
+  pinId: number;
+  title: string;
+  shell: string;
+  cwd: string | null;
+}
+
+/** terminal_sessions 的返回项：某窗口名下存活会话的最小快照。 */
+export interface TerminalSessionSnapshot {
+  id: number;
+  /** Rust 侧存的重命名标题；null = 前端用 shell 名兜底。 */
+  title: string | null;
+  shell: string;
+  cwd: string | null;
+  pinId: number | null;
+}
+
+/** terminal_transfer 的入参：把会话转移给目标窗口。 */
+export interface TerminalTransferArgs {
+  id: number;
+  /** 目标窗口 label：'main' 或独立窗口 label。 */
+  target: string;
+  title: string;
+  shell: string;
+  cwd: string | null;
+  pinId: number | null;
+}
+
+/** terminal://transferred 事件负载：目标窗口据此接管标签。 */
+export interface TerminalTransferEvent {
+  id: number;
+  windowLabel: string;
+  title: string;
+  shell: string;
+  cwd: string | null;
+  pinId: number | null;
+}
+
+/** window_spawn_view 的入参：分离某页到独立窗口。 */
+export interface WindowSpawnViewArgs {
+  view: 'terminal' | 'dsh';
+}
+
+/** window://closed 事件负载：主窗据此恢复侧栏项。 */
+export interface StandaloneClosedEvent {
+  label: string;
+  view: 'terminal' | 'dsh';
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +478,8 @@ export interface NoteMeta {
   path: string;
   title: string;
   tags: string[];
+  /** 正文首行摘要（跳过标题行，截断 80 字符）。 */
+  excerpt: string;
   /** 文件修改时间（毫秒时间戳）。 */
   updated: number;
   size: number;
@@ -427,6 +548,13 @@ export interface RemoteStatus {
   deviceCount: number;
   activeCount: number;
   dshRunning: boolean;
+}
+
+/** remote_self_check 返回：网关健康自检（带真实 token 走 /qx-gate）。 */
+export interface SelfCheck {
+  ok: boolean;
+  detail: string;
+  latencyMs: number;
 }
 
 // ---------------------------------------------------------------------------

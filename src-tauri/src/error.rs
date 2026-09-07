@@ -41,6 +41,9 @@ pub enum Error {
     #[error("终端失败：{0}")]
     Terminal(String),
 
+    #[error("窗口操作失败：{0}")]
+    Window(String),
+
     #[error("笔记失败：{0}")]
     Notes(String),
 

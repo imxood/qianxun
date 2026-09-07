@@ -5,7 +5,8 @@
 //! 手机端数秒内自动生效——页面里的 bootstrap.js 轮询 `version` 的内容
 //! hash，变化即热替换（见 assets/qx-mobile-bootstrap.js）。
 //!
-//! 路由一览（除 unknown 外全部要求已配对，cookie 或 query token）：
+//! 路由一览（除 unknown 外全部鉴权：回环入口放行，局域网要求已配对——
+//! cookie 或 query token）：
 //! - `GET info` 电脑端身份（主机名/版本/DSH 就绪），供 App 端命名连接与在线探测；
 //!   额外带 CORS `*`——Capacitor 壳在配对前（无 cookie）用 query token 探测。
 //! - `GET version` `{v,css,js}` 内容 hash（css/js 各 16 位 hex），热刷新依据。
@@ -24,7 +25,8 @@ use axum::http::{header, HeaderMap, Response, StatusCode};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::remote::gateway::{authorized, plain, GatewayState};
+use crate::dsh_upstream::plain;
+use crate::remote::gateway::GatewayState;
 
 /// 单文件上限（对齐 dsh-mobile：css 512KB / js 1MB），超出按 413 拒绝。
 const CSS_LIMIT: usize = 512 * 1024;
@@ -61,7 +63,7 @@ pub async fn info(
     uri: OriginalUri,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if !authorized(&state, uri.query().unwrap_or(""), &headers) {
+    if !state.mobile_authorized(uri.query().unwrap_or(""), &headers) {
         return plain(StatusCode::UNAUTHORIZED, "未配对设备");
     }
     let hostname = hostname::get()
@@ -71,7 +73,7 @@ pub async fn info(
         "app": "qianxun",
         "version": env!("CARGO_PKG_VERSION"),
         "hostname": hostname,
-        "dshReady": state.upstream_ready(),
+        "dshReady": state.upstream.ready().await,
     });
     let mut response = json_response(&body);
     // CORS 放开：凭据是 query 里的配对 token 本身，cookie 不跨源，无凭据泄漏面。
@@ -88,7 +90,7 @@ pub async fn version(
     uri: OriginalUri,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if !authorized(&state, uri.query().unwrap_or(""), &headers) {
+    if !state.mobile_authorized(uri.query().unwrap_or(""), &headers) {
         return plain(StatusCode::UNAUTHORIZED, "未配对设备");
     }
     let css = short_hash_of(&state.mobile.css_path, CSS_FALLBACK).await;
@@ -102,7 +104,7 @@ pub async fn bootstrap(
     uri: OriginalUri,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if !authorized(&state, uri.query().unwrap_or(""), &headers) {
+    if !state.mobile_authorized(uri.query().unwrap_or(""), &headers) {
         return plain(StatusCode::UNAUTHORIZED, "未配对设备");
     }
     text_response(BOOTSTRAP_JS, "text/javascript; charset=utf-8", "no-cache")
@@ -160,7 +162,7 @@ async fn serve_custom(
     fallback: &str,
     content_type: &str,
 ) -> Response<Body> {
-    if !authorized(state, query, headers) {
+    if !state.mobile_authorized(query, headers) {
         return plain(StatusCode::UNAUTHORIZED, "未配对设备");
     }
     let (body, from_file) = match tokio::fs::read(path).await {

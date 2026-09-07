@@ -11,7 +11,6 @@ mobile/
   App.tsx / src/        RN 壳（连接管理、扫码、Workspace+Surface 注册表）
   android/              生成的 Android 工程（gradle 已配国内镜像与本机 SDK 版本）
   test/mock-gateway.mjs 验证用 mock 网关（node 零依赖）
-  legacy-capacitor/     旧 Capacitor 壳存档（www/index.html 可作交互参考）
   examples/             网关定制层示例（custom.css/js，与壳技术无关）
 ```
 

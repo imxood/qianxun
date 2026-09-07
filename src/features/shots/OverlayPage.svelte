@@ -63,8 +63,8 @@
   let liveShape: Shape | null = null;
   let textDraft = $state<{ x: number; y: number; value: string } | null>(null);
 
+  // 'none' = 默认空态（可拖选区/编辑标注），不再是按钮；再点激活的工具可切回。
   const TOOLS: Array<{ id: Tool; label: string; icon: string }> = [
-    { id: 'none', label: '选择', icon: 'M5 3l14 9-6 1 4 6-3 2-4-6-4 5z' },
     { id: 'rect', label: '矩形', icon: 'M4 5h16v14H4z' },
     { id: 'ellipse', label: '椭圆', icon: 'M12 5a8 7 0 100 14 8 7 0 000-14z' },
     { id: 'arrow', label: '箭头', icon: 'M4 20L20 4M20 4h-7M20 4v7' },
@@ -346,6 +346,12 @@
   }
 
   // ---- 交互 ----
+  /**
+   * 统一优先级分发器（设计 §4.1）：
+   * 文字草稿提交 > 选区手柄（任何工具）> 选区边带 ≤5dpr（任何工具）>
+   * 无工具态：标注手柄 > 标注拖动 > 框内空白移动选区 >
+   * 绘图工具态：文字落点 / 起笔绘制 > 选区外任何工具都重开选区。
+   */
   function onMouseDown(event: MouseEvent): void {
     if (!canvas || !baseImage) return;
     if (event.button !== 0) return;
@@ -354,61 +360,56 @@
       return;
     }
     const point = toPhysical(event);
-    if (phase === 'idle' || tool !== 'none') {
-      if (tool === 'text') {
-        const sel = norm(selection);
-        if (
-          phase === 'selected' &&
-          point.x >= sel.x1 &&
-          point.x <= sel.x2 &&
-          point.y >= sel.y1 &&
-          point.y <= sel.y2
-        ) {
-          selected = null;
-          textDraft = { x: point.x, y: point.y, value: '' };
-        }
-        return;
-      }
-      if (tool === 'none' && phase === 'idle') {
-        // 开新选区。
-        phase = 'selecting';
-        selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
-        drag = { kind: 'new', origin: { ...selection }, start: point };
-        return;
-      }
-      if (phase === 'selected') {
-        // 标注工具在选区内起笔。
-        const sel = norm(selection);
-        const inside =
-          point.x >= sel.x1 && point.x <= sel.x2 && point.y >= sel.y1 && point.y <= sel.y2;
-        if (!inside) {
-          // 点到选区外：重开选区（微信行为）。
-          tool = 'none';
-          phase = 'selecting';
-          selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
-          drag = { kind: 'new', origin: { ...selection }, start: point };
-          shapes = [];
-          redoStack = [];
-          selected = null;
-          return;
-        }
-        selected = null;
-        liveShape = beginShape(tool, point, color, strokeWidth);
-        return;
-      }
+
+    if (phase === 'idle') {
+      // 开新选区。
+      phase = 'selecting';
+      selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
+      drag = { kind: 'new', origin: { ...selection }, start: point };
       return;
     }
-    if (phase === 'selected' && tool === 'none') {
-      // 1) 已选中形状：优先试它自己的缩放手柄。
+
+    // ---- selected 态：优先级分发 ----
+    // 2) 选区 8 手柄（任何工具态；外层几何优先于标注手柄）。
+    const handle = hitHandle(point);
+    if (handle >= 0) {
+      selected = null;
+      drag = { kind: 'resize', handle, origin: { ...selection }, start: point };
+      return;
+    }
+    // 3) 选区边带 ≤5dpr → 对应向 resize（任何工具态）。
+    const edge = hitSelectionEdge(point);
+    if (edge >= 0) {
+      selected = null;
+      drag = { kind: 'resize', handle: edge, origin: { ...selection }, start: point };
+      return;
+    }
+
+    const sel = norm(selection);
+    const inside = point.x >= sel.x1 && point.x <= sel.x2 && point.y >= sel.y1 && point.y <= sel.y2;
+    if (!inside) {
+      // 6) 选区外（任何工具）→ 清标注重开选区（微信行为）。
+      tool = 'none';
+      phase = 'selecting';
+      selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
+      drag = { kind: 'new', origin: { ...selection }, start: point };
+      shapes = [];
+      redoStack = [];
+      selected = null;
+      return;
+    }
+
+    if (tool === 'none') {
+      // 4a) 已选标注的手柄 → 缩放。
       if (selected !== null) {
         const current = shapes[selected];
         if (current && shapeResizable(current)) {
-          const handle = hitBoxHandle(outlineBox(current), point);
-          if (handle >= 0) {
+          const shapeHandle = hitBoxHandle(outlineBox(current), point);
+          if (shapeHandle >= 0) {
             drag = {
               kind: 'shape-resize',
               index: selected,
-              handle,
+              handle: shapeHandle,
               origin: cloneShape(current),
               start: point,
             };
@@ -416,7 +417,7 @@
           }
         }
       }
-      // 2) 点到任意标注：选中并进入拖动。
+      // 4b) 标注命中 → 选中并拖动。
       const hit = hitShapeIndex(point);
       if (hit >= 0) {
         const shape = shapes[hit];
@@ -427,28 +428,47 @@
         }
         return;
       }
-      // 3) 空白处：先取消选中，再按选区手柄 / 移动 / 重开处理。
+      // 4c) 框内空白 → 拖动即移动选区。
       if (selected !== null) {
         selected = null;
         render();
       }
-      const handle = hitHandle(point);
-      if (handle >= 0) {
-        drag = { kind: 'resize', handle, origin: { ...selection }, start: point };
-        return;
-      }
-      const sel = norm(selection);
-      if (point.x >= sel.x1 && point.x <= sel.x2 && point.y >= sel.y1 && point.y <= sel.y2) {
-        drag = { kind: 'move', origin: { ...selection }, start: point };
-        return;
-      }
-      // 选区外：重开。
-      phase = 'selecting';
-      selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
-      shapes = [];
-      redoStack = [];
-      drag = { kind: 'new', origin: { ...selection }, start: point };
+      drag = { kind: 'move', origin: { ...selection }, start: point };
+      return;
     }
+
+    // 5) 绘图工具态（框内）。
+    if (tool === 'text') {
+      selected = null;
+      textDraft = { x: point.x, y: point.y, value: '' };
+      return;
+    }
+    selected = null;
+    liveShape = beginShape(tool, point, color, strokeWidth);
+  }
+
+  /**
+   * 选区边带命中（设计 §4.1 第 3 级）：距任一边 ≤5dpr 的带状区域，
+   * 返回对应方向的 resize 手柄号；角部同时命中两边 → 角手柄。
+   */
+  function hitSelectionEdge(point: Pt): number {
+    const sel = norm(selection);
+    const band = 5 * dpr;
+    const nearLeft = Math.abs(point.x - sel.x1) <= band;
+    const nearRight = Math.abs(point.x - sel.x2) <= band;
+    const nearTop = Math.abs(point.y - sel.y1) <= band;
+    const nearBottom = Math.abs(point.y - sel.y2) <= band;
+    const withinY = point.y >= sel.y1 - band && point.y <= sel.y2 + band;
+    const withinX = point.x >= sel.x1 - band && point.x <= sel.x2 + band;
+    if (nearLeft && nearTop && withinY && withinX) return 0;
+    if (nearRight && nearTop && withinY && withinX) return 2;
+    if (nearLeft && nearBottom && withinY && withinX) return 5;
+    if (nearRight && nearBottom && withinY && withinX) return 7;
+    if (nearLeft && withinY) return 3;
+    if (nearRight && withinY) return 4;
+    if (nearTop && withinX) return 1;
+    if (nearBottom && withinX) return 6;
+    return -1;
   }
 
   function beginShape(
@@ -760,22 +780,29 @@
   function updateCursor(point: { x: number; y: number }): void {
     if (!canvas) return;
     let cursor = 'crosshair';
-    if (phase === 'selected' && tool === 'none') {
-      const current = selected !== null ? shapes[selected] : undefined;
-      // 已选中形状的手柄优先提示缩放方向。
-      const shapeHandle =
-        current && shapeResizable(current) ? hitBoxHandle(outlineBox(current), point) : -1;
-      const handle = shapeHandle >= 0 ? shapeHandle : hitHandle(point);
-      if (handle >= 0) {
-        cursor = HANDLE_CURSORS[handle] ?? 'crosshair';
-      } else if (hitShapeIndex(point) >= 0) {
-        // 悬停在标注上：提示可拖动。
-        cursor = 'move';
+    if (phase === 'selected') {
+      // 边线/手柄最优先（任何工具态）：选区手柄 → 选区边带。
+      const selectionHandle = hitHandle(point);
+      const edge = selectionHandle >= 0 ? selectionHandle : hitSelectionEdge(point);
+      if (edge >= 0) {
+        cursor = HANDLE_CURSORS[edge] ?? 'crosshair';
       } else {
         const sel = norm(selection);
         const inside =
           point.x >= sel.x1 && point.x <= sel.x2 && point.y >= sel.y1 && point.y <= sel.y2;
-        cursor = inside ? 'move' : 'crosshair';
+        if (inside) {
+          if (tool === 'none') {
+            // 已选标注的手柄提示缩放方向；其余框内区域一律可拖动。
+            const current = selected !== null ? shapes[selected] : undefined;
+            const shapeHandle =
+              current && shapeResizable(current) ? hitBoxHandle(outlineBox(current), point) : -1;
+            cursor = shapeHandle >= 0 ? (HANDLE_CURSORS[shapeHandle] ?? 'move') : 'move';
+          } else if (tool === 'text') {
+            cursor = 'text';
+          } else {
+            cursor = 'crosshair';
+          }
+        }
       }
     }
     canvas.style.cursor = cursor;
@@ -783,8 +810,10 @@
 
   function onDoubleClick(event: MouseEvent): void {
     if (phase !== 'selected' || textDraft) return;
+    // 双击复制仅在无工具态生效（设计 §4.2）。
+    if (tool !== 'none') return;
     // 双击标注是编辑意图，不触发"双击复制"。
-    if (tool === 'none' && hitShapeIndex(toPhysical(event)) >= 0) return;
+    if (hitShapeIndex(toPhysical(event)) >= 0) return;
     void produce('copy');
   }
 
@@ -939,10 +968,11 @@
             : 'text-neutral-300 hover:bg-white/10'}"
           title={item.label}
           onclick={() => {
-            tool = item.id;
-            if (item.id !== 'text') textDraft = null;
+            // 再点激活中的工具 = 切回无工具态（拖选区/编辑标注）。
+            tool = tool === item.id ? 'none' : item.id;
+            if (tool !== 'text') textDraft = null;
             // 切到绘图工具即退出标注编辑态。
-            if (item.id !== 'none') selected = null;
+            if (tool !== 'none') selected = null;
           }}
         >
           <svg

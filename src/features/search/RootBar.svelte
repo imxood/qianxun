@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { search } from '../../stores/search.svelte';
   import { settings } from '../../stores/settings.svelte';
+  import { formatBytes } from './format';
 
   // 草稿可编辑；根目录切换成功后由 store 回填（writable derived 的双向同步）。
   let draft = $state('');
@@ -9,6 +11,16 @@
   let picking = $state(false);
 
   const history = $derived(settings.current?.search.rootHistory ?? []);
+
+  onMount(() => void search.loadDrives());
+
+  const KIND_LABEL: Record<string, string> = {
+    fixed: '本地磁盘',
+    removable: '可移动',
+    network: '网络',
+    cdrom: '光驱',
+    ramdisk: '内存盘',
+  };
 
   /** 原生目录选择器：选完即打开索引，不再要求手输路径。 */
   async function pickDirectory(): Promise<void> {
@@ -74,7 +86,7 @@
       <input
         class="w-full rounded-md border border-line bg-surface px-3 py-1.5 pr-8 text-sm placeholder:text-muted/60"
         type="text"
-        placeholder="或粘贴目录路径"
+        placeholder="或粘贴目录路径（含整盘，如 D:\）"
         value={search.status?.root ?? draft}
         oninput={(event) => (draft = event.currentTarget.value)}
         onkeydown={(event) => {
@@ -124,6 +136,23 @@
     </div>
   </div>
 
+  {#if search.drives.length > 0}
+    <div class="flex flex-wrap items-center gap-1.5">
+      {#each search.drives as drive (drive.path)}
+        <button
+          class="rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs text-fg transition-colors hover:border-accent hover:bg-accent-soft"
+          title="{KIND_LABEL[drive.kind] ?? drive.kind} · 共 {formatBytes(
+            drive.totalBytes,
+          )} · 剩 {formatBytes(drive.freeBytes)}"
+          onclick={() => void submit(drive.path)}
+        >
+          {drive.path}
+          <span class="text-muted">{KIND_LABEL[drive.kind] ?? drive.kind}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+
   <div class="flex h-5 items-center gap-2 text-xs">
     {#if search.openError}
       <span class="text-danger">{search.openError}</span>
@@ -144,7 +173,7 @@
       {/if}
       <span class="truncate text-muted/70" title={search.status.root}>{search.status.root}</span>
     {:else}
-      <span class="text-muted">选择目录后即可搜索文件与内容</span>
+      <span class="text-muted">点盘符或选目录后即可搜索文件与内容</span>
     {/if}
   </div>
 </div>
