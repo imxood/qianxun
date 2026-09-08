@@ -86,6 +86,19 @@ pub async fn harness_stop(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// 重启 DSH：按当前设置先停（等监督循环退出）再拉起；未运行时等价启动。
+/// 桥/设置/版本变化后的「重启生效」都走这里，与生命周期闸门串行。
+#[tauri::command]
+pub async fn harness_restart(app: AppHandle) -> Result<String> {
+    let state = app.state::<crate::AppState>();
+    let _gate = state.harness.lifecycle.lock().await;
+    state.harness.supervisor.stop().await;
+    state.harness.supervisor.wait_until_inactive().await?;
+    let settings = crate::settings_snapshot(&app)?;
+    let plan = super::launch_plan(&app, &settings)?;
+    Arc::clone(&state.harness.supervisor).start(plan).await
+}
+
 /// 安装（或重装）DSH。pnpm 的每一行输出都通过日志事件实时转发，
 /// 包数推进经进度事件驱动环境页进度卡。
 #[tauri::command]

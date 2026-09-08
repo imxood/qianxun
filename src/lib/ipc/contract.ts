@@ -22,9 +22,13 @@ export const IPC_COMMANDS = [
   'harness_proxy_url',
   'harness_start',
   'harness_stop',
+  'harness_restart',
   'harness_install',
   'harness_install_node',
   'harness_log',
+  'disk_home',
+  'disk_scan',
+  'disk_clean',
   'search_open',
   'search_status',
   'search_files',
@@ -65,6 +69,7 @@ export const IPC_COMMANDS = [
   'notes_init',
   'bridge_deploy',
   'bridge_status',
+  'plugins_list',
   'remote_interfaces',
   'remote_status',
   'remote_pair',
@@ -470,6 +475,30 @@ export interface StandaloneClosedEvent {
 }
 
 // ---------------------------------------------------------------------------
+// disk_*（磁盘清理域）
+// ---------------------------------------------------------------------------
+
+/** 目录占用条目：磁盘清理页一个方块的数据形状。 */
+export interface DiskEntry {
+  /** 显示名；占位项为「其余 N 项」。 */
+  name: string;
+  /** 绝对路径；占位项为空串（不可下钻/清理）。 */
+  path: string;
+  /** 递归占用（字节）。 */
+  size: number;
+  /** 是否目录（方块可下钻）。 */
+  dir: boolean;
+  /** 下一层子项，按占用降序。 */
+  children: DiskEntry[];
+}
+
+/** disk_home 返回：扫描起点（千寻数据根）+ 受管子目录的展示名。 */
+export interface DiskHome {
+  root: string;
+  labels: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
 // notes_*（笔记域，M5）
 // ---------------------------------------------------------------------------
 
@@ -511,6 +540,14 @@ export interface BridgeStatus {
   profileDir: string;
   /** DSH 进程当前是否在跑（跑着则需重启才加载桥）。 */
   dshRunning: boolean;
+}
+
+/** plugins_list 返回项：cordis.patch.yml 里注册的一个插件。 */
+export interface PluginEntry {
+  id: string;
+  name: string;
+  /** 插件文件已在 profile node_modules 就位。 */
+  deployed: boolean;
 }
 
 // ---------------------------------------------------------------------------

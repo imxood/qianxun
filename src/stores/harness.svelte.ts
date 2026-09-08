@@ -25,6 +25,8 @@ class HarnessStore {
   environment: HarnessEnvironment | null = $state(null);
   environmentLoading = $state(false);
   starting = $state(false);
+  /** 手动重启动作进行中（按钮禁用与文案用；进程相位仍由事件驱动）。 */
+  restarting = $state(false);
   installing = $state(false);
   /** 最近一次安装进度事件（环境页进度卡数据源；安装结束即清空）。 */
   installProgress: InstallProgress | null = $state(null);
@@ -126,6 +128,19 @@ class HarnessStore {
 
   async stop(): Promise<void> {
     await call('harness_stop');
+  }
+
+  /**
+   * 重启 DSH：运行中先停后启，未运行等价启动。动作期间 restarting
+   * 置 true，按钮据它禁用（进程相位由状态事件另行驱动）。
+   */
+  async restart(): Promise<void> {
+    this.restarting = true;
+    try {
+      await call<string>('harness_restart');
+    } finally {
+      this.restarting = false;
+    }
   }
 
   async install(): Promise<void> {

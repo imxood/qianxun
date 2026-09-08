@@ -6,6 +6,7 @@
 mod atomic;
 mod bridge;
 mod child_output;
+mod disk;
 mod dsh_upstream;
 mod error;
 mod harness;
@@ -258,9 +259,13 @@ pub fn run() {
             harness::commands::harness_proxy_url,
             harness::commands::harness_start,
             harness::commands::harness_stop,
+            harness::commands::harness_restart,
             harness::commands::harness_install,
             harness::commands::harness_install_node,
             harness::commands::harness_log,
+            disk::disk_home,
+            disk::disk_scan,
+            disk::disk_clean,
             search::commands::search_open,
             search::commands::search_status,
             search::commands::search_files,
@@ -303,6 +308,7 @@ pub fn run() {
             notes::commands::notes_init,
             bridge::commands::bridge_deploy,
             bridge::commands::bridge_status,
+            bridge::commands::plugins_list,
             remote::commands::remote_interfaces,
             remote::commands::remote_status,
             remote::commands::remote_pair,

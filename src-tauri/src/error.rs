@@ -56,6 +56,9 @@ pub enum Error {
     #[error("同步失败：{0}")]
     Sync(String),
 
+    #[error("磁盘操作失败：{0}")]
+    Disk(String),
+
     #[error("DSH 正在启动中，请等待")]
     AlreadyStarting,
 

@@ -7,14 +7,13 @@
   import SideNav from './components/SideNav.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ContextMenuLayer from './components/ContextMenuLayer.svelte';
-  import OverviewPage from './features/overview/OverviewPage.svelte';
   import EnvPage from './features/env/EnvPage.svelte';
   import DshPage from './features/dsh/DshPage.svelte';
-  import FilesPage from './features/search/FilesPage.svelte';
-  import GrepPage from './features/search/GrepPage.svelte';
+  import SearchPage from './features/search/SearchPage.svelte';
   import TerminalPage from './features/terminal/TerminalPage.svelte';
   import RemotePage from './features/remote/RemotePage.svelte';
   import NotesPage from './features/notes/NotesPage.svelte';
+  import PluginsPage from './features/plugins/PluginsPage.svelte';
   import SettingsPage from './features/settings/SettingsPage.svelte';
   import type { PageId } from './stores/nav.svelte';
   import type { StandaloneClosedEvent } from './lib/ipc/contract';
@@ -123,24 +122,19 @@
           <NotesPage />
         </div>
       {/if}
-      {#if nav.visited.overview}
-        <div class="absolute inset-0 overflow-y-auto p-6 {show('overview')}">
-          <OverviewPage />
-        </div>
-      {/if}
       {#if nav.visited.env}
         <div class="absolute inset-0 overflow-hidden {show('env')}">
           <EnvPage />
         </div>
       {/if}
-      {#if nav.visited['search-files']}
-        <div class="absolute inset-0 overflow-y-auto p-6 {show('search-files')}">
-          <FilesPage />
+      {#if nav.visited.files}
+        <div class="absolute inset-0 overflow-hidden {show('files')}">
+          <SearchPage />
         </div>
       {/if}
-      {#if nav.visited['search-grep']}
-        <div class="absolute inset-0 overflow-y-auto p-6 {show('search-grep')}">
-          <GrepPage />
+      {#if nav.visited.plugins}
+        <div class="absolute inset-0 overflow-y-auto p-6 {show('plugins')}">
+          <PluginsPage />
         </div>
       {/if}
       {#if nav.visited.settings}

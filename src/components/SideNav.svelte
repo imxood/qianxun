@@ -7,12 +7,6 @@
 
   const items: Array<{ id: PageId; label: string; icon: string; detachable: boolean }> = [
     {
-      id: 'overview',
-      label: '概览',
-      icon: 'M3 12l9-8 9 8M5 10v10h5v-6h4v6h5V10',
-      detachable: false,
-    },
-    {
       id: 'env',
       label: '环境',
       icon: 'M4 7h16M4 7a2 2 0 012-2h2m10 0a2 2 0 012 2M6 5v14m12-14v14M6 19h12',
@@ -25,15 +19,9 @@
       detachable: true,
     },
     {
-      id: 'search-files',
-      label: '找文件',
-      icon: 'M14 3a7 7 0 100 14 7 7 0 000-14zM20 20l-4.9-4.9M10 7h8M10 11h5',
-      detachable: false,
-    },
-    {
-      id: 'search-grep',
-      label: '搜内容',
-      icon: 'M4 6h16M4 12h16M4 18h10M17 18a2 2 0 104 0 2 2 0 00-4 0z',
+      id: 'files',
+      label: '文件',
+      icon: 'M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z',
       detachable: false,
     },
     {
@@ -52,6 +40,12 @@
       id: 'notes',
       label: '笔记',
       icon: 'M7 3h10a2 2 0 012 2v14a2 2 0 01-2 2H7a2 2 0 01-2-2V5a2 2 0 012-2zM9 8h6M9 12h6M9 16h4',
+      detachable: false,
+    },
+    {
+      id: 'plugins',
+      label: '插件',
+      icon: 'M9 3v4M15 3v4M6 7h12v3a6 6 0 01-12 0V7zM12 16v5',
       detachable: false,
     },
     {

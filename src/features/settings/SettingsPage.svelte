@@ -1,12 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { call } from '../../lib/ipc';
-  import type {
-    AppMetaResult,
-    BridgeStatus,
-    SyncStatus,
-    ThemePreference,
-  } from '../../lib/ipc/contract';
+  import type { AppMetaResult, SyncStatus, ThemePreference } from '../../lib/ipc/contract';
   import { nav } from '../../stores/nav.svelte';
   import { settings } from '../../stores/settings.svelte';
   import { theme } from '../../stores/theme.svelte';
@@ -150,41 +145,12 @@
     }
   }
 
-  // ---- DSH 笔记桥（M6） ----
-  let bridge = $state<BridgeStatus | null>(null);
-  let bridgeBusy = $state(false);
-  let bridgeError = $state('');
-  const vaultReady = $derived((settings.current?.notes.vaultDir ?? '').trim().length > 0);
-
-  $effect(() => {
-    if (settings.current) void refreshBridge();
-  });
-
-  async function refreshBridge(): Promise<void> {
-    try {
-      bridge = await call<BridgeStatus>('bridge_status');
-    } catch {
-      bridge = null;
-    }
-  }
-
-  async function deployBridge(): Promise<void> {
-    bridgeBusy = true;
-    bridgeError = '';
-    try {
-      bridge = await call<BridgeStatus>('bridge_deploy');
-    } catch (error) {
-      bridgeError = error instanceof Error ? error.message : String(error);
-    } finally {
-      bridgeBusy = false;
-    }
-  }
-
   // ---- 同步（S1 第一阶段：vault 走 git） ----
   let syncStatus = $state<SyncStatus | null>(null);
   let syncBusy = $state(false);
   let syncError = $state('');
   let syncLog = $state<string[]>([]);
+  const vaultReady = $derived((settings.current?.notes.vaultDir ?? '').trim().length > 0);
 
   async function refreshSync(): Promise<void> {
     try {
@@ -425,43 +391,6 @@
     {#if terminalError}
       <p class="text-sm text-danger">{terminalError}</p>
     {/if}
-  </section>
-
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">DSH 笔记桥</h2>
-    <p class="text-xs text-muted">
-      把笔记库注入 DSH：agent 可直接检索与读写笔记。变更后需重启 DSH。
-    </p>
-    {#if bridge}
-      <ul class="space-y-1 text-xs">
-        <li>{bridge.deployed ? '✓' : '✗'} 插件{bridge.deployed ? '已就位' : '未部署'}</li>
-        <li>
-          {bridge.patchEntry ? '✓' : '✗'} 装配条目{bridge.patchEntry ? '已写入' : '未写入'}
-        </li>
-        <li>
-          {bridge.vaultMatch ? '✓' : '✗'} 笔记库{bridge.vaultMatch
-            ? '配置一致'
-            : '配置不一致，重新部署即可'}
-        </li>
-        <li>{bridge.dshRunning ? '⏳ DSH 运行中，重启后加载' : 'DSH 未运行，下次启动加载'}</li>
-      </ul>
-      <p class="truncate text-xs text-muted" title={bridge.pluginDir}>{bridge.pluginDir}</p>
-    {:else}
-      <p class="text-xs text-muted">读取状态中…</p>
-    {/if}
-    <div class="flex items-center gap-2">
-      <button
-        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
-        disabled={bridgeBusy || !vaultReady}
-        onclick={() => void deployBridge()}
-      >
-        {bridgeBusy ? '部署中…' : '部署 / 修复'}
-      </button>
-      {#if !vaultReady}
-        <span class="text-xs text-muted">请先初始化笔记库</span>
-      {/if}
-      {#if bridgeError}<span class="text-sm text-danger">{bridgeError}</span>{/if}
-    </div>
   </section>
 
   <section class="space-y-2 rounded-lg border border-line bg-card p-4">

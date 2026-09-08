@@ -59,6 +59,64 @@ pub fn bridge_status(app: AppHandle) -> Result<BridgeStatus> {
     Ok(status(&app, &settings))
 }
 
+/// 已注册插件条目（插件页清单）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEntry {
+    pub id: String,
+    pub name: String,
+    /// 插件文件已在 profile node_modules 就位。
+    pub deployed: bool,
+}
+
+/// 从 cordis.patch.yml 列出全部注册插件（文本级解析，与 update_patch
+/// 同一套约定）；profile 尚不存在时返回空清单，不报错。
+#[tauri::command]
+pub fn plugins_list(app: AppHandle) -> Result<Vec<PluginEntry>> {
+    let state = app.state::<crate::AppState>();
+    let settings = state.settings.lock().unwrap().clone();
+    let Ok(patch) = patch_path(&app, &settings) else {
+        return Ok(Vec::new());
+    };
+    let Ok(text) = std::fs::read_to_string(patch) else {
+        return Ok(Vec::new());
+    };
+    let node_modules = profile_dir(&app, &settings)
+        .ok()
+        .map(|dir| dir.join("node_modules"));
+
+    let mut entries = Vec::new();
+    let mut pending: Option<String> = None;
+    let mut flush =
+        |id: Option<String>, name: String, node_modules: Option<&std::path::PathBuf>| {
+            let Some(id) = id else { return };
+            let deployed = node_modules
+                .map(|dir| dir.join(&id).is_dir())
+                .unwrap_or(false);
+            entries.push(PluginEntry { id, name, deployed });
+        };
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("- id:")
+            .or_else(|| trimmed.strip_prefix("id:"));
+        if let Some(id) = rest {
+            flush(pending.take(), "未命名".to_owned(), node_modules.as_ref());
+            pending = Some(id.trim().to_owned());
+            continue;
+        }
+        if let Some(name) = trimmed.strip_prefix("name:") {
+            flush(
+                pending.take(),
+                name.trim().to_owned(),
+                node_modules.as_ref(),
+            );
+        }
+    }
+    flush(pending.take(), "未命名".to_owned(), node_modules.as_ref());
+    Ok(entries)
+}
+
 /// 外壳启动自愈入口：已部署过（patch 有条目）但插件文件丢失（DSH 重装
 /// 清理了 node_modules）时静默补齐。失败只记日志，不阻断启动。
 pub fn heal(app: &AppHandle) {
