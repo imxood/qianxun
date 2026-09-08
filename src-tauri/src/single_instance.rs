@@ -39,9 +39,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 ///
 /// `AppHandle<R>: Send` 需显式声明：泛型 R 的关联类型不自动继承 auto
 /// trait，具体实例化（Wry）满足它。
-pub fn init<R: Runtime>(
-    on_wake: impl Fn(&AppHandle<R>) + Send + 'static,
-) -> TauriPlugin<R>
+pub fn init<R: Runtime>(on_wake: impl Fn(&AppHandle<R>) + Send + 'static) -> TauriPlugin<R>
 where
     AppHandle<R>: Send + 'static,
 {
@@ -78,14 +76,12 @@ where
             // 闭包按字段路径精确捕获，闭包里写 `event.0` 会绕过包装直接
             // 捕获裸指针（!Send），写 `event.wait_forever()` 才捕获整体。
             let event = SendHandle(event);
-            std::thread::spawn(move || {
-                loop {
-                    let woken = event.wait_forever();
-                    if woken != WAIT_OBJECT_0 {
-                        break;
-                    }
-                    on_wake(&app_handle);
+            std::thread::spawn(move || loop {
+                let woken = event.wait_forever();
+                if woken != WAIT_OBJECT_0 {
+                    break;
                 }
+                on_wake(&app_handle);
             });
             Ok(())
         })

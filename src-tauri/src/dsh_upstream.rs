@@ -243,26 +243,27 @@ pub(crate) async fn forward(upstream: &Upstream, request: Request<Body>) -> Resp
     };
 
     // 一次锁定上游状态取出 authority，整轮转发（首次 + 401 重试）复用——
-// 401 重试走 build_request 闭包时不能再 .await，否则就不是 Fn 了。
-// DSH revive 期间 origin 会热更新，但 forge 整转发只在一个就绪窗口内，
-// 一次锁拿到的 authority 与 cookie 是同一时刻的快照，自洽。
-let upstream_authority = upstream.inner.lock().await.origin.clone();
-let synthetic_origin = format!("http://{}", upstream_authority);
-let caller_had_origin = parts
-    .headers
-    .iter()
-    .any(|(name, _)| name.as_str() == "origin");
-let caller_had_sec_fetch_site = parts
-    .headers
-    .iter()
-    .any(|(name, _)| name.as_str() == "sec-fetch-site");
+    // 401 重试走 build_request 闭包时不能再 .await，否则就不是 Fn 了。
+    // DSH revive 期间 origin 会热更新，但 forge 整转发只在一个就绪窗口内，
+    // 一次锁拿到的 authority 与 cookie 是同一时刻的快照，自洽。
+    let upstream_authority = upstream.inner.lock().await.origin.clone();
+    let synthetic_origin = format!("http://{}", upstream_authority);
+    let caller_had_origin = parts
+        .headers
+        .iter()
+        .any(|(name, _)| name.as_str() == "origin");
+    let caller_had_sec_fetch_site = parts
+        .headers
+        .iter()
+        .any(|(name, _)| name.as_str() == "sec-fetch-site");
 
-let build_request = |client: &reqwest::Client, cookie: &Option<String>| {
+    let build_request = |client: &reqwest::Client, cookie: &Option<String>| {
         // 不设 .timeout()：转发的也有 SSE/流式响应，总超时会腰斩长连接
         // （原因见 UPSTREAM_CONNECT_TIMEOUT 处注释）。
         let mut outgoing = client.request(method.clone(), &url);
         for (name, value) in parts.headers.iter() {
-            if HOP_HEADERS.contains(&name.as_str()) || SKIP_UPSTREAM_HEADERS.contains(&name.as_str())
+            if HOP_HEADERS.contains(&name.as_str())
+                || SKIP_UPSTREAM_HEADERS.contains(&name.as_str())
             {
                 continue;
             }
@@ -284,6 +285,13 @@ let build_request = |client: &reqwest::Client, cookie: &Option<String>| {
                 outgoing = outgoing.header("sec-fetch-site", "same-origin");
                 continue;
             }
+            // 调用方的 Accept-Encoding 一律丢弃：网关的 reqwest 未启用解压
+            // 特性，上游若按它回 gzip/br，网关既解不了也无法对压缩字节做
+            // 移动层注入（手机 WebView 必发 gzip，曾致「非 UTF-8」502）。
+            // 统一以 identity 请求；SSE/流式响应与 identity 无冲突。
+            if name.as_str() == "accept-encoding" {
+                continue;
+            }
             if let Ok(header_value) = value.to_str() {
                 outgoing = outgoing.header(name.as_str(), header_value);
             }
@@ -299,6 +307,7 @@ let build_request = |client: &reqwest::Client, cookie: &Option<String>| {
         if !caller_had_sec_fetch_site {
             outgoing = outgoing.header("sec-fetch-site", "same-origin");
         }
+        outgoing = outgoing.header("accept-encoding", "identity");
         if let Some(cookie) = cookie {
             outgoing = outgoing.header(reqwest::header::COOKIE, cookie);
         }
@@ -646,10 +655,7 @@ mod tests {
         let obs = Arc::clone(&observed_origin);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local = listener.local_addr().unwrap();
-        let upstream = Upstream::new(
-            format!("127.0.0.1:{}", local.port()),
-            None,
-        );
+        let upstream = Upstream::new(format!("127.0.0.1:{}", local.port()), None);
         upstream.test_set_cookie("dsh-auth-test=v1.sig").await;
         let app = Router::new()
             .route(
@@ -663,7 +669,10 @@ mod tests {
                         let mut only = axum::http::HeaderMap::new();
                         for name in ["origin", "sec-fetch-site"] {
                             if let Some(v) = req.headers().get(name) {
-                                only.insert(name.parse::<axum::http::HeaderName>().unwrap(), v.clone());
+                                only.insert(
+                                    name.parse::<axum::http::HeaderName>().unwrap(),
+                                    v.clone(),
+                                );
                             }
                         }
                         *obs.lock().unwrap() = only;
@@ -714,7 +723,10 @@ mod tests {
             .strip_prefix("http://127.0.0.1:")
             .and_then(|s| s.parse().ok())
             .expect("synthetic origin 形如 http://127.0.0.1:<port>");
-        assert!(port > 0, "网关必须为上游 DSH 合成同源 Origin（端口非占位 0）：{origin}");
+        assert!(
+            port > 0,
+            "网关必须为上游 DSH 合成同源 Origin（端口非占位 0）：{origin}"
+        );
         assert_eq!(
             observed.get("sec-fetch-site").and_then(|v| v.to_str().ok()),
             Some("same-origin"),
@@ -758,17 +770,21 @@ mod tests {
     async fn host与cookie不被透传() {
         // host 由 reqwest 按 URL 自动设；cookie 由网关换上服务端持有的
         // dsh-auth-*；两者都不该带着调用方原值去上游。
-        let (captured, _) = captured_upstream_headers(
-            "127.0.0.1:0",
-            vec![("cookie", "qx_token=should-not-leak")],
-        )
-        .await;
+        let (captured, _) =
+            captured_upstream_headers("127.0.0.1:0", vec![("cookie", "qx_token=should-not-leak")])
+                .await;
         // 上游看到的是网关代发的 dsh-auth-*，不是调用方的 qx_token。
         let cookie = captured
             .get(axum::http::header::COOKIE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        assert!(cookie.contains("dsh-auth-test="), "上游 cookie 必须来自服务端持有：{cookie}");
-        assert!(!cookie.contains("qx_token"), "调用方 qx_token 不该泄到上游 DSH：{cookie}");
+        assert!(
+            cookie.contains("dsh-auth-test="),
+            "上游 cookie 必须来自服务端持有：{cookie}"
+        );
+        assert!(
+            !cookie.contains("qx_token"),
+            "调用方 qx_token 不该泄到上游 DSH：{cookie}"
+        );
     }
 }

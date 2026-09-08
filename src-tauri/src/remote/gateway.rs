@@ -402,13 +402,27 @@ async fn inject_mobile_layer_into(
             return plain(StatusCode::BAD_GATEWAY, "DSH 页面超限，注入失败");
         }
     };
-    let Ok(text) = String::from_utf8(bytes.to_vec()) else {
-        return plain(StatusCode::BAD_GATEWAY, "DSH 页面非 UTF-8，跳过注入");
+    let text = match String::from_utf8(bytes.to_vec()) {
+        Ok(text) => text,
+        // 非 UTF-8（理论上游不应出现，防御压缩字节漏网）：**原样透传**，
+        // 绝不能拿错误页顶掉正常页面——手机用户看到的就是整个响应体。
+        Err(_) => {
+            crate::logging::log("warn", "DSH 页面非 UTF-8，跳过注入（原样透传）");
+            let mut builder = Response::builder()
+                .status(parts.status)
+                .header(axum::http::header::CONTENT_TYPE, content_type);
+            if let Some(cache) = &cache_control {
+                builder = builder.header(axum::http::header::CACHE_CONTROL, cache);
+            }
+            return builder
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| plain(StatusCode::BAD_GATEWAY, "响应构造失败"));
+        }
     };
     // 注入后内容已改写：etag/last-modified 一律丢弃，禁止旧实体复用；
     // cache-control 保留。注入失败（无 </head>）则原文透传。
-    let injected = inject_mobile_layer(&method, parts.status.as_u16(), &content_type, &text)
-        .unwrap_or(text);
+    let injected =
+        inject_mobile_layer(&method, parts.status.as_u16(), &content_type, &text).unwrap_or(text);
     let mut builder = Response::builder()
         .status(parts.status)
         .header(axum::http::header::CONTENT_TYPE, content_type);
