@@ -190,7 +190,7 @@ pub fn apply_webview_preferences(window: &WebviewWindow) {
         };
         if let Ok(settings) = core.Settings() {
             if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
-                let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+                let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(true);
             }
         }
         // Profile() 在 ICoreWebView2_13（runtime 1.0.1108+，Evergreen 均已覆盖）。
