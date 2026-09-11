@@ -11,12 +11,16 @@
 /** 全部 IPC 命令。新增命令时在这里登记，Rust 侧同名实现。 */
 export const IPC_COMMANDS = [
   'app_meta',
+  'app_restart',
   'app_toggle_devtools',
   'clipboard_read_text',
   'clipboard_write_text',
   'system_theme',
   'settings_get',
   'settings_update',
+  'backup_export',
+  'backup_inspect',
+  'backup_restore',
   'harness_environment',
   'harness_status',
   'harness_proxy_url',
@@ -182,6 +186,42 @@ export interface SettingsPatch {
   terminal?: Partial<TerminalSettings>;
   notes?: Partial<NotesSettings>;
   remote?: Partial<RemoteSettings>;
+}
+
+// ---------------------------------------------------------------------------
+// backup_*（数据备份域）
+// ---------------------------------------------------------------------------
+
+/**
+ * backup_export 返回：备份包落盘位置与体量。
+ * 备份包含 API Key 明文，UI 需在显著位置提示用户妥善保管。
+ */
+export interface BackupExportResult {
+  path: string;
+  sizeBytes: number;
+  fileCount: number;
+}
+
+/** 备份包顶层 manifest.json（backup_inspect 的返回）。 */
+export interface BackupManifest {
+  kind: string;
+  schemaVersion: number;
+  /** 本地时间（展示用）。 */
+  createdAt: string;
+  /** 导出时的千寻版本。 */
+  appVersion: string;
+  /** 导出时的 DSH 版本（未安装 = null）。 */
+  dshVersion: string | null;
+  workspaceCount: number;
+  sessionCount: number;
+  /** 包内数据文件总数（不含 manifest 自身）。 */
+  fileCount: number;
+}
+
+/** backup_restore 返回：还原统计与回滚包位置（null = 还原前无可备份现状）。 */
+export interface BackupRestoreReport {
+  restoredFiles: number;
+  preRestoreBackup: string | null;
 }
 
 // ---------------------------------------------------------------------------

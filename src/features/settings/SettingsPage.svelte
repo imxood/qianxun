@@ -1,10 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  // 注意：本页已有设置补丁的 save()，对话框的 save 起别名避免撞名。
+  import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { call } from '../../lib/ipc';
-  import type { AppMetaResult, SyncStatus, ThemePreference } from '../../lib/ipc/contract';
+  import type {
+    AppMetaResult,
+    BackupExportResult,
+    BackupManifest,
+    BackupRestoreReport,
+    HarnessStatus,
+    SyncStatus,
+    ThemePreference,
+  } from '../../lib/ipc/contract';
   import { nav } from '../../stores/nav.svelte';
   import { settings } from '../../stores/settings.svelte';
   import { theme } from '../../stores/theme.svelte';
+  import ConfirmDialog from '../../components/ConfirmDialog.svelte';
   import Switch from '../../components/Switch.svelte';
 
   let meta: AppMetaResult | null = $state(null);
@@ -172,6 +183,138 @@
     } finally {
       syncBusy = false;
     }
+  }
+
+  // ---- 数据备份（导出/还原 ~/.qianxun：千寻设置 + DSH 全部用户数据） ----
+  let backupBusy = $state(false);
+  let exportResult = $state<BackupExportResult | null>(null);
+  let backupError = $state('');
+  /** 待确认的还原包摘要（非 null = 显示确认框）。 */
+  let restoreSummary = $state<BackupManifest | null>(null);
+  let restorePath = $state('');
+  /** 还原成功后的报告（非 null = 显示重启引导框）。 */
+  let restoreReport = $state<BackupRestoreReport | null>(null);
+  /** 导出时 DSH 正在运行的一致性提醒。 */
+  let exportWarnOpen = $state(false);
+
+  const BACKUP_FILTER = { name: '千寻备份', extensions: ['zip'] };
+
+  const restoreMessage = $derived(
+    restoreSummary
+      ? `创建于 ${restoreSummary.createdAt} · 千寻 v${restoreSummary.appVersion}` +
+          `${restoreSummary.dshVersion ? ` · DSH ${restoreSummary.dshVersion}` : ''}；` +
+          `工作区 ${restoreSummary.workspaceCount} 个 · 会话 ${restoreSummary.sessionCount} 个 · ` +
+          `文件 ${restoreSummary.fileCount} 个。` +
+          '还原将覆盖当前全部千寻设置与 DSH 数据（含 agents 配置与 API Key），' +
+          '还原前会自动保存一份当前状态快照；DSH 会被先停止。'
+      : '',
+  );
+
+  const restartMessage = $derived(
+    restoreReport
+      ? `已还原 ${restoreReport.restoredFiles} 个文件` +
+          `${restoreReport.preRestoreBackup ? `，还原前状态已保存到 ${restoreReport.preRestoreBackup}` : ''}。` +
+          '重启千寻以加载还原的数据。'
+      : '',
+  );
+
+  function formatSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${bytes} B`;
+  }
+
+  /** DSH 是否在跑（状态查询失败不拦截备份操作）。 */
+  async function dshRunning(): Promise<boolean> {
+    try {
+      const status = await call<HarnessStatus>('harness_status');
+      return (
+        status.phase === 'ready' || status.phase === 'starting' || status.phase === 'restarting'
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async function exportBackup(): Promise<void> {
+    if (backupBusy) return;
+    backupError = '';
+    // 会话是追加写：运行中导出可能备份到半截文件，先提醒再放行。
+    if (await dshRunning()) {
+      exportWarnOpen = true;
+      return;
+    }
+    await runExport();
+  }
+
+  async function runExport(): Promise<void> {
+    backupBusy = true;
+    try {
+      const now = new Date();
+      const pad = (value: number): string => String(value).padStart(2, '0');
+      const stamp =
+        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+        `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const target = await saveDialog({
+        defaultPath: `qianxun-backup-${stamp}.zip`,
+        filters: [BACKUP_FILTER],
+      });
+      if (typeof target === 'string' && target.trim()) {
+        exportResult = await call<BackupExportResult>('backup_export', { path: target });
+      }
+    } catch (error) {
+      backupError = error instanceof Error ? error.message : String(error);
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function pickRestore(): Promise<void> {
+    if (backupBusy) return;
+    backupError = '';
+    exportResult = null;
+    try {
+      const picked = await openDialog({ multiple: false, filters: [BACKUP_FILTER] });
+      if (typeof picked === 'string' && picked.trim()) {
+        restorePath = picked;
+        restoreSummary = await call<BackupManifest>('backup_inspect', { path: picked });
+      }
+    } catch (error) {
+      backupError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function confirmRestore(): Promise<void> {
+    const path = restorePath;
+    restoreSummary = null;
+    backupBusy = true;
+    try {
+      // 还原要求 DSH 已停止：在跑就先停（harness_stop 等监督循环退出后才返回）。
+      if (await dshRunning()) {
+        await call('harness_stop');
+      }
+      restoreReport = await call<BackupRestoreReport>('backup_restore', { path });
+    } catch (error) {
+      backupError = error instanceof Error ? error.message : String(error);
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function restartNow(): Promise<void> {
+    try {
+      await call('app_restart');
+      // restart 不返回：走到这里说明重启没有发生，提示用户手动重启。
+      backupError = '自动重启失败，请手动退出并重新打开千寻。';
+    } catch {
+      backupError = '自动重启失败，请手动退出并重新打开千寻。';
+    }
+  }
+
+  /** 暂不重启：也让 UI 立即反映还原结果（Rust 侧已重载设置）。 */
+  function dismissRestoreReport(): void {
+    restoreReport = null;
+    void settings.load();
   }
 </script>
 
@@ -466,6 +609,71 @@
         )}</pre>
     {/if}
   </section>
+
+  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+    <h2 class="text-sm font-medium">数据备份</h2>
+    <p class="text-xs text-muted">
+      把千寻设置与 DSH 全部用户数据（agents 配置、API Key、工作区列表、会话记录、附件） 打包成一个
+      zip；同一台电脑上可随时还原。不含 DSH 程序本体与项目源码（可重建）。
+    </p>
+    <p class="text-xs text-danger">备份包含 API Key 明文，请妥善保管备份文件。</p>
+    <div class="flex items-center gap-2">
+      <button
+        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
+        disabled={backupBusy}
+        onclick={() => void exportBackup()}
+      >
+        导出备份…
+      </button>
+      <button
+        class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-40"
+        disabled={backupBusy}
+        onclick={() => void pickRestore()}
+      >
+        还原备份…
+      </button>
+    </div>
+    {#if exportResult}
+      <p class="text-xs text-muted">
+        已导出：{exportResult.path}（{formatSize(exportResult.sizeBytes)} ·
+        {exportResult.fileCount} 个文件）
+      </p>
+    {/if}
+    {#if backupError}
+      <p class="text-sm text-danger">{backupError}</p>
+    {/if}
+  </section>
+
+  <ConfirmDialog
+    open={exportWarnOpen}
+    title="DSH 正在运行"
+    message="运行中导出可能备份到写到一半的会话文件，建议先停止 DSH 再导出。仍要继续导出吗？"
+    confirmLabel="继续导出"
+    onconfirm={() => {
+      exportWarnOpen = false;
+      void runExport();
+    }}
+    oncancel={() => (exportWarnOpen = false)}
+  />
+
+  <ConfirmDialog
+    open={restoreSummary !== null}
+    title="确认还原这份备份？"
+    danger
+    confirmLabel="停止 DSH 并还原"
+    message={restoreMessage}
+    onconfirm={() => void confirmRestore()}
+    oncancel={() => (restoreSummary = null)}
+  />
+
+  <ConfirmDialog
+    open={restoreReport !== null}
+    title="还原完成"
+    confirmLabel="重启千寻"
+    message={restartMessage}
+    onconfirm={() => void restartNow()}
+    oncancel={dismissRestoreReport}
+  />
 
   <section class="space-y-1 rounded-lg border border-line bg-card p-4 text-xs text-muted">
     <h2 class="text-sm font-medium text-fg">关于</h2>

@@ -4,6 +4,7 @@
 //! 托管与事件转发，以及搜索域（fff-search 索引 + 文件名/内容搜索）。
 
 mod atomic;
+mod backup;
 mod bridge;
 mod child_output;
 mod disk;
@@ -97,6 +98,14 @@ fn clipboard_write_text(app: tauri::AppHandle, text: String) -> error::Result<()
     app.clipboard()
         .write_text(text)
         .map_err(|cause| error::Error::Window(format!("写入剪贴板失败：{cause}")))
+}
+
+/// 退出并立即重启千寻（数据备份还原后的生效入口：还原出的设置、
+/// 热键、托盘、网关等运行时副作用靠完整重启加载干净）。
+/// `restart` 不返回——进程在这里终结，由启动器重新拉起。
+#[tauri::command]
+fn app_restart(app: tauri::AppHandle) {
+    app.restart();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -253,6 +262,10 @@ pub fn run() {
             app_meta,
             clipboard_read_text,
             clipboard_write_text,
+            app_restart,
+            backup::commands::backup_export,
+            backup::commands::backup_inspect,
+            backup::commands::backup_restore,
             settings::commands::settings_get,
             settings::commands::settings_update,
             harness::commands::harness_environment,
