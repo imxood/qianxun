@@ -174,6 +174,7 @@ pub fn run() {
             });
             app.manage(shots::commands::ShotsState::default());
             app.manage(terminal::commands::TerminalState::default());
+            app.manage(disk::DiskScanManager::default());
             forward_events(handle, &supervisor);
             // 远程/回环双端网关：setup 即占位监听回环网关端口（默认
             // release 23090 / debug 23091，DSH 页 iframe 立刻有稳定地址），
@@ -265,6 +266,8 @@ pub fn run() {
             harness::commands::harness_log,
             disk::disk_home,
             disk::disk_scan,
+            disk::disk_scan_stream,
+            disk::disk_scan_stop,
             disk::disk_clean,
             search::commands::search_open,
             search::commands::search_status,

@@ -5,8 +5,14 @@ edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
 [workspace]
-# 两个移植 crate 与主包同仓同构建；src-tauri 即 workspace 根。
-members = ["crates/proc-guard", "crates/node-runtime"]
+# 五个移植/收编 crate 与主包同仓同构建；src-tauri 即 workspace 根。
+members = [
+    "crates/proc-guard",
+    "crates/node-runtime",
+    "crates/fff-core",
+    "crates/fff-grep",
+    "crates/fff-query-parser",
+]
 
 [lib]
 name = "qianxun_lib"
@@ -49,8 +55,10 @@ dirs = "6"
 sha2 = "0.10"
 zip = { version = "6", default-features = false, features = ["deflate"] }
 # 搜索双页（M2，架构 §4.9）：文件名搜索与内容搜索 SDK，均为 MIT。
-fff-search = "0.10.6"
-fff-grep = "0.10.6"
+# fff 定制版已收编进仓库（crates/fff-*），不再依赖外部路径/仓库。
+fff-search = { path = "crates/fff-core" }
+fff-grep = { path = "crates/fff-grep" }
+fff-query-parser = { path = "crates/fff-query-parser", default-features = false }
 # 移植 crate：进程树回收 + Node 探测。
 proc-guard = { path = "crates/proc-guard" }
 node-runtime = { path = "crates/node-runtime" }

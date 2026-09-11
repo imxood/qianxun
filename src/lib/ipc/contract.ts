@@ -28,6 +28,8 @@ export const IPC_COMMANDS = [
   'harness_log',
   'disk_home',
   'disk_scan',
+  'disk_scan_stream',
+  'disk_scan_stop',
   'disk_clean',
   'search_open',
   'search_status',
@@ -475,10 +477,10 @@ export interface StandaloneClosedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// disk_*（磁盘清理域）
+// disk_*（磁盘扫描域）
 // ---------------------------------------------------------------------------
 
-/** 目录占用条目：磁盘清理页一个方块的数据形状。 */
+/** 目录占用条目：磁盘扫描页一个方块的数据形状。 */
 export interface DiskEntry {
   /** 显示名；占位项为「其余 N 项」。 */
   name: string;
@@ -497,6 +499,27 @@ export interface DiskHome {
   root: string;
   labels: Record<string, string>;
 }
+
+/** disk_scan_stream 进度帧（固定 ~100ms 一帧）。 */
+export interface DiskScanProgress {
+  type: 'progress';
+  /** 正在遍历的根目录。 */
+  root: string;
+  files: number;
+  dirs: number;
+  bytes: number;
+}
+
+/** disk_scan_stream 结束帧（完成或被停止）：完整树快照，整体替换。 */
+export interface DiskScanDone {
+  type: 'done';
+  root: string;
+  cancelled: boolean;
+  tree: DiskEntry;
+}
+
+/** disk_scan_stream 的流式事件（Tauri Channel 推送）。 */
+export type DiskScanEvent = DiskScanProgress | DiskScanDone;
 
 // ---------------------------------------------------------------------------
 // notes_*（笔记域，M5）

@@ -1,0 +1,36 @@
+[package]
+# fff 定制版，收编进仓库（来源：E:/git/rust/fff，去外部仓库/路径依赖）。
+name = "fff-query-parser"
+version = "0.10.6"
+edition = "2024"
+description = "Query parser for fff file finder - includes specific syntax for various constraints like globs, extensions, regex etc"
+license = "MIT"
+authors = ["Dmitriy Kovalenko <dmtr.kovalenko@outlok.com>"]
+
+# 收编代码保持上游原貌，不追千寻主包的 clippy 零告警门禁。
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+# 独立声明而非继承（同 proc-guard 约定）：版本取自上游 workspace.dependencies。
+regex = "1"
+aho-corasick = "1"
+smallvec = "1"
+unicode-segmentation = "1"
+globset = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "parse_bench"
+harness = false

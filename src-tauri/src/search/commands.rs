@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use fff_search::{
     FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions, GrepMode, GrepSearchOptions,
-    PaginationArgs, QueryParser, SharedFilePicker, SharedFrecency,
+    PaginationArgs, QueryParser, SharedFilePicker,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -162,7 +162,6 @@ pub fn search_open(root: String, state: State<'_, crate::AppState>) -> Result<Se
     let fresh_shared = SharedFilePicker::default();
     FilePicker::new_with_shared_state(
         fresh_shared.clone(),
-        SharedFrecency::default(),
         FilePickerOptions {
             base_path: canonical.to_string_lossy().into_owned(),
             mode: FFFMode::Ai,
@@ -248,7 +247,6 @@ pub fn search_files(
     let parsed = QueryParser::default().parse(&query);
     let result = picker.fuzzy_search(
         &parsed,
-        None,
         FuzzySearchOptions {
             max_threads: 0,
             current_file: None,
@@ -647,7 +645,6 @@ mod tests {
         let shared = SharedFilePicker::default();
         FilePicker::new_with_shared_state(
             shared.clone(),
-            SharedFrecency::default(),
             FilePickerOptions {
                 base_path: root.to_string_lossy().into_owned(),
                 mode: FFFMode::Ai,
@@ -673,7 +670,6 @@ mod tests {
             let query = QueryParser::default().parse("hello");
             let result = picker.fuzzy_search(
                 &query,
-                None,
                 FuzzySearchOptions {
                     max_threads: 0,
                     current_file: None,
@@ -776,7 +772,6 @@ mod tests {
         let shared = SharedFilePicker::default();
         FilePicker::new_with_shared_state(
             shared.clone(),
-            SharedFrecency::default(),
             FilePickerOptions {
                 base_path: root.to_string_lossy().into_owned(),
                 mode: FFFMode::Ai,
@@ -809,7 +804,6 @@ mod tests {
             let query = QueryParser::default().parse("svelte");
             let result = picker.fuzzy_search(
                 &query,
-                None,
                 FuzzySearchOptions {
                     max_threads: 0,
                     current_file: None,
@@ -850,7 +844,6 @@ mod tests {
         let shared = SharedFilePicker::default();
         let built = FilePicker::new_with_shared_state(
             shared.clone(),
-            SharedFrecency::default(),
             FilePickerOptions {
                 base_path: root.to_string_lossy().into_owned(),
                 mode: FFFMode::Ai,

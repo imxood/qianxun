@@ -1,14 +1,14 @@
 <script lang="ts">
   import FilesPage from './FilesPage.svelte';
   import GrepPage from './GrepPage.svelte';
-  import DiskCleanup from './disk/DiskCleanup.svelte';
+  import DiskScan from './disk/DiskScan.svelte';
 
   type TabId = 'files' | 'grep' | 'disk';
 
   const tabs: Array<{ id: TabId; label: string }> = [
     { id: 'files', label: '找文件' },
     { id: 'grep', label: '搜内容' },
-    { id: 'disk', label: '磁盘清理' },
+    { id: 'disk', label: '磁盘扫描' },
   ];
 
   // 页内三功能各自保活：切签只显隐，搜索结果与扫描进度全程不丢。
@@ -49,7 +49,7 @@
       <GrepPage />
     </div>
     <div class="absolute inset-0 px-6 pb-6 {show('disk')}">
-      <DiskCleanup />
+      <DiskScan />
     </div>
   </div>
 </section>

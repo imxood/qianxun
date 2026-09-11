@@ -1,0 +1,30 @@
+[package]
+# fff 定制版，收编进仓库（来源：E:/git/rust/fff，去外部仓库/路径依赖）。
+name = "fff-grep"
+description = "File grepping logic for fff"
+license = "MIT"
+authors = ["Dmitriy Kovalenko <dmtr.kovalenko@outlok.com>"]
+version = "0.10.6"
+edition = "2024"
+
+# 收编代码保持上游原貌，不追千寻主包的 clippy 零告警门禁。
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# 独立声明而非继承（同 proc-guard 约定）：版本取自上游 workspace.dependencies。
+aho-corasick = "1"
+blake3 = "1.8.2"
+fff-query-parser = { path = "../fff-query-parser" }
+memchr = "2"
+regex = "1.11"
+rayon = "1.8.0"
+smallvec = { version = "1.13", features = ["const_generics", "union"] }
+thiserror = "2.0.10"

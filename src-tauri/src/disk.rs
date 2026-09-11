@@ -1,16 +1,21 @@
-//! 磁盘清理域：目录占用扫描（下一层子项 + 递归大小）与回收站清理。
+//! 磁盘扫描域：目录占用扫描（下一层子项 + 递归大小）与回收站清理。
 //!
 //! 设计约束：
-//! - 扫描是纯只读遍历，spawn_blocking 里跑，不占异步线程池的同步线程；
-//! - 符号链接 / junction 不深入（防环、不重复计容），链接本身记 0；
-//! - 巨目录的子项列表截断为 top N，尾部聚合为一个占位项——`size` 恒真，
-//!   占位项 path 为空，UI 据此禁用下钻与清理；
-//! - 清理走回收站（trash crate）：可撤销，不做物理直删。
+//! - 流式扫描由 fff-search 的 `scan_directory` 承担：rayon 并行遍历任意
+//!   目录，`cancelled` 原子标志随时停止；扫描发现即时可见，事件按固定
+//!   100ms 节流推给前端，避免 IPC 洪泛；
+//! - 同步 `disk_scan` / `disk_clean` 保留：单层扫描走 spawn_blocking，
+//!   清理走回收站（trash crate）可撤销；
+//! - 旧 `disk_scan` 的约定继续有效：符号链接 / junction 不深入（防环），
+//!   巨目录子项截断 top N 聚合占位，`size` 恒真。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::AppHandle;
 
 use crate::error::{Error, Result};
@@ -18,8 +23,21 @@ use crate::error::{Error, Result};
 /// 子项列表上限：超出部分聚合成「其余」占位，防止巨目录撑爆 IPC。
 const CHILDREN_LIMIT: usize = 200;
 
-/// 目录占用条目：磁盘清理页一个方块的数据形状。
-#[derive(Serialize)]
+/// fff 流式扫描条目 → 磁盘页数据形状（字段一一对应，递归转换）。
+impl From<fff_search::DiskSpaceEntry> for DiskEntry {
+    fn from(value: fff_search::DiskSpaceEntry) -> Self {
+        DiskEntry {
+            name: value.name,
+            path: value.path,
+            size: value.size,
+            dir: value.is_dir,
+            children: value.children.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// 目录占用条目：磁盘扫描页一个方块的数据形状。
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskEntry {
     /// 显示名（目录名 / 文件名 / 占位项文案）。
@@ -98,6 +116,132 @@ pub async fn disk_clean(app: AppHandle, path: String) -> Result<()> {
         .await
         .map_err(|cause| Error::Disk(format!("清理没有完成：{cause}")))?
         .map_err(|cause| Error::Disk(format!("移入回收站失败：{cause}")))
+}
+
+// ---- 流式扫描：fff 并行遍历 + 固定频率事件 ----
+
+/// 流式扫描事件：进度按 100ms 节流推送，结束时给完整树快照。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum DiskScanEvent {
+    /// 周期进度（固定 ~100ms 一帧）：当前扫描目标 + 实时计数。
+    Progress {
+        /// 正在遍历的根目录。
+        root: String,
+        files: u64,
+        dirs: u64,
+        bytes: u64,
+    },
+    /// 扫描结束（完成或被停止）：完整树快照，前端整体替换。
+    Done {
+        root: String,
+        cancelled: bool,
+        tree: DiskEntry,
+    },
+}
+
+/// 进程内流式扫描句柄：换目标 / 停止时置位旧的 `cancelled`，
+/// `scan_active` 防止同一时刻两条扫描并存。内层 Arc 化让句柄可以
+/// 跨进 spawn_blocking 的 'static 闭包。
+#[derive(Default)]
+pub struct DiskScanManager {
+    current: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+}
+
+impl DiskScanManager {
+    /// 取出（并作废）当前扫描，返回新扫描应使用的取消标志。
+    fn rotate(&self) -> Arc<AtomicBool> {
+        let mut guard = self.current.lock().unwrap();
+        if let Some(old) = guard.take() {
+            old.store(true, Ordering::Relaxed);
+        }
+        let fresh = Arc::new(AtomicBool::new(false));
+        *guard = Some(fresh.clone());
+        fresh
+    }
+
+    /// 克隆内层共享槽（供 spawn_blocking 的 'static 闭包收尾用）。
+    fn slot(&self) -> Arc<Mutex<Option<Arc<AtomicBool>>>> {
+        self.current.clone()
+    }
+}
+
+/// 停止当前流式扫描：置位取消标志，walker 在下个条目即退出，
+/// 前端照常收到 Done{cancelled:true} 收尾帧。无进行中扫描时空操作。
+#[tauri::command]
+pub fn disk_scan_stop(manager: tauri::State<'_, DiskScanManager>) -> Result<()> {
+    if let Some(current) = manager.current.lock().unwrap().as_ref() {
+        current.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// 流式扫描任意目录：fff 并行遍历，事件走 Channel 推送。
+/// 用户换目标 / 点停止时旧的扫描会被静默作废（事件流以新扫描为准）。
+#[tauri::command]
+pub async fn disk_scan_stream(
+    manager: tauri::State<'_, DiskScanManager>,
+    path: String,
+    on_event: Channel<DiskScanEvent>,
+) -> Result<()> {
+    let target = PathBuf::from(&path);
+    if !target.is_dir() {
+        return Err(Error::Disk(format!("目录不存在：{}", path)));
+    }
+    let cancelled = manager.rotate();
+    let slot = manager.slot();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let root_display = target.display().to_string();
+        let mut last_tick = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(100))
+            .unwrap_or_else(std::time::Instant::now);
+        let result = fff_search::scan_directory(&target, &cancelled, |files, dirs, bytes| {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_tick) >= std::time::Duration::from_millis(100) {
+                last_tick = now;
+                let _ = on_event.send(DiskScanEvent::Progress {
+                    root: root_display.clone(),
+                    files,
+                    dirs,
+                    bytes,
+                });
+            }
+        });
+        // 扫描结束后清空句柄（仅当还指向本次扫描时）。
+        {
+            let mut guard = slot.lock().unwrap();
+            if let Some(current) = guard.as_ref() {
+                if Arc::ptr_eq(current, &cancelled) {
+                    *guard = None;
+                }
+            }
+        }
+        let event = match result {
+            Ok(done) => DiskScanEvent::Done {
+                root: done.root,
+                cancelled: done.cancelled,
+                tree: done.tree_root.into(),
+            },
+            Err(cause) => {
+                // 出错也要给前端收尾事件，UI 才能脱离「扫描中」状态。
+                crate::logging::log("warn", &format!("磁盘扫描 {root_display} 失败：{cause}"));
+                DiskScanEvent::Done {
+                    root: root_display,
+                    cancelled: true,
+                    tree: DiskEntry {
+                        name: String::new(),
+                        path: String::new(),
+                        size: 0,
+                        dir: true,
+                        children: Vec::new(),
+                    },
+                }
+            }
+        };
+        let _ = on_event.send(event);
+    });
+    Ok(())
 }
 
 // ---- 内部：只读遍历 ----

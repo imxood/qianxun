@@ -1,0 +1,57 @@
+[package]
+# fff 定制版，收编进仓库（来源：E:/git/rust/fff，去外部仓库/路径依赖）。
+# 定制点：只保留文件搜索 + grep 所需；API 与 crates.io 0.10.6 不完全兼容
+# （如 fuzzy_search 去掉 SharedFrecency/QueryTracker 参数），千寻代码以本
+# 目录为准。包名沿用上游的 fff-search。
+name = "fff-search"
+version = "0.10.6"
+edition = "2024"
+license = "MIT"
+authors = ["Dmitriy Kovalenko <dmtr.kovalenko@outlook.com>"]
+description = "Fast & efficient file finder SDK with fuzzy search and grep"
+
+# 收编代码保持上游原貌，不追千寻主包的 clippy 零告警门禁。
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+
+[dependencies]
+# 独立声明而非继承（同 proc-guard 约定）：版本取自上游 workspace.dependencies。
+ahash = "0.8"
+rayon = "1.8.0"
+smallvec = { version = "1.13", features = ["const_generics", "union"] }
+thiserror = "2.0.10"
+fff-query-parser = { path = "../fff-query-parser" }
+blake3 = "1.8.2"
+dirs = "5.0"
+glidesort = "0.1"
+globset = "0.4"
+fff-grep = { path = "../fff-grep" }
+aho-corasick = "1"
+memchr = "2"
+ignore = "0.4.22"
+neo_frizbee = { version = "0.11.0", features = ["match_end_col"] }
+notify = "9.0.0-rc.3"
+notify-debouncer-full = { package = "fff-notify-debouncer-full", version = "0.9.4" }
+parking_lot = "0.12"
+pathdiff = "0.2.1"
+regex = "1.11"
+regex-syntax = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+dunce = "1.0"
+
+[dev-dependencies]
+# 单元测试的临时目录；上游 workspace 声明，收编后独立声明。
+tempfile = "3"
