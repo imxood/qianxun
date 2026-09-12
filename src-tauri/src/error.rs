@@ -50,6 +50,10 @@ pub enum Error {
     #[error("桥失败：{0}")]
     Bridge(String),
 
+    /// 插件市场：搜索、安装/卸载、profile manifest 维护。
+    #[error("插件市场：{0}")]
+    Market(String),
+
     #[error("远程失败：{0}")]
     Remote(String),
 
@@ -76,6 +80,12 @@ pub enum Error {
 
     #[error("DSH 尚未安装：请到「环境」页安装")]
     DshNotInstalled,
+
+    /// ADR-015：千寻主版本号 ↔ DSH 适配锚点。已装的 DSH 与 `PINNED_VERSION`
+    /// 不一致时禁止启动——必须由用户点「重装」装入验证过的版本。
+    /// （重启 DSH 不是选项：DSH 进程在跑也意味着它在用未验证的版本。）
+    #[error("DSH 版本不匹配：千寻要求 {required}，当前 {installed}。请到「环境」页点重装")]
+    DshVersionMismatch { required: String, installed: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

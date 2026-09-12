@@ -195,7 +195,9 @@ async fn perform_install(app: &AppHandle) -> Result<()> {
     .await?;
 
     // pnpm 可能成功退出却装出别的东西——信文件不信退出码。
-    install::check_installed(&crate::paths::harness_dir(app)?)?;
+    // ADR-015：完整性校验之外还要校验版本号 = PINNED_VERSION；否则 pnpm 复用
+    // 旧版本时会被误判为「OK」，下次启动还会拒绝 spawn。
+    install::check_installed_at_version(&crate::paths::harness_dir(app)?)?;
     Ok(())
 }
 

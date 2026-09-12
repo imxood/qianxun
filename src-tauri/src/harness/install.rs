@@ -23,10 +23,17 @@ use crate::error::{Error, Result};
 /// DSH 的 npm 包名。
 pub const PACKAGE: &str = "@deepseek-ai/dsh";
 
-/// 千寻这个版本锁定的 DSH 版本（ADR-002/013：软件版本 ↔ DSH 版本一一对应）。
+/// 千寻这个版本锁定的 DSH 版本（ADR-015：千寻主版本号 ↔ DSH 适配锚点）。
+///
+/// 千寻版本号语义（ADR-015）：
+/// - 主版本号第二位 = **DSH 适配锚点代号**：千寻 `0.4.x` 适配 DSH `0.1.5`；
+///   锚点切换（如 `0.4.x` → `0.5.x`）= 一次 DSH 升级 = 一次完整 DSH 真机验收；
+/// - 第三位 = **千寻自身修订号**：`0.4.0` 是该主版本下的第一个发布版，`0.4.1` 是
+///   第二个修订版（仅千寻自身迭代，DSH 不动）；修订号递增不需要重新验证 DSH。
+///
 /// 由千寻验证后随版本发布，用户不可改——改了就没有验证意义。
 /// 升级 DSH = 升级千寻：改这里、跑全部验收、发版。
-pub const PINNED_VERSION: &str = "0.1.2-rc.1";
+pub const PINNED_VERSION: &str = "0.1.5-rc.1";
 
 /// 安装说明符：始终钉死精确版本，绝不 `latest`——latest 装出未验证
 /// 的上游版本，等于把运行时的正确性交给运气。
@@ -48,7 +55,8 @@ pub const PNPM_SPEC: &str = "pnpm@11.7.0";
 /// pnpm 构建脚本白名单：DSH 运行时需要这些原生/生成步骤真正执行
 /// （koffi 与 node-pty 是终端/子进程工具的原生绑定，没有它们对应功能
 /// 会在运行时报模块缺失）。pnpm 11 从 pnpm-workspace.yaml 读 allowBuilds。
-const PNPM_WORKSPACE_YAML: &str = "\
+/// 插件市场（market）给 profile 写入同一份。
+pub(crate) const PNPM_WORKSPACE_YAML: &str = "\
 # 千寻安装器生成：允许 DSH 运行时的原生构建脚本执行。
 allowBuilds:
   esbuild: true
@@ -138,7 +146,7 @@ impl InstallPlan {
 
 /// CREATE_NO_WINDOW：子进程走重定向管道汇报，控制台宿主不许在外壳上
 /// 闪现（npm/curl 通用；node_install 复用）。
-pub(super) fn hide_console_window(command: &mut Command) {
+pub(crate) fn hide_console_window(command: &mut Command) {
     #[cfg(windows)]
     {
         // npm 与生命周期脚本走重定向管道汇报；CREATE_NO_WINDOW 阻止
@@ -374,8 +382,8 @@ where
 }
 
 /// 限时执行一条安装器命令：空闲/总超时、进程树回收、逐行转发。
-/// Node 安装（node_install.rs）复用同一套闸门。
-pub(super) async fn run_with_limits<R>(
+/// Node 安装（node_install.rs）与插件市场（market）复用同一套闸门。
+pub(crate) async fn run_with_limits<R>(
     mut command: Command,
     report: R,
     label: &'static str,
@@ -516,6 +524,35 @@ pub fn check_installed(target: &Path) -> Result<()> {
     )))
 }
 
+/// 完整性 + 版本号与 `PINNED_VERSION` 一致性（ADR-015：千寻主版本号 ↔ DSH 适配锚点）。
+///
+/// install 完成后必须调这个——只校验 `runtime_complete` 会被误判为「OK」：
+/// pnpm 偶尔会复用旧版本（peer 链重装后版本号没刷），把 0.1.2 误报成「已装」。
+pub fn check_installed_at_version(target: &Path) -> Result<()> {
+    check_installed(target)?;
+    let installed = runtime_version(target).ok_or_else(|| {
+        Error::Install(format!(
+            "DSH 入口存在但 version 字段缺失：{}",
+            target.display()
+        ))
+    })?;
+    if installed == PINNED_VERSION {
+        return Ok(());
+    }
+    Err(Error::DshVersionMismatch {
+        required: PINNED_VERSION.to_owned(),
+        installed,
+    })
+}
+
+/// 安装目标的 DSH 版本号是否等于 `PINNED_VERSION`（不存在的目录 = false）。
+///
+/// 启动路径用这个判定是否拒绝 spawn：版本不一致时**禁止启动 DSH**——
+/// 让未验证的版本继续跑等于把运行时的正确性交给运气。
+pub fn runtime_matches_pinned(target: &Path) -> bool {
+    runtime_version(target).as_deref() == Some(PINNED_VERSION)
+}
+
 /// 修复一次在任意阶段被打断的安装。
 ///
 /// 返回 true 表示发现了 journal。环境探测可以安全地每次都调用：
@@ -616,9 +653,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        check_installed, entry_of, install_spec, npm_cli_candidates, recover_interrupted_install,
-        remove_dir_if_exists, runtime_complete, runtime_version, InstallPlan, PACKAGE,
-        PINNED_VERSION, PNPM_SPEC,
+        check_installed, check_installed_at_version, entry_of, install_spec, npm_cli_candidates,
+        recover_interrupted_install, remove_dir_if_exists, runtime_complete,
+        runtime_matches_pinned, runtime_version, InstallPlan, PACKAGE, PINNED_VERSION, PNPM_SPEC,
     };
 
     fn write_runtime(root: &Path, version: Option<&str>) {
@@ -715,6 +752,33 @@ mod tests {
         assert!(!runtime_complete(&root));
         assert!(check_installed(&root).is_err());
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn 版本一致性校验拦截旧版DSH() {
+        // ADR-015：已装但版本不等于 PINNED_VERSION 时启动必须被拒。
+        let root = scratch("version-mismatch");
+        write_runtime(&root, Some("0.1.2-rc.1"));
+        assert!(runtime_complete(&root));
+        // 完整性 OK——但版本不一致，校验与启动判定都应当拒绝。
+        assert!(check_installed(&root).is_ok());
+        assert!(!runtime_matches_pinned(&root));
+        assert!(check_installed_at_version(&root).is_err());
+
+        // 装入 PINNED_VERSION 后才能通过。
+        write_runtime(&root, Some(PINNED_VERSION));
+        assert!(runtime_matches_pinned(&root));
+        assert!(check_installed_at_version(&root).is_ok());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn 版本一致性校验在目录缺失时返回false() {
+        let root = scratch("missing");
+        assert!(!runtime_matches_pinned(&root));
+        assert!(check_installed_at_version(&root).is_err());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

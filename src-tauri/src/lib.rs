@@ -12,6 +12,7 @@ mod dsh_upstream;
 mod error;
 mod harness;
 mod logging;
+mod market;
 mod notes;
 mod paths;
 mod remote;
@@ -325,6 +326,11 @@ pub fn run() {
             bridge::commands::bridge_deploy,
             bridge::commands::bridge_status,
             bridge::commands::plugins_list,
+            market::market_search,
+            market::market_detail,
+            market::market_installed,
+            market::market_install,
+            market::market_remove,
             remote::commands::remote_interfaces,
             remote::commands::remote_status,
             remote::commands::remote_pair,

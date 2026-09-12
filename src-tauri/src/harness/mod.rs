@@ -138,6 +138,9 @@ pub struct Environment {
     pub minimum_node: node_runtime::Version,
     pub dsh_installed: bool,
     pub dsh_version: Option<String>,
+    /// 已装的 DSH 是否等于 `install::PINNED_VERSION`（ADR-015）。
+    /// `false` 时启动被拒、UI 显示简短警告，必须用户主动点重装。
+    pub dsh_version_matches: bool,
     /// 下一次安装将使用的包说明符（千寻版本锁定的精确 DSH 版本）。
     pub install_spec: String,
     pub dsh_entry: PathBuf,
@@ -173,6 +176,9 @@ pub fn environment(app: &tauri::AppHandle, settings: &Settings) -> Environment {
     let dsh_entry = paths::harness_entry(app).unwrap_or_else(|_| PathBuf::from("."));
     let dsh_version = install::runtime_version(&harness_dir);
     let dsh_installed = dsh_version.is_some() && dsh_entry.is_file();
+    // ADR-015：千寻主版本号 ↔ DSH 适配锚点。已装但版本不匹配时不允许启动——
+    // 必须用户主动点重装装入验证过的版本。
+    let dsh_version_matches = install::runtime_matches_pinned(&harness_dir);
 
     Environment {
         node,
@@ -180,6 +186,7 @@ pub fn environment(app: &tauri::AppHandle, settings: &Settings) -> Environment {
         minimum_node: node_runtime::MINIMUM_SUPPORTED,
         dsh_installed,
         dsh_version,
+        dsh_version_matches,
         install_spec: install::install_spec(),
         dsh_entry,
         workspace: paths::workspace_dir(),
@@ -227,6 +234,24 @@ pub fn launch_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<Launch
             ),
         );
         return Err(Error::DshNotInstalled);
+    }
+    // ADR-015：已装但版本不等于 PINNED_VERSION → 禁止启动。必须由用户
+    // 点重装装入验证过的版本，不能让旧版 DSH 继续跑。
+    if !environment.dsh_version_matches {
+        let dir = paths::harness_dir(app).unwrap_or_else(|_| PathBuf::from("."));
+        crate::logging::log(
+            "warn",
+            &format!(
+                "DSH 版本不匹配：dir={} installed={:?} required={}",
+                dir.display(),
+                environment.dsh_version,
+                install::PINNED_VERSION,
+            ),
+        );
+        return Err(Error::DshVersionMismatch {
+            required: install::PINNED_VERSION.to_owned(),
+            installed: environment.dsh_version.unwrap_or_default(),
+        });
     }
 
     Ok(LaunchPlan {

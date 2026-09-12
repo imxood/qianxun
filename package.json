@@ -1,7 +1,7 @@
 {
   "name": "qianxun",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程",
   "scripts": {

@@ -1,198 +1,340 @@
 <script lang="ts">
+  /**
+   * 插件市场（发现 / 已安装）。
+   *
+   * 插件 = 装进 DSH profile 的 npm 包。发现 = registry 搜索（默认 npmmirror，
+   * 空词给生态发现词）；安装 = pnpm 精确版本 + 并入 profile bundles。
+   * 变更即时落盘、DSH 下次启动生效；pnpm 输出进 supervisor 日志，页面底部
+   * 跟一行最新日志当进度。
+   */
   import { onMount } from 'svelte';
-  import { openPath } from '@tauri-apps/plugin-opener';
+  import { SvelteMap } from 'svelte/reactivity';
   import { call } from '../../lib/ipc';
-  import type { BridgeStatus, PluginEntry } from '../../lib/ipc/contract';
-  import { nav } from '../../stores/nav.svelte';
-  import { settings } from '../../stores/settings.svelte';
+  import type { MarketDetail, MarketInstalled, MarketListing } from '../../lib/ipc/contract';
   import { harness } from '../../stores/harness.svelte';
 
-  let bridge = $state<BridgeStatus | null>(null);
-  let plugins = $state<PluginEntry[]>([]);
-  let bridgeBusy = $state(false);
-  let bridgeError = $state('');
-  const vaultReady = $derived((settings.current?.notes.vaultDir ?? '').trim().length > 0);
+  type Tab = 'discover' | 'installed';
+
+  const DEBOUNCE_MS = 320;
+
+  let tab = $state<Tab>('discover');
+  let query = $state('');
+  let results = $state<MarketListing[]>([]);
+  let searching = $state(false);
+  let searchSeq = 0;
+  let expanded = $state<string | null>(null);
+  let details = new SvelteMap<string, MarketDetail>();
+  let installed = $state<MarketInstalled[]>([]);
+  let installedLoading = $state(false);
+  let working = $state<string | null>(null);
+  let error = $state('');
 
   onMount(() => {
-    void refresh();
+    void refreshInstalled();
   });
 
-  async function refresh(): Promise<void> {
-    try {
-      bridge = await call<BridgeStatus>('bridge_status');
-    } catch {
-      bridge = null;
-    }
-    try {
-      plugins = await call<PluginEntry[]>('plugins_list');
-    } catch {
-      plugins = [];
-    }
-  }
+  // 搜索：空词立即（首屏发现），输入防抖。
+  $effect(() => {
+    const keyword = query;
+    const current = tab;
+    if (current === 'installed') return;
+    const delay = keyword.trim() === '' ? 0 : DEBOUNCE_MS;
+    const timer = window.setTimeout(() => void search(keyword), delay);
+    return () => window.clearTimeout(timer);
+  });
 
-  async function deployBridge(): Promise<void> {
-    bridgeBusy = true;
-    bridgeError = '';
+  async function search(keyword: string): Promise<void> {
+    const seq = ++searchSeq;
+    searching = true;
+    error = '';
     try {
-      bridge = await call<BridgeStatus>('bridge_deploy');
-      plugins = await call<PluginEntry[]>('plugins_list');
-    } catch (error) {
-      bridgeError = error instanceof Error ? error.message : String(error);
+      const items = await call<MarketListing[]>('market_search', { query: keyword });
+      if (seq === searchSeq) results = items;
+    } catch (failure) {
+      if (seq === searchSeq) {
+        results = [];
+        error = failure instanceof Error ? failure.message : String(failure);
+      }
     } finally {
-      bridgeBusy = false;
+      if (seq === searchSeq) searching = false;
     }
   }
 
-  /** 部署过但 DSH 在跑：重启才加载。按钮只在「重启有意义」时出现。 */
-  const restartMeaningful = $derived(
-    bridge !== null && bridge.deployed && bridge.dshRunning && !harness.restarting,
-  );
-
-  async function restartDsh(): Promise<void> {
-    bridgeError = '';
+  async function refreshInstalled(): Promise<void> {
+    installedLoading = true;
     try {
-      await harness.restart();
-      bridge = await call<BridgeStatus>('bridge_status');
-    } catch (error) {
-      bridgeError = error instanceof Error ? error.message : String(error);
+      installed = await call<MarketInstalled[]>('market_installed');
+    } catch {
+      installed = [];
+    } finally {
+      installedLoading = false;
     }
   }
 
-  /** 三项部署事实的状态行；DSH 运行态单独一行（语义不同）。 */
-  const bridgeRows = $derived(
-    bridge
-      ? [
-          { ok: bridge.deployed, text: bridge.deployed ? '插件已就位' : '插件未部署' },
-          {
-            ok: bridge.patchEntry,
-            text: bridge.patchEntry ? '装配条目已写入' : '装配条目未写入',
-          },
-          {
-            ok: bridge.vaultMatch,
-            text: bridge.vaultMatch ? '笔记库配置一致' : '笔记库配置不一致，重新部署即可',
-          },
-        ]
-      : [],
-  );
+  async function toggleExpand(name: string): Promise<void> {
+    error = '';
+    expanded = expanded === name ? null : name;
+    if (expanded !== name) return;
+    await loadDetail(name);
+  }
+
+  async function loadDetail(name: string): Promise<void> {
+    if (details.has(name)) return;
+    try {
+      details.set(name, await call<MarketDetail>('market_detail', { name }));
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+      expanded = null;
+    }
+  }
+
+  async function install(name: string, version: string): Promise<void> {
+    working = name;
+    error = '';
+    try {
+      await loadDetail(name);
+      await call('market_install', { name, version });
+      await refreshInstalled();
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      working = null;
+    }
+  }
+
+  async function remove(name: string): Promise<void> {
+    working = name;
+    error = '';
+    try {
+      await call('market_remove', { name });
+      await refreshInstalled();
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      working = null;
+    }
+  }
+
+  function installedHere(name: string): MarketInstalled | undefined {
+    return installed.find((entry) => entry.name === name);
+  }
+
+  // 展开行里安装按钮要精确版本：详情没有时退回列表给的版本。
+  function versionOf(listing: MarketListing): string {
+    return details.get(listing.name)?.version ?? listing.version;
+  }
+
+  function compatText(detail: MarketDetail): string {
+    switch (detail.compatibility.state) {
+      case 'compatible':
+        return `兼容 DSH（${detail.compatibility.requirement}）`;
+      case 'incompatible':
+        return `不兼容：${detail.compatibility.reason}`;
+      default:
+        return '未声明 DSH 版本';
+    }
+  }
+
+  function count(value: number): string {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+    return String(value);
+  }
+
+  function day(iso: string): string {
+    return iso.slice(0, 10);
+  }
+
+  function filesize(bytes: number | null): string {
+    if (bytes === null) return '';
+    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${bytes} B`;
+  }
+
+  // 安装/卸载走 pnpm，输出进 supervisor 日志；尾行即进度。
+  const progressLine = $derived(harness.logs.at(-1) ?? '');
 </script>
 
-<section class="mx-auto max-w-2xl space-y-6">
-  <header>
-    <h1 class="text-lg font-semibold">插件</h1>
-    <p class="mt-1 text-sm text-muted">
-      千寻经 DSH 插件系统扩展其行为；插件的部署与生效都在这里完成。
-    </p>
+<section class="flex h-full min-h-0 flex-col">
+  <!-- 头：标题 + tab + 搜索 -->
+  <header class="shrink-0 space-y-3 border-b border-line px-6 pt-5 pb-3">
+    <div class="flex items-center justify-between gap-4">
+      <h1 class="text-lg font-semibold">插件</h1>
+      <div class="flex rounded-lg border border-line p-0.5 text-sm">
+        <button
+          class="rounded-md px-3 py-1 transition-colors {tab === 'discover'
+            ? 'bg-accent-soft font-medium text-fg'
+            : 'text-muted hover:text-fg'}"
+          onclick={() => (tab = 'discover')}
+        >
+          发现
+        </button>
+        <button
+          class="rounded-md px-3 py-1 transition-colors {tab === 'installed'
+            ? 'bg-accent-soft font-medium text-fg'
+            : 'text-muted hover:text-fg'}"
+          onclick={() => (tab = 'installed')}
+        >
+          已安装 {installed.length > 0 ? installed.length : ''}
+        </button>
+      </div>
+    </div>
+    {#if tab === 'discover'}
+      <input
+        class="w-full rounded-md border border-line bg-surface px-3 py-1.5 text-sm outline-none focus:border-accent"
+        type="search"
+        placeholder="搜索 npm 上的 DSH 插件"
+        bind:value={query}
+      />
+    {/if}
   </header>
 
-  <!-- 千寻笔记桥 -->
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <div class="flex items-start justify-between gap-4">
-      <div>
-        <h2 class="text-sm font-medium">千寻笔记桥</h2>
-        <p class="mt-1 text-xs text-muted">
-          把笔记库注入 DSH：agent 可直接检索与读写笔记（note_search / note_read / note_write）。
+  {#if tab === 'discover' && error}
+    <p class="shrink-0 px-6 pt-3 text-sm text-danger">{error}</p>
+  {/if}
+
+  <!-- 列表 -->
+  <div class="min-h-0 flex-1 overflow-y-auto px-6 py-3">
+    {#if tab === 'discover'}
+      {#if results.length === 0}
+        <p class="py-12 text-center text-sm text-muted">
+          {searching ? '搜索中…' : '没有结果'}
         </p>
-      </div>
-      <span class="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 font-mono text-xs text-muted">
-        qx-bridge
-      </span>
-    </div>
-
-    {#if bridge}
-      <ul class="space-y-1.5 text-xs">
-        {#each bridgeRows as item (item.text)}
-          <li class="flex items-center gap-2">
-            <span class={item.ok ? 'text-ok' : 'text-danger'}>{item.ok ? '✓' : '✗'}</span>
-            {item.text}
-          </li>
-        {/each}
-        <li class="flex items-center gap-2">
-          <span class={bridge.dshRunning ? 'text-accent' : 'text-muted'}>
-            {bridge.dshRunning ? '⏳' : '○'}
-          </span>
-          {bridge.dshRunning ? 'DSH 运行中，重启后加载' : 'DSH 未运行，下次启动加载'}
-        </li>
-      </ul>
-      {#if bridge.pluginDir}
-        <p class="truncate font-mono text-xs text-muted" title={bridge.pluginDir}>
-          {bridge.pluginDir}
-        </p>
+      {:else}
+        <ul>
+          {#each results as listing (listing.name)}
+            {@const here = installedHere(listing.name)}
+            {@const detail = details.get(listing.name)}
+            <li class="border-b border-line/60 last:border-b-0">
+              <div class="flex items-start gap-3 py-3">
+                <button
+                  class="min-w-0 flex-1 text-left"
+                  onclick={() => void toggleExpand(listing.name)}
+                >
+                  <p class="flex items-baseline gap-2">
+                    <span class="truncate text-sm font-medium">{listing.name}</span>
+                    <span class="shrink-0 font-mono text-xs text-muted">{listing.version}</span>
+                    {#if here}
+                      <span class="shrink-0 text-xs text-ok">已安装</span>
+                    {/if}
+                  </p>
+                  {#if listing.description}
+                    <p class="mt-1 line-clamp-2 text-xs leading-relaxed text-muted">
+                      {listing.description}
+                    </p>
+                  {/if}
+                  <p class="mt-1 flex flex-wrap gap-x-3 text-xs text-muted">
+                    {#if listing.publisher}<span>{listing.publisher}</span>{/if}
+                    {#if listing.weeklyDownloads > 0}
+                      <span>{count(listing.weeklyDownloads)} 周下载</span>
+                    {/if}
+                    {#if listing.updated}<span>{day(listing.updated)}</span>{/if}
+                  </p>
+                </button>
+                {#if here}
+                  <span class="shrink-0 px-1 py-1 text-xs text-ok">✓</span>
+                {:else}
+                  <button
+                    class="shrink-0 rounded-md border border-line px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent-soft disabled:opacity-40"
+                    disabled={working !== null}
+                    onclick={() => void install(listing.name, versionOf(listing))}
+                  >
+                    {working === listing.name ? '安装中…' : '安装'}
+                  </button>
+                {/if}
+              </div>
+              {#if expanded === listing.name}
+                <div class="mb-3 space-y-1.5 rounded-md border border-line bg-surface p-3 text-xs">
+                  {#if !detail}
+                    <p class="text-muted">读取详情…</p>
+                  {:else}
+                    <p class="flex flex-wrap items-center gap-2">
+                      <span
+                        class="rounded px-1.5 py-0.5 {detail.bundle
+                          ? 'bg-ok/15 text-ok'
+                          : 'bg-accent-soft text-muted'}"
+                      >
+                        {detail.bundle ? 'DSH 插件' : '普通包'}
+                      </span>
+                      <span class="text-muted">{compatText(detail)}</span>
+                      {#if detail.license}<span class="text-muted">{detail.license}</span>{/if}
+                      {#if detail.unpackedBytes}
+                        <span class="text-muted">{filesize(detail.unpackedBytes)}</span>
+                      {/if}
+                    </p>
+                    {#if detail.deprecated}
+                      <p class="text-danger">已弃用：{detail.deprecated}</p>
+                    {/if}
+                    {#if detail.lifecycleScripts.length > 0}
+                      <p class="text-muted">
+                        含安装脚本：{detail.lifecycleScripts.join('、')}
+                      </p>
+                    {/if}
+                    {#if detail.homepage || detail.repository}
+                      <p class="truncate">
+                        <span class="text-muted">主页 </span>
+                        <span class="font-mono">{detail.homepage ?? detail.repository}</span>
+                      </p>
+                    {/if}
+                    <p class="font-mono text-muted">将安装 {detail.installSpec}</p>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
       {/if}
-    {:else}
-      <p class="text-xs text-muted">读取状态中…</p>
-    {/if}
-
-    <div class="flex flex-wrap items-center gap-2">
-      <button
-        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
-        disabled={bridgeBusy || !vaultReady}
-        onclick={() => void deployBridge()}
-      >
-        {bridgeBusy ? '部署中…' : '部署 / 修复'}
-      </button>
-      {#if restartMeaningful}
-        <button
-          class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-40"
-          disabled={harness.restarting}
-          data-testid="plugin-restart-dsh"
-          onclick={() => void restartDsh()}
-        >
-          {harness.restarting ? '重启中…' : '重启 DSH 生效'}
-        </button>
-      {/if}
-      {#if bridge?.pluginDir}
-        <button
-          class="rounded-md px-2 py-1.5 text-xs text-muted transition-colors hover:bg-accent-soft hover:text-fg"
-          onclick={() => void openPath(bridge?.pluginDir ?? '').catch(() => {})}
-        >
-          打开目录
-        </button>
-      {/if}
-      {#if !vaultReady}
-        <button
-          class="text-xs text-muted transition-colors hover:text-accent"
-          onclick={() => nav.go('notes')}
-        >
-          请先初始化笔记库 →
-        </button>
-      {/if}
-    </div>
-    {#if bridgeError}
-      <p class="text-sm text-danger">{bridgeError}</p>
-    {/if}
-  </section>
-
-  <!-- 已注册插件 -->
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <div class="flex items-center justify-between">
-      <h2 class="text-sm font-medium">已注册插件</h2>
-      <button
-        class="rounded px-2 py-1 text-xs text-muted transition-colors hover:bg-accent-soft hover:text-fg"
-        onclick={() => void refresh()}
-      >
-        刷新
-      </button>
-    </div>
-    {#if plugins.length === 0}
-      <p class="text-xs text-muted">
-        尚无注册插件。部署笔记桥后，这里会列出 DSH profile 里的全部插件。
+    {:else if installed.length === 0}
+      <p class="py-12 text-center text-sm text-muted">
+        {installedLoading ? '读取中…' : '尚未安装插件'}
       </p>
     {:else}
-      <ul class="divide-y divide-line">
-        {#each plugins as plugin (plugin.id)}
-          <li class="flex items-center gap-3 py-2 text-sm">
-            <span class={plugin.deployed ? 'text-ok' : 'text-danger'}>
-              {plugin.deployed ? '✓' : '✗'}
-            </span>
-            <span class="min-w-0 flex-1 truncate text-fg">{plugin.name}</span>
-            <span class="shrink-0 font-mono text-xs text-muted">{plugin.id}</span>
-            <span class="shrink-0 text-xs {plugin.deployed ? 'text-muted' : 'text-danger'}">
-              {plugin.deployed ? '已就位' : '未部署'}
-            </span>
+      <ul>
+        {#each installed as entry (entry.name)}
+          <li class="flex items-center gap-3 border-b border-line/60 py-2.5 last:border-b-0">
+            <div class="min-w-0 flex-1">
+              <p class="flex items-baseline gap-2">
+                <span class="truncate text-sm">{entry.name}</span>
+                {#if entry.spec}
+                  <span class="shrink-0 font-mono text-xs text-muted">{entry.spec}</span>
+                {/if}
+              </p>
+              <p class="mt-0.5 flex items-center gap-2 text-xs">
+                {#if entry.builtin}
+                  <span class="rounded bg-accent-soft px-1.5 py-0.5 text-muted">内核</span>
+                {:else if entry.active}
+                  <span class="rounded bg-ok/15 px-1.5 py-0.5 text-ok">生效中</span>
+                {:else}
+                  <span class="rounded bg-accent-soft px-1.5 py-0.5 text-muted">未加载</span>
+                {/if}
+                {#if !entry.deployed}
+                  <span class="text-danger">文件缺失，重装可修复</span>
+                {/if}
+              </p>
+            </div>
+            {#if !entry.builtin}
+              <button
+                class="shrink-0 rounded-md border border-line px-2.5 py-1 text-xs text-danger transition-colors hover:bg-danger/10 disabled:opacity-40"
+                disabled={working !== null}
+                onclick={() => void remove(entry.name)}
+              >
+                {working === entry.name ? '卸载中…' : '卸载'}
+              </button>
+            {/if}
           </li>
         {/each}
       </ul>
-      <p class="text-xs text-muted">清单来自 DSH profile 的装配配置（cordis.patch.yml）。</p>
     {/if}
-  </section>
+  </div>
+
+  <!-- 底：进度行 + 生效提示 -->
+  <footer class="flex h-8 shrink-0 items-center gap-2 border-t border-line px-6">
+    {#if working !== null}
+      <span class="size-2 animate-pulse rounded-full bg-accent"></span>
+      <span class="truncate font-mono text-xs text-muted">{progressLine}</span>
+    {:else}
+      <span class="text-xs text-muted">安装 / 卸载在 DSH 下次启动时生效</span>
+    {/if}
+  </footer>
 </section>

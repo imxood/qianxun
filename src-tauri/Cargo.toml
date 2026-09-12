@@ -1,6 +1,6 @@
 [package]
 name = "qianxun"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
@@ -70,10 +70,13 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 portable-pty = "0.9.0"
 # 远程网关（R1，架构 §4.5）：DSH 回环唯一暴露面——axum 终结 HTTP/WS，
 # reqwest 流式转发 /api（含 SSE），tokio-tungstenite 桥两条 WS 下行。
+# native-tls：插件市场（market）是第一个走 HTTPS 的调用方；SChannel 走
+# 系统 trust store，企业代理的自签根证书也能过（rustls 会拒）。
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "json",
+    "native-tls",
 ] }
 tokio-tungstenite = "0.30"
 futures-util = "0.3"
@@ -81,6 +84,8 @@ futures-util = "0.3"
 if-addrs = "0.13"
 # grep 结果的 glob 过滤（M2 深化）：glob→正则。fff 自用版本不外露。
 regex = "1"
+# 插件市场兼容判定：包声明的 @deepseek-ai/dsh 范围 vs 千寻钉住的 DSH 版本。
+semver = "1"
 # 设备配对 token。
 rand = "0.8"
 # /qx-mobile/info 的电脑主机名（App 端自动命名连接用）。

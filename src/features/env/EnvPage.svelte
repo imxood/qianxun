@@ -9,6 +9,7 @@
     void harness.backfillLogs();
   });
 
+  /** Node 来源标注（信息块用）。 */
   const sourceLabels: Record<string, string> = {
     path: 'PATH',
     nvm: 'nvm',
@@ -77,6 +78,15 @@
     return Math.min(100, Math.floor((downloaded / total) * 100));
   }
 
+  /**
+   * 从 `installSpec`（形如 `@deepseek-ai/dsh@0.1.5-rc.1`）提取精确版本号，
+   * 用于「千寻要求 X，当前 Y」展示。比后端再多发一个字段省事——格式稳定。
+   */
+  function pinnedDshVersion(spec: string): string {
+    const at = spec.lastIndexOf('@');
+    return at >= 0 ? spec.slice(at + 1) : spec;
+  }
+
   const statusTone: Record<string, string> = {
     stopped: 'text-muted',
     starting: 'text-accent',
@@ -106,7 +116,7 @@
 <section class="flex h-full flex-col gap-4 p-6">
   <header class="shrink-0">
     <h1 class="text-lg font-semibold">环境</h1>
-    <p class="mt-1 text-sm text-muted">依赖检测、安装与进程控制；日志实时同步在右侧。</p>
+    <p class="mt-1 text-sm text-muted">安装与启停；过程与结果都在右侧日志。</p>
   </header>
 
   <div class="flex min-h-0 flex-1 gap-4">
@@ -209,7 +219,8 @@
               class="flex-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
               disabled={harness.starting ||
                 !harness.environment?.node ||
-                !harness.environment?.dshInstalled}
+                !harness.environment?.dshInstalled ||
+                !harness.environment?.dshVersionMatches}
               data-testid="harness-start"
               onclick={() => void start()}
             >
@@ -230,123 +241,118 @@
       {/if}
 
       {#if harness.environment}
-        <!-- 检查 Node -->
-        <div class="rounded-lg border border-line bg-surface p-4">
-          <div class="flex items-start justify-between gap-4">
-            <div class="min-w-0">
-              <h2 class="font-medium">
-                Node
-                {#if harness.environment.node}
-                  <span class="ml-1 text-xs text-ok">✓</span>
-                {:else}
-                  <span class="ml-1 text-xs text-danger">✗ 未检测到</span>
-                {/if}
-              </h2>
-              {#if harness.environment.node}
-                <p class="mt-1 text-sm text-fg">
-                  {formatNodeVersion(harness.environment.node.version)}
-                  <span class="ml-2 rounded bg-accent-soft px-1.5 py-0.5 text-xs text-muted">
-                    {sourceLabels[harness.environment.node.source] ??
-                      harness.environment.node.source}
-                  </span>
-                </p>
-                <p
-                  class="mt-1 truncate font-mono text-xs text-muted"
-                  title={harness.environment.node.path}
-                >
-                  {harness.environment.node.path}
-                </p>
-              {:else}
-                <p class="mt-1 text-xs text-muted">
-                  需要 v{formatNodeVersion(harness.environment.minimumNode)} 或更高
-                </p>
-              {/if}
-            </div>
-            {#if !harness.environment.node}
-              <button
-                class="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
-                disabled={harness.installing}
-                onclick={installNode}
-              >
-                {harness.installing ? '安装中…' : `安装 v${harness.environment.bundledNodeVersion}`}
-              </button>
-            {/if}
+        <!-- 只在缺东西时出现：环境健康时这一列为空，日志即环境页的主体。 -->
+        {#if !harness.environment.node}
+          <div
+            class="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface p-4"
+          >
+            <p class="text-sm">
+              未检测到 Node
+              <span class="ml-2 text-xs text-muted">
+                需 v{formatNodeVersion(harness.environment.minimumNode)} 或更高
+              </span>
+            </p>
+            <button
+              class="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+              disabled={harness.installing}
+              onclick={installNode}
+            >
+              {harness.installing ? '安装中…' : `安装 v${harness.environment.bundledNodeVersion}`}
+            </button>
           </div>
-          {#if harness.environment.allNodeRuntimes.length > 1}
-            <details class="mt-3 text-xs text-muted">
-              <summary class="cursor-pointer select-none">
-                发现 {harness.environment.allNodeRuntimes.length} 个运行时（使用最新）
-              </summary>
-              <ul class="mt-2 space-y-1">
-                {#each harness.environment.allNodeRuntimes as runtime (runtime.path)}
-                  <li class="break-all font-mono">
-                    {formatNodeVersion(runtime.version)} ·
-                    {sourceLabels[runtime.source] ?? runtime.source} · {runtime.path}
-                  </li>
-                {/each}
-              </ul>
-            </details>
-          {/if}
           {#if nodeError}
-            <p class="mt-3 text-sm text-danger">{nodeError}</p>
+            <p class="text-sm text-danger">{nodeError}</p>
           {/if}
-        </div>
+        {/if}
 
-        <!-- 检查 DSH -->
-        <div class="rounded-lg border border-line bg-surface p-4">
-          <div class="flex items-start justify-between gap-4">
+        {#if !harness.environment.dshInstalled}
+          <!-- 未安装：给一个安装入口，过程与结果都在右侧日志。 -->
+          <div
+            class="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface p-4"
+          >
+            <p class="text-sm">DSH 未安装</p>
+            <button
+              class="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+              disabled={harness.installing || !harness.environment.node}
+              onclick={installDsh}
+            >
+              {harness.installing ? '安装中…' : '安装'}
+            </button>
+          </div>
+          {#if dshError}
+            <p class="text-sm text-danger">{dshError}</p>
+          {/if}
+        {:else if !harness.environment.dshVersionMatches}
+          <!-- ADR-015：已装但版本对不上时禁止启动，必须升级。 -->
+          <div
+            class="flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4"
+          >
             <div class="min-w-0">
-              <h2 class="font-medium">
-                DSH
-                {#if harness.environment.dshInstalled}
-                  <span class="ml-1 text-xs text-ok">✓</span>
-                {:else}
-                  <span class="ml-1 text-xs text-danger">✗ 未检测到</span>
-                {/if}
-              </h2>
-              {#if harness.environment.dshInstalled}
-                <p class="mt-1 text-sm text-fg">
-                  已安装
-                  {#if harness.environment.dshVersion}
-                    <span class="font-mono">{harness.environment.dshVersion}</span>
-                  {/if}
-                </p>
-                <p
-                  class="mt-1 truncate font-mono text-xs text-muted"
-                  title={harness.environment.dshEntry}
-                >
+              <p class="text-sm text-warning">⚠ DSH 版本不匹配，启动已禁用</p>
+              <p class="mt-0.5 text-xs text-muted">
+                千寻要求
+                <span class="font-mono">{pinnedDshVersion(harness.environment.installSpec)}</span>
+                ，当前 <span class="font-mono">{harness.environment.dshVersion ?? '?'}</span>
+              </p>
+            </div>
+            <button
+              class="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+              disabled={harness.installing || !harness.environment.node}
+              onclick={installDsh}
+            >
+              {harness.installing ? '安装中…' : '升级'}
+            </button>
+          </div>
+          {#if dshError}
+            <p class="text-sm text-danger">{dshError}</p>
+          {/if}
+        {/if}
+
+        <!-- 环境信息：默认收起，健康时不占版面；点开看版本与路径事实。 -->
+        <details class="rounded-lg border border-line bg-surface px-3 py-2 text-xs">
+          <summary class="cursor-pointer select-none text-muted">信息</summary>
+          <dl class="mt-2 space-y-2">
+            <div class="flex gap-2">
+              <dt class="w-16 shrink-0 text-muted">DSH</dt>
+              <dd class="min-w-0 flex-1 font-mono">
+                <span>
+                  {harness.environment.dshVersion ??
+                    `未安装（要求 ${pinnedDshVersion(harness.environment.installSpec)}）`}
+                </span>
+                <p class="truncate text-muted" title={harness.environment.dshEntry}>
                   {harness.environment.dshEntry}
                 </p>
-              {:else}
-                <p class="mt-1 text-xs text-muted">
-                  安装说明符 <span class="font-mono">{harness.environment.installSpec}</span>
-                </p>
-              {/if}
+              </dd>
             </div>
-            {#if !harness.environment.dshInstalled || harness.environment.dshVersion}
-              <button
-                class="shrink-0 rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-50"
-                disabled={harness.installing || !harness.environment.node}
-                onclick={installDsh}
-              >
-                {harness.installing
-                  ? '安装中…'
-                  : harness.environment.dshInstalled
-                    ? '重装'
-                    : '安装'}
-              </button>
+            {#if harness.environment.node}
+              <div class="flex gap-2">
+                <dt class="w-16 shrink-0 text-muted">Node</dt>
+                <dd class="min-w-0 flex-1 font-mono">
+                  {formatNodeVersion(harness.environment.node.version)}
+                  <span class="text-muted">
+                    · {sourceLabels[harness.environment.node.source] ??
+                      harness.environment.node.source}
+                  </span>
+                  <p class="truncate text-muted" title={harness.environment.node.path}>
+                    {harness.environment.node.path}
+                  </p>
+                </dd>
+              </div>
             {/if}
-          </div>
-          <p class="mt-3 truncate text-xs text-muted" title={harness.environment.workspace}>
-            工作目录 {harness.environment.workspace}
-          </p>
-          <p class="mt-1 truncate text-xs text-muted" title={harness.environment.dshHome}>
-            DSH_HOME {harness.environment.dshHome}
-          </p>
-          {#if dshError}
-            <p class="mt-3 text-sm text-danger">{dshError}</p>
-          {/if}
-        </div>
+            <div class="flex gap-2">
+              <dt class="w-16 shrink-0 text-muted">工作目录</dt>
+              <dd class="min-w-0 flex-1 truncate font-mono" title={harness.environment.workspace}>
+                {harness.environment.workspace}
+              </dd>
+            </div>
+            <div class="flex gap-2">
+              <dt class="w-16 shrink-0 text-muted">DSH_HOME</dt>
+              <dd class="min-w-0 flex-1 truncate font-mono" title={harness.environment.dshHome}>
+                {harness.environment.dshHome}
+              </dd>
+            </div>
+          </dl>
+        </details>
       {/if}
     </aside>
 

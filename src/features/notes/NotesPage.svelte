@@ -9,7 +9,7 @@
   import { onMount, tick } from 'svelte';
   import { marked } from 'marked';
   import { call } from '../../lib/ipc';
-  import type { NoteContent, NoteMeta } from '../../lib/ipc/contract';
+  import type { BridgeStatus, NoteContent, NoteMeta } from '../../lib/ipc/contract';
   import { settings } from '../../stores/settings.svelte';
   import { harness } from '../../stores/harness.svelte';
   import { theme } from '../../stores/theme.svelte';
@@ -35,6 +35,51 @@
   let removeOpen = $state(false);
   let discardOpen = $state(false);
   let saveAsTitleOpen = $state(false);
+
+  // ---- 笔记桥（qx-bridge：agent 工具 + AI 整理的通道） ----
+  // 桥的部署入口从原插件页迁到这里：它只服务于笔记，未就绪时在页顶给一条
+  // 状态条；三处事实都就位即整条隐藏，不占版面。
+  let bridge = $state<BridgeStatus | null>(null);
+  let bridgeBusy = $state(false);
+  let bridgeError = $state('');
+
+  const bridgeHealthy = $derived(
+    bridge !== null && bridge.deployed && bridge.patchEntry && bridge.vaultMatch,
+  );
+  const bridgeRestartMeaningful = $derived(
+    bridge !== null && bridge.deployed && bridge.dshRunning && !harness.restarting,
+  );
+
+  async function refreshBridge(): Promise<void> {
+    try {
+      bridge = await call<BridgeStatus>('bridge_status');
+    } catch {
+      bridge = null;
+    }
+  }
+
+  async function deployBridge(): Promise<void> {
+    bridgeBusy = true;
+    bridgeError = '';
+    try {
+      bridge = await call<BridgeStatus>('bridge_deploy');
+    } catch (error) {
+      bridgeError = error instanceof Error ? error.message : String(error);
+    } finally {
+      bridgeBusy = false;
+    }
+  }
+
+  /** DSH 在跑时部署完需要重启才加载；重启完回读桥状态。 */
+  async function restartForBridge(): Promise<void> {
+    bridgeError = '';
+    try {
+      await harness.restart();
+      await refreshBridge();
+    } catch (error) {
+      bridgeError = error instanceof Error ? error.message : String(error);
+    }
+  }
 
   // ---- AI 整理（M6：经 qx-bridge 的 /qx/notes/organize） ----
   let organizing = $state(false);
@@ -64,7 +109,10 @@
 
   // 库目录就绪（或首次初始化）后拉清单。
   $effect(() => {
-    if (vault) void refresh();
+    if (vault) {
+      void refresh();
+      void refreshBridge();
+    }
   });
 
   // 外部变更感知（轻量）：窗口重获焦点时静默刷新清单，不做 watcher。
@@ -280,7 +328,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<section class="flex h-full min-h-0 gap-0">
+<section class="flex h-full min-h-0 flex-col">
   {#if !vault}
     <div class="flex h-full w-full flex-col items-center justify-center gap-3">
       <p class="text-sm text-muted">还没有笔记库。初始化会在「文档\千寻笔记」创建目录。</p>
@@ -293,177 +341,215 @@
       {#if errorText}<p class="text-sm text-danger">{errorText}</p>{/if}
     </div>
   {:else}
-    <!-- 列表 -->
-    <aside class="flex w-64 shrink-0 flex-col border-r border-line">
-      <div class="flex items-center gap-2 border-b border-line p-2">
-        <input
-          class="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1 text-sm"
-          type="text"
-          placeholder="标题/标签过滤"
-          bind:value={filter}
-        />
+    {#if !bridgeHealthy}
+      <!-- 笔记桥状态条：只在未就绪时出现（agent 工具与 AI 整理都走它）。 -->
+      <div class="flex shrink-0 items-center gap-3 border-b border-line bg-surface px-4 py-2">
+        <p class="min-w-0 flex-1 truncate text-xs">
+          <span class="font-medium">笔记桥未就绪</span>
+          <span class="ml-2 text-muted">
+            {bridge === null
+              ? '检查中…'
+              : !bridge.deployed
+                ? '插件文件未部署'
+                : !bridge.patchEntry
+                  ? '装配条目未写入'
+                  : '笔记库配置不一致'}
+          </span>
+          {#if bridgeError}<span class="ml-2 text-danger">{bridgeError}</span>{/if}
+        </p>
         <button
-          class="shrink-0 rounded-md bg-accent px-2 py-1 text-sm text-white hover:bg-accent/90"
-          title="新建笔记"
-          onclick={() => (createOpen = true)}
+          class="shrink-0 rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-40"
+          disabled={bridgeBusy}
+          onclick={() => void deployBridge()}
         >
-          +
+          {bridgeBusy ? '部署中…' : '部署'}
         </button>
+        {#if bridgeRestartMeaningful}
+          <button
+            class="shrink-0 rounded-md border border-line px-2.5 py-1 text-xs hover:bg-accent-soft disabled:opacity-40"
+            disabled={harness.restarting}
+            onclick={() => void restartForBridge()}
+          >
+            {harness.restarting ? '重启中…' : '重启 DSH 生效'}
+          </button>
+        {/if}
       </div>
-      <ul class="min-h-0 flex-1 overflow-y-auto">
-        {#each filtered as note (note.path)}
-          <li>
-            <button
-              class="w-full border-b border-line/50 px-3 py-2 text-left transition-colors hover:bg-accent-soft/60 {activePath ===
-              note.path
-                ? 'bg-accent-soft'
-                : ''}"
-              onclick={() => void open(note)}
-            >
-              <p class="truncate text-sm">{note.title}</p>
-              <p class="mt-0.5 truncate text-xs text-muted">{note.excerpt}</p>
-              <p class="mt-0.5 flex items-center gap-2 text-xs text-muted">
-                <span>{formatRelative(note.updated)}</span>
-                {#each note.tags.slice(0, 3) as tag (tag)}
-                  <span class="rounded bg-accent-soft px-1">{tag}</span>
-                {/each}
-              </p>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    </aside>
-
-    <!-- 编辑 / 预览 -->
-    <div class="flex min-w-0 flex-1 flex-col">
-      <div class="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5 text-xs">
-        <span class="truncate text-muted">{activeNote?.meta.path ?? '未选择笔记'}</span>
-        {#if dirty}<span class="text-accent">未保存</span>{/if}
-        <span class="ml-auto flex items-center gap-2">
-          <button
-            class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
-            title={dshProxyBase ? 'AI 整理（经 qx-bridge）' : 'DSH 未运行：先启动 DSH 并部署桥'}
-            disabled={!dshProxyBase || organizing}
-            onclick={() => {
-              organizeOpen = !organizeOpen;
-              organizeError = '';
-            }}
-          >
-            {organizing ? '整理中…' : 'AI 整理'}
-          </button>
-          <button
-            class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
-            disabled={!activeNote || saving}
-            onclick={() => void save()}
-          >
-            保存
-          </button>
-          <button
-            class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
-            disabled={!activeNote}
-            onclick={() => (previewing = !previewing)}
-          >
-            {previewing ? '编辑' : '预览'}
-          </button>
-          <button
-            class="rounded px-2 py-1 text-danger hover:bg-danger/10 disabled:opacity-40"
-            disabled={!activeNote}
-            onclick={() => (removeOpen = true)}
-          >
-            删除
-          </button>
-        </span>
-      </div>
-      {#if activeNote}
-        <!-- 结构化元数据：frontmatter 的 UI 形态（修改即标脏，随保存写回）。 -->
-        <div class="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5">
+    {/if}
+    <div class="flex min-h-0 flex-1">
+      <!-- 列表 -->
+      <aside class="flex w-64 shrink-0 flex-col border-r border-line">
+        <div class="flex items-center gap-2 border-b border-line p-2">
           <input
-            class="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-sm font-medium outline-none focus:border-line"
-            placeholder="标题"
-            bind:value={editTitle}
-            oninput={markDirty}
+            class="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1 text-sm"
+            type="text"
+            placeholder="标题/标签过滤"
+            bind:value={filter}
           />
-          <input
-            class="w-64 shrink-0 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-xs outline-none focus:border-line"
-            placeholder="标签（逗号分隔）"
-            bind:value={editTags}
-            oninput={markDirty}
-          />
+          <button
+            class="shrink-0 rounded-md bg-accent px-2 py-1 text-sm text-white hover:bg-accent/90"
+            title="新建笔记"
+            onclick={() => (createOpen = true)}
+          >
+            +
+          </button>
         </div>
-      {/if}
-      {#if organizeOpen}
-        <div class="flex shrink-0 flex-col gap-2 border-b border-line bg-surface px-3 py-2">
-          <div class="flex items-center gap-2">
-            <input
-              class="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1 text-xs"
-              type="text"
-              placeholder="整理指令，如：把所有笔记里的 Rust 命令合并成一篇速查表"
-              bind:value={organizeInstruction}
-            />
-            <button
-              class="rounded bg-accent px-2.5 py-1 text-xs text-white hover:bg-accent/90 disabled:opacity-40"
-              disabled={organizing || !dshProxyBase}
-              onclick={() => void runOrganize()}
-            >
-              {organizing ? '生成中…' : '生成'}
-            </button>
-            {#if organizeResult}
+        <ul class="min-h-0 flex-1 overflow-y-auto">
+          {#each filtered as note (note.path)}
+            <li>
               <button
-                class="rounded px-2.5 py-1 text-xs hover:bg-accent-soft"
-                onclick={() => (saveAsTitleOpen = true)}
+                class="w-full border-b border-line/50 px-3 py-2 text-left transition-colors hover:bg-accent-soft/60 {activePath ===
+                note.path
+                  ? 'bg-accent-soft'
+                  : ''}"
+                onclick={() => void open(note)}
               >
-                存为笔记
+                <p class="truncate text-sm">{note.title}</p>
+                <p class="mt-0.5 truncate text-xs text-muted">{note.excerpt}</p>
+                <p class="mt-0.5 flex items-center gap-2 text-xs text-muted">
+                  <span>{formatRelative(note.updated)}</span>
+                  {#each note.tags.slice(0, 3) as tag (tag)}
+                    <span class="rounded bg-accent-soft px-1">{tag}</span>
+                  {/each}
+                </p>
               </button>
-            {/if}
+            </li>
+          {/each}
+        </ul>
+      </aside>
+
+      <!-- 编辑 / 预览 -->
+      <div class="flex min-w-0 flex-1 flex-col">
+        <div class="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5 text-xs">
+          <span class="truncate text-muted">{activeNote?.meta.path ?? '未选择笔记'}</span>
+          {#if dirty}<span class="text-accent">未保存</span>{/if}
+          <span class="ml-auto flex items-center gap-2">
             <button
-              class="rounded px-2 py-1 text-xs text-muted hover:bg-accent-soft"
-              onclick={() => (organizeOpen = false)}
+              class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
+              title={dshProxyBase ? 'AI 整理（经 qx-bridge）' : 'DSH 未运行：先启动 DSH 并部署桥'}
+              disabled={!dshProxyBase || organizing}
+              onclick={() => {
+                organizeOpen = !organizeOpen;
+                organizeError = '';
+              }}
             >
-              收起
+              {organizing ? '整理中…' : 'AI 整理'}
             </button>
-          </div>
-          {#if !dshProxyBase}
-            <p class="text-xs text-muted">DSH 未运行或桥未部署：先启动 DSH（并在设置页部署桥）。</p>
-          {/if}
-          {#if organizeError}<p class="text-xs text-danger">{organizeError}</p>{/if}
-          {#if organizeResult}
-            <textarea
-              class="h-40 resize-y rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs leading-relaxed"
-              readonly>{organizeResult}</textarea
+            <button
+              class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
+              disabled={!activeNote || saving}
+              onclick={() => void save()}
             >
-          {/if}
+              保存
+            </button>
+            <button
+              class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
+              disabled={!activeNote}
+              onclick={() => (previewing = !previewing)}
+            >
+              {previewing ? '编辑' : '预览'}
+            </button>
+            <button
+              class="rounded px-2 py-1 text-danger hover:bg-danger/10 disabled:opacity-40"
+              disabled={!activeNote}
+              onclick={() => (removeOpen = true)}
+            >
+              删除
+            </button>
+          </span>
         </div>
-      {/if}
-      {#if activeNote}
-        <!-- 编辑器容器常驻 DOM（hidden 切换）：预览来回切不销毁 CodeMirror。 -->
-        <div class="min-h-0 flex-1 overflow-hidden {previewing ? 'hidden' : ''}">
-          <NoteEditor
-            bind:this={editor}
-            doc={activeNote.body}
-            {dark}
-            onDocChange={(next) => {
-              if (activeNote && next !== activeNote.body) {
-                activeNote = { ...activeNote, body: next };
-                markDirty();
-              }
-            }}
-          />
-        </div>
-        {#if previewing}
-          <div class="prose-notes min-h-0 flex-1 overflow-y-auto p-6">
-            <!-- 个人笔记库，内容全部自产（本人撰写/AI 整理回写），无第三方注入面：豁免 XSS lint -->
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-            {@html previewHtml}
+        {#if activeNote}
+          <!-- 结构化元数据：frontmatter 的 UI 形态（修改即标脏，随保存写回）。 -->
+          <div class="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5">
+            <input
+              class="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-sm font-medium outline-none focus:border-line"
+              placeholder="标题"
+              bind:value={editTitle}
+              oninput={markDirty}
+            />
+            <input
+              class="w-64 shrink-0 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-xs outline-none focus:border-line"
+              placeholder="标签（逗号分隔）"
+              bind:value={editTags}
+              oninput={markDirty}
+            />
           </div>
         {/if}
-      {:else}
-        <div class="flex flex-1 items-center justify-center text-sm text-muted">
-          左侧选择或新建一篇笔记
-        </div>
-      {/if}
-      {#if errorText}<p class="border-t border-line px-3 py-1.5 text-xs text-danger">
-          {errorText}
-        </p>{/if}
+        {#if organizeOpen}
+          <div class="flex shrink-0 flex-col gap-2 border-b border-line bg-surface px-3 py-2">
+            <div class="flex items-center gap-2">
+              <input
+                class="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1 text-xs"
+                type="text"
+                placeholder="整理指令，如：把所有笔记里的 Rust 命令合并成一篇速查表"
+                bind:value={organizeInstruction}
+              />
+              <button
+                class="rounded bg-accent px-2.5 py-1 text-xs text-white hover:bg-accent/90 disabled:opacity-40"
+                disabled={organizing || !dshProxyBase}
+                onclick={() => void runOrganize()}
+              >
+                {organizing ? '生成中…' : '生成'}
+              </button>
+              {#if organizeResult}
+                <button
+                  class="rounded px-2.5 py-1 text-xs hover:bg-accent-soft"
+                  onclick={() => (saveAsTitleOpen = true)}
+                >
+                  存为笔记
+                </button>
+              {/if}
+              <button
+                class="rounded px-2 py-1 text-xs text-muted hover:bg-accent-soft"
+                onclick={() => (organizeOpen = false)}
+              >
+                收起
+              </button>
+            </div>
+            {#if !dshProxyBase}
+              <p class="text-xs text-muted">
+                DSH 未运行或桥未部署：先启动 DSH，并在本页顶部部署桥。
+              </p>
+            {/if}
+            {#if organizeError}<p class="text-xs text-danger">{organizeError}</p>{/if}
+            {#if organizeResult}
+              <textarea
+                class="h-40 resize-y rounded-md border border-line bg-bg px-2 py-1 font-mono text-xs leading-relaxed"
+                readonly>{organizeResult}</textarea
+              >
+            {/if}
+          </div>
+        {/if}
+        {#if activeNote}
+          <!-- 编辑器容器常驻 DOM（hidden 切换）：预览来回切不销毁 CodeMirror。 -->
+          <div class="min-h-0 flex-1 overflow-hidden {previewing ? 'hidden' : ''}">
+            <NoteEditor
+              bind:this={editor}
+              doc={activeNote.body}
+              {dark}
+              onDocChange={(next) => {
+                if (activeNote && next !== activeNote.body) {
+                  activeNote = { ...activeNote, body: next };
+                  markDirty();
+                }
+              }}
+            />
+          </div>
+          {#if previewing}
+            <div class="prose-notes min-h-0 flex-1 overflow-y-auto p-6">
+              <!-- 个人笔记库，内容全部自产（本人撰写/AI 整理回写），无第三方注入面：豁免 XSS lint -->
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+              {@html previewHtml}
+            </div>
+          {/if}
+        {:else}
+          <div class="flex flex-1 items-center justify-center text-sm text-muted">
+            左侧选择或新建一篇笔记
+          </div>
+        {/if}
+        {#if errorText}<p class="border-t border-line px-3 py-1.5 text-xs text-danger">
+            {errorText}
+          </p>{/if}
+      </div>
     </div>
   {/if}
 </section>

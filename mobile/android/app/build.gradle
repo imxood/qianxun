@@ -83,7 +83,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
-        versionName "0.3.0"
+        versionName "0.4.0"
         // 模板 manifest 以占位符声明 cleartext：EasyTier 网段明文 HTTP 折中
         // （见 mobile/README.md 安全注记；TLS 化后收紧为 false）。
         manifestPlaceholders = [usesCleartextTraffic: "true"]

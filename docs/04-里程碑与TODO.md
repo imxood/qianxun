@@ -228,8 +228,8 @@
 
 ## V0.2.1 · DSH 0.1.2 适配 + 外壳整合（2026-09-05）
 
-- [x] DSH 版本硬编码（ADR-013）：`install::PINNED_VERSION` 随千寻版本
-      锁定（当前 0.1.2-rc.1），删用户可编辑的 dsh.pinnedVersion——
+- [x] DSH 版本硬编码（ADR-015）：`install::PINNED_VERSION` 随千寻版本
+      锁定（当时 0.1.2-rc.1），删用户可编辑的 dsh.pinnedVersion——
       软件版本 ↔ DSH 版本一一对应，改版本=升级千寻
 - [x] DSH 0.1.2 浏览器鉴权适配：readiness 保留就绪 URL 完整 token
       （回环/http/显式端口校验不放宽）；Status::Ready 拆分 origin+token
@@ -243,6 +243,43 @@
       （自上而下：检查 Node → 检查 DSH → 启动/停止 → 日志铺满剩余
       空间，安装/启动日志全程可见）；「DSH」保持为 DeepSeek Harness
       聊天页（iframe），启动入口收敛到环境页
+
+## V0.4 · 千寻 0.4 适配锚点切换（DSH 0.1.5）+ 版本号语义落地
+
+**目标**：把 V0.2.1 时随 `install::PINNED_VERSION` 锁住的 DSH 0.1.2 升级到
+DSH 0.1.5，并确立千寻版本号 ↔ DSH 适配锚点的对应关系（ADR-015）。
+
+### 版本号语义（ADR-015）
+
+千寻版本号格式 `0.<DSH 适配锚点>.<千寻修订号>`：
+
+- **主版本号第二位** = **DSH 适配锚点代号**：千寻 `0.4.x` 适配 DSH `0.1.5`；
+  锚点切换（如 `0.4.x` → `0.5.x`）= 一次 DSH 升级 = 一次完整 DSH 真机验收；
+  锚点代号是约定不是机械推导（`0.4` ↔ `0.1.5` 由团队手工映射）。
+- **第三位** = **千寻自身修订号**：`0.4.0` 是该主版本下的第一个发布版，
+  `0.4.1` 是第二个修订版（仅千寻自身迭代，DSH 不动）；
+  修订号递增不需要重验 DSH。
+- 编号规则：**千寻主版本号推进 = 锚点切换 + 至少一次 `PINNED_VERSION` 升级
+  - 一次完整 DSH 真机验收**；千寻修订号推进 = 千寻自身小迭代，可只跑千寻
+    自身的回归。
+
+### 落地项
+
+- [ ] `install::PINNED_VERSION` 由 `0.1.2-rc.1` 升到 `0.1.5-rc.1` ✅（代码侧）
+- [ ] 千寻版本号 `0.3.0` → `0.4.0` ✅（包元数据：root / tauri / mobile / Cargo.lock / mobile lockfile / iOS MARKETING_VERSION / Android versionName）
+- [ ] ADR-015 登记于 `02-技术架构.md §6` ✅
+- [ ] `install::PINNED_VERSION` 注释引用更新为 ADR-015 ✅（V0.2.1 那行 ADR-013 引用同步修正）
+- [ ] **版本一致性兜底**：`check_installed_at_version` 校验完整性 + 版本号 = `PINNED_VERSION`；`launch_plan` 在不匹配时拒绝启动（返回 `Error::DshVersionMismatch`）✅
+- [ ] **UI 警告**：环境页 DSH 块在 `dshVersionMatches=false` 时显示 `⚠ 版本不匹配，需重新安装` + 「千寻要求 X，当前 Y」副说明；按钮文案变「升级」；启动按钮禁用 ✅
+- [ ] install.rs 单元测试 `版本一致性校验拦截旧版DSH` / `版本一致性校验在目录缺失时返回false` ✅
+- [ ] **插件市场**（架构 §4.11）：market 域（registry 搜索/详情 + pnpm 精确安装/bundles 原子维护）+
+      插件页重写为 发现 / 已安装 两 tab；弃用与不兼容拒绝安装；`@deepseek-ai/*` 内核不可卸载 ✅
+- [ ] **环境页减法**：删 Node/DSH 常驻信息卡——健康时左侧为空、日志即主体；
+      只在缺 Node / DSH 未装 / 版本不匹配时显示紧凑操作行 ✅
+- [ ] **笔记桥迁移**：部署入口从插件页迁到笔记页状态条（三处事实就位即隐藏）✅
+- [ ] DSH 0.1.5 真机验收（按 V0.2.1 纪律：readiness 行格式 / 鉴权契约 / iframe 链路 / 网关代持）
+- [ ] 插件市场真机验收（npmmirror 搜索出插件 → 安装 → 重启 DSH 生效 → 卸载）
+- [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
 
 ## 里程碑间的纪律
 

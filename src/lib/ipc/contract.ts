@@ -76,6 +76,11 @@ export const IPC_COMMANDS = [
   'bridge_deploy',
   'bridge_status',
   'plugins_list',
+  'market_search',
+  'market_detail',
+  'market_installed',
+  'market_install',
+  'market_remove',
   'remote_interfaces',
   'remote_status',
   'remote_pair',
@@ -253,6 +258,11 @@ export interface HarnessEnvironment {
   minimumNode: NodeVersion;
   dshInstalled: boolean;
   dshVersion: string | null;
+  /**
+   * 已装的 DSH 是否等于千寻要求的版本（ADR-015）。
+   * `false` 时启动被拒，必须由用户点「重装」。
+   */
+  dshVersionMatches: boolean;
   installSpec: string;
   dshEntry: string;
   workspace: string;
@@ -611,6 +621,60 @@ export interface PluginEntry {
   name: string;
   /** 插件文件已在 profile node_modules 就位。 */
   deployed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// market_*（插件市场域）
+// ---------------------------------------------------------------------------
+
+/** market_search 返回项：npm registry 的一条搜索结果。 */
+export interface MarketListing {
+  name: string;
+  version: string;
+  description: string;
+  publisher: string;
+  /** ISO 时间戳。 */
+  updated: string;
+  weeklyDownloads: number;
+  link: string | null;
+  /** registry base（详情/安装同源）。 */
+  registry: string;
+}
+
+/** 兼容结论（serde tag = "state"）。 */
+export type MarketCompatibility =
+  | { state: 'compatible'; requirement: string }
+  | { state: 'unknown' }
+  | { state: 'incompatible'; requirement: string; reason: string };
+
+/** market_detail 返回项：一个包的发布详情。 */
+export interface MarketDetail {
+  name: string;
+  version: string;
+  description: string;
+  license: string;
+  homepage: string | null;
+  repository: string | null;
+  /** 声明了 dsh.bundle.patch = 插件；否则只是普通包。 */
+  bundle: boolean;
+  compatibility: MarketCompatibility;
+  lifecycleScripts: string[];
+  /** 存在即拒绝安装。 */
+  deprecated: string | null;
+  unpackedBytes: number | null;
+  installSpec: string;
+}
+
+/** market_installed 返回项：profile manifest 里的一项。 */
+export interface MarketInstalled {
+  name: string;
+  /** 依赖范围；内核包为空串。 */
+  spec: string;
+  /** 在 bundles 数组里 = 启动加载。 */
+  active: boolean;
+  /** node_modules 已落盘。 */
+  deployed: boolean;
+  builtin: boolean;
 }
 
 // ---------------------------------------------------------------------------
