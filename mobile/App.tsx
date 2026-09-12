@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { BackHandler, StatusBar, StyleSheet, useColorScheme, View } from 'react-native';
+import {
+  BackHandler,
+  StatusBar,
+  StyleSheet,
+  useColorScheme,
+  View,
+} from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AddSheet } from './src/screens/AddSheet';
 import { HomeScreen } from './src/screens/HomeScreen';
@@ -24,21 +30,24 @@ function App(): React.JSX.Element {
 
   // Android 返回键：扫码 > 表单 > 工作台 > 系统默认。
   useEffect(() => {
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (scanning) {
-        setScanning(false);
-        return true;
-      }
-      if (adding) {
-        setAdding(false);
-        return true;
-      }
-      if (view.type === 'workspace') {
-        setView({ type: 'home' });
-        return true;
-      }
-      return false;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        if (scanning) {
+          setScanning(false);
+          return true;
+        }
+        if (adding) {
+          setAdding(false);
+          return true;
+        }
+        if (view.type === 'workspace') {
+          setView({ type: 'home' });
+          return true;
+        }
+        return false;
+      },
+    );
     return () => subscription.remove();
   }, [scanning, adding, view.type]);
 
@@ -72,11 +81,20 @@ function App(): React.JSX.Element {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={[styles.root, { backgroundColor: colors.bg }]} edges={['top', 'bottom']}>
-        <StatusBar barStyle={scheme === 'dark' ? 'light-content' : 'dark-content'} />
+      <SafeAreaView
+        style={[styles.root, { backgroundColor: colors.bg }]}
+        edges={['top', 'bottom']}
+      >
+        <StatusBar
+          barStyle={scheme === 'dark' ? 'light-content' : 'dark-content'}
+        />
         <View style={[styles.body, { backgroundColor: colors.bg }]}>
           {workspaceConn ? (
-            <WorkspaceScreen colors={colors} conn={workspaceConn} onExit={() => setView({ type: 'home' })} />
+            <WorkspaceScreen
+              colors={colors}
+              conn={workspaceConn}
+              onExit={() => setView({ type: 'home' })}
+            />
           ) : (
             <HomeScreen
               colors={colors}
@@ -100,7 +118,11 @@ function App(): React.JSX.Element {
           />
         )}
         {scanning && (
-          <ScannerScreen colors={colors} onCancel={() => setScanning(false)} onCode={handleCode} />
+          <ScannerScreen
+            colors={colors}
+            onCancel={() => setScanning(false)}
+            onCode={handleCode}
+          />
         )}
       </SafeAreaView>
     </SafeAreaProvider>

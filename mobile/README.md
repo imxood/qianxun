@@ -1,10 +1,12 @@
 # 千寻移动端（React Native）
 
 千寻的 Android App：**多 PC 连接管理**（扫码/粘贴配对、自动命名、在线状态、随时切换）
-+ **Workspace 多 Surface 骨架**（工作台 / 远程桌面——同一配对连接，切换零重新鉴权）。
+
+- **Workspace 多 Surface 骨架**（工作台 / 远程桌面——同一配对连接，切换零重新鉴权）。
 
 技术栈：React Native 0.87（新架构）+ react-native-webview（DSH 工作台 Surface）
-+ react-native-camera-kit（原生扫码）+ 原生剪贴板/AsyncStorage。
+
+- react-native-camera-kit（原生扫码）+ 原生剪贴板/AsyncStorage。
 
 ```
 mobile/

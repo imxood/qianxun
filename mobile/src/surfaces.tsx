@@ -65,5 +65,10 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   placeholderTitle: { fontSize: 20, fontWeight: '700', opacity: 0.7 },
-  placeholderBody: { fontSize: 13, textAlign: 'center', lineHeight: 20, opacity: 0.5 },
+  placeholderBody: {
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 20,
+    opacity: 0.5,
+  },
 });

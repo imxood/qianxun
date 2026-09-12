@@ -2,15 +2,25 @@ import { hostOf, isValidPairUrl, relTime } from '../src/validate';
 
 describe('配对链接校验', () => {
   it('接受千寻配对链接形态', () => {
-    expect(isValidPairUrl('http://10.144.3.2:17400/qx-gate?token=cafebabe12345678')).toBe(true);
-    expect(isValidPairUrl('  http://10.144.3.2:17400/qx-gate?token=CAFEF00D  ')).toBe(true);
-    expect(isValidPairUrl('http://my-pc.local:17400/qx-gate?token=deadbeef')).toBe(true);
+    expect(
+      isValidPairUrl('http://10.144.3.2:17400/qx-gate?token=cafebabe12345678'),
+    ).toBe(true);
+    expect(
+      isValidPairUrl('  http://10.144.3.2:17400/qx-gate?token=CAFEF00D  '),
+    ).toBe(true);
+    expect(
+      isValidPairUrl('http://my-pc.local:17400/qx-gate?token=deadbeef'),
+    ).toBe(true);
   });
 
   it('拒绝非配对形态', () => {
     expect(isValidPairUrl('http://10.144.3.2:17400/')).toBe(false);
-    expect(isValidPairUrl('https://10.144.3.2:17400/qx-gate?token=cafebabe')).toBe(false);
-    expect(isValidPairUrl('http://10.144.3.2:17400/qx-gate?token=短')).toBe(false);
+    expect(
+      isValidPairUrl('https://10.144.3.2:17400/qx-gate?token=cafebabe'),
+    ).toBe(false);
+    expect(isValidPairUrl('http://10.144.3.2:17400/qx-gate?token=短')).toBe(
+      false,
+    );
     expect(isValidPairUrl('随便一段文本')).toBe(false);
     expect(isValidPairUrl('')).toBe(false);
   });
@@ -18,7 +28,9 @@ describe('配对链接校验', () => {
 
 describe('展示工具', () => {
   it('hostOf 提取主机端口', () => {
-    expect(hostOf('http://10.144.3.2:17400/qx-gate?token=x')).toBe('10.144.3.2:17400');
+    expect(hostOf('http://10.144.3.2:17400/qx-gate?token=x')).toBe(
+      '10.144.3.2:17400',
+    );
     expect(hostOf('not a url')).toBe('not a url');
   });
 

@@ -24,6 +24,8 @@ export async function loadConnections(): Promise<Connection[]> {
   }
 }
 
-export async function saveConnections(connections: Connection[]): Promise<void> {
+export async function saveConnections(
+  connections: Connection[],
+): Promise<void> {
   await AsyncStorage.setItem(STORE_KEY, JSON.stringify(connections));
 }

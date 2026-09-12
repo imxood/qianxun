@@ -13,7 +13,7 @@ import { space, type } from '../theme';
 import { probeInfo } from '../probe';
 import type { Connection } from '../types';
 import type { Notice } from '../useConnections';
-import { hostOf, relTime } from '../validate';
+import { hostOf } from '../validate';
 
 interface HomeScreenProps {
   colors: Palette;
@@ -40,7 +40,9 @@ export function HomeScreen(props: HomeScreenProps) {
   const appState = useRef(AppState.currentState);
 
   const sorted = [...connections].sort(
-    (a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0) || (b.addedAt || 0) - (a.addedAt || 0),
+    (a, b) =>
+      (b.lastUsedAt || 0) - (a.lastUsedAt || 0) ||
+      (b.addedAt || 0) - (a.addedAt || 0),
   );
 
   const refreshStatuses = useCallback(() => {
@@ -89,11 +91,19 @@ export function HomeScreen(props: HomeScreenProps) {
         </Pressable>
       </View>
 
-      <ScrollView style={styles.flex} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={styles.flex}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
         {!ready ? null : sorted.length === 0 ? (
           <View style={styles.empty}>
-            <Text style={[type.headline, { color: colors.secondaryLabel }]}>未添加连接</Text>
-            <Text style={[type.footnote, { color: colors.tertiaryLabel }]}>点右上角 + 添加电脑</Text>
+            <Text style={[type.headline, { color: colors.secondaryLabel }]}>
+              未添加连接
+            </Text>
+            <Text style={[type.footnote, { color: colors.tertiaryLabel }]}>
+              点右上角 + 添加电脑
+            </Text>
           </View>
         ) : (
           <View style={[styles.list, { backgroundColor: colors.card }]}>
@@ -104,7 +114,10 @@ export function HomeScreen(props: HomeScreenProps) {
                   key={conn.id}
                   accessibilityLabel={`${conn.name}，${statusText(state)}`}
                   android_ripple={{ color: colors.fill }}
-                  style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+                  style={({ pressed }) => [
+                    styles.row,
+                    pressed && styles.pressed,
+                  ]}
                   onPress={() => props.onOpen(conn)}
                 >
                   <View
@@ -112,15 +125,25 @@ export function HomeScreen(props: HomeScreenProps) {
                       styles.dot,
                       {
                         backgroundColor:
-                          state === 'on' ? colors.green : state === 'off' ? colors.red : colors.tertiaryLabel,
+                          state === 'on'
+                            ? colors.green
+                            : state === 'off'
+                              ? colors.red
+                              : colors.tertiaryLabel,
                       },
                     ]}
                   />
                   <View style={styles.rowMeta}>
-                    <Text style={[type.headline, { color: colors.label }]} numberOfLines={1}>
+                    <Text
+                      style={[type.headline, { color: colors.label }]}
+                      numberOfLines={1}
+                    >
                       {conn.name}
                     </Text>
-                    <Text style={[type.footnote, { color: colors.secondaryLabel }]} numberOfLines={1}>
+                    <Text
+                      style={[type.footnote, { color: colors.secondaryLabel }]}
+                      numberOfLines={1}
+                    >
                       {hostOf(conn.url)} · {statusText(state)}
                     </Text>
                   </View>
@@ -128,17 +151,32 @@ export function HomeScreen(props: HomeScreenProps) {
                     accessibilityLabel="更多操作"
                     accessibilityRole="button"
                     hitSlop={8}
-                    style={({ pressed }) => [styles.more, pressed && styles.pressed]}
+                    style={({ pressed }) => [
+                      styles.more,
+                      pressed && styles.pressed,
+                    ]}
                     onPress={() => {
                       setMenuName(conn.name);
                       setMenuUrl(conn.url);
                       setMenu({ conn, mode: 'menu' });
                     }}
                   >
-                    <Text style={[styles.moreGlyph, { color: colors.secondaryLabel }]}>⋯</Text>
+                    <Text
+                      style={[
+                        styles.moreGlyph,
+                        { color: colors.secondaryLabel },
+                      ]}
+                    >
+                      ⋯
+                    </Text>
                   </Pressable>
                   {index < sorted.length - 1 && (
-                    <View style={[styles.separator, { backgroundColor: colors.separator }]} />
+                    <View
+                      style={[
+                        styles.separator,
+                        { backgroundColor: colors.separator },
+                      ]}
+                    />
                   )}
                 </Pressable>
               );
@@ -151,7 +189,10 @@ export function HomeScreen(props: HomeScreenProps) {
             style={[
               type.footnote,
               styles.notice,
-              { color: notice.kind === 'ok' ? colors.secondaryLabel : colors.red },
+              {
+                color:
+                  notice.kind === 'ok' ? colors.secondaryLabel : colors.red,
+              },
             ]}
           >
             {notice.text}
@@ -166,13 +207,25 @@ export function HomeScreen(props: HomeScreenProps) {
             {menu.mode === 'menu' && (
               <>
                 <Text
-                  style={[type.footnote, styles.sheetHeader, { color: colors.secondaryLabel }]}
+                  style={[
+                    type.footnote,
+                    styles.sheetHeader,
+                    { color: colors.secondaryLabel },
+                  ]}
                   numberOfLines={1}
                 >
                   {menu.conn.name}
                 </Text>
-                <MenuItem colors={colors} label="重命名" onPress={() => setMenu({ conn: menu.conn, mode: 'rename' })} />
-                <MenuItem colors={colors} label="更新链接" onPress={() => setMenu({ conn: menu.conn, mode: 'update' })} />
+                <MenuItem
+                  colors={colors}
+                  label="重命名"
+                  onPress={() => setMenu({ conn: menu.conn, mode: 'rename' })}
+                />
+                <MenuItem
+                  colors={colors}
+                  label="更新链接"
+                  onPress={() => setMenu({ conn: menu.conn, mode: 'update' })}
+                />
                 <MenuItem
                   colors={colors}
                   label="删除连接"
@@ -182,16 +235,41 @@ export function HomeScreen(props: HomeScreenProps) {
                     setMenu(null);
                   }}
                 />
-                <View style={[styles.sheetCancelGap, { backgroundColor: colors.bg }]} />
-                <MenuItem colors={colors} label="取消" bold onPress={() => setMenu(null)} cancel />
+                <View
+                  style={[
+                    styles.sheetCancelGap,
+                    { backgroundColor: colors.bg },
+                  ]}
+                />
+                <MenuItem
+                  colors={colors}
+                  label="取消"
+                  bold
+                  onPress={() => setMenu(null)}
+                  cancel
+                />
               </>
             )}
             {menu.mode === 'rename' && (
               <>
-                <Text style={[type.footnote, styles.sheetHeader, { color: colors.secondaryLabel }]}>名称</Text>
-                <View style={[styles.fieldWrap, { backgroundColor: colors.bg }]}>
+                <Text
+                  style={[
+                    type.footnote,
+                    styles.sheetHeader,
+                    { color: colors.secondaryLabel },
+                  ]}
+                >
+                  名称
+                </Text>
+                <View
+                  style={[styles.fieldWrap, { backgroundColor: colors.bg }]}
+                >
                   <TextInput
-                    style={[type.body, styles.textInput, { color: colors.label }]}
+                    style={[
+                      type.body,
+                      styles.textInput,
+                      { color: colors.label },
+                    ]}
                     value={menuName}
                     onChangeText={setMenuName}
                     maxLength={30}
@@ -207,15 +285,34 @@ export function HomeScreen(props: HomeScreenProps) {
                     setMenu(null);
                   }}
                 />
-                <MenuItem colors={colors} label="取消" onPress={() => setMenu(null)} cancel />
+                <MenuItem
+                  colors={colors}
+                  label="取消"
+                  onPress={() => setMenu(null)}
+                  cancel
+                />
               </>
             )}
             {menu.mode === 'update' && (
               <>
-                <Text style={[type.footnote, styles.sheetHeader, { color: colors.secondaryLabel }]}>配对链接</Text>
-                <View style={[styles.fieldWrap, { backgroundColor: colors.bg }]}>
+                <Text
+                  style={[
+                    type.footnote,
+                    styles.sheetHeader,
+                    { color: colors.secondaryLabel },
+                  ]}
+                >
+                  配对链接
+                </Text>
+                <View
+                  style={[styles.fieldWrap, { backgroundColor: colors.bg }]}
+                >
                   <TextInput
-                    style={[type.subheadline, styles.textInput, { color: colors.label }]}
+                    style={[
+                      type.subheadline,
+                      styles.textInput,
+                      { color: colors.label },
+                    ]}
                     value={menuUrl}
                     onChangeText={setMenuUrl}
                     autoCapitalize="none"
@@ -229,13 +326,21 @@ export function HomeScreen(props: HomeScreenProps) {
                   label="保存"
                   bold
                   onPress={() => {
-                    const result = props.onUpdateUrl(menu.conn.id, menuUrl.trim());
+                    const result = props.onUpdateUrl(
+                      menu.conn.id,
+                      menuUrl.trim(),
+                    );
                     if (result.ok) {
                       setMenu(null);
                     }
                   }}
                 />
-                <MenuItem colors={colors} label="取消" onPress={() => setMenu(null)} cancel />
+                <MenuItem
+                  colors={colors}
+                  label="取消"
+                  onPress={() => setMenu(null)}
+                  cancel
+                />
               </>
             )}
           </View>
@@ -305,7 +410,12 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.55 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   rowMeta: { flex: 1, minWidth: 0, paddingVertical: space.m, gap: 2 },
-  more: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  more: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   moreGlyph: { fontSize: 22, fontWeight: '600' },
   separator: {
     position: 'absolute',
@@ -316,7 +426,14 @@ const styles = StyleSheet.create({
   },
   empty: { alignItems: 'center', gap: space.s, paddingTop: 96 },
   notice: { textAlign: 'center', marginTop: space.l },
-  overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'flex-end' },
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'flex-end',
+  },
   backdrop: {
     position: 'absolute',
     top: 0,
@@ -325,7 +442,11 @@ const styles = StyleSheet.create({
     bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.4)',
   },
-  sheet: { borderTopLeftRadius: 16, borderTopRightRadius: 16, paddingBottom: 24 },
+  sheet: {
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingBottom: 24,
+  },
   sheetHeader: { textAlign: 'center', paddingVertical: space.m },
   sheetCancelGap: { height: space.s, marginTop: space.s },
   menuItem: {
@@ -335,6 +456,10 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(120,120,128,0.2)',
   },
-  fieldWrap: { marginHorizontal: space.l, borderRadius: 10, marginBottom: space.s },
+  fieldWrap: {
+    marginHorizontal: space.l,
+    borderRadius: 10,
+    marginBottom: space.s,
+  },
   textInput: { padding: space.m },
 });

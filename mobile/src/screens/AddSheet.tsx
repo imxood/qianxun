@@ -46,22 +46,44 @@ export function AddSheet(props: AddSheetProps) {
 
   return (
     <View style={styles.root}>
-      <Pressable style={styles.backdrop} onPress={props.onClose} accessibilityLabel="关闭" />
-      <KeyboardAvoidingView style={styles.avoid} behavior={Platform.OS === 'android' ? undefined : 'padding'}>
+      <Pressable
+        style={styles.backdrop}
+        onPress={props.onClose}
+        accessibilityLabel="关闭"
+      />
+      <KeyboardAvoidingView
+        style={styles.avoid}
+        behavior={Platform.OS === 'android' ? undefined : 'padding'}
+      >
         <View style={[styles.sheet, { backgroundColor: colors.card }]}>
           <View style={styles.grabber}>
-            <View style={[styles.grabberBar, { backgroundColor: colors.tertiaryLabel }]} />
+            <View
+              style={[
+                styles.grabberBar,
+                { backgroundColor: colors.tertiaryLabel },
+              ]}
+            />
           </View>
           <View style={styles.header}>
             <Pressable onPress={props.onClose} hitSlop={8}>
               <Text style={[type.body, { color: colors.tint }]}>取消</Text>
             </Pressable>
-            <Text style={[type.headline, { color: colors.label }]}>添加连接</Text>
-            <Pressable onPress={() => void submit()} hitSlop={8} disabled={!canSubmit || adding}>
+            <Text style={[type.headline, { color: colors.label }]}>
+              添加连接
+            </Text>
+            <Pressable
+              onPress={() => void submit()}
+              hitSlop={8}
+              disabled={!canSubmit || adding}
+            >
               <Text
                 style={[
                   type.body,
-                  { color: canSubmit && !adding ? colors.tint : colors.tertiaryLabel, fontWeight: '600' },
+                  {
+                    color:
+                      canSubmit && !adding ? colors.tint : colors.tertiaryLabel,
+                    fontWeight: '600',
+                  },
                 ]}
               >
                 {adding ? '…' : '添加'}
@@ -71,9 +93,21 @@ export function AddSheet(props: AddSheetProps) {
 
           <View style={[styles.form, { backgroundColor: colors.card }]}>
             <View style={[styles.fieldGroup, { backgroundColor: colors.bg }]}>
-              <Text style={[type.caption, styles.fieldLabel, { color: colors.secondaryLabel }]}>配对链接</Text>
+              <Text
+                style={[
+                  type.caption,
+                  styles.fieldLabel,
+                  { color: colors.secondaryLabel },
+                ]}
+              >
+                配对链接
+              </Text>
               <TextInput
-                style={[type.subheadline, styles.fieldInput, { color: colors.label }]}
+                style={[
+                  type.subheadline,
+                  styles.fieldInput,
+                  { color: colors.label },
+                ]}
                 placeholder="http://IP:端口/qx-gate?token=…"
                 placeholderTextColor={colors.tertiaryLabel}
                 value={url}
@@ -88,9 +122,21 @@ export function AddSheet(props: AddSheetProps) {
               />
             </View>
             <View style={[styles.fieldGroup, { backgroundColor: colors.bg }]}>
-              <Text style={[type.caption, styles.fieldLabel, { color: colors.secondaryLabel }]}>备注（可选）</Text>
+              <Text
+                style={[
+                  type.caption,
+                  styles.fieldLabel,
+                  { color: colors.secondaryLabel },
+                ]}
+              >
+                备注（可选）
+              </Text>
               <TextInput
-                style={[type.subheadline, styles.fieldInput, { color: colors.label }]}
+                style={[
+                  type.subheadline,
+                  styles.fieldInput,
+                  { color: colors.label },
+                ]}
                 placeholder="电脑名称"
                 placeholderTextColor={colors.tertiaryLabel}
                 value={name}
@@ -99,7 +145,11 @@ export function AddSheet(props: AddSheetProps) {
               />
             </View>
             {error !== '' && (
-              <Text style={[type.footnote, styles.error, { color: colors.red }]}>{error}</Text>
+              <Text
+                style={[type.footnote, styles.error, { color: colors.red }]}
+              >
+                {error}
+              </Text>
             )}
           </View>
 
@@ -107,16 +157,27 @@ export function AddSheet(props: AddSheetProps) {
             <Pressable
               accessibilityRole="button"
               android_ripple={{ color: colors.fill }}
-              style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.action,
+                pressed && styles.pressed,
+              ]}
               onPress={props.onScan}
             >
               <Text style={[type.body, { color: colors.tint }]}>扫码填写</Text>
             </Pressable>
-            <View style={[styles.actionSeparator, { backgroundColor: colors.separator }]} />
+            <View
+              style={[
+                styles.actionSeparator,
+                { backgroundColor: colors.separator },
+              ]}
+            />
             <Pressable
               accessibilityRole="button"
               android_ripple={{ color: colors.fill }}
-              style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.action,
+                pressed && styles.pressed,
+              ]}
               onPress={() => {
                 Clipboard.getString()
                   .then(text => {
@@ -132,7 +193,13 @@ export function AddSheet(props: AddSheetProps) {
             </Pressable>
           </View>
 
-          <Text style={[type.caption, styles.footnote, { color: colors.tertiaryLabel }]}>
+          <Text
+            style={[
+              type.caption,
+              styles.footnote,
+              { color: colors.tertiaryLabel },
+            ]}
+          >
             配对令牌等同电脑控制权，请妥善保管
           </Text>
         </View>
@@ -142,15 +209,33 @@ export function AddSheet(props: AddSheetProps) {
 }
 
 const styles = StyleSheet.create({
-  root: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'flex-end' },
-  backdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.4)' },
+  root: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'flex-end',
+  },
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
   avoid: { justifyContent: 'flex-end' },
   sheet: {
     borderTopLeftRadius: radius.sheet,
     borderTopRightRadius: radius.sheet,
     paddingBottom: space.xl,
   },
-  grabber: { alignItems: 'center', paddingTop: space.s, paddingBottom: space.xs },
+  grabber: {
+    alignItems: 'center',
+    paddingTop: space.s,
+    paddingBottom: space.xs,
+  },
   grabberBar: { width: 36, height: 5, borderRadius: 2.5 },
   header: {
     flexDirection: 'row',
@@ -160,7 +245,12 @@ const styles = StyleSheet.create({
     paddingVertical: space.m,
   },
   form: { paddingHorizontal: space.l, gap: space.m },
-  fieldGroup: { borderRadius: radius.list, paddingHorizontal: space.l, paddingTop: space.xs, paddingBottom: space.s },
+  fieldGroup: {
+    borderRadius: radius.list,
+    paddingHorizontal: space.l,
+    paddingTop: space.xs,
+    paddingBottom: space.s,
+  },
   fieldLabel: { marginTop: space.xs },
   fieldInput: { paddingVertical: space.xs },
   error: { marginTop: -space.xs },
@@ -173,5 +263,9 @@ const styles = StyleSheet.create({
   action: { minHeight: 50, alignItems: 'center', justifyContent: 'center' },
   actionSeparator: { height: StyleSheet.hairlineWidth },
   pressed: { opacity: 0.55 },
-  footnote: { textAlign: 'center', marginTop: space.l, marginHorizontal: space.xl },
+  footnote: {
+    textAlign: 'center',
+    marginTop: space.l,
+    marginHorizontal: space.xl,
+  },
 });

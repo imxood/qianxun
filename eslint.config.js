@@ -17,6 +17,15 @@ export default tseslint.config(
       'mobile/android/.gradle/',
       'mobile/android/app/build/',
       'mobile/node_modules/',
+      // RN 模板工具链配置（CommonJS）与 node 小工具脚本：node 环境，
+      // 外壳的 flat config（browser + ESM）套不上，留给 mobile 自己的 lint。
+      'mobile/.eslintrc.js',
+      'mobile/.prettierrc.js',
+      'mobile/babel.config.js',
+      'mobile/jest.config.js',
+      'mobile/metro.config.js',
+      'mobile/examples/',
+      'mobile/test/',
     ],
   },
   js.configs.recommended,

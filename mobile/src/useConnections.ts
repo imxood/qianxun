@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { probeInfo } from './probe';
 import { loadConnections, saveConnections } from './store';
-import type { Connection, PcInfo } from './types';
+import type { Connection } from './types';
 import { hostOf, isValidPairUrl, newId } from './validate';
 
 export interface AddResult {
@@ -37,7 +37,11 @@ export function useConnections() {
     async (rawUrl: string, manualName: string): Promise<AddResult> => {
       const url = rawUrl.trim();
       if (!isValidPairUrl(url)) {
-        return { ok: false, message: '链接形态不对：请扫电脑端「远程访问」的配对二维码，或完整粘贴配对链接。' };
+        return {
+          ok: false,
+          message:
+            '链接形态不对：请扫电脑端「远程访问」的配对二维码，或完整粘贴配对链接。',
+        };
       }
       if (connectionsRef.current.some(item => item.url === url)) {
         return { ok: false, message: '这条连接已经存在。' };
@@ -49,12 +53,7 @@ export function useConnections() {
         addedAt: Date.now(),
         lastUsedAt: 0,
       };
-      let info: PcInfo | null = null;
-      try {
-        info = await probeInfo(draft);
-      } catch {
-        info = null;
-      }
+      const info = await probeInfo(draft).catch(() => null);
       if (info?.hostname && !manualName.trim()) {
         draft.name = info.hostname;
       }
@@ -65,7 +64,11 @@ export function useConnections() {
           message: `已添加「${draft.name}」${info.dshReady ? '，DSH 运行中' : '（DSH 未运行，稍后可连）'}`,
         };
       }
-      return { ok: true, message: '暂时连不上这台电脑（可能离线），已按地址保存，连上后状态点亮。' };
+      return {
+        ok: true,
+        message:
+          '暂时连不上这台电脑（可能离线），已按地址保存，连上后状态点亮。',
+      };
     },
     [persist],
   );
@@ -76,7 +79,11 @@ export function useConnections() {
       if (!trimmed) {
         return;
       }
-      persist(connectionsRef.current.map(item => (item.id === id ? { ...item, name: trimmed } : item)));
+      persist(
+        connectionsRef.current.map(item =>
+          item.id === id ? { ...item, name: trimmed } : item,
+        ),
+      );
     },
     [persist],
   );
@@ -84,9 +91,16 @@ export function useConnections() {
   const updateConnectionUrl = useCallback(
     (id: string, url: string): AddResult => {
       if (!isValidPairUrl(url)) {
-        return { ok: false, message: '链接形态不对：应来自千寻设置页的配对二维码/复制链接。' };
+        return {
+          ok: false,
+          message: '链接形态不对：应来自千寻设置页的配对二维码/复制链接。',
+        };
       }
-      persist(connectionsRef.current.map(item => (item.id === id ? { ...item, url } : item)));
+      persist(
+        connectionsRef.current.map(item =>
+          item.id === id ? { ...item, url } : item,
+        ),
+      );
       return { ok: true, message: '配对链接已更新。' };
     },
     [persist],
@@ -102,7 +116,9 @@ export function useConnections() {
   const touchConnection = useCallback(
     (id: string) => {
       persist(
-        connectionsRef.current.map(item => (item.id === id ? { ...item, lastUsedAt: Date.now() } : item)),
+        connectionsRef.current.map(item =>
+          item.id === id ? { ...item, lastUsedAt: Date.now() } : item,
+        ),
       );
     },
     [persist],

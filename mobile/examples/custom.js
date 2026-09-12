@@ -31,7 +31,8 @@ window.qxMobile.register(({ root }) => {
 
   // 等首个消息区出现再显示，避免空会话时挡视线。
   const observer = new MutationObserver(() => {
-    button.hidden = document.querySelectorAll('[class*="message"]').length === 0;
+    button.hidden =
+      document.querySelectorAll('[class*="message"]').length === 0;
   });
   observer.observe(document.body, { childList: true, subtree: true });
 

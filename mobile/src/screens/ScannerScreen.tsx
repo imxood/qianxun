@@ -1,9 +1,15 @@
 import { Camera } from 'react-native-camera-kit';
 import React, { useEffect, useRef, useState } from 'react';
-import { PermissionsAndroid, Pressable, StyleSheet, Text, Vibration, View } from 'react-native';
+import {
+  PermissionsAndroid,
+  Pressable,
+  StyleSheet,
+  Text,
+  Vibration,
+  View,
+} from 'react-native';
 import type { Palette } from '../theme';
 import { space, type } from '../theme';
-import { isValidPairUrl } from '../validate';
 
 interface ScannerScreenProps {
   colors: Palette;
@@ -17,15 +23,22 @@ const FRAME = 248;
 const ARM = 30;
 
 export function ScannerScreen(props: ScannerScreenProps) {
-  const { colors } = props;
-  const [permission, setPermission] = useState<'pending' | 'granted' | 'denied'>('pending');
+  const [permission, setPermission] = useState<
+    'pending' | 'granted' | 'denied'
+  >('pending');
   const [hint, setHint] = useState(HINT_DEFAULT);
   const busy = useRef(false);
-  const hintTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const hintTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA)
-      .then(state => setPermission(state === PermissionsAndroid.RESULTS.GRANTED ? 'granted' : 'denied'))
+      .then(state =>
+        setPermission(
+          state === PermissionsAndroid.RESULTS.GRANTED ? 'granted' : 'denied',
+        ),
+      )
       .catch(() => setPermission('denied'));
     return () => clearTimeout(hintTimer.current);
   }, []);
@@ -35,7 +48,8 @@ export function ScannerScreen(props: ScannerScreenProps) {
       return;
     }
     const text = String(
-      (raw as { nativeEvent?: { codeStringValue?: string } })?.nativeEvent?.codeStringValue ?? '',
+      (raw as { nativeEvent?: { codeStringValue?: string } })?.nativeEvent
+        ?.codeStringValue ?? '',
     ).trim();
     if (!text) {
       return;
@@ -57,11 +71,18 @@ export function ScannerScreen(props: ScannerScreenProps) {
   return (
     <View style={styles.root}>
       {permission === 'granted' ? (
-        <Camera style={StyleSheet.absoluteFill} scanBarcode showFrame={false} onReadCode={handleRead} />
+        <Camera
+          style={StyleSheet.absoluteFill}
+          scanBarcode
+          showFrame={false}
+          onReadCode={handleRead}
+        />
       ) : (
         <View style={styles.center}>
           <Text style={[type.subheadline, styles.dimText]}>
-            {permission === 'pending' ? '正在请求相机权限…' : '相机权限未开启，可在系统设置中允许'}
+            {permission === 'pending'
+              ? '正在请求相机权限…'
+              : '相机权限未开启，可在系统设置中允许'}
           </Text>
         </View>
       )}
@@ -69,8 +90,14 @@ export function ScannerScreen(props: ScannerScreenProps) {
         <>
           <View style={[styles.dim, styles.dimTop]} pointerEvents="none" />
           <View style={[styles.dim, styles.dimBottom]} pointerEvents="none" />
-          <View style={[styles.frameSide, styles.frameTop]} pointerEvents="none" />
-          <View style={[styles.frameSide, styles.frameBottom]} pointerEvents="none" />
+          <View
+            style={[styles.frameSide, styles.frameTop]}
+            pointerEvents="none"
+          />
+          <View
+            style={[styles.frameSide, styles.frameBottom]}
+            pointerEvents="none"
+          />
           <FrameCorners />
           <Text style={[type.footnote, styles.hint]} pointerEvents="none">
             {hint}
@@ -100,19 +127,89 @@ function FrameCorners() {
   const half = FRAME / 2;
   return (
     <View pointerEvents="none">
-      <View style={[corner, { borderTopWidth: 3, borderLeftWidth: 3, borderTopLeftRadius: 16, left: '50%', top: '42%', marginLeft: -half, marginTop: -half }]} />
-      <View style={[corner, { borderTopWidth: 3, borderRightWidth: 3, borderTopRightRadius: 16, left: '50%', top: '42%', marginLeft: half - ARM, marginTop: -half }]} />
-      <View style={[corner, { borderBottomWidth: 3, borderLeftWidth: 3, borderBottomLeftRadius: 16, left: '50%', top: '42%', marginLeft: -half, marginTop: half - ARM }]} />
-      <View style={[corner, { borderBottomWidth: 3, borderRightWidth: 3, borderBottomRightRadius: 16, left: '50%', top: '42%', marginLeft: half - ARM, marginTop: half - ARM }]} />
+      <View
+        style={[
+          corner,
+          {
+            borderTopWidth: 3,
+            borderLeftWidth: 3,
+            borderTopLeftRadius: 16,
+            left: '50%',
+            top: '42%',
+            marginLeft: -half,
+            marginTop: -half,
+          },
+        ]}
+      />
+      <View
+        style={[
+          corner,
+          {
+            borderTopWidth: 3,
+            borderRightWidth: 3,
+            borderTopRightRadius: 16,
+            left: '50%',
+            top: '42%',
+            marginLeft: half - ARM,
+            marginTop: -half,
+          },
+        ]}
+      />
+      <View
+        style={[
+          corner,
+          {
+            borderBottomWidth: 3,
+            borderLeftWidth: 3,
+            borderBottomLeftRadius: 16,
+            left: '50%',
+            top: '42%',
+            marginLeft: -half,
+            marginTop: half - ARM,
+          },
+        ]}
+      />
+      <View
+        style={[
+          corner,
+          {
+            borderBottomWidth: 3,
+            borderRightWidth: 3,
+            borderBottomRightRadius: 16,
+            left: '50%',
+            top: '42%',
+            marginLeft: half - ARM,
+            marginTop: half - ARM,
+          },
+        ]}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#000' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: space.xl },
+  root: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000',
+  },
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: space.xl,
+  },
   dimText: { color: 'rgba(255,255,255,0.85)', textAlign: 'center' },
-  dim: { position: 'absolute', left: 0, right: 0, height: '21%', backgroundColor: 'rgba(0,0,0,0.4)' },
+  dim: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: '21%',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
   dimTop: { top: 0 },
   dimBottom: { bottom: 0 },
   frameSide: {
