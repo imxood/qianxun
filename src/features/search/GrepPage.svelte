@@ -98,7 +98,7 @@
       <input
         class="min-w-0 flex-1 bg-transparent px-2.5 py-2 font-mono text-sm placeholder:text-muted/60 focus:outline-none"
         type="text"
-        placeholder={search.status?.root ? '搜索文件内容（流式出结果，无需回车）' : '先选择目录'}
+        placeholder={search.status?.root ? '搜索文件内容（即输即搜）' : '先选择目录'}
         disabled={!search.status?.root}
         bind:value={search.grepQuery}
         oninput={() => search.scheduleGrep()}
@@ -166,7 +166,7 @@
 
   <div class="flex items-center gap-2 text-xs">
     <input
-      class="w-56 rounded border border-line bg-surface px-2 py-1 font-mono text-xs placeholder:text-muted/60"
+      class="qx-input w-56 rounded-md py-1 font-mono text-xs"
       type="text"
       placeholder="文件过滤，如 *.rs 或 src/**"
       value={search.grepGlob}
@@ -188,7 +188,7 @@
     {#if search.grepError}
       <span class="text-danger">{search.grepError}</span>
     {:else if search.grepResult?.aborted}
-      <span class="text-muted">已停止（取消或达到 2000 条上限——试试缩小范围或加文件过滤）</span>
+      <span class="text-muted">已停止（达到 2000 条上限）</span>
     {/if}
   </div>
 
@@ -262,12 +262,12 @@
   {:else if search.grepResult}
     <div class="flex flex-col items-center gap-1 py-16 text-center">
       <p class="text-sm text-fg">无匹配内容</p>
-      <p class="text-xs text-muted">试试 .* 正则、w 整词或放宽文件过滤</p>
+      <p class="text-xs text-muted">试试正则或放宽文件过滤</p>
     </div>
   {:else if search.status?.root}
     <div class="flex flex-col items-center gap-1 py-16 text-center">
       <p class="text-sm text-fg">输入内容开始搜索</p>
-      <p class="text-xs text-muted">.* 正则 · Aa 智能大小写 · w 整词 · 文件过滤 glob · 即输即搜</p>
+      <p class="text-xs text-muted">支持正则、整词与文件过滤</p>
     </div>
   {/if}
 </section>

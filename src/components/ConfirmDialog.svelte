@@ -40,7 +40,7 @@
     onclick={() => oncancel?.()}
   >
     <div
-      class="w-80 rounded-lg border border-line bg-surface p-4 shadow-xl"
+      class="w-80 rounded-xl border border-line bg-surface p-4 shadow-xl"
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -50,15 +50,15 @@
       <p class="mt-1.5 text-xs leading-5 text-muted">{message}</p>
       <div class="mt-4 flex justify-end gap-2">
         <button
-          class="rounded-md px-3 py-1.5 text-xs text-muted transition-colors hover:bg-accent-soft hover:text-fg"
+          class="qx-btn qx-btn-ghost rounded-md px-3 py-1.5 text-xs"
           onclick={() => oncancel?.()}
         >
           {cancelLabel}
         </button>
         <button
-          class="rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors {danger
-            ? 'bg-danger hover:bg-danger/90'
-            : 'bg-accent hover:bg-accent/90'}"
+          class="qx-btn rounded-md px-3 py-1.5 text-xs {danger
+            ? 'qx-btn-danger'
+            : 'qx-btn-primary'}"
           onclick={() => onconfirm?.()}
         >
           {confirmLabel}

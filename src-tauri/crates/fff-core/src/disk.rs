@@ -6,8 +6,15 @@
 //! - the walk runs on the existing background rayon pool, workers push
 //!   discovered entries into a shared buffer, the caller flushes at its own
 //!   cadence (qianxun flushes every 100ms) — the scanner never blocks on UI;
+//! - progress ticks fire every 512 entries *globally* (not per worker), so
+//!   even small scans produce frames, and additionally carry the scan root's
+//!   direct children with their *partial* accumulated sizes (maintained
+//!   incrementally per file, O(1) amortised) — the frontend renders a
+//!   provisional treemap that grows while the walk is still running
+//!   ("边扫边长");
 //! - after the walk finishes, recursive directory sizes are computed
-//!   bottom-up (leaf-first sort) and the full entry tree is assembled;
+//!   bottom-up (leaf-first sort), the full entry tree is assembled and the
+//!   largest files are picked via `select_nth` (O(n));
 //! - `cancelled` is a shared `AtomicBool`: the walker checks it per entry and
 //!   stops early, returning whatever was collected so far.
 
@@ -19,6 +26,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Serialize;
 
 use crate::parallelism::BACKGROUND_THREAD_POOL;
+
+/// 一次进度快照里直接子项的数量上限（降序截断；巨根也不会撑爆 IPC 帧）。
+const TOP_CHILDREN_LIMIT: usize = 200;
+/// 全局每发现多少条目触发一次进度帧（跨线程计数，小目录也有帧）。
+const TICK_EVERY: usize = 512;
+/// 扫描结束时挑选的最大文件个数。
+pub const LARGEST_FILES_LIMIT: usize = 10;
 
 /// One discovered entry: a file, or a directory with its direct children
 /// filled in after the walk (`children` stays empty while streaming).
@@ -51,6 +65,41 @@ impl DiskEntry {
     }
 }
 
+/// 流式进度快照。遍历未结束时所有数值都是部分值。
+#[derive(Debug, Clone)]
+pub struct ScanTick {
+    /// 已发现文件数。
+    pub files: u64,
+    /// 已发现目录数（不含扫描根）。
+    pub dirs: u64,
+    /// 已发现文件的字节和（增量维护，tick 不再全量求和）。
+    pub bytes: u64,
+    /// 因权限 / 系统错误被跳过的条目数（大小未知，不计入 bytes）。
+    pub skipped: u64,
+    /// 扫描根直接子项的即时（部分）占用，降序，截断 [`TOP_CHILDREN_LIMIT`]。
+    pub top_children: Vec<PartialChild>,
+}
+
+/// 扫描根直接子项的部分占用快照（「边扫边长」的数据源）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialChild {
+    pub name: String,
+    pub path: String,
+    /// 遍历中 = 已落进该子树的文件字节和；遍历结束后为精确值。
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+/// 占用最大的单个文件（扫描结束时选 TOP N，降序）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeFile {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+}
+
 /// Final scan outcome. `entries` is the full flat list (any depth);
 /// `tree_root` is the scan root with children nested recursively.
 #[derive(Debug, Serialize)]
@@ -66,6 +115,10 @@ pub struct DiskScanResult {
     pub dir_count: usize,
     /// Recursive size of the scan root.
     pub total_size: u64,
+    /// Entries skipped due to permission / OS errors (sizes unknown).
+    pub skipped_count: usize,
+    /// Largest files (descending, capped at [`LARGEST_FILES_LIMIT`]).
+    pub largest_files: Vec<LargeFile>,
     /// Flat list of every entry.
     pub entries: Vec<DiskEntry>,
     /// Scan root entry with children assembled (sizes are recursive).
@@ -85,34 +138,93 @@ struct Collected {
     files: Vec<(PathBuf, String, u64)>,
     file_count: usize,
     dir_count: usize,
+    skipped: usize,
+    /// 已发现条目总数（全局 tick 节奏用）。
+    seen: usize,
+    /// 已发现文件字节和（增量维护）。
+    bytes_so_far: u64,
+    /// 扫描根直接子项 → 部分占用（每发现一个条目 O(1) 记到顶层祖先）。
+    root_children: HashMap<String, PartialChild>,
 }
 
-/// Scan `root` recursively. `on_tick` receives `(dirs, files, bytes_so_far)`
-/// snapshots of everything discovered so far whenever the walker passes a
-/// tick boundary — call it as often as you like (qianxun uses ~100ms).
+impl Collected {
+    /// 把一个条目记到扫描根的直接子项桶上：`C:\root\a\b\f.txt` 记到 `a`。
+    /// 目录只占位（大小随文件积累），文件累加字节。
+    fn note_root_child(&mut self, root_key: &str, key: &str, size: u64, is_dir: bool) {
+        let Some((child_key, seg)) = direct_child_key(root_key, key) else {
+            return;
+        };
+        let entry = self
+            .root_children
+            .entry(child_key.clone())
+            .or_insert_with(|| PartialChild {
+                name: seg,
+                path: child_key,
+                size: 0,
+                is_dir,
+            });
+        entry.size += size;
+        if is_dir {
+            entry.is_dir = true;
+        }
+    }
+
+    /// 直接子项快照：降序 + 截断。目录大小此刻只含已发现文件（部分值）。
+    fn top_children(&self) -> Vec<PartialChild> {
+        let mut tops: Vec<PartialChild> = self.root_children.values().cloned().collect();
+        tops.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+        tops.truncate(TOP_CHILDREN_LIMIT);
+        tops
+    }
+}
+
+/// 扫描根直接子项的键与末段名：`C:\root` + `C:\root\a\b` → `("C:\root\a", "a")`。
+/// 条目即扫描根本身（或前缀不符）时返回 None。
+fn direct_child_key(root_key: &str, key: &str) -> Option<(String, String)> {
+    if key.len() <= root_key.len() || !key.starts_with(root_key) {
+        return None;
+    }
+    // root_key 之后必跟分隔符（两边都经过 normalize_key，尾分隔符已剥掉）。
+    // 字节切片安全：starts_with 保证前缀逐字节相同，分隔符本身是 ASCII。
+    let rest = &key[root_key.len() + 1..];
+    let seg = match rest.find('\\') {
+        Some(idx) => &rest[..idx],
+        None => rest,
+    };
+    if seg.is_empty() {
+        return None;
+    }
+    Some((format!("{root_key}\\{seg}"), seg.to_owned()))
+}
+
+/// Scan `root` recursively. `on_tick` receives [`ScanTick`] snapshots of
+/// everything discovered so far whenever the walker crosses a tick boundary —
+/// call it as often as you like (qianxun uses ~100ms).
 ///
 /// Cancellation: set `cancelled` to `true` from any thread; the walk stops
 /// at the next entry and the result is marked `cancelled`.
 pub fn scan_directory(
     root: &Path,
     cancelled: &AtomicBool,
-    on_tick: impl FnMut(u64, u64, u64) + Send,
+    on_tick: impl FnMut(ScanTick) + Send,
 ) -> crate::Result<DiskScanResult> {
     BACKGROUND_THREAD_POOL.install(|| {
         let tick = Mutex::new(on_tick);
         let collected = Mutex::new(Collected::default());
+        let root_key = path_key(root);
 
-        walk_parallel(root, cancelled, &collected, &tick)?;
+        walk_parallel(root, &root_key, cancelled, &collected, &tick)?;
 
         let Collected {
             dirs,
-            files,
+            mut files,
             file_count,
             dir_count,
+            skipped,
+            ..
         } = collected.into_inner().expect("collected");
 
         let root_str = root.to_string_lossy().into_owned();
-        let root_key = normalize_key(&root_str);
         let was_cancelled = cancelled.load(Ordering::Relaxed);
 
         // ---- recursive sizes: leaf-first ----
@@ -154,6 +266,22 @@ pub fn scan_directory(
                 *size,
                 false,
             ));
+        }
+
+        // ---- largest files: select_nth O(n) 选出 TOP N 再排序 ----
+        let mut largest_files: Vec<LargeFile> = Vec::new();
+        if !files.is_empty() {
+            let k = LARGEST_FILES_LIMIT.min(files.len());
+            files.select_nth_unstable_by(k - 1, |a, b| b.2.cmp(&a.2));
+            largest_files = files[..k]
+                .iter()
+                .map(|(path, name, size)| LargeFile {
+                    name: name.clone(),
+                    path: path.to_string_lossy().into_owned(),
+                    size: *size,
+                })
+                .collect();
+            largest_files.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
         }
 
         // ---- assemble the tree bottom-up ----
@@ -208,6 +336,8 @@ pub fn scan_directory(
             file_count,
             dir_count,
             total_size: file_total,
+            skipped_count: skipped,
+            largest_files,
             entries: Vec::new(),
             tree_root,
         })
@@ -215,12 +345,13 @@ pub fn scan_directory(
 }
 
 /// `ignore`-based parallel walk: skips symlinks (no cycles), collects dirs and
-/// files with sizes, and ticks the caller with a monotonic entry counter.
+/// files with sizes, and ticks the caller with aggregated snapshots.
 fn walk_parallel(
     root: &Path,
+    root_key: &str,
     cancelled: &AtomicBool,
     collected: &Mutex<Collected>,
-    tick: &Mutex<impl FnMut(u64, u64, u64) + Send>,
+    tick: &Mutex<impl FnMut(ScanTick) + Send>,
 ) -> crate::Result<()> {
     use ignore::WalkBuilder;
 
@@ -241,21 +372,27 @@ fn walk_parallel(
         let collected = &collected;
         let tick = &tick;
         let cancelled = cancelled;
-        let mut seen: u64 = 0;
+        let root_key = root_key;
 
         Box::new(move |result| {
             if cancelled.load(Ordering::Relaxed) {
                 return ignore::WalkState::Quit;
             }
             let Ok(entry) = result else {
+                // 权限拒绝 / 遍历 IO 错误：计数但不计入任何大小，前端透明化。
+                collected.lock().expect("collected").skipped += 1;
                 return ignore::WalkState::Continue;
             };
             let Ok(metadata) = entry.metadata() else {
+                collected.lock().expect("collected").skipped += 1;
                 return ignore::WalkState::Continue;
             };
             let file_type = match entry.file_type() {
                 Some(ft) => ft,
-                None => return ignore::WalkState::Continue,
+                None => {
+                    collected.lock().expect("collected").skipped += 1;
+                    return ignore::WalkState::Continue;
+                }
             };
             let path = entry.path().to_path_buf();
             // 扫描根本身不算一个条目（dir_count/树都不含它，见结构体注释）。
@@ -263,27 +400,35 @@ fn walk_parallel(
                 return ignore::WalkState::Continue;
             }
             let name = dir_name_of(&path);
+            let key = path_key(&path);
 
-            {
+            // 入账与 tick 判定同一次持锁完成；tick 回调放锁外（可能做 IPC）。
+            let should_tick = {
                 let mut guard = collected.lock().expect("collected");
                 if file_type.is_dir() {
                     guard.dirs.push((path, name));
                     guard.dir_count += 1;
+                    // 顶层目录桶即使还没有文件也要占位（空目录可见）。
+                    guard.note_root_child(root_key, &key, 0, true);
                 } else if file_type.is_file() {
                     let size = metadata.len();
                     guard.files.push((path, name, size));
                     guard.file_count += 1;
+                    guard.bytes_so_far += size;
+                    guard.note_root_child(root_key, &key, size, false);
                 }
-            }
-
-            seen += 1;
-            if seen % 512 == 0 {
+                guard.seen += 1;
+                guard.seen % TICK_EVERY == 0
+            };
+            if should_tick {
                 let guard = collected.lock().expect("collected");
-                (tick.lock().expect("tick"))(
-                    guard.file_count as u64,
-                    guard.dir_count as u64,
-                    guard.files.iter().map(|f| f.2).sum::<u64>(),
-                );
+                (tick.lock().expect("tick"))(ScanTick {
+                    files: guard.file_count as u64,
+                    dirs: guard.dir_count as u64,
+                    bytes: guard.bytes_so_far,
+                    skipped: guard.skipped as u64,
+                    top_children: guard.top_children(),
+                });
             }
 
             ignore::WalkState::Continue
@@ -324,6 +469,8 @@ fn parent_key_of(key: &str) -> String {
 mod tests {
     use super::*;
 
+    fn quiet_tick(_: ScanTick) {}
+
     #[test]
     fn 扫描任意目录并组装树() {
         let dir = std::env::temp_dir().join(format!("fff-disk-{}", std::process::id()));
@@ -336,11 +483,12 @@ mod tests {
         std::fs::write(dir.join("nested/c.log"), [0u8; 50]).unwrap();
 
         let cancelled = AtomicBool::new(false);
-        let result = scan_directory(&dir, &cancelled, |_, _, _| {}).unwrap();
+        let result = scan_directory(&dir, &cancelled, quiet_tick).unwrap();
 
         assert!(!result.cancelled);
         assert_eq!(result.file_count, 3);
         assert_eq!(result.total_size, 160);
+        assert_eq!(result.skipped_count, 0);
         // root children sorted by size: nested(150) before a.txt(10)
         let children = &result.tree_root.children;
         assert_eq!(children.len(), 2);
@@ -355,6 +503,11 @@ mod tests {
             .unwrap();
         assert_eq!(deeper.size, 100);
 
+        // 最大文件 TOP：b.bin(100) > c.log(50) > a.txt(10)。
+        assert_eq!(result.largest_files.len(), 3);
+        assert_eq!(result.largest_files[0].name, "b.bin");
+        assert_eq!(result.largest_files[0].size, 100);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -365,8 +518,78 @@ mod tests {
         std::fs::write(dir.join("x.txt"), [0u8; 1]).unwrap();
 
         let cancelled = AtomicBool::new(true);
-        let result = scan_directory(&dir, &cancelled, |_, _, _| {}).unwrap();
+        let result = scan_directory(&dir, &cancelled, quiet_tick).unwrap();
         assert!(result.cancelled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 直接子键切割() {
+        let root = "C:\\root";
+        assert_eq!(
+            direct_child_key(root, "C:\\root\\a\\b\\f.txt"),
+            Some(("C:\\root\\a".to_owned(), "a".to_owned()))
+        );
+        // 顶层文件：直接子项就是文件自己。
+        assert_eq!(
+            direct_child_key(root, "C:\\root\\f.txt"),
+            Some(("C:\\root\\f.txt".to_owned(), "f.txt".to_owned()))
+        );
+        // 根自身与外部路径不产生子键。
+        assert_eq!(direct_child_key(root, "C:\\root"), None);
+        assert_eq!(direct_child_key(root, "D:\\elsewhere\\x"), None);
+    }
+
+    #[test]
+    fn 顶层子项部分占用聚合() {
+        let mut collected = Collected::default();
+        // 真实 walker 会先记录目录本身（占位 is_dir），文件再累加大小。
+        collected.note_root_child("C:\\r", "C:\\r\\aaa", 0, true);
+        collected.note_root_child("C:\\r", "C:\\r\\bbb", 0, true);
+        // aaa 下两个文件（10 + 40），bbb 一个（30），根下文件与空目录各一。
+        collected.note_root_child("C:\\r", "C:\\r\\aaa\\x\\f.txt", 10, false);
+        collected.note_root_child("C:\\r", "C:\\r\\aaa\\y\\g.txt", 40, false);
+        collected.note_root_child("C:\\r", "C:\\r\\bbb\\h.txt", 30, false);
+        collected.note_root_child("C:\\r", "C:\\r\\top.bin", 5, false);
+        collected.note_root_child("C:\\r", "C:\\r\\empty", 0, true);
+
+        let tops = collected.top_children();
+        assert_eq!(tops.len(), 4);
+        // 降序：aaa(50) > bbb(30) > top.bin(5) > empty(0)。
+        assert_eq!(tops[0].name, "aaa");
+        assert_eq!(tops[0].path, "C:\\r\\aaa");
+        assert!(tops[0].is_dir);
+        assert_eq!(tops[0].size, 50);
+        assert_eq!(tops[1].name, "bbb");
+        assert_eq!(tops[2].name, "top.bin");
+        assert!(!tops[2].is_dir);
+        assert_eq!(tops[3].name, "empty");
+        assert!(tops[3].is_dir);
+    }
+
+    #[test]
+    fn 进度帧在遍历中触发() {
+        let dir = std::env::temp_dir().join(format!("fff-disk-tick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = dir.join("aaa");
+        std::fs::create_dir_all(&a).unwrap();
+        // 600 条 > TICK_EVERY(512)：无论线程怎么分片都必有全局帧。
+        for index in 0..600 {
+            std::fs::write(a.join(format!("a{index}.dat")), [0u8; 10]).unwrap();
+        }
+
+        let cancelled = AtomicBool::new(false);
+        let mut ticks = Vec::new();
+        let result = scan_directory(&dir, &cancelled, |tick| ticks.push(tick)).unwrap();
+        assert!(!ticks.is_empty(), "600 个条目至少应触发一次全局 tick");
+        // 帧计数单调且不超过最终值（部分快照语义）。
+        for pair in ticks.windows(2) {
+            assert!(pair[0].files <= pair[1].files);
+            assert!(pair[0].bytes <= pair[1].bytes);
+        }
+        assert!(ticks.last().unwrap().files as usize <= result.file_count);
+        assert_eq!(result.file_count, 600);
 
         std::fs::remove_dir_all(&dir).ok();
     }

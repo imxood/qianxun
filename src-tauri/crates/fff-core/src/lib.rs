@@ -28,7 +28,9 @@ pub use grep::*;
 
 /// Disk space scanner: parallel walk with streaming ticks and cancellation.
 pub mod disk;
-pub use disk::{DiskEntry as DiskSpaceEntry, DiskScanResult, scan_directory};
+pub use disk::{
+    DiskEntry as DiskSpaceEntry, DiskScanResult, LargeFile, PartialChild, ScanTick, scan_directory,
+};
 
 /// Core data types shared across the crate.
 pub mod types;
@@ -45,7 +47,6 @@ mod sort_buffer;
 pub(crate) mod index;
 pub(crate) mod parallelism;
 pub(crate) mod path_utils;
-pub(crate) mod rescan_stats;
 pub(crate) mod rescan_throttle;
 pub(crate) mod simd_path;
 pub(crate) mod simd_string_utils;

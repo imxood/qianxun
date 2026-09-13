@@ -1,8 +1,9 @@
-//! 插件市场域：搜索、安装、卸载、已装清单。
+//! 插件市场域：安装、卸载、已装清单（变更面）。
 //!
-//! 插件 = 装进 DSH profile 的 npm 包 + `dsh.profile.bundles` 里的一行。
-//! 搜索/详情在 registry.rs（只读网络），本文件负责变更：
-//! 用千寻自带的 pnpm 往 profile 装精确版本，再把包名并进 bundles 数组。
+//! 浏览与搜索在前端：webview fetch 走系统代理，npmmirror 全端点带 CORS，
+//! 推荐目录（dsh-plugin-catalog）的 tar.gz 解包由前端完成，Rust 不掺和。
+//! 本文件是唯一的变更面：安装前用 registry 详情复核（registry.rs，
+//! 不信任前端的结论），pnpm 精确版本装入 profile，包名并进 bundles 数组。
 //! 变更即时落盘，DSH 下次启动生效；输出行进 supervisor 日志（环境页日志面）。
 
 pub mod registry;
@@ -38,20 +39,6 @@ pub struct InstalledBundle {
     pub builtin: bool,
 }
 
-/// 搜索市场（透传 registry 搜索端点）。
-#[tauri::command]
-pub async fn market_search(app: AppHandle, query: String) -> Result<Vec<registry::Listing>> {
-    let registry = registry_base(&app)?;
-    registry::search(&registry, &query).await
-}
-
-/// 读一个包的发布详情。
-#[tauri::command]
-pub async fn market_detail(app: AppHandle, name: String) -> Result<registry::Detail> {
-    let registry = registry_base(&app)?;
-    registry::detail(&registry, &name).await
-}
-
 /// 已装清单：profile manifest 的 dependencies × bundles × node_modules。
 #[tauri::command]
 pub fn market_installed(app: AppHandle) -> Result<Vec<InstalledBundle>> {
@@ -62,46 +49,75 @@ pub fn market_installed(app: AppHandle) -> Result<Vec<InstalledBundle>> {
     Ok(installed(&profile))
 }
 
-/// 安装精确版本并加入 bundles。输出逐行进 supervisor 日志。
+/// 安装精确版本并加入 bundles。每一步与 pnpm 输出都进 supervisor 日志。
 #[tauri::command]
 pub async fn market_install(app: AppHandle, name: String, version: String) -> Result<()> {
     let settings = crate::settings_snapshot(&app)?;
     let registry = settings.mirrors.registry_url();
     let profile = profile_dir(&app, &settings)?;
+    let supervisor = app.state::<crate::AppState>().harness.supervisor.clone();
+    supervisor.note(
+        Stream::Stdout,
+        format!("[插件] 安装 {name}@{version}（pnpm add → profile）"),
+    );
     // 安装前用详情做硬门槛（弃用/不兼容），不让 registry 之外的状态混进 profile。
-    let detail = registry::detail(&registry, &name).await?;
+    let detail = match registry::detail(&registry, &name).await {
+        Ok(detail) => detail,
+        Err(failure) => {
+            supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+            return Err(failure);
+        }
+    };
     if detail.version != version {
-        return Err(Error::Market(format!(
+        let failure = Error::Market(format!(
             "registry 最新版本是 {}，与请求的 {version} 不一致；刷新后重试",
             detail.version
-        )));
+        ));
+        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+        return Err(failure);
     }
-    registry::validate(&detail)?;
+    if let Err(failure) = registry::validate(&detail) {
+        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+        return Err(failure);
+    }
 
-    let supervisor = app.state::<crate::AppState>().harness.supervisor.clone();
-    supervisor.note(Stream::Stdout, format!("安装插件 {name}@{version}"));
-    ensure_build_allowlist(&profile, &supervisor)?;
-    run_pnpm(
+    if let Err(failure) = ensure_build_allowlist(&profile, &supervisor) {
+        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+        return Err(failure);
+    }
+    let outcome = run_pnpm(
         &app,
         &settings,
         &supervisor,
         ["add".into(), format!("{name}@{version}")],
         "插件安装",
+        true,
     )
-    .await?;
-    mutate_bundles(&profile, |bundles| {
+    .await;
+    if let Err(failure) = &outcome {
+        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+        return outcome;
+    }
+    if let Err(failure) = mutate_bundles(&profile, |bundles| {
         if !bundles.iter().any(|entry| entry == &name) {
             bundles.push(name.clone());
         }
-    })?;
+    }) {
+        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+        return Err(failure);
+    }
     supervisor.note(
         Stream::Stdout,
-        format!("{name}@{version} 已装好，DSH 下次启动生效"),
+        "[插件] 已写入装配清单（dsh.profile.bundles）".to_owned(),
+    );
+    supervisor.note(
+        Stream::Stdout,
+        format!("[插件] {name}@{version} 安装完成，DSH 下次启动生效"),
     );
     Ok(())
 }
 
-/// 卸载：移出 bundles + pnpm rm。
+/// 卸载：移出 bundles + pnpm rm。每一步与 pnpm 输出都进 supervisor 日志。
 #[tauri::command]
 pub async fn market_remove(app: AppHandle, name: String) -> Result<()> {
     let settings = crate::settings_snapshot(&app)?;
@@ -110,25 +126,37 @@ pub async fn market_remove(app: AppHandle, name: String) -> Result<()> {
         return Err(Error::Market("内核组件不可卸载".to_owned()));
     }
     let supervisor = app.state::<crate::AppState>().harness.supervisor.clone();
-    supervisor.note(Stream::Stdout, format!("卸载插件 {name}"));
-    mutate_bundles(&profile, |bundles| bundles.retain(|entry| entry != &name))?;
+    supervisor.note(Stream::Stdout, format!("[插件] 卸载 {name}"));
+    if let Err(failure) = mutate_bundles(&profile, |bundles| bundles.retain(|entry| entry != &name))
+    {
+        supervisor.note(Stream::Stderr, format!("[插件] 卸载失败：{failure}"));
+        return Err(failure);
+    }
+    supervisor.note(
+        Stream::Stdout,
+        "[插件] 已从装配清单移除（dsh.profile.bundles）".to_owned(),
+    );
     let outcome = run_pnpm(
         &app,
         &settings,
         &supervisor,
         ["remove".into(), name.clone()],
         "插件卸载",
+        false,
     )
     .await;
-    supervisor.note(Stream::Stdout, format!("{name} 已卸载，DSH 下次启动生效"));
+    if let Err(failure) = &outcome {
+        supervisor.note(Stream::Stderr, format!("[插件] 卸载失败：{failure}"));
+        return outcome;
+    }
+    supervisor.note(
+        Stream::Stdout,
+        format!("[插件] {name} 卸载完成，DSH 下次启动生效"),
+    );
     outcome
 }
 
 // ---- 内部 ----
-
-fn registry_base(app: &AppHandle) -> Result<String> {
-    Ok(crate::settings_snapshot(app)?.mirrors.registry_url())
-}
 
 fn profile_dir(app: &AppHandle, settings: &Settings) -> Result<std::path::PathBuf> {
     let dir = harness::dsh_home(app, settings)
@@ -243,18 +271,21 @@ fn ensure_build_allowlist(
         .map_err(|cause| Error::Market(format!("写 pnpm 构建白名单失败：{cause}")))?;
     supervisor.note(
         Stream::Stdout,
-        "已写入 profile 构建白名单（pnpm-workspace.yaml）".to_owned(),
+        "[插件] 已写入构建白名单（pnpm-workspace.yaml）".to_owned(),
     );
     Ok(())
 }
 
 /// 在 profile 目录里跑一条 pnpm（千寻自带的那份），输出进 supervisor 日志。
+/// `with_registry`：只有 add 联网解析接受 `--registry`，remove 传了会报
+/// 「Unknown option」。
 async fn run_pnpm(
     app: &AppHandle,
     settings: &Settings,
     supervisor: &std::sync::Arc<harness::supervisor::Supervisor>,
     args: impl IntoIterator<Item = String>,
     label: &'static str,
+    with_registry: bool,
 ) -> Result<()> {
     // Node + npm 必须可用（安装器探测过的同一套规则）；pnpm 用千寻装好的。
     let environment = harness::environment(app, settings);
@@ -287,11 +318,11 @@ async fn run_pnpm(
     for arg in args {
         command.arg(&arg);
     }
+    command.arg("--dir").arg(profile_dir(app, settings)?);
+    if with_registry {
+        command.arg("--registry").arg(plan.registry.clone());
+    }
     command
-        .arg("--dir")
-        .arg(profile_dir(app, settings)?)
-        .arg("--registry")
-        .arg(plan.registry.clone())
         .arg("--reporter=append-only")
         .arg("--config.auto-install-peers=true")
         .current_dir(&plan.target)
@@ -316,6 +347,15 @@ async fn run_pnpm(
         DRAIN_TIMEOUT,
     )
     .await
+    .map_err(market_error)
+}
+
+/// `run_with_limits` 的错误是 Install 域形态（「安装失败：…」前缀），
+/// 市场域剥掉前缀重新包装，避免「卸载失败：安装失败：…」叠罗汉。
+fn market_error(failure: crate::error::Error) -> Error {
+    let text = failure.to_string();
+    let text = text.strip_prefix("安装失败：").unwrap_or(&text);
+    Error::Market(text.to_owned())
 }
 
 #[cfg(test)]

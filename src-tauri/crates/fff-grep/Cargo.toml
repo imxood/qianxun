@@ -20,8 +20,8 @@ crate-type = ["rlib"]
 
 [dependencies]
 # 独立声明而非继承（同 proc-guard 约定）：版本取自上游 workspace.dependencies。
+# blake3 已移除：源码零引用（死依赖），还拖着 C/asm 编译与 arrayvec 等子树。
 aho-corasick = "1"
-blake3 = "1.8.2"
 fff-query-parser = { path = "../fff-query-parser" }
 memchr = "2"
 regex = "1.11"

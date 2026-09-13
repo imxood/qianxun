@@ -46,8 +46,8 @@ fn sources_for(policy: &str) -> Vec<&'static DistSource> {
     match policy {
         "official" => vec![&OFFICIAL],
         "npmmirror" => vec![&NPMMIRROR],
-        // auto：官方优先，失败落 npmmirror（默认）。
-        _ => vec![&OFFICIAL, &NPMMIRROR],
+        // auto：国内 npmmirror 优先，失败落官方（默认）。
+        _ => vec![&NPMMIRROR, &OFFICIAL],
     }
 }
 
@@ -193,7 +193,7 @@ where
     if !archive_matches(&plan.archive, &expected) {
         let _ = std::fs::remove_file(&plan.archive);
         let url = plan.url(&archive_name());
-        // 总大小来自 HEAD 探测；源不配合时进度卡退化为只显示已下载。
+        // 总大小来自 HEAD 探测；源不配合时进度事件退化为只带已下载字节数。
         let total_bytes = remote_content_length(&plan.curl, &url).await;
         let downloaded_now = || {
             std::fs::metadata(&plan.archive)
@@ -429,7 +429,9 @@ mod tests {
     #[test]
     fn 镜像策略展开次序() {
         assert_eq!(sources_for("auto").len(), 2);
-        assert_eq!(sources_for("auto")[0].label, "官方");
+        // auto 默认国内 npmmirror 优先，官方兜底。
+        assert_eq!(sources_for("auto")[0].label, "npmmirror");
+        assert_eq!(sources_for("auto")[1].label, "官方");
         assert_eq!(sources_for("official").len(), 1);
         assert_eq!(sources_for("npmmirror")[0].label, "npmmirror");
     }

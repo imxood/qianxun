@@ -3,7 +3,7 @@
    * 截屏覆盖窗（#/overlay?monitor=N&path=…）：微信式交互。
    * 冻结帧做底图 → 暗化遮罩 + 十字光标 → 拖框选区（可移动/8 手柄微调）
    * → 标注工具栏（矩形/椭圆/箭头/画笔/马赛克/文字 + 撤销重做）
-   * → 产出（复制/保存/贴图/退出）。双击选区 = 复制；Esc = 退出。
+   * → 产出（复制/保存/贴图/退出）。双击选区或按回车 = 复制并退出；Esc = 退出。
    */
   import { onMount, tick } from 'svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
@@ -154,6 +154,12 @@
           return;
         }
         void exitAll();
+      } else if (event.key === 'Enter') {
+        // 选区就绪后回车 = 复制并退出（文字草稿中的回车归输入框落墨）。
+        // preventDefault 顺带抑制焦点工具栏按钮的回车激活，避免双重动作。
+        if (textDraft || phase !== 'selected') return;
+        event.preventDefault();
+        void produce('copy');
       } else if (
         (event.key === 'Delete' || event.key === 'Backspace') &&
         tool === 'none' &&

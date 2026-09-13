@@ -19,7 +19,7 @@
 
 <section class="flex h-full flex-col">
   <header class="flex shrink-0 items-center gap-4 px-6 pb-3 pt-5">
-    <h1 class="text-lg font-semibold">文件</h1>
+    <h1 class="qx-page-title">文件</h1>
     <div
       class="flex items-center gap-0.5 rounded-lg border border-line bg-surface p-1"
       role="tablist"
@@ -30,9 +30,7 @@
           role="tab"
           aria-selected={tab === item.id}
           data-testid="files-tab-{item.id}"
-          class="rounded-md px-3 py-1 text-sm transition-colors {tab === item.id
-            ? 'bg-accent-soft font-medium text-fg'
-            : 'text-muted hover:text-fg'}"
+          class="qx-segment {tab === item.id ? 'qx-segment-on' : 'qx-segment-off'}"
           onclick={() => (tab = item.id)}
         >
           {item.label}

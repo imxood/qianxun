@@ -25,10 +25,11 @@
 - [x] 移植 supervisor 并**改造为固定端口**：`--port <配置>`、就绪行校验端口一致性、
       冲突显式报错（含保留端口 10000 专门提示）、健康探测、退避重启
 - [x] **DSH_HOME 隔离**（ADR-009）：spawn 时注入 `DSH_HOME=<数据目录>/dsh-home`
-- [x] DSH 安装：私有 prefix **pnpm 安装**（自带 pnpm@11.7.0，备份→直装→校验事务，
-      registry 按 `mirrors.npmRegistry` 默认 npmmirror，allowBuilds 放行原生构建）
-- [x] Node 安装：系统 curl.exe 下载官方 win-x64 zip + SHASUMS256 校验 +
-      解压到 `node/`（auto=官方优先失败转 npmmirror），不动系统 PATH
+- [x] DSH 安装：私有 prefix **pnpm 安装**（pnpm 每次安装取最新、失败回落已装版本，
+      备份→直装→校验事务，registry 按 `mirrors.npmRegistry` 默认 npmmirror，
+      allowBuilds 放行原生构建）
+- [x] Node 安装：系统 curl.exe 下载 win-x64 zip + SHASUMS256 校验 +
+      解压到 `node/`（auto=npmmirror 优先失败转官方），不动系统 PATH
 - [x] 环境页 UI：Node/DSH 检测行 + "检测不到即安装按钮" + 安装进度实时日志
 - [x] 控制台页：DSH 状态卡 + 手动启动/停止 + 日志流（回填 + 自动滚动）
 - [x] 承载页：iframe 加载 DSH + 端口跟随 + 断线/重启自动重载
@@ -272,13 +273,17 @@ DSH 0.1.5，并确立千寻版本号 ↔ DSH 适配锚点的对应关系（ADR-0
 - [ ] **版本一致性兜底**：`check_installed_at_version` 校验完整性 + 版本号 = `PINNED_VERSION`；`launch_plan` 在不匹配时拒绝启动（返回 `Error::DshVersionMismatch`）✅
 - [ ] **UI 警告**：环境页 DSH 块在 `dshVersionMatches=false` 时显示 `⚠ 版本不匹配，需重新安装` + 「千寻要求 X，当前 Y」副说明；按钮文案变「升级」；启动按钮禁用 ✅
 - [ ] install.rs 单元测试 `版本一致性校验拦截旧版DSH` / `版本一致性校验在目录缺失时返回false` ✅
-- [ ] **插件市场**（架构 §4.11）：market 域（registry 搜索/详情 + pnpm 精确安装/bundles 原子维护）+
-      插件页重写为 发现 / 已安装 两 tab；弃用与不兼容拒绝安装；`@deepseek-ai/*` 内核不可卸载 ✅
+- [ ] **插件市场**（架构 §4.11）：**双数据源 + 浏览在前端**——推荐源
+      `dsh-plugin-catalog`（前端 tar.gz 解包，零新增 crate）+ 搜索源
+      registry search（webview fetch 走系统代理，CSP 放行 https:）；
+      Rust 只留变更面（安装预检 / 卸载 / 已装清单），弃用与不兼容拒绝安装，
+      `@deepseek-ai/*` 内核不可卸载；插件页 = 推荐 / 搜索 / 已安装 三 tab ✅
 - [ ] **环境页减法**：删 Node/DSH 常驻信息卡——健康时左侧为空、日志即主体；
-      只在缺 Node / DSH 未装 / 版本不匹配时显示紧凑操作行 ✅
+      只在缺 Node / DSH 未装 / 版本不匹配时显示紧凑操作行；版本/路径/
+      工作目录/DSH_HOME 收进默认收起的「信息」块 ✅
 - [ ] **笔记桥迁移**：部署入口从插件页迁到笔记页状态条（三处事实就位即隐藏）✅
 - [ ] DSH 0.1.5 真机验收（按 V0.2.1 纪律：readiness 行格式 / 鉴权契约 / iframe 链路 / 网关代持）
-- [ ] 插件市场真机验收（npmmirror 搜索出插件 → 安装 → 重启 DSH 生效 → 卸载）
+- [ ] 插件市场真机验收（推荐目录拉取 + 分类过滤 → 安装 → 重启 DSH 生效 → 卸载；搜索兜底）
 - [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
 
 ## 里程碑间的纪律

@@ -127,7 +127,7 @@ fn default_npm_registry() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct MirrorsSettings {
-    /// auto = 官方优先失败落 npmmirror；official / npmmirror = 强制。
+    /// auto = 国内 npmmirror 优先失败落官方；official / npmmirror = 强制。
     pub node_binary: String,
     /// official / npmmirror / 自定义 https:// URL。
     pub npm_registry: String,

@@ -46,11 +46,13 @@ const INSTALL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const INSTALL_TOTAL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 pub(super) const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 千寻自带的 pnpm 版本。DSH 的依赖树带 peer 链（如 cordis-plugin-group），
-/// npm 的解析要么组合爆炸要么丢 peer；pnpm 的 auto-install-peers 是
-/// 唯一被验证可正确装出运行时的路线。pnpm 由 npm 装进工具目录（pnpm
-/// 自身无原生依赖、无 peer，npm 装它没有上述问题）。
-pub const PNPM_SPEC: &str = "pnpm@11.7.0";
+/// 千寻自带的 pnpm 安装说明符：不钉版本，每次安装都取 registry 上的最新。
+/// DSH 的依赖树带 peer 链（如 cordis-plugin-group），npm 的解析要么组合
+/// 爆炸要么丢 peer；pnpm 的 auto-install-peers 是唯一被验证可正确装出
+/// 运行时的路线。pnpm 由 npm 装进工具目录（pnpm 自身无原生依赖、无
+/// peer，npm 装它没有上述问题）；与 DSH（ADR-015 钉死验证版本）不同，
+/// pnpm 是纯工具链、命令面小，跟随最新风险可控，失败还回落已装版本。
+pub const PNPM_SPEC: &str = "pnpm@latest";
 
 /// pnpm 构建脚本白名单：DSH 运行时需要这些原生/生成步骤真正执行
 /// （koffi 与 node-pty 是终端/子进程工具的原生绑定，没有它们对应功能
@@ -76,7 +78,7 @@ pub struct InstallPlan {
     pub npm_cli: PathBuf,
     /// `node_modules` 所在目录（千寻私有 prefix）。
     pub target: PathBuf,
-    /// pnpm 工具目录（npm 装 pnpm 的落位，幂等复用）。
+    /// pnpm 工具目录（npm 装 pnpm 的落位；每次安装刷新到最新，失败回落）。
     pub pnpm_tool_dir: PathBuf,
     /// 包说明符（含版本）。
     pub spec: String,
@@ -349,36 +351,46 @@ where
     .await
 }
 
-/// 幂等确保 pnpm 工具就位。
+/// 确保 pnpm 工具就位，且每次安装都刷新到 registry 最新版。
 /// 工具目录整体不属于安装事务：它只含 pnpm 自身，坏了删掉重装即可。
+/// 刷新失败而已有旧 pnpm 时回落复用（离线/镜像抖动不该阻塞整个 DSH
+/// 安装），连旧版都没有才把错误抛出去。
 pub async fn ensure_pnpm_tool<R>(plan: &InstallPlan, report: R) -> Result<()>
 where
     R: Fn(Stream, String) + Clone + Send + 'static,
 {
-    if plan.pnpm_cli().is_file() {
-        return Ok(());
-    }
+    let existing = plan.pnpm_cli().is_file();
     std::fs::create_dir_all(&plan.pnpm_tool_dir).map_err(|cause| {
         Error::Install(format!(
             "无法创建 {}：{cause}",
             plan.pnpm_tool_dir.display()
         ))
     })?;
-    let installed = run_with_limits(
+    let refreshed = run_with_limits(
         plan.pnpm_tool_command(),
-        report,
+        report.clone(),
         "npm install pnpm",
         INSTALL_IDLE_TIMEOUT,
         Duration::from_secs(5 * 60),
         PIPE_DRAIN_TIMEOUT,
     )
     .await;
-    if installed.is_ok() && !plan.pnpm_cli().is_file() {
+    if refreshed.is_ok() && !plan.pnpm_cli().is_file() {
         return Err(Error::Install(
             "npm 报告成功，但 pnpm 入口脚本缺失".to_owned(),
         ));
     }
-    installed
+    match refreshed {
+        Ok(()) => Ok(()),
+        Err(failure) if existing => {
+            report(
+                Stream::Stderr,
+                format!("pnpm 刷新到最新失败，回落使用已装版本：{failure}"),
+            );
+            Ok(())
+        }
+        Err(failure) => Err(failure),
+    }
 }
 
 /// 限时执行一条安装器命令：空闲/总超时、进程树回收、逐行转发。

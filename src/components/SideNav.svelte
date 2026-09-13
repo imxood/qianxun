@@ -5,6 +5,7 @@
   import { nav, type PageId } from '../stores/nav.svelte';
   import type { TerminalSessionSnapshot } from '../lib/ipc/contract';
 
+  /** 主导航项：settings 独立沉底（低频项与工具项分组）。 */
   const items: Array<{ id: PageId; label: string; icon: string; detachable: boolean }> = [
     {
       id: 'env',
@@ -46,12 +47,6 @@
       id: 'plugins',
       label: '插件',
       icon: 'M9 3v4M15 3v4M6 7h12v3a6 6 0 01-12 0V7zM12 16v5',
-      detachable: false,
-    },
-    {
-      id: 'settings',
-      label: '设置',
-      icon: 'M12 8a4 4 0 100 8 4 4 0 000-8zM19 12l2-1-2-4-2 1-2-1V4h-2.2L12 6l-2.8-2H7v3l-2 1-2-1-2 4 2 1v2l-2 1 2 4 2-1 2 1v3h2.8L12 18l2.8 2H17v-3l2-1 2 1 2-4-2-1z',
       detachable: false,
     },
   ];
@@ -99,38 +94,70 @@
   }
 </script>
 
-<nav class="flex w-16 shrink-0 flex-col gap-1 border-r border-line bg-surface p-1.5">
+<nav class="flex w-16 shrink-0 flex-col gap-1.5 border-r border-line bg-surface px-1.5 py-2">
   {#each items.filter((item) => !nav.detached[item.id]) as item (item.id)}
     {@const active = nav.page === item.id}
     <button
-      class="group flex flex-col items-center gap-1 rounded-lg px-1 py-2 transition-colors {active
-        ? 'bg-accent-soft'
-        : 'hover:bg-accent-soft/60'}"
+      class="group mx-auto flex w-12 flex-col items-center gap-1 rounded-lg py-2 outline-none transition-all focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface {active
+        ? 'qx-nav-active'
+        : 'text-muted hover:bg-accent-soft/50 hover:text-fg'}"
+      aria-label={item.label}
       aria-current={active ? 'page' : undefined}
       data-testid="nav-{item.id}"
       onclick={() => nav.go(item.id)}
       oncontextmenu={(event) => navItemMenu(event, item)}
-      title="{item.label}——右键可分离{item.detachable ? '' : '（暂不支持）'}"
+      title={item.detachable ? `${item.label} · 右键分离到独立窗口` : item.label}
     >
       <svg
         viewBox="0 0 24 24"
-        class="size-5 shrink-0 {active ? 'text-accent' : 'text-muted group-hover:text-fg'}"
+        class="size-5 shrink-0 transition-colors"
         fill="none"
         stroke="currentColor"
-        stroke-width="1.6"
+        stroke-width={active ? 1.9 : 1.6}
         stroke-linecap="round"
         stroke-linejoin="round"
         aria-hidden="true"
       >
         <path d={item.icon} />
       </svg>
-      <span
-        class="text-[11px] leading-none {active
-          ? 'font-medium text-fg'
-          : 'text-muted group-hover:text-fg'}"
-      >
+      <span class="text-[11px] leading-none {active ? 'font-medium' : ''}">
         {item.label}
       </span>
     </button>
   {/each}
+
+  {#if !nav.detached.settings}
+    <!-- 设置沉底：与工具项分组，栏内层级一眼可辨。 -->
+    <div class="mt-auto border-t border-line/60 pt-1.5">
+      <button
+        class="group mx-auto flex w-12 flex-col items-center gap-1 rounded-lg py-2 outline-none transition-all focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface {nav.page ===
+        'settings'
+          ? 'qx-nav-active'
+          : 'text-muted hover:bg-accent-soft/50 hover:text-fg'}"
+        aria-label="设置"
+        aria-current={nav.page === 'settings' ? 'page' : undefined}
+        data-testid="nav-settings"
+        onclick={() => nav.go('settings')}
+        title="设置"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          class="size-5 shrink-0 transition-colors"
+          fill="none"
+          stroke="currentColor"
+          stroke-width={nav.page === 'settings' ? 1.9 : 1.6}
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path
+            d="M12 8a4 4 0 100 8 4 4 0 000-8zM19 12l2-1-2-4-2 1-2-1V4h-2.2L12 6l-2.8-2H7v3l-2 1-2-1-2 4 2 1v2l-2 1 2 4 2-1 2 1v3h2.8L12 18l2.8 2H17v-3l2-1 2 1 2-4-2-1z"
+          />
+        </svg>
+        <span class="text-[11px] leading-none {nav.page === 'settings' ? 'font-medium' : ''}">
+          设置
+        </span>
+      </button>
+    </div>
+  {/if}
 </nav>

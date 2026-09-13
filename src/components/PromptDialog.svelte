@@ -57,7 +57,7 @@
     onclick={() => oncancel?.()}
   >
     <div
-      class="w-80 rounded-lg border border-line bg-surface p-4 shadow-xl"
+      class="w-80 rounded-xl border border-line bg-surface p-4 shadow-xl"
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -68,7 +68,7 @@
         {label}
         <!-- svelte-ignore a11y_autofocus -->
         <input
-          class="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-xs text-fg outline-none focus:border-accent"
+          class="qx-input mt-1 w-full rounded-md bg-bg py-1.5 text-xs"
           bind:this={input}
           bind:value
           {placeholder}
@@ -78,15 +78,12 @@
       </label>
       <div class="mt-4 flex justify-end gap-2">
         <button
-          class="rounded-md px-3 py-1.5 text-xs text-muted transition-colors hover:bg-accent-soft hover:text-fg"
+          class="qx-btn qx-btn-ghost rounded-md px-3 py-1.5 text-xs"
           onclick={() => oncancel?.()}
         >
           {cancelLabel}
         </button>
-        <button
-          class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent/90"
-          onclick={submit}
-        >
+        <button class="qx-btn qx-btn-primary rounded-md px-3 py-1.5 text-xs" onclick={submit}>
           {confirmLabel}
         </button>
       </div>

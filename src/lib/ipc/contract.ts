@@ -76,8 +76,6 @@ export const IPC_COMMANDS = [
   'bridge_deploy',
   'bridge_status',
   'plugins_list',
-  'market_search',
-  'market_detail',
   'market_installed',
   'market_install',
   'market_remove',
@@ -550,7 +548,24 @@ export interface DiskHome {
   labels: Record<string, string>;
 }
 
-/** disk_scan_stream 进度帧（固定 ~100ms 一帧）。 */
+/** 进度帧里的扫描根直接子项（部分占用，边扫边长数据源）。 */
+export interface DiskPartialChild {
+  name: string;
+  /** 绝对路径（扫描中下钻用）。 */
+  path: string;
+  /** 遍历中 = 已发现文件的字节和；结束后为精确值。 */
+  size: number;
+  dir: boolean;
+}
+
+/** 占用最大的单个文件（扫描结束 TOP，降序）。 */
+export interface DiskLargeFile {
+  name: string;
+  path: string;
+  size: number;
+}
+
+/** disk_scan_stream 进度帧（固定 ~100ms 一帧；遍历中所有计数都是部分值）。 */
 export interface DiskScanProgress {
   type: 'progress';
   /** 正在遍历的根目录。 */
@@ -558,14 +573,24 @@ export interface DiskScanProgress {
   files: number;
   dirs: number;
   bytes: number;
+  /** 权限/系统错误跳过的条目数（不计入大小）。 */
+  skipped: number;
+  /** 扫描根直接子项的部分占用（降序，≤200）。 */
+  topChildren: DiskPartialChild[];
 }
 
 /** disk_scan_stream 结束帧（完成或被停止）：完整树快照，整体替换。 */
 export interface DiskScanDone {
   type: 'done';
   root: string;
+  /** true = 被停止/出错：树是部分结果，数字不完整。 */
   cancelled: boolean;
+  files: number;
+  dirs: number;
+  skipped: number;
   tree: DiskEntry;
+  /** 占用最大的文件 TOP（降序，≤10）。 */
+  largestFiles: DiskLargeFile[];
 }
 
 /** disk_scan_stream 的流式事件（Tauri Channel 推送）。 */
@@ -624,46 +649,9 @@ export interface PluginEntry {
 }
 
 // ---------------------------------------------------------------------------
-// market_*（插件市场域）
+// market_*（插件市场域）。浏览/搜索在前端（webview fetch 走系统代理，
+// npmmirror 全端点带 CORS，见 lib/market/）；Rust 只保留变更面。
 // ---------------------------------------------------------------------------
-
-/** market_search 返回项：npm registry 的一条搜索结果。 */
-export interface MarketListing {
-  name: string;
-  version: string;
-  description: string;
-  publisher: string;
-  /** ISO 时间戳。 */
-  updated: string;
-  weeklyDownloads: number;
-  link: string | null;
-  /** registry base（详情/安装同源）。 */
-  registry: string;
-}
-
-/** 兼容结论（serde tag = "state"）。 */
-export type MarketCompatibility =
-  | { state: 'compatible'; requirement: string }
-  | { state: 'unknown' }
-  | { state: 'incompatible'; requirement: string; reason: string };
-
-/** market_detail 返回项：一个包的发布详情。 */
-export interface MarketDetail {
-  name: string;
-  version: string;
-  description: string;
-  license: string;
-  homepage: string | null;
-  repository: string | null;
-  /** 声明了 dsh.bundle.patch = 插件；否则只是普通包。 */
-  bundle: boolean;
-  compatibility: MarketCompatibility;
-  lifecycleScripts: string[];
-  /** 存在即拒绝安装。 */
-  deprecated: string | null;
-  unpackedBytes: number | null;
-  installSpec: string;
-}
 
 /** market_installed 返回项：profile manifest 里的一项。 */
 export interface MarketInstalled {

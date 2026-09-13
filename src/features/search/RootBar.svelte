@@ -63,7 +63,7 @@
 <div class="space-y-2">
   <div class="flex items-center gap-2">
     <button
-      class="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+      class="qx-btn qx-btn-primary qx-btn-md"
       disabled={picking}
       onclick={() => void pickDirectory()}
     >
@@ -84,9 +84,9 @@
 
     <div class="relative min-w-0 flex-1">
       <input
-        class="w-full rounded-md border border-line bg-surface px-3 py-1.5 pr-8 text-sm placeholder:text-muted/60"
+        class="qx-input w-full pr-8"
         type="text"
-        placeholder="或粘贴目录路径（含整盘，如 D:\）"
+        placeholder="或粘贴目录路径"
         value={search.status?.root ?? draft}
         oninput={(event) => (draft = event.currentTarget.value)}
         onkeydown={(event) => {
@@ -119,7 +119,7 @@
             onclick={() => (historyOpen = false)}
           ></button>
           <div
-            class="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-md border border-line bg-card shadow-lg"
+            class="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-xl border border-line bg-card shadow-lg"
           >
             {#each history as item (item)}
               <button
@@ -140,7 +140,7 @@
     <div class="flex flex-wrap items-center gap-1.5">
       {#each search.drives as drive (drive.path)}
         <button
-          class="rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs text-fg transition-colors hover:border-accent hover:bg-accent-soft"
+          class="rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs text-fg transition-colors outline-none hover:border-accent hover:bg-accent-soft focus-visible:ring-2 focus-visible:ring-accent/50"
           title="{KIND_LABEL[drive.kind] ?? drive.kind} · 共 {formatBytes(
             drive.totalBytes,
           )} · 剩 {formatBytes(drive.freeBytes)}"
@@ -157,8 +157,8 @@
     {#if search.openError}
       <span class="text-danger">{search.openError}</span>
     {:else if search.status?.root}
-      <span class="rounded-full bg-accent-soft px-2 py-0.5 text-muted">
-        已索引 {search.status.files} 个文件
+      <span class="qx-badge bg-accent-soft text-muted tabular-nums">
+        已索引 {search.status.files}
       </span>
       {#if search.scanning}
         <span class="flex items-center gap-1 text-accent">
@@ -173,7 +173,7 @@
       {/if}
       <span class="truncate text-muted/70" title={search.status.root}>{search.status.root}</span>
     {:else}
-      <span class="text-muted">点盘符或选目录后即可搜索文件与内容</span>
+      <span class="text-muted">选择目录后即可搜索</span>
     {/if}
   </div>
 </div>

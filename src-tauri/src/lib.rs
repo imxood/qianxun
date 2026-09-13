@@ -326,8 +326,6 @@ pub fn run() {
             bridge::commands::bridge_deploy,
             bridge::commands::bridge_status,
             bridge::commands::plugins_list,
-            market::market_search,
-            market::market_detail,
             market::market_installed,
             market::market_install,
             market::market_remove,

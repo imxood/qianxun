@@ -319,10 +319,10 @@
 </script>
 
 <section class="mx-auto max-w-2xl space-y-6">
-  <h1 class="text-lg font-semibold">设置</h1>
+  <h1 class="qx-page-title">设置</h1>
 
   {#if settings.loadError}
-    <div class="rounded-lg border border-danger bg-danger/10 p-4 text-sm">
+    <div class="rounded-xl border border-danger bg-danger/10 p-4 text-sm">
       <p class="font-medium">设置加载失败</p>
       <p class="mt-1 text-muted">{settings.loadError}</p>
       <button class="mt-2 text-accent hover:underline" onclick={() => void settings.load()}>
@@ -332,15 +332,14 @@
   {:else if !settings.current}
     <p class="text-sm text-muted">正在加载设置…</p>
   {:else}
-    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-      <h2 class="text-sm font-medium">外观</h2>
+    <section class="qx-card space-y-3 p-4">
+      <h2 class="qx-h">外观</h2>
       <div class="flex gap-2">
         {#each themeOptions as option (option.value)}
           <button
-            class="rounded-md border px-3 py-1.5 text-sm transition-colors {theme.preference ===
-            option.value
-              ? 'border-accent bg-accent-soft text-fg'
-              : 'border-line text-muted hover:text-fg'}"
+            class="qx-btn qx-btn-md {theme.preference === option.value
+              ? 'qx-btn-soft'
+              : 'qx-btn-outline text-muted'}"
             onclick={() => onTheme(option.value)}
           >
             {option.label}
@@ -349,8 +348,8 @@
       </div>
     </section>
 
-    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-      <h2 class="text-sm font-medium">窗口行为</h2>
+    <section class="qx-card space-y-3 p-4">
+      <h2 class="qx-h">窗口行为</h2>
       <label class="flex items-center justify-between text-sm">
         <span>关闭窗口时隐藏到托盘</span>
         <Switch
@@ -369,16 +368,12 @@
       </label>
     </section>
 
-    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-      <h2 class="text-sm font-medium">DSH</h2>
+    <section class="qx-card space-y-3 p-4">
+      <h2 class="qx-h">DSH</h2>
       <div class="flex items-center justify-between gap-4 text-sm">
         <span class="shrink-0">端口</span>
-        <span class="font-mono text-xs text-muted">随机（OS 分配）</span>
+        <span class="font-mono text-xs text-muted">随机分配</span>
       </div>
-      <p class="text-xs text-muted">
-        每次启动由操作系统分配一个随机空闲端口，永不与其它服务冲突；
-        实际端口见「环境」页状态与日志。
-      </p>
 
       <label class="flex items-center justify-between text-sm">
         <span>随千寻启动 DSH</span>
@@ -392,7 +387,7 @@
       <div class="flex items-center justify-between gap-4 text-sm">
         <span class="shrink-0">DSH_HOME</span>
         <select
-          class="rounded-md border border-line bg-surface px-2 py-1"
+          class="qx-select"
           value={settings.current.dsh.home}
           onchange={(event) => {
             const value = event.currentTarget.value as 'isolated' | 'system';
@@ -410,24 +405,21 @@
           {installSpec ?? '…'}
         </span>
       </div>
-      <p class="text-xs text-muted">
-        DSH 版本由千寻锁定并经过验收，随千寻更新而升级；本页不可修改。
-      </p>
     </section>
 
-    <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-      <h2 class="text-sm font-medium">镜像源</h2>
+    <section class="qx-card space-y-3 p-4">
+      <h2 class="qx-h">镜像源</h2>
       <div class="flex items-center justify-between gap-4 text-sm">
         <span class="shrink-0">Node 下载源</span>
         <select
-          class="rounded-md border border-line bg-surface px-2 py-1"
+          class="qx-select"
           value={settings.current.mirrors.nodeBinary}
           onchange={(event) => {
             const value = event.currentTarget.value as 'auto' | 'official' | 'npmmirror';
             void save({ mirrors: { nodeBinary: value } });
           }}
         >
-          <option value="auto">自动（官方优先，失败转 npmmirror）</option>
+          <option value="auto">自动（npmmirror 优先）</option>
           <option value="official">仅官方</option>
           <option value="npmmirror">仅 npmmirror</option>
         </select>
@@ -435,7 +427,7 @@
       <div class="flex items-center justify-between gap-4 text-sm">
         <span class="shrink-0">npm registry</span>
         <input
-          class="w-56 rounded-md border border-line bg-surface px-2 py-1 invalid:border-danger"
+          class="qx-input w-56 invalid:border-danger"
           type="text"
           list="registry-presets"
           bind:value={registryInput}
@@ -448,11 +440,9 @@
           <option value="official">npm 官方</option>
         </datalist>
       </div>
-      <p class="text-xs {registryValid ? 'text-muted' : 'text-danger'}">
-        {registryValid
-          ? 'npmmirror / official / http(s):// 自定义地址。'
-          : '仅限 npmmirror、official 或 http(s):// 地址。'}
-      </p>
+      {#if !registryValid}
+        <p class="text-xs text-danger">仅限 npmmirror、official 或 http(s):// 地址。</p>
+      {/if}
     </section>
   {/if}
 
@@ -460,13 +450,13 @@
     <p class="text-sm text-danger">保存失败：{saveError}</p>
   {/if}
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">快捷键</h2>
+  <section class="qx-card space-y-3 p-4">
+    <h2 class="qx-h">快捷键</h2>
     <div class="flex items-center gap-3">
       <label for="hotkey-screenshot" class="w-28 shrink-0 text-sm text-muted">截屏</label>
       <input
         id="hotkey-screenshot"
-        class="w-44 rounded-md border border-line bg-surface px-3 py-1.5 text-center font-mono text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+        class="qx-input w-44 text-center font-mono"
         type="text"
         readonly
         placeholder="点击录制"
@@ -474,26 +464,23 @@
         onclick={() => (hotkeyRecording = true)}
         onkeydown={onHotkeyKeydown}
       />
-      <button
-        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
-        onclick={() => void applyHotkey()}
-      >
+      <button class="qx-btn qx-btn-primary qx-btn-md" onclick={() => void applyHotkey()}>
         应用
       </button>
     </div>
-    <p class="text-xs text-muted">修饰键 + 字母/数字；清空并应用为停用。</p>
+    <p class="text-xs text-muted">清空并应用 = 停用。</p>
     {#if hotkeyError}
       <p class="text-sm text-danger">{hotkeyError}</p>
     {/if}
   </section>
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">终端</h2>
+  <section class="qx-card space-y-3 p-4">
+    <h2 class="qx-h">终端</h2>
     <div class="flex items-center gap-3">
       <label for="term-shell" class="w-28 shrink-0 text-sm text-muted">Shell</label>
       <select
         id="term-shell"
-        class="flex-1 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
+        class="qx-select flex-1"
         value={terminalShell}
         onchange={(event) => (terminalShell = event.currentTarget.value)}
       >
@@ -507,7 +494,7 @@
       <label for="term-font" class="w-28 shrink-0 text-sm text-muted">字号</label>
       <input
         id="term-font"
-        class="w-24 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
+        class="qx-input w-24"
         type="number"
         min="8"
         max="32"
@@ -516,17 +503,14 @@
       <label for="term-scroll" class="ml-4 w-28 shrink-0 text-sm text-muted">回滚行数</label>
       <input
         id="term-scroll"
-        class="w-28 rounded-md border border-line bg-surface px-3 py-1.5 text-sm"
+        class="qx-input w-28"
         type="number"
         min="100"
         max="100000"
         step="100"
         bind:value={terminalScrollInput}
       />
-      <button
-        class="ml-auto rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
-        onclick={() => void applyTerminal()}
-      >
+      <button class="qx-btn qx-btn-primary qx-btn-md ml-auto" onclick={() => void applyTerminal()}>
         应用
       </button>
     </div>
@@ -536,33 +520,22 @@
     {/if}
   </section>
 
-  <section class="space-y-2 rounded-lg border border-line bg-card p-4">
-    <div class="flex items-center justify-between">
-      <h2 class="text-sm font-medium">远程访问</h2>
-      <button
-        class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
-        onclick={() => nav.go('remote')}
-      >
-        打开远程页
-      </button>
-    </div>
-    <p class="text-xs text-muted">
-      远程访问已升格为一级页面：启用网关、配对设备、自检都在「远程」页完成。
-    </p>
+  <section class="qx-card flex items-center justify-between p-4">
+    <h2 class="qx-h">远程访问</h2>
+    <button class="qx-btn qx-btn-outline qx-btn-md" onclick={() => nav.go('remote')}>
+      打开远程页
+    </button>
   </section>
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">同步</h2>
-    <p class="text-xs text-muted">
-      笔记库以 git 同步，仅同步 vault 目录。推送 = 提交并 push；拉取 = rebase。
-    </p>
+  <section class="qx-card space-y-3 p-4">
+    <h2 class="qx-h">同步</h2>
     {#if syncStatus}
       {#if !syncStatus.gitAvailable}
         <p class="text-sm text-danger">未检测到 git，请安装后重试。</p>
       {:else if !syncStatus.initialized}
         <p class="text-sm text-muted">笔记库还不是 git 仓。</p>
         <button
-          class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-40"
+          class="qx-btn qx-btn-primary qx-btn-md"
           disabled={syncBusy || !vaultReady}
           onclick={() => void syncAction('sync_init')}
         >
@@ -579,7 +552,7 @@
         </p>
         <div class="flex items-center gap-2">
           <button
-            class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-40"
+            class="qx-btn qx-btn-primary qx-btn-md"
             disabled={syncBusy || !syncStatus.hasRemote}
             title={syncStatus.hasRemote ? '' : '先在终端里给仓加 remote'}
             onclick={() => void syncAction('sync_push')}
@@ -587,16 +560,13 @@
             推送
           </button>
           <button
-            class="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-accent-soft disabled:opacity-40"
+            class="qx-btn qx-btn-outline qx-btn-md"
             disabled={syncBusy || !syncStatus.hasRemote}
             onclick={() => void syncAction('sync_pull')}
           >
             拉取
           </button>
-          <button
-            class="rounded-md px-2 py-1.5 text-xs text-muted hover:bg-accent-soft"
-            onclick={() => void refreshSync()}
-          >
+          <button class="qx-btn qx-btn-ghost qx-btn-sm" onclick={() => void refreshSync()}>
             刷新
           </button>
         </div>
@@ -604,29 +574,29 @@
     {/if}
     {#if syncError}<p class="text-sm text-danger">{syncError}</p>{/if}
     {#if syncLog.length > 0}
-      <pre class="max-h-32 overflow-y-auto rounded-md bg-bg p-2 text-xs text-muted">{syncLog.join(
+      <pre
+        class="max-h-32 overflow-y-auto rounded-md bg-bg p-2 font-mono text-xs text-muted">{syncLog.join(
           '\n',
         )}</pre>
     {/if}
   </section>
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">数据备份</h2>
+  <section class="qx-card space-y-3 p-4">
+    <h2 class="qx-h">数据备份</h2>
     <p class="text-xs text-muted">
-      把千寻设置与 DSH 全部用户数据（agents 配置、API Key、工作区列表、会话记录、附件） 打包成一个
-      zip；同一台电脑上可随时还原。不含 DSH 程序本体与项目源码（可重建）。
+      打包千寻设置与 DSH 用户数据（含 API Key）为 zip，可随时还原；不含程序本体。
     </p>
     <p class="text-xs text-danger">备份包含 API Key 明文，请妥善保管备份文件。</p>
     <div class="flex items-center gap-2">
       <button
-        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
+        class="qx-btn qx-btn-primary qx-btn-md"
         disabled={backupBusy}
         onclick={() => void exportBackup()}
       >
         导出备份…
       </button>
       <button
-        class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft disabled:opacity-40"
+        class="qx-btn qx-btn-outline qx-btn-md"
         disabled={backupBusy}
         onclick={() => void pickRestore()}
       >
@@ -634,7 +604,7 @@
       </button>
     </div>
     {#if exportResult}
-      <p class="text-xs text-muted">
+      <p class="text-xs break-all text-muted">
         已导出：{exportResult.path}（{formatSize(exportResult.sizeBytes)} ·
         {exportResult.fileCount} 个文件）
       </p>
@@ -675,8 +645,8 @@
     oncancel={dismissRestoreReport}
   />
 
-  <section class="space-y-1 rounded-lg border border-line bg-card p-4 text-xs text-muted">
-    <h2 class="text-sm font-medium text-fg">关于</h2>
+  <section class="qx-card space-y-1 p-4 text-xs text-muted">
+    <h2 class="qx-h">关于</h2>
     {#if meta}
       <p>千寻 v{meta.version} · {meta.identifier}</p>
       <p>Tauri 2 · Svelte 5</p>

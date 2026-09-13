@@ -17,9 +17,8 @@
   class="flex h-8 shrink-0 select-none items-stretch justify-between border-b border-line bg-surface"
   data-tauri-drag-region="deep"
 >
-  <div class="flex items-baseline gap-2 self-center pl-3">
-    <span class="text-sm font-semibold tracking-wide">千寻</span>
-    <span class="text-xs text-muted">Qianxun</span>
+  <div class="flex items-center self-center pr-3 pl-3">
+    <span class="text-sm font-semibold tracking-tight">千寻</span>
   </div>
   <!-- 中段留空作为拖拽区（继承 header 的 deep 规则），也承载双击最大化。 -->
   <div class="flex-1"></div>

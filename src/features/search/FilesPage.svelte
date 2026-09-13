@@ -17,6 +17,13 @@
   // ---- 排序 / 类型过滤 ------------------------------------------------
   type SortKey = 'score' | 'name' | 'mtime' | 'size';
   const KIND_ORDER: FileKind[] = ['code', 'doc', 'image', 'archive', 'other'];
+  const KIND_LABEL: Record<FileKind, string> = {
+    code: '代码',
+    doc: '文档',
+    image: '图片',
+    archive: '压缩包',
+    other: '其他',
+  };
   let sortKey = $state<SortKey>('score');
   let sortAsc = $state(false);
   let kindFilter = $state<FileKind | 'all'>('all');
@@ -191,11 +198,9 @@
         />
       </svg>
       <input
-        class="w-full rounded-md border border-line bg-surface py-2 pl-9 pr-3 text-sm placeholder:text-muted/60"
+        class="qx-input w-full py-2 pl-9"
         type="text"
-        placeholder={search.status?.root
-          ? '按文件名过滤，即时生效（↑↓ 选择 · Enter 打开）'
-          : '先选择目录'}
+        placeholder={search.status?.root ? '按文件名过滤（↑↓ 选择 · Enter 打开）' : '先选择目录'}
         disabled={!search.status?.root}
         bind:value={search.filesQuery}
         oninput={() => search.scheduleFiles()}
@@ -223,9 +228,7 @@
   {#if filtered.length > 0}
     <div class="flex flex-wrap items-center gap-1.5 text-xs">
       <button
-        class="rounded-full px-2 py-0.5 transition-colors {kindFilter === 'all'
-          ? 'bg-accent text-white'
-          : 'bg-surface text-muted hover:text-fg'}"
+        class="qx-chip {kindFilter === 'all' ? 'qx-chip-on' : 'qx-chip-off'}"
         onclick={() => (kindFilter = 'all')}
       >
         全部 {search.filesResult?.items.length ?? 0}
@@ -233,18 +236,17 @@
       {#each KIND_ORDER as kind (kind)}
         {#if (kindCounts[kind] ?? 0) > 0}
           <button
-            class="rounded-full px-2 py-0.5 transition-colors {kindFilter === kind
-              ? 'bg-accent text-white'
-              : 'bg-surface text-muted hover:text-fg'}"
+            class="qx-chip {kindFilter === kind ? 'qx-chip-on' : 'qx-chip-off'}"
             onclick={() => (kindFilter = kind)}
           >
-            {kind}{kindCounts[kind]}
+            {KIND_LABEL[kind]}
+            {kindCounts[kind]}
           </button>
         {/if}
       {/each}
     </div>
 
-    <div class="overflow-hidden rounded-lg border border-line bg-card">
+    <div class="qx-card overflow-hidden">
       <div
         class="flex items-center border-b border-line/60 bg-surface/40 px-3 py-1.5 text-xs text-muted"
       >
@@ -305,9 +307,6 @@
         {/each}
       </div>
     </div>
-    <p class="text-xs text-muted/70">
-      单击选中 · Ctrl 单击加选 · Shift 单击范围 · 双击打开 · 右键更多操作
-    </p>
   {:else if search.filesResult}
     <div class="flex flex-col items-center gap-1 py-16 text-center">
       <p class="text-sm text-fg">无匹配文件</p>
@@ -316,7 +315,7 @@
   {:else if search.status?.root}
     <div class="flex flex-col items-center gap-1 py-16 text-center">
       <p class="text-sm text-fg">输入文件名开始查找</p>
-      <p class="text-xs text-muted">支持模糊匹配，结果按相关度排序</p>
+      <p class="text-xs text-muted">支持模糊匹配</p>
     </div>
   {/if}
 </section>

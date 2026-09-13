@@ -82,7 +82,10 @@ pub async fn harness_start(app: AppHandle) -> Result<String> {
 pub async fn harness_stop(app: AppHandle) -> Result<()> {
     let state = app.state::<crate::AppState>();
     let _gate = state.harness.lifecycle.lock().await;
-    state.harness.supervisor.stop().await;
+    let supervisor = Arc::clone(&state.harness.supervisor);
+    supervisor.note(Stream::Stdout, "[DSH] 停止".to_owned());
+    supervisor.stop().await;
+    supervisor.note(Stream::Stdout, "[DSH] 已停止".to_owned());
     Ok(())
 }
 
@@ -92,15 +95,17 @@ pub async fn harness_stop(app: AppHandle) -> Result<()> {
 pub async fn harness_restart(app: AppHandle) -> Result<String> {
     let state = app.state::<crate::AppState>();
     let _gate = state.harness.lifecycle.lock().await;
-    state.harness.supervisor.stop().await;
-    state.harness.supervisor.wait_until_inactive().await?;
+    let supervisor = Arc::clone(&state.harness.supervisor);
+    supervisor.note(Stream::Stdout, "[DSH] 重启".to_owned());
+    supervisor.stop().await;
+    supervisor.wait_until_inactive().await?;
     let settings = crate::settings_snapshot(&app)?;
     let plan = super::launch_plan(&app, &settings)?;
     Arc::clone(&state.harness.supervisor).start(plan).await
 }
 
 /// 安装（或重装）DSH。pnpm 的每一行输出都通过日志事件实时转发，
-/// 包数推进经进度事件驱动环境页进度卡。
+/// 包数推进另发进度事件（前端 store 留存备用，UI 展示走日志）。
 #[tauri::command]
 pub async fn harness_install(app: AppHandle) -> Result<()> {
     let state = app.state::<crate::AppState>();
@@ -179,7 +184,7 @@ async fn perform_install(app: &AppHandle) -> Result<()> {
         format!("正在安装 {} 到 {}", plan.spec, plan.target.display()),
     );
 
-    // 先幂等备好 pnpm 工具，再走事务安装（备份 → 直装 → 校验 → 清理）。
+    // 先把 pnpm 工具刷新到最新（失败回落已装版本），再走事务安装（备份 → 直装 → 校验 → 清理）。
     let tool_reporter = Arc::clone(&supervisor);
     install::ensure_pnpm_tool(&plan, move |stream, line| tool_reporter.note(stream, line)).await?;
     // pnpm 的 Progress 行顺便解析成进度事件：环境页能看到包数推进。
@@ -220,5 +225,9 @@ pub async fn start_managed(app: &AppHandle) -> Result<String> {
     let _gate = state.harness.lifecycle.lock().await;
     let settings = crate::settings_snapshot(app)?;
     let plan = super::launch_plan(app, &settings)?;
+    state
+        .harness
+        .supervisor
+        .note(Stream::Stdout, "[DSH] 启动".to_owned());
     Arc::clone(&state.harness.supervisor).start(plan).await
 }

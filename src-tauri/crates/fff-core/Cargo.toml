@@ -26,13 +26,15 @@ default = []
 
 [dependencies]
 # 独立声明而非继承（同 proc-guard 约定）：版本取自上游 workspace.dependencies。
+# 收编清理：blake3（源码零引用，死依赖，还拖着 C/asm 编译）已移除；
+# dirs 从 5 升到 6 —— 与千寻主包/node-runtime 同版本，砍掉 dirs5+dirs-sys0.4
+# +windows-sys0.48 一整条重复栈（源码只用 home_dir，v6 API 不变）。
 ahash = "0.8"
 rayon = "1.8.0"
 smallvec = { version = "1.13", features = ["const_generics", "union"] }
 thiserror = "2.0.10"
 fff-query-parser = { path = "../fff-query-parser" }
-blake3 = "1.8.2"
-dirs = "5.0"
+dirs = "6"
 glidesort = "0.1"
 globset = "0.4"
 fff-grep = { path = "../fff-grep" }
@@ -50,7 +52,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-dunce = "1.0"
+# dunce 已移除：源码零引用（死依赖）。
 
 [dev-dependencies]
 # 单元测试的临时目录；上游 workspace 声明，收编后独立声明。

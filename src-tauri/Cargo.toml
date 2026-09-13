@@ -107,3 +107,10 @@ windows-sys = { version = "0.60", features = [
 # 由 xterm.attachCustomKeyEventHandler 在终端内自行处理（Ctrl+Shift+C/V）。
 webview2-com = "0.38"
 windows-core = "0.61"
+
+# fff-search 增量编译：该 crate 的 LLVM 后端体量极端（收编的 frizbee SIMD
+# 匹配矩阵单包 ≈ 全仓一半编译时间，且按调用树整簇塞进单个 CGU 串行编译），
+# release 默认不增量导致改动一行也要全量重编 ~9 分钟。打开后仅重编脏 CGU。
+# 全量构建成本 +10~20%（MIR 编码），换来日常迭代热重建数量级加速。
+[profile.release.package.fff-search]
+incremental = true

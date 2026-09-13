@@ -598,12 +598,21 @@
           onpointermove={tabPointerMove}
           onpointerup={(event) => tabPointerUp(event, tab)}
           onpointercancel={tabPointerCancel}
-          title="{tab.cwd ?? tab.title}{tab.pinned !== null
-            ? '（已固定）'
-            : ''}——双击重命名，右键更多，拖拽排序"
+          title="{tab.cwd ?? tab.title}{tab.pinned !== null ? ' · 已固定' : ''}"
         >
           {#if tab.pinned !== null}
-            <span class="shrink-0 text-[10px] text-accent" title="已固定">📌</span>
+            <svg
+              viewBox="0 0 24 24"
+              class="size-3 shrink-0 text-accent"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-label="已固定"
+            >
+              <path d="M8 4h8v5l2 3H6l2-3zM12 12v8" />
+            </svg>
           {/if}
           <span class="truncate {tab.alive ? '' : 'opacity-50 line-through'}">{tab.title}</span>
           <span
@@ -622,23 +631,44 @@
     {/each}
     <!-- + 紧邻标签列表（好点）；⚙ 独占行尾（ml-auto 撑开弹性空隙）。 -->
     <button
-      class="rounded-md px-2 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg"
+      class="qx-icon-btn"
       title="新建终端（继承当前终端的工作目录）"
       data-testid="terminal-new"
       onclick={() => void newTab(tabs.find((tab) => tab.id === activeId)?.cwd ?? null)}
     >
-      +
+      <svg
+        viewBox="0 0 24 24"
+        class="size-4"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <path d="M12 5v14M5 12h14" />
+      </svg>
     </button>
     <button
-      class="ml-auto rounded-md px-1.5 py-1 text-sm text-muted transition-colors hover:bg-accent-soft hover:text-fg {settingsOpen
-        ? 'bg-accent-soft text-fg'
-        : ''}"
+      class="qx-icon-btn ml-auto {settingsOpen ? 'bg-accent-soft text-fg' : ''}"
       title="终端设置"
       aria-label="终端设置"
       data-testid="terminal-settings"
       onclick={() => (settingsOpen = !settingsOpen)}
     >
-      ⚙
+      <svg
+        viewBox="0 0 24 24"
+        class="size-4"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path
+          d="M12 8a4 4 0 100 8 4 4 0 000-8zM19 12l2-1-2-4-2 1-2-1V4h-2.2L12 6l-2.8-2H7v3l-2 1-2-1-2 4 2 1v2l-2 1 2 4 2-1 2 1v3h2.8L12 18l2.8 2H17v-3l2-1 2 1 2-4-2-1z"
+        />
+      </svg>
     </button>
     {#if settingsOpen}
       <!-- 点击别处关闭（透明垫层）；面板悬浮在按钮下方。 -->
@@ -647,9 +677,7 @@
         aria-label="关闭终端设置"
         onclick={() => (settingsOpen = false)}
       ></button>
-      <div
-        class="absolute top-full z-50 mt-1 w-64 space-y-3 rounded-lg border border-line bg-card p-3 shadow-xl"
-      >
+      <div class="qx-card absolute top-full z-50 mt-1 w-64 space-y-3 p-3 text-xs shadow-xl">
         <div class="flex items-center justify-between text-xs">
           <span class="text-muted">字号</span>
           <span class="flex items-center gap-1.5">
@@ -669,7 +697,7 @@
         <div class="flex items-center justify-between text-xs">
           <span class="text-muted">光标样式</span>
           <select
-            class="rounded border border-line bg-surface px-1.5 py-0.5"
+            class="qx-select rounded-md px-1.5 py-0.5"
             value={prefs.cursorStyle}
             onchange={(event) =>
               saveTerminalPrefs({
@@ -692,7 +720,7 @@
         <div class="flex items-center justify-between text-xs">
           <span class="text-muted">滚动缓冲</span>
           <select
-            class="rounded border border-line bg-surface px-1.5 py-0.5"
+            class="qx-select rounded-md px-1.5 py-0.5"
             value={prefs.scrollback}
             onchange={(event) =>
               saveTerminalPrefs({ scrollback: Number(event.currentTarget.value) })}
@@ -715,7 +743,18 @@
       style="top: {ghost.y}px;"
     >
       {#if ghost.pinned}
-        <span class="shrink-0 text-[10px] text-accent">📌</span>
+        <svg
+          viewBox="0 0 24 24"
+          class="size-3 shrink-0 text-accent"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M8 4h8v5l2 3H6l2-3zM12 12v8" />
+        </svg>
       {/if}
       <span class="truncate">{ghost.title}</span>
     </div>
@@ -751,13 +790,24 @@
       </div>
     {/each}
     {#if tabs.length === 0}
-      <div class="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted">
-        <p>没有终端会话。点 + 新建。</p>
-        {#if standalone}
-          <p class="text-xs">主窗的标签可右键「分离到独立窗口」转移到这里。</p>
-        {:else}
-          <p class="text-xs">标签右键可分离到独立窗口。</p>
-        {/if}
+      <div class="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted">
+        <span
+          class="qx-grad grid size-14 place-items-center rounded-2xl text-white shadow-lg shadow-accent/30"
+          aria-hidden="true"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="size-7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M4 5h16v14H4zM7.5 9l3 3-3 3M12.5 15h4" />
+          </svg>
+        </span>
+        <p>点 + 新建终端会话</p>
       </div>
     {/if}
   </div>

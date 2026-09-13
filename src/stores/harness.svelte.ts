@@ -28,7 +28,7 @@ class HarnessStore {
   /** 手动重启动作进行中（按钮禁用与文案用；进程相位仍由事件驱动）。 */
   restarting = $state(false);
   installing = $state(false);
-  /** 最近一次安装进度事件（环境页进度卡数据源；安装结束即清空）。 */
+  /** 最近一次安装进度事件（UI 目前只展示日志；安装结束即清空）。 */
   installProgress: InstallProgress | null = $state(null);
   logs: string[] = $state([]);
   /** 进程仍在跑（starting/ready/restarting）时置 true，控制按钮可用性。 */

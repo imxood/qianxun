@@ -22,10 +22,10 @@ default = []
 
 [dependencies]
 # 独立声明而非继承（同 proc-guard 约定）：版本取自上游 workspace.dependencies。
+# unicode-segmentation 已移除：源码零引用（死依赖）。
 regex = "1"
 aho-corasick = "1"
 smallvec = "1"
-unicode-segmentation = "1"
 globset = "0.4"
 
 [dev-dependencies]

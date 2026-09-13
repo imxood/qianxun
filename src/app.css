@@ -4,32 +4,38 @@
    设置里显式覆盖系统偏好。@custom-variant 让 dark: 前缀走类判定。 */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* 设计 token 全部集中在这里（编码规范 §前端：token 集中在 lib/design/ 的
-   约定落在本文件 + 后续组件目录）。语义命名，组件只允许用语义色。 */
+/* 设计 token 全部集中在这里。语义命名，组件只允许用语义色。
+   品牌视觉：蓝紫渐变（273→293 双色）贯穿主按钮 / 激活导航 / 进度与
+   空态图标；内容区顶部常驻一道极光渐变，暗色下提供纵深、亮色下
+   提供品牌色温。 */
 :root {
-  --qx-bg: oklch(0.975 0.004 260);
-  --qx-surface: oklch(1 0 0);
+  --qx-bg: oklch(0.968 0.008 275);
+  --qx-surface: oklch(0.995 0.002 275);
   --qx-card: oklch(1 0 0);
-  --qx-fg: oklch(0.245 0.02 262);
-  --qx-muted: oklch(0.52 0.02 262);
-  --qx-line: oklch(0.905 0.008 262);
-  --qx-accent: oklch(0.55 0.19 265);
-  --qx-accent-fg: oklch(0.99 0.005 265);
-  --qx-accent-soft: oklch(0.945 0.03 265);
+  --qx-fg: oklch(0.22 0.03 275);
+  --qx-muted: oklch(0.5 0.025 275);
+  --qx-line: oklch(0.912 0.012 278);
+  --qx-accent: oklch(0.54 0.22 273);
+  --qx-accent-2: oklch(0.6 0.2 293);
+  --qx-accent-fg: oklch(0.995 0.003 275);
+  --qx-accent-soft: oklch(0.947 0.032 282);
+  --qx-ok: oklch(0.55 0.15 150);
   --qx-warning: oklch(0.62 0.14 75);
   --qx-danger: oklch(0.58 0.21 25);
 }
 
 .dark {
-  --qx-bg: oklch(0.185 0.014 262);
-  --qx-surface: oklch(0.225 0.016 262);
-  --qx-card: oklch(0.245 0.017 262);
-  --qx-fg: oklch(0.93 0.008 262);
-  --qx-muted: oklch(0.68 0.015 262);
-  --qx-line: oklch(0.32 0.018 262);
-  --qx-accent: oklch(0.7 0.16 265);
-  --qx-accent-fg: oklch(0.17 0.02 265);
-  --qx-accent-soft: oklch(0.3 0.05 265);
+  --qx-bg: oklch(0.165 0.018 278);
+  --qx-surface: oklch(0.205 0.022 278);
+  --qx-card: oklch(0.24 0.026 278);
+  --qx-fg: oklch(0.94 0.01 278);
+  --qx-muted: oklch(0.72 0.02 278);
+  --qx-line: oklch(0.315 0.028 278);
+  --qx-accent: oklch(0.62 0.19 273);
+  --qx-accent-2: oklch(0.66 0.17 293);
+  --qx-accent-fg: oklch(0.995 0.003 275);
+  --qx-accent-soft: oklch(0.3 0.065 285);
+  --qx-ok: oklch(0.72 0.14 150);
   --qx-warning: oklch(0.78 0.14 75);
   --qx-danger: oklch(0.68 0.18 25);
 }
@@ -44,8 +50,14 @@
   --color-accent: var(--qx-accent);
   --color-accent-fg: var(--qx-accent-fg);
   --color-accent-soft: var(--qx-accent-soft);
+  --color-ok: var(--qx-ok);
   --color-warning: var(--qx-warning);
   --color-danger: var(--qx-danger);
+
+  /* 等宽字体双轨制（Developer Mono 原则）：代码/路径/数字统一走它。
+     本地已装 JetBrains Mono / Cascadia 时优先，未装回退 Consolas。 */
+  --font-mono:
+    'JetBrains Mono', 'Cascadia Mono', Consolas, 'Sarasa Mono SC', ui-monospace, monospace;
 }
 
 html,
@@ -56,6 +68,7 @@ body {
 body {
   @apply bg-bg text-fg antialiased;
   font-family:
+    'Segoe UI Variable Text',
     'Segoe UI',
     'Microsoft YaHei',
     system-ui,
@@ -63,7 +76,196 @@ body {
     sans-serif;
 }
 
+::selection {
+  background: color-mix(in oklab, var(--qx-accent) 22%, transparent);
+}
+
 /* 自绘标题栏窗口的默认字体大小由组件自行控制，这里只给全局基线。 */
 #app {
   height: 100%;
+}
+
+/* 桌面应用基线：可点元素统一 pointer。 */
+button:not(:disabled),
+[role='button']:not([aria-disabled='true']),
+summary {
+  cursor: pointer;
+}
+
+/* 细滚动条：列表密集的桌面工具里，默认宽滚动条太重。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--qx-fg) 20%, transparent) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-color: color-mix(in oklab, var(--qx-fg) 20%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--qx-fg) 32%, transparent);
+}
+
+/* ---------- 共享组件类：页面只做布局，控件语义收敛到这里 ---------- */
+@layer components {
+  /* 品牌渐变：可叠加在任何元素的背景色之上。 */
+  .qx-grad {
+    background-image: linear-gradient(135deg, var(--qx-accent), var(--qx-accent-2));
+  }
+
+  /* 卡片：内容分组的唯一容器形态。亮色 = 柔和投影 + 品牌色环境影；
+     暗色 = 顶部 1px 高光 + 深投影（玻璃层压感）。 */
+  .qx-card {
+    @apply rounded-xl border border-line bg-card;
+    box-shadow:
+      0 1px 2px color-mix(in oklab, var(--qx-fg) 5%, transparent),
+      0 16px 40px -24px color-mix(in oklab, var(--qx-accent) 32%, transparent);
+  }
+  .dark .qx-card {
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, white 4%, transparent),
+      0 16px 40px -24px color-mix(in oklab, black 70%, transparent);
+  }
+
+  /* 按钮体系：qx-btn 定基础形态与状态，变体只管配色。 */
+  .qx-btn {
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-[color,background-color,border-color,filter,box-shadow] outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:pointer-events-none disabled:opacity-45;
+  }
+  .qx-btn-md {
+    @apply px-3.5 py-2;
+  }
+  .qx-btn-sm {
+    @apply rounded-md px-2.5 py-1 text-xs;
+  }
+  .qx-btn-primary {
+    @apply text-white;
+    background-image: linear-gradient(135deg, var(--qx-accent), var(--qx-accent-2));
+    box-shadow:
+      0 1px 2px color-mix(in oklab, black 12%, transparent),
+      0 4px 14px -4px color-mix(in oklab, var(--qx-accent) 55%, transparent);
+  }
+  .qx-btn-primary:hover {
+    filter: brightness(1.08);
+  }
+  .qx-btn-primary:active {
+    filter: brightness(0.95);
+  }
+  .qx-btn-soft {
+    @apply bg-accent-soft text-accent;
+  }
+  .qx-btn-soft:hover {
+    @apply bg-accent/25;
+  }
+  .qx-btn-outline {
+    @apply border border-line text-fg;
+  }
+  .qx-btn-outline:hover {
+    @apply border-accent/40 bg-accent-soft/50 text-accent;
+  }
+  .qx-btn-ghost {
+    @apply text-muted;
+  }
+  .qx-btn-ghost:hover {
+    @apply bg-accent-soft text-fg;
+  }
+  .qx-btn-danger {
+    @apply bg-danger text-white hover:bg-danger/90;
+  }
+  .qx-btn-danger-outline {
+    @apply border border-danger/40 text-danger hover:border-danger/60 hover:bg-danger/10;
+  }
+
+  /* 输入控件：聚焦 = 品牌描边 + 柔光晕。 */
+  .qx-input {
+    @apply rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-fg transition-[border-color,box-shadow] outline-none placeholder:text-muted/60 focus:border-accent/55 focus:ring-4 focus:ring-accent/15 disabled:opacity-50;
+  }
+  .qx-select {
+    @apply rounded-lg border border-line bg-surface px-2 py-1.5 text-sm text-fg transition-colors outline-none focus:border-accent/55 disabled:opacity-50;
+  }
+
+  /* 小图标按钮：工具栏与行内操作。 */
+  .qx-icon-btn {
+    @apply inline-flex size-7 shrink-0 items-center justify-center rounded-lg text-muted transition-colors outline-none hover:bg-accent-soft hover:text-fg focus-visible:ring-2 focus-visible:ring-accent/50 disabled:pointer-events-none disabled:opacity-45;
+  }
+
+  /* 筛选 chip 与状态徽标。 */
+  .qx-chip {
+    @apply rounded-full px-2.5 py-0.5 text-xs transition-[filter,background-color,color] outline-none focus-visible:ring-2 focus-visible:ring-accent/50;
+  }
+  .qx-chip-on {
+    @apply text-white;
+    background-image: linear-gradient(135deg, var(--qx-accent), var(--qx-accent-2));
+    box-shadow: 0 2px 8px -2px color-mix(in oklab, var(--qx-accent) 50%, transparent);
+  }
+  .qx-chip-on:hover {
+    filter: brightness(1.06);
+  }
+  .qx-chip-off {
+    @apply bg-surface text-muted hover:text-fg;
+  }
+  .qx-badge {
+    @apply inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-xs whitespace-nowrap;
+  }
+
+  /* 页面标题：全部一级页面统一字阶（大标题 + 紧字距）。 */
+  .qx-page-title {
+    @apply text-xl font-semibold tracking-tight text-fg;
+  }
+
+  /* 章节标题：品牌渐变小竖条 + 字重，卡片内分区的产品级细节。 */
+  .qx-h {
+    @apply flex items-center gap-2 text-sm font-medium text-fg;
+  }
+  .qx-h::before {
+    content: '';
+    @apply h-3 w-[3px] shrink-0 rounded-full;
+    background-image: linear-gradient(180deg, var(--qx-accent), var(--qx-accent-2));
+  }
+
+  /* 段控（tab / 视图切换）：同一容器内互斥选择。 */
+  .qx-segment {
+    @apply rounded-md px-3 py-1 text-sm transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/50;
+  }
+  .qx-segment-on {
+    @apply bg-accent-soft font-medium text-accent;
+  }
+  .qx-segment-off {
+    @apply text-muted hover:text-fg;
+  }
+
+  /* 导航激活态：柔和品牌底 + 细描边。整块渐变大底在窄侧栏里过亮过大、
+     压过内容区；低饱和底色 + 同色文字足够锚定当前位置。 */
+  .qx-nav-active {
+    @apply bg-accent-soft text-accent;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--qx-accent) 22%, transparent);
+  }
+
+  /* 内容区极光：内容背景顶部的一道品牌色氛围光。
+     挂在内容容器（relative）上；页面容器在其后的 DOM 序，天然盖住它。 */
+  .qx-content::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        720px 320px at 12% -6%,
+        color-mix(in oklab, var(--qx-accent) 15%, transparent),
+        transparent 65%
+      ),
+      radial-gradient(
+        560px 280px at 88% -10%,
+        color-mix(in oklab, var(--qx-accent-2) 11%, transparent),
+        transparent 65%
+      );
+  }
 }

@@ -14,8 +14,8 @@
   aria-checked={checked}
   aria-label={label}
   {disabled}
-  class="relative h-5 w-9 shrink-0 rounded-full transition-colors {checked
-    ? 'bg-accent'
+  class="relative h-5 w-9 shrink-0 rounded-full transition-all {checked
+    ? 'qx-grad shadow-sm shadow-accent/40'
     : 'bg-line'} disabled:cursor-not-allowed disabled:opacity-50"
   onclick={() => onchange(!checked)}
 >

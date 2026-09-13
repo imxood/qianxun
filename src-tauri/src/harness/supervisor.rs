@@ -211,6 +211,10 @@ impl Supervisor {
         match Arc::clone(&self).launch_once(&plan).await {
             Ok((child, origin, url)) => {
                 let pid = child.id().unwrap_or_default();
+                self.note(
+                    Stream::Stdout,
+                    format!("[DSH] 已就绪（{origin}），pid {pid}"),
+                );
                 self.publish(Status::Ready {
                     origin: origin.clone(),
                     url,
@@ -221,6 +225,7 @@ impl Supervisor {
             }
             Err(failure) => {
                 self.active.store(false, Ordering::SeqCst);
+                self.note(Stream::Stderr, format!("[DSH] 启动失败：{failure}"));
                 self.publish(Status::Failed {
                     reason: failure.to_string(),
                 });

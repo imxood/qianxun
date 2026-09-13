@@ -3,7 +3,8 @@
 //! 设计约束：
 //! - 流式扫描由 fff-search 的 `scan_directory` 承担：rayon 并行遍历任意
 //!   目录，`cancelled` 原子标志随时停止；扫描发现即时可见，事件按固定
-//!   100ms 节流推给前端，避免 IPC 洪泛；
+//!   100ms 节流推给前端，避免 IPC 洪泛；进度帧附带扫描根直接子项的
+//!   部分占用，前端「边扫边长」，结束时给 TOP 大文件与跳过计数；
 //! - 同步 `disk_scan` / `disk_clean` 保留：单层扫描走 spawn_blocking，
 //!   清理走回收站（trash crate）可撤销；
 //! - 旧 `disk_scan` 的约定继续有效：符号链接 / junction 不深入（防环），
@@ -120,23 +121,33 @@ pub async fn disk_clean(app: AppHandle, path: String) -> Result<()> {
 
 // ---- 流式扫描：fff 并行遍历 + 固定频率事件 ----
 
-/// 流式扫描事件：进度按 100ms 节流推送，结束时给完整树快照。
+/// 流式扫描事件：进度按 ~100ms 节流推送，结束时给完整树快照。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum DiskScanEvent {
-    /// 周期进度（固定 ~100ms 一帧）：当前扫描目标 + 实时计数。
+    /// 周期进度：实时计数 + 扫描根直接子项的部分占用（前端「边扫边长」）。
     Progress {
         /// 正在遍历的根目录。
         root: String,
         files: u64,
         dirs: u64,
         bytes: u64,
+        /// 权限/系统错误跳过的条目数（不计入大小）。
+        skipped: u64,
+        /// 直接子项部分占用（降序，≤200；path 可用于扫描中下钻）。
+        top_children: Vec<fff_search::PartialChild>,
     },
     /// 扫描结束（完成或被停止）：完整树快照，前端整体替换。
     Done {
         root: String,
         cancelled: bool,
+        /// 已发现文件/目录总数与跳过数（cancelled 时为部分值）。
+        files: u64,
+        dirs: u64,
+        skipped: u64,
         tree: DiskEntry,
+        /// 占用最大的文件 TOP（降序，≤10）。
+        largest_files: Vec<fff_search::LargeFile>,
     },
 }
 
@@ -196,15 +207,17 @@ pub async fn disk_scan_stream(
         let mut last_tick = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_millis(100))
             .unwrap_or_else(std::time::Instant::now);
-        let result = fff_search::scan_directory(&target, &cancelled, |files, dirs, bytes| {
+        let result = fff_search::scan_directory(&target, &cancelled, |tick| {
             let now = std::time::Instant::now();
             if now.duration_since(last_tick) >= std::time::Duration::from_millis(100) {
                 last_tick = now;
                 let _ = on_event.send(DiskScanEvent::Progress {
                     root: root_display.clone(),
-                    files,
-                    dirs,
-                    bytes,
+                    files: tick.files,
+                    dirs: tick.dirs,
+                    bytes: tick.bytes,
+                    skipped: tick.skipped,
+                    top_children: tick.top_children,
                 });
             }
         });
@@ -221,7 +234,11 @@ pub async fn disk_scan_stream(
             Ok(done) => DiskScanEvent::Done {
                 root: done.root,
                 cancelled: done.cancelled,
+                files: done.file_count as u64,
+                dirs: done.dir_count as u64,
+                skipped: done.skipped_count as u64,
                 tree: done.tree_root.into(),
+                largest_files: done.largest_files,
             },
             Err(cause) => {
                 // 出错也要给前端收尾事件，UI 才能脱离「扫描中」状态。
@@ -229,6 +246,9 @@ pub async fn disk_scan_stream(
                 DiskScanEvent::Done {
                     root: root_display,
                     cancelled: true,
+                    files: 0,
+                    dirs: 0,
+                    skipped: 0,
                     tree: DiskEntry {
                         name: String::new(),
                         path: String::new(),
@@ -236,6 +256,7 @@ pub async fn disk_scan_stream(
                         dir: true,
                         children: Vec::new(),
                     },
+                    largest_files: Vec::new(),
                 }
             }
         };

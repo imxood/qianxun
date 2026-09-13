@@ -33,27 +33,22 @@
     frameLoaded = false;
   });
 
-  const statusText: Record<string, string> = {
-    stopped: 'DSH 未运行。可在「环境」页启动，或：',
-    starting: 'DSH 启动中…首次启动需加载插件，稍慢。',
-    restarting: 'DSH 异常退出，正在自动重启…',
-    failed: 'DSH 启动失败，详见「环境」页日志。',
-  };
-  const stoppedText = $derived(
-    standalone ? 'DSH 未运行。请先在主窗口的「环境」页启动。' : statusText.stopped,
-  );
+  const phase = $derived(harness.status.phase);
+  /** failed 阶段的失败原因（其余阶段为空串；同时为 TS 收窄联合类型）。 */
+  const failReason = $derived(harness.status.phase === 'failed' ? harness.status.reason : '');
 </script>
 
-{#if harness.status.phase === 'ready' && !ready}
+{#if phase === 'ready' && !ready}
   <div class="flex h-full w-full items-center justify-center bg-bg">
     <div class="max-w-md space-y-3 text-center">
       <p class="text-sm text-muted">
-        DSH 已就绪，但回环代理尚未监听成功。请查看「环境」页日志； 也可<button
+        DSH 已就绪，但回环代理尚未监听。请查看「环境」页日志，或
+        <button
           class="text-accent underline-offset-2 hover:underline"
           onclick={() => void harness.refreshProxyUrl()}
         >
-          重试获取代理地址</button
-        >。
+          重试获取代理地址
+        </button>
       </p>
     </div>
   </div>
@@ -80,21 +75,63 @@
   </div>
 {:else}
   <div class="flex h-full w-full items-center justify-center bg-bg">
-    <div class="max-w-md space-y-3 text-center">
-      {#if harness.status.phase === 'failed'}
-        <p class="text-sm text-danger">{statusText.failed}</p>
-        <p class="break-all rounded-md bg-surface p-3 text-left font-mono text-xs text-muted">
-          {harness.status.reason}
+    <div class="flex max-w-md flex-col items-center gap-4 text-center">
+      {#if phase === 'failed'}
+        <span
+          class="grid size-12 place-items-center rounded-2xl bg-danger/10 text-danger"
+          aria-hidden="true"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="size-6"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+          >
+            <path
+              d="M12 8v5M12 16.5v.5M10.3 3.8L2.8 17a2 2 0 001.7 3h15a2 2 0 001.7-3L13.7 3.8a2 2 0 00-3.4 0z"
+            />
+          </svg>
+        </span>
+        <p class="text-sm font-medium text-fg">DSH 启动失败</p>
+        <p
+          class="max-w-md w-full rounded-xl border border-line bg-card p-3 text-left font-mono text-xs break-all text-muted"
+        >
+          {failReason}
         </p>
-      {:else if harness.status.phase === 'starting' || harness.status.phase === 'restarting'}
-        <p class="text-sm text-muted">{statusText[harness.status.phase]}</p>
+      {:else if phase === 'starting' || phase === 'restarting'}
+        <span
+          class="inline-block size-8 animate-spin rounded-full border-2 border-line border-t-accent"
+          aria-hidden="true"
+        ></span>
+        <p class="text-sm text-muted">{phase === 'starting' ? 'DSH 启动中…' : 'DSH 重启中…'}</p>
       {:else}
-        <p class="text-sm text-muted">{stoppedText}</p>
+        <!-- e2e 依赖「DSH 未运行」文案。 -->
+        <span
+          class="qx-grad grid size-14 place-items-center rounded-2xl text-white shadow-lg shadow-accent/30"
+          aria-hidden="true"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="size-7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5" />
+          </svg>
+        </span>
+        <p class="text-sm text-muted">
+          {standalone ? 'DSH 未运行。请先在主窗口的「环境」页启动。' : 'DSH 未运行'}
+        </p>
       {/if}
-      <div class="flex justify-center gap-2 pt-1">
-        {#if !standalone && (harness.status.phase === 'stopped' || harness.status.phase === 'failed')}
+      <div class="flex justify-center gap-2">
+        {#if !standalone && (phase === 'stopped' || phase === 'failed')}
           <button
-            class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+            class="qx-btn qx-btn-primary qx-btn-md"
             disabled={harness.starting}
             onclick={() => void harness.start().catch(() => {})}
           >
@@ -102,11 +139,8 @@
           </button>
         {/if}
         {#if !standalone}
-          <button
-            class="rounded-md border border-line px-3 py-1.5 text-sm transition-colors hover:bg-accent-soft"
-            onclick={() => nav.go('env')}
-          >
-            查看环境与日志
+          <button class="qx-btn qx-btn-outline qx-btn-md" onclick={() => nav.go('env')}>
+            环境与日志
           </button>
         {/if}
       </div>

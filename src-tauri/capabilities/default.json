@@ -12,6 +12,10 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "opener:allow-open-path",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://**" }, { "url": "http://**" }]
+    },
     "opener:allow-reveal-item-in-dir",
     "dialog:allow-open",
     "dialog:allow-save"

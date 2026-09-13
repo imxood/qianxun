@@ -181,23 +181,19 @@
 <svelte:window onfocus={() => void refresh()} />
 
 <section class="mx-auto w-full max-w-2xl space-y-4">
-  <h1 class="text-lg font-semibold">远程</h1>
-  <p class="text-xs text-muted">
-    手机经 EasyTier 虚拟网访问本机 DSH：千寻开一个网关做唯一入口，配对一次、扫码即用。
-  </p>
+  <h1 class="qx-page-title">远程</h1>
 
   {#if easytierAbsent}
-    <div class="rounded-lg border border-line bg-card p-3 text-xs">
+    <div class="qx-card p-3 text-xs">
       <p class="font-medium text-fg">未检测到 EasyTier 虚拟网卡</p>
       <p class="mt-1 leading-5 text-muted">
-        请先安装并启动 EasyTier 组网（本机与手机加入同一虚拟网）。启动后其网卡会出现在下方列表，
-        名称含 “EasyTier”，选择它即可。
+        安装并启动 EasyTier 组网（本机与手机同一虚拟网）后，选择名称含 “EasyTier” 的网卡。
       </p>
     </div>
   {/if}
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
-    <h2 class="text-sm font-medium">网关</h2>
+  <section class="qx-card space-y-3 p-4">
+    <h2 class="qx-h">网关</h2>
     <label class="flex items-center justify-between text-sm">
       <span>启用远程访问</span>
       <Switch
@@ -209,7 +205,7 @@
     <label class="flex items-center justify-between gap-4 text-sm">
       <span class="shrink-0">绑定网卡</span>
       <select
-        class="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1.5 text-sm disabled:opacity-50"
+        class="qx-select min-w-0 flex-1"
         disabled={!interfaces.length}
         value={bindIp}
         onchange={(event) => setBindIp(event.currentTarget.value)}
@@ -225,7 +221,7 @@
     <label class="flex items-center justify-between gap-4 text-sm">
       <span class="shrink-0">端口</span>
       <input
-        class="w-32 rounded-md border border-line bg-surface px-2 py-1 text-right invalid:border-danger"
+        class="qx-input w-32 py-1 text-right invalid:border-danger"
         type="text"
         inputmode="numeric"
         bind:value={portInput}
@@ -243,16 +239,14 @@
         <span class="text-danger">{error}</span>
       {:else if status}
         {#if status.listening}
-          <span class="rounded-full bg-accent-soft px-2 py-0.5 text-muted">
+          <span class="qx-badge bg-accent-soft text-accent tabular-nums">
             监听 {status.listening}
           </span>
         {:else}
           <span class="text-muted">未监听</span>
         {/if}
-        <span class="text-muted">
-          DSH {status.dshRunning ? '运行中' : '未运行（网关已就绪，DSH 起来即通）'}
-        </span>
-        <span class="text-muted">设备 {status.activeCount}/{status.deviceCount}</span>
+        <span class="text-muted">DSH {status.dshRunning ? '运行中' : '未运行'}</span>
+        <span class="text-muted tabular-nums">设备 {status.activeCount}/{status.deviceCount}</span>
         {#if dshUrl}
           <button
             class="shrink-0 rounded px-1.5 py-0.5 text-muted transition-colors hover:bg-accent-soft hover:text-fg"
@@ -268,44 +262,33 @@
     </div>
   </section>
 
-  <section class="space-y-3 rounded-lg border border-line bg-card p-4">
+  <section class="qx-card space-y-3 p-4">
     <div class="flex items-center justify-between">
-      <h2 class="text-sm font-medium">配对设备</h2>
-      <button
-        class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent/90"
-        onclick={() => (pairDialogOpen = true)}
-      >
+      <h2 class="qx-h">配对设备</h2>
+      <button class="qx-btn qx-btn-primary qx-btn-sm" onclick={() => (pairDialogOpen = true)}>
         配对新设备
       </button>
     </div>
 
     {#if pairUrl}
-      <div class="flex items-center gap-4 rounded-lg border border-line bg-surface p-3">
+      <div class="flex items-center gap-4 rounded-xl border border-line bg-surface p-3">
         <canvas bind:this={pairCanvas} class="size-44 shrink-0 rounded bg-white p-1"></canvas>
         <div class="min-w-0 flex-1 space-y-2">
           <p class="text-sm text-fg">{pairName}</p>
           <p class="break-all font-mono text-xs text-muted">{pairUrl}</p>
           <div class="flex gap-2">
-            <button
-              class="rounded-md border border-line px-2.5 py-1 text-xs transition-colors hover:bg-accent-soft"
-              onclick={() => void copyPairLink()}
-            >
+            <button class="qx-btn qx-btn-outline qx-btn-sm" onclick={() => void copyPairLink()}>
               复制链接
             </button>
-            <button
-              class="rounded-md px-2.5 py-1 text-xs text-muted transition-colors hover:bg-accent-soft hover:text-fg"
-              onclick={closePair}
-            >
-              完成
-            </button>
+            <button class="qx-btn qx-btn-ghost qx-btn-sm" onclick={closePair}> 完成 </button>
           </div>
-          <p class="text-xs text-muted">手机浏览器打开此链接（或扫码）即完成配对。</p>
+          <p class="text-xs text-muted">扫码或打开链接完成配对。</p>
         </div>
       </div>
     {/if}
 
     {#if devices.length === 0}
-      <p class="text-xs text-muted">还没有设备。点击「配对新设备」生成二维码。</p>
+      <p class="text-xs text-muted">还没有设备</p>
     {:else}
       <ul class="divide-y divide-line/60">
         {#each devices as device (device.id)}
@@ -317,11 +300,11 @@
             >
               {device.name}
             </span>
-            <span class="shrink-0 text-xs text-muted">{formatDate(device.createdAt)}</span>
+            <span class="shrink-0 text-xs text-muted tabular-nums"
+              >{formatDate(device.createdAt)}</span
+            >
             {#if device.revoked}
-              <span class="shrink-0 rounded bg-surface px-1.5 py-0.5 text-xs text-muted"
-                >已删除</span
-              >
+              <span class="qx-badge bg-surface text-muted">已删除</span>
             {:else}
               <button
                 class="shrink-0 rounded px-1.5 py-0.5 text-xs text-danger transition-colors hover:bg-danger/10"
@@ -336,11 +319,11 @@
     {/if}
   </section>
 
-  <section class="space-y-2 rounded-lg border border-line bg-card p-4">
+  <section class="qx-card space-y-2 p-4">
     <div class="flex items-center justify-between">
-      <h2 class="text-sm font-medium">自检</h2>
+      <h2 class="qx-h">自检</h2>
       <button
-        class="rounded-md border border-line px-3 py-1.5 text-xs transition-colors hover:bg-accent-soft disabled:opacity-50"
+        class="qx-btn qx-btn-outline qx-btn-sm"
         disabled={checking}
         onclick={() => void runSelfCheck()}
       >
@@ -348,11 +331,9 @@
       </button>
     </div>
     {#if selfCheck}
-      <p class="text-xs {selfCheck.ok ? 'text-fg' : 'text-danger'}">
+      <p class="text-xs {selfCheck.ok ? 'text-ok' : 'text-danger'}">
         {selfCheck.ok ? '✓ ' : '✗ '}{selfCheck.detail}
       </p>
-    {:else}
-      <p class="text-xs text-muted">本机带设备 token 请求一次配对入口，验证网关端到端可用。</p>
     {/if}
   </section>
 </section>

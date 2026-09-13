@@ -100,8 +100,9 @@
   <div class="flex min-h-0 flex-1">
     <SideNav />
     <!-- 所有页面绝对定位叠放在同一容器里，同一时刻只有一页可见。
-         已分离（detached）的页不渲染主窗副本——活视图在独立窗口里。 -->
-    <div class="relative min-w-0 flex-1">
+         已分离（detached）的页不渲染主窗副本——活视图在独立窗口里。
+         qx-content：内容区顶部极光氛围光（见 app.css）。 -->
+    <div class="qx-content relative min-w-0 flex-1">
       {#if nav.visited.dsh && !nav.detached.dsh}
         <div class="absolute inset-0 overflow-hidden {show('dsh')}">
           <DshPage />

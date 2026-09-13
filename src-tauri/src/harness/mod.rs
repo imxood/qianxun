@@ -30,7 +30,7 @@ const BIND_HOST: &str = "127.0.0.1";
 /// 固定启动 web profile；profile 选择器后续接入。
 pub const DEFAULT_PROFILE: &str = "web";
 
-/// 安装进度事件通道（环境页进度卡的实时数据源）。
+/// 安装进度事件通道（前端 store 留存备用；环境页 UI 只展示日志）。
 pub const INSTALL_PROGRESS_CHANNEL: &str = "harness://install-progress";
 
 /// 一次组件安装的实时进度。
@@ -65,7 +65,7 @@ pub enum InstallProgress {
         added: u64,
         total_hint: Option<u64>,
     },
-    /// 安装流程结束（无论成败，前端收起进度卡）。
+    /// 安装流程结束（无论成败）。
     Done,
 }
 

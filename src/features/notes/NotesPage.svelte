@@ -331,11 +331,26 @@
 <section class="flex h-full min-h-0 flex-col">
   {#if !vault}
     <div class="flex h-full w-full flex-col items-center justify-center gap-3">
-      <p class="text-sm text-muted">还没有笔记库。初始化会在「文档\千寻笔记」创建目录。</p>
-      <button
-        class="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90"
-        onclick={() => void initVault()}
+      <span
+        class="qx-grad grid size-14 place-items-center rounded-2xl text-white shadow-lg shadow-accent/30"
+        aria-hidden="true"
       >
+        <svg
+          viewBox="0 0 24 24"
+          class="size-7"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path
+            d="M7 3h10a2 2 0 012 2v14a2 2 0 01-2 2H7a2 2 0 01-2-2V5a2 2 0 012-2zM9 8h6M9 12h6M9 16h4"
+          />
+        </svg>
+      </span>
+      <p class="text-sm text-muted">还没有笔记库（将创建在「文档\千寻笔记」）</p>
+      <button class="qx-btn qx-btn-primary qx-btn-md" onclick={() => void initVault()}>
         初始化笔记库
       </button>
       {#if errorText}<p class="text-sm text-danger">{errorText}</p>{/if}
@@ -358,7 +373,7 @@
           {#if bridgeError}<span class="ml-2 text-danger">{bridgeError}</span>{/if}
         </p>
         <button
-          class="shrink-0 rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-40"
+          class="qx-btn qx-btn-primary qx-btn-sm"
           disabled={bridgeBusy}
           onclick={() => void deployBridge()}
         >
@@ -380,35 +395,47 @@
       <aside class="flex w-64 shrink-0 flex-col border-r border-line">
         <div class="flex items-center gap-2 border-b border-line p-2">
           <input
-            class="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1 text-sm"
+            class="qx-input min-w-0 flex-1 rounded-md py-1"
             type="text"
             placeholder="标题/标签过滤"
             bind:value={filter}
           />
           <button
-            class="shrink-0 rounded-md bg-accent px-2 py-1 text-sm text-white hover:bg-accent/90"
+            class="qx-btn qx-btn-primary size-7 shrink-0 rounded-md p-0"
             title="新建笔记"
             onclick={() => (createOpen = true)}
           >
-            +
+            <svg
+              viewBox="0 0 24 24"
+              class="size-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
           </button>
         </div>
-        <ul class="min-h-0 flex-1 overflow-y-auto">
+        <ul class="min-h-0 flex-1 overflow-y-auto p-1.5">
           {#each filtered as note (note.path)}
             <li>
               <button
-                class="w-full border-b border-line/50 px-3 py-2 text-left transition-colors hover:bg-accent-soft/60 {activePath ===
+                class="w-full rounded-lg px-2.5 py-2 text-left transition-colors outline-none hover:bg-accent-soft/60 focus-visible:ring-2 focus-visible:ring-accent/50 {activePath ===
                 note.path
                   ? 'bg-accent-soft'
                   : ''}"
                 onclick={() => void open(note)}
               >
-                <p class="truncate text-sm">{note.title}</p>
+                <p class="truncate text-sm {activePath === note.path ? 'font-medium' : ''}">
+                  {note.title}
+                </p>
                 <p class="mt-0.5 truncate text-xs text-muted">{note.excerpt}</p>
-                <p class="mt-0.5 flex items-center gap-2 text-xs text-muted">
-                  <span>{formatRelative(note.updated)}</span>
+                <p class="mt-1 flex items-center gap-2 text-xs text-muted">
+                  <span class="tabular-nums">{formatRelative(note.updated)}</span>
                   {#each note.tags.slice(0, 3) as tag (tag)}
-                    <span class="rounded bg-accent-soft px-1">{tag}</span>
+                    <span class="rounded bg-accent-soft px-1 text-muted">{tag}</span>
                   {/each}
                 </p>
               </button>
@@ -419,13 +446,13 @@
 
       <!-- 编辑 / 预览 -->
       <div class="flex min-w-0 flex-1 flex-col">
-        <div class="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5 text-xs">
-          <span class="truncate text-muted">{activeNote?.meta.path ?? '未选择笔记'}</span>
-          {#if dirty}<span class="text-accent">未保存</span>{/if}
-          <span class="ml-auto flex items-center gap-2">
+        <div class="flex items-center gap-1 border-b border-line bg-surface px-3 py-1.5 text-xs">
+          <span class="min-w-0 truncate text-muted">{activeNote?.meta.path ?? '未选择笔记'}</span>
+          {#if dirty}<span class="shrink-0 text-accent">未保存</span>{/if}
+          <span class="ml-auto flex shrink-0 items-center gap-1">
             <button
-              class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
-              title={dshProxyBase ? 'AI 整理（经 qx-bridge）' : 'DSH 未运行：先启动 DSH 并部署桥'}
+              class="qx-btn qx-btn-ghost rounded-md px-2 py-1 text-xs"
+              title={dshProxyBase ? 'AI 整理（经 qx-bridge）' : '需先启动 DSH 并部署笔记桥'}
               disabled={!dshProxyBase || organizing}
               onclick={() => {
                 organizeOpen = !organizeOpen;
@@ -435,21 +462,21 @@
               {organizing ? '整理中…' : 'AI 整理'}
             </button>
             <button
-              class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
+              class="qx-btn qx-btn-ghost rounded-md px-2 py-1 text-xs"
               disabled={!activeNote || saving}
               onclick={() => void save()}
             >
               保存
             </button>
             <button
-              class="rounded px-2 py-1 hover:bg-accent-soft disabled:opacity-40"
+              class="qx-btn qx-btn-ghost rounded-md px-2 py-1 text-xs"
               disabled={!activeNote}
               onclick={() => (previewing = !previewing)}
             >
               {previewing ? '编辑' : '预览'}
             </button>
             <button
-              class="rounded px-2 py-1 text-danger hover:bg-danger/10 disabled:opacity-40"
+              class="qx-btn rounded-md px-2 py-1 text-xs text-danger hover:bg-danger/10"
               disabled={!activeNote}
               onclick={() => (removeOpen = true)}
             >
@@ -478,13 +505,13 @@
           <div class="flex shrink-0 flex-col gap-2 border-b border-line bg-surface px-3 py-2">
             <div class="flex items-center gap-2">
               <input
-                class="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1 text-xs"
+                class="qx-input min-w-0 flex-1 rounded-md bg-bg py-1 text-xs"
                 type="text"
-                placeholder="整理指令，如：把所有笔记里的 Rust 命令合并成一篇速查表"
+                placeholder="整理指令，如：合并重复条目成一篇清单"
                 bind:value={organizeInstruction}
               />
               <button
-                class="rounded bg-accent px-2.5 py-1 text-xs text-white hover:bg-accent/90 disabled:opacity-40"
+                class="qx-btn qx-btn-primary rounded-md px-2.5 py-1 text-xs"
                 disabled={organizing || !dshProxyBase}
                 onclick={() => void runOrganize()}
               >
@@ -492,23 +519,21 @@
               </button>
               {#if organizeResult}
                 <button
-                  class="rounded px-2.5 py-1 text-xs hover:bg-accent-soft"
+                  class="qx-btn qx-btn-outline rounded-md px-2.5 py-1 text-xs"
                   onclick={() => (saveAsTitleOpen = true)}
                 >
                   存为笔记
                 </button>
               {/if}
               <button
-                class="rounded px-2 py-1 text-xs text-muted hover:bg-accent-soft"
+                class="qx-btn qx-btn-ghost rounded-md px-2 py-1 text-xs"
                 onclick={() => (organizeOpen = false)}
               >
                 收起
               </button>
             </div>
             {#if !dshProxyBase}
-              <p class="text-xs text-muted">
-                DSH 未运行或桥未部署：先启动 DSH，并在本页顶部部署桥。
-              </p>
+              <p class="text-xs text-muted">需先启动 DSH 并部署笔记桥。</p>
             {/if}
             {#if organizeError}<p class="text-xs text-danger">{organizeError}</p>{/if}
             {#if organizeResult}
@@ -669,7 +694,7 @@
     margin: 0.5rem 0;
   }
   .prose-notes :global(a) {
-    color: #3b82f6;
+    color: var(--qx-accent);
     text-decoration: underline;
   }
   .prose-notes :global(table) {
