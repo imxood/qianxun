@@ -70,7 +70,7 @@ pub fn remote_status(app: AppHandle) -> RemoteStatus {
         .lock()
         .unwrap()
         .as_ref()
-        .and_then(|handle| handle.lan_addr.as_ref().map(|a| a.to_string()));
+        .and_then(|handle| handle.lan_addr.borrow().map(|a| a.to_string()));
     let dsh_running = matches!(
         state.harness.supervisor.status(),
         crate::harness::supervisor::Status::Starting
@@ -162,7 +162,7 @@ pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
         (
             running
                 .as_ref()
-                .and_then(|handle| handle.lan_addr.as_ref().map(|a| a.to_string())),
+                .and_then(|handle| handle.lan_addr.borrow().map(|a| a.to_string())),
             settings
                 .remote
                 .devices
@@ -372,7 +372,7 @@ pub async fn sync(app: AppHandle) {
     .await
     {
         Ok(handle) => {
-            let log = match handle.lan_addr {
+            let log = match *handle.lan_addr.borrow() {
                 Some(lan) => format!(
                     "回环 {} + 局域网 {lan}（上游 {upstream}）",
                     handle.loopback_addr
@@ -574,7 +574,7 @@ mod tests {
         .expect("网关启动");
         // 局域网端（qx_token 鉴权）走 127.0.0.2 listener；回环端（无鉴权）
         // 走 127.0.0.1 listener——本测试只覆盖 LAN 路径。
-        let base = format!("http://{}", handle.lan_addr.expect("LAN 应绑定"));
+        let base = format!("http://{}", handle.lan_addr.borrow().expect("LAN 应绑定"));
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -643,7 +643,7 @@ mod tests {
         )
         .await
         .expect("网关二启动");
-        let base2 = format!("http://{}", handle2.lan_addr.expect("LAN 应绑定"));
+        let base2 = format!("http://{}", handle2.lan_addr.borrow().expect("LAN 应绑定"));
         let status = client
             .get(format!("{base2}/"))
             .header(reqwest::header::COOKIE, cookie)
@@ -762,7 +762,7 @@ mod tests {
         )
         .await
         .expect("网关启动");
-        let base = format!("http://{}", handle.lan_addr.expect("LAN 应绑定"));
+        let base = format!("http://{}", handle.lan_addr.borrow().expect("LAN 应绑定"));
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()

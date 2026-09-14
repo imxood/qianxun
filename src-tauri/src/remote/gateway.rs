@@ -7,12 +7,17 @@
 //! 局域网请求必须带 qx_token。端口按构建模式默认 23090/23091，实例内
 //! 恒定——iframe URL 永不变（DSH revive 热吸收的前提）。
 //!
+//! LAN 的健壮性语义：配置的网卡不可绑（EasyTier 掉线等）时**降级为仅
+//! 回环**，后台按 `LAN_RETRY_INTERVAL` 周期重试，网卡恢复自动上线；
+//! 配置本身不动，失败绝不影响回环服务。
+//!
 //! DSH 0.1.2 起的浏览器鉴权由共享原语 dsh_upstream 在服务端完成
 //! （token 与 cookie 都留在千寻侧，回环/局域网都一样）。
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -26,13 +31,21 @@ use tokio::sync::watch;
 use crate::dsh_upstream::{self, plain, query_param, Upstream};
 use crate::remote::{MobileUi, RemoteDevice};
 
+/// LAN 绑定失败后的重试周期。EasyTier 这类虚拟网卡晚于千寻启动、中途
+/// 掉线都是常态：周期重试即可自愈，无需用户干预。
+const LAN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// 连续绑定失败时的日志节流：每 10 次（约 5 分钟）提醒一次；首败与
+/// 「上线/掉线」状态翻转必记（见 `lan_serve_loop`）。
+const LAN_FAILURE_LOG_EVERY: u32 = 10;
+
 /// 运行中的网关句柄：停止信号 + 监督任务 + 监听地址 + 启动配置指纹。
-/// `lan_addr = None` 表示只绑了回环（远程功能未启用）。
+/// `lan_addr` 经 watch 共享、可动态变化：None = 远程未启用，或配置的
+/// 网卡当前不可绑（降级为仅回环 + 后台周期重试中，见 `lan_serve_loop`）。
 pub struct GatewayHandle {
     pub shutdown: watch::Sender<bool>,
     pub task: tokio::task::JoinHandle<()>,
-    /// LAN 监听地址；未启用远程时为 None。
-    pub lan_addr: Option<SocketAddr>,
+    /// LAN 监听地址（随后台重试动态出现/消失；远程未启用时恒 None）。
+    pub lan_addr: watch::Receiver<Option<SocketAddr>>,
     /// 回环监听地址（永远存在）。DSH 页 iframe URL 即 `http://{loopback_addr}`。
     pub loopback_addr: SocketAddr,
     pub fingerprint: u64,
@@ -139,40 +152,58 @@ pub async fn start(
         .route("/", any(handler))
         .with_state(state.clone());
 
-    // 可选绑局域网——失败时不让半开状态出现，调用方决定是否回退到回环
-    // 唯一模式。bind_ip 与回环同地址（127.0.0.1）时直接跳过 LAN，避免双绑
-    // 同一 socket 报错。
-    let (lan_addr, lan_listener) = if !bind_ip.is_empty() && bind_ip != "127.0.0.1" {
+    // 可选绑局域网——**绑定失败不拖累回环**：EasyTier 这类虚拟网卡晚于
+    // 千寻启动、中途掉线是常态（os error 10049 曾让整个网关起不来，
+    // DSH 页报「回环代理尚未监听」且重启 DSH 无解）。首绑失败 → 记一次
+    // warn 并降级为仅回环，监督任务里按 LAN_RETRY_INTERVAL 周期重试，
+    // 网卡恢复后自动监听。bind_ip 与回环同地址（127.0.0.1）时跳过 LAN，
+    // 避免双绑同一 socket 报错。
+    let (lan_listener, lan_bind) = if !bind_ip.is_empty() && bind_ip != "127.0.0.1" {
         let lan_bind: SocketAddr = format!("{bind_ip}:{port}")
             .parse()
             .map_err(|cause| format!("绑定地址不合法（{bind_ip}:{port}）：{cause}"))?;
-        let listener = tokio::net::TcpListener::bind(lan_bind)
-            .await
-            .map_err(|cause| format!("网关监听失败（{lan_bind}）：{cause}"))?;
-        let local = listener.local_addr().map_err(|cause| cause.to_string())?;
-        (Some(local), Some(listener))
+        match tokio::net::TcpListener::bind(lan_bind).await {
+            Ok(listener) => (Some(listener), Some(lan_bind)),
+            Err(cause) => {
+                crate::logging::log(
+                    "warn",
+                    &format!(
+                        "局域网 {lan_bind} 暂不可用（{cause}）；已降级为仅回环，每 30s 自动重试，网卡恢复后自动监听"
+                    ),
+                );
+                (None, Some(lan_bind))
+            }
+        }
     } else {
         (None, None)
     };
+    let lan_addr = lan_listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok());
+    let (lan_status_tx, lan_status_rx) = watch::channel(lan_addr);
+    // 首绑成功 = 无失败计数；首绑失败 = start() 已记一次 warn，计数从 1 起。
+    let lan_failures = u32::from(lan_addr.is_none());
 
     // 单个监督任务托起所有 server，共享同一停止信号——任一 server 退出就
-    // 结束整组（restart 由 sync 层重新建）。
+    // 结束整组（restart 由 sync 层重新建）。LAN 侧不是一次性 serve 而是
+    // 「重试 + 服务」循环：绑定失败回到定时重试，网卡恢复即自动上线。
     let (shutdown, mut signal) = watch::channel(false);
+    let lan_retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = match lan_bind
+    {
+        Some(bind) => Box::pin(lan_serve_loop(
+            lan_listener,
+            bind,
+            app.clone(),
+            lan_status_tx,
+            signal.clone(),
+            lan_failures,
+        )),
+        None => Box::pin(std::future::pending()),
+    };
     let task = tokio::spawn(async move {
         // axum 0.8 的 Serve 实现 IntoFuture（不是直接 Future），select! 接受
         // 两者但 Either 要 Future 形态——用 .into_future() 统一一下。
-        let loopback_server = axum::serve(loopback_listener, app.clone()).into_future();
-        // LAN 未启用时的占位分支（pending）与真实 serve 的 Future 形态统一。
-        type LanServer = futures_util::future::Either<
-            std::future::Pending<Result<(), std::io::Error>>,
-            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>,
-        >;
-        let lan_server: LanServer = match lan_listener {
-            Some(listener) => futures_util::future::Either::Right(Box::pin(
-                axum::serve(listener, app).into_future(),
-            )),
-            None => futures_util::future::Either::Left(std::future::pending()),
-        };
+        let loopback_server = axum::serve(loopback_listener, app).into_future();
         tokio::select! {
             _ = signal.changed() => {
                 // 停机请求：丢弃所有 server（连接随之关闭）。
@@ -188,20 +219,71 @@ pub async fn start(
                     crate::logging::log("warn", &format!("回环网关退出：{cause}"));
                 }
             }
-            result = lan_server => {
-                if let Err(cause) = result {
-                    crate::logging::log("warn", &format!("局域网网关退出：{cause}"));
-                }
-            }
+            _ = lan_retry => {}
         }
     });
     Ok(GatewayHandle {
         shutdown,
         task,
-        lan_addr,
+        lan_addr: lan_status_rx,
         loopback_addr,
         fingerprint,
     })
+}
+
+/// 局域网端口的周期重试 + 服务循环。`listener` 是首绑结果（成功 = 直接
+/// 上线；None = 首绑失败，从重试开始）。绑定失败只记节流日志（首败已在
+/// `start` 记过 warn，此后每 LAN_FAILURE_LOG_EVERY 次提醒一次，约 5 分
+/// 钟一条，避免 30s 一条刷屏）；上线/掉线的状态翻转必记，并在
+/// `lan_status` 上广播，供远程页状态与自检读取。
+async fn lan_serve_loop(
+    mut listener: Option<tokio::net::TcpListener>,
+    bind: SocketAddr,
+    app: Router,
+    lan_status: watch::Sender<Option<SocketAddr>>,
+    mut signal: watch::Receiver<bool>,
+    mut failures: u32,
+) {
+    loop {
+        if *signal.borrow_and_update() {
+            return;
+        }
+        // 优先用首绑的 listener；没有（首绑失败或上一轮服务结束）则现绑。
+        let bound = match listener.take() {
+            Some(l) => l,
+            None => match tokio::net::TcpListener::bind(bind).await {
+                Ok(l) => l,
+                Err(cause) => {
+                    failures += 1;
+                    if failures.is_multiple_of(LAN_FAILURE_LOG_EVERY) {
+                        crate::logging::log(
+                            "warn",
+                            &format!(
+                                "局域网网关仍不可用（{bind}）：{cause}（已连续 {failures} 次，节流提醒）"
+                            ),
+                        );
+                    }
+                    tokio::select! {
+                        _ = signal.changed() => return,
+                        _ = tokio::time::sleep(LAN_RETRY_INTERVAL) => {}
+                    }
+                    continue;
+                }
+            },
+        };
+        failures = 0;
+        let _ = lan_status.send(Some(bind));
+        crate::logging::log("info", &format!("局域网网关已监听 {bind}（网卡已恢复）"));
+        if let Err(cause) = axum::serve(bound, app.clone()).await {
+            crate::logging::log("warn", &format!("局域网网关退出：{cause}"));
+        }
+        let _ = lan_status.send(None);
+        crate::logging::log("warn", "局域网网关退出，将按周期重试绑定");
+        tokio::select! {
+            _ = signal.changed() => return,
+            _ = tokio::time::sleep(LAN_RETRY_INTERVAL) => {}
+        }
+    }
 }
 
 /// 统一入口：按 Host 头分发——回环走栅栏免鉴权，局域网走设备配对。
@@ -459,10 +541,37 @@ pub fn new_device_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{access_allowed, inject_mobile_layer, loopback_authority, origin_allowed};
+    use super::{access_allowed, inject_mobile_layer, loopback_authority, origin_allowed, start};
     use axum::http::{HeaderMap, Method};
 
     const GET: Method = Method::GET;
+
+    /// 回归：LAN 绑定失败（曾因 EasyTier 掉线 os error 10049 让整个网关
+    /// 起不来，DSH 页报「回环代理尚未监听」且重启 DSH 无解）必须降级为
+    /// 仅回环，回环照常服务；LAN 处于重试态（lan_addr = None）。
+    #[tokio::test]
+    async fn lan_绑定失败时降级为仅回环且回环照常服务() {
+        // 占住 127.0.0.2 的端口，模拟「配置的网卡地址当前不可绑」。
+        let blocker = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let handle = start(
+            "127.0.0.2",
+            port,
+            "127.0.0.1:0".to_owned(),
+            None,
+            Vec::new(),
+            0,
+            std::env::temp_dir().join("qianxun-gateway-degrade-test"),
+        )
+        .await
+        .expect("LAN 绑定失败不应拖垮网关启动");
+        assert!(handle.lan_addr.borrow().is_none(), "LAN 应处于降级重试态");
+        // 回环照常可达。
+        tokio::net::TcpStream::connect(handle.loopback_addr)
+            .await
+            .expect("回环必须照常监听");
+        let _ = handle.shutdown.send(true);
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
