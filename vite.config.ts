@@ -2,13 +2,13 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 
-// 5180：避开本机其他 Vite 应用。strictPort 保证
+// 5190：避开本机其他 Vite 应用（inspection-app 占 5180）。strictPort 保证
 // tauri.conf.json 里的 devUrl 永远指向这里，端口漂移会让白屏很难排查。
 export default defineConfig({
   plugins: [tailwindcss(), svelte()],
   clearScreen: false,
   server: {
-    port: 5180,
+    port: 5190,
     strictPort: true,
     warmup: {
       // tauri dev 先起 Vite、再编译 Rust：利用编译窗口把整张模块图预先
