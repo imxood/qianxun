@@ -50,9 +50,14 @@ pub(super) const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// DSH 的依赖树带 peer 链（如 cordis-plugin-group），npm 的解析要么组合
 /// 爆炸要么丢 peer；pnpm 的 auto-install-peers 是唯一被验证可正确装出
 /// 运行时的路线。pnpm 由 npm 装进工具目录（pnpm 自身无原生依赖、无
-/// peer，npm 装它没有上述问题）；与 DSH（ADR-015 钉死验证版本）不同，
-/// pnpm 是纯工具链、命令面小，跟随最新风险可控，失败还回落已装版本。
-pub const PNPM_SPEC: &str = "pnpm@latest";
+/// peer，npm 装它没有上述问题）。
+///
+/// 钉死 11.7.0（实测验证版本，与 ADR-015 同哲学）：pnpm 12 改为原生
+/// exe 发行——tarball 不再自带 `bin/pnpm.cjs` 入口，且落位 exe 依赖
+/// pre/postinstall，会撞上新版 npm 的 allow-scripts 门禁（脚本被拦但
+/// npm 照样退出 0），入口必缺失。11.7.0 的入口在 tarball 里且无
+/// install 脚本，两个坑都不沾。
+pub const PNPM_SPEC: &str = "pnpm@11.7.0";
 
 /// pnpm 构建脚本白名单：DSH 运行时需要这些原生/生成步骤真正执行
 /// （koffi 与 node-pty 是终端/子进程工具的原生绑定，没有它们对应功能
