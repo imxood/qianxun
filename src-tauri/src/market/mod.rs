@@ -313,8 +313,8 @@ async fn run_pnpm(
         path_entries.insert(0, dir.to_path_buf());
     }
 
-    let mut command = tokio::process::Command::new(&plan.node);
-    command.arg(plan.pnpm_cli());
+    // pnpm 是原生 exe（@pnpm/exe），直接跑，不经 node。
+    let mut command = tokio::process::Command::new(plan.pnpm_cli());
     for arg in args {
         command.arg(&arg);
     }

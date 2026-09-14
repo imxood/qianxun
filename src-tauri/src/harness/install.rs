@@ -46,18 +46,16 @@ const INSTALL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const INSTALL_TOTAL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 pub(super) const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 千寻自带的 pnpm 安装说明符：不钉版本，每次安装都取 registry 上的最新。
-/// DSH 的依赖树带 peer 链（如 cordis-plugin-group），npm 的解析要么组合
-/// 爆炸要么丢 peer；pnpm 的 auto-install-peers 是唯一被验证可正确装出
-/// 运行时的路线。pnpm 由 npm 装进工具目录（pnpm 自身无原生依赖、无
-/// peer，npm 装它没有上述问题）。
+/// 千寻自带的 pnpm 安装说明符。DSH 的依赖树带 peer 链（如
+/// cordis-plugin-group），npm 的解析要么组合爆炸要么丢 peer；pnpm 的
+/// auto-install-peers 是唯一被验证可正确装出运行时的路线。
 ///
-/// 钉死 11.7.0（实测验证版本，与 ADR-015 同哲学）：pnpm 12 改为原生
-/// exe 发行——tarball 不再自带 `bin/pnpm.cjs` 入口，且落位 exe 依赖
-/// pre/postinstall，会撞上新版 npm 的 allow-scripts 门禁（脚本被拦但
-/// npm 照样退出 0），入口必缺失。11.7.0 的入口在 tarball 里且无
-/// install 脚本，两个坑都不沾。
-pub const PNPM_SPEC: &str = "pnpm@11.7.0";
+/// 统一走原生 `@pnpm/exe` 发行（用户指示 2026-09-14）：exe 直接在
+/// tarball 里——没有 install 脚本（不吃 npm allow-scripts 门禁）、不依赖
+/// tarball 内的 cjs 入口、也不需要 node 解释器。版本钉死 11.7.0（实测
+/// 验证版本，与 ADR-015 同哲学；pnpm@latest 已漂到 12，其 JS 包改走
+/// install 脚本落位 exe，恰好撞上门禁，入口必缺失——教训见 git log）。
+pub const PNPM_SPEC: &str = "@pnpm/exe@11.7.0";
 
 /// pnpm 构建脚本白名单：DSH 运行时需要这些原生/生成步骤真正执行
 /// （koffi 与 node-pty 是终端/子进程工具的原生绑定，没有它们对应功能
@@ -92,13 +90,14 @@ pub struct InstallPlan {
 }
 
 impl InstallPlan {
-    /// pnpm 的入口脚本（npm 装出来的 cjs）。存在即复用。
+    /// pnpm 的入口：原生 `pnpm.exe`（@pnpm/exe tarball 自带，直接跑，
+    /// 不经 node）。存在即复用。
     pub fn pnpm_cli(&self) -> PathBuf {
         self.pnpm_tool_dir
             .join("node_modules")
-            .join("pnpm")
-            .join("bin")
-            .join("pnpm.cjs")
+            .join("@pnpm")
+            .join("exe")
+            .join("pnpm.exe")
     }
 
     /// 用 npm 把 pnpm 工具装进 tool dir 的命令。
@@ -125,10 +124,10 @@ impl InstallPlan {
     }
 
     /// 安装目标目录里执行 `pnpm add` 的命令。
+    /// pnpm 是原生 exe（@pnpm/exe），直接跑，不经 node。
     fn to_command(&self) -> Command {
-        let mut command = Command::new(&self.node);
+        let mut command = Command::new(self.pnpm_cli());
         command
-            .arg(self.pnpm_cli())
             .arg("add")
             .arg(&self.spec)
             // pnpm 的 --dir 要求目录已存在（run() 里先建）。
@@ -735,10 +734,16 @@ mod tests {
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        // 入口是 pnpm.cjs，动作用 add --dir；peer 自动补齐是硬要求。
-        assert!(arguments
-            .first()
-            .is_some_and(|first| first.ends_with("pnpm.cjs")));
+        // 入口是原生 pnpm.exe（直接跑，不经 node），动作用 add --dir；
+        // peer 自动补齐是硬要求。
+        let program = plan
+            .to_command()
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .into_owned();
+        assert!(program.ends_with("pnpm.exe"));
+        assert!(arguments.first().is_some_and(|first| first == "add"));
         assert!(arguments.contains(&"add".to_owned()));
         assert!(arguments.contains(&"--dir".to_owned()));
         assert!(arguments.contains(&"--config.auto-install-peers=true".to_owned()));
