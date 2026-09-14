@@ -1,5 +1,5 @@
-//! 托盘：回到窗口、DSH 启停、真正退出三条路；tooltip 实时反映 DSH
-//! 运行状态。左键单击 = 显示窗口，右键 = 菜单。
+//! 托盘：回到窗口、重启界面、截图、DSH 启停、真正退出；tooltip 实时
+//! 反映 DSH 运行状态。左键单击 = 显示窗口，右键 = 菜单。
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -15,6 +15,10 @@ static TRAY: std::sync::OnceLock<TrayIcon> = std::sync::OnceLock::new();
 pub fn build(app: &AppHandle) -> Result<()> {
     let show = MenuItem::with_id(app, "show", "显示千寻", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
+    // 重启界面: webview 白屏/显示异常时重载前端 (supervisor 与后端不动;
+    // 参照 AutoInspection 实测方案, 2026-09-14)。
+    let reload_ui = MenuItem::with_id(app, "reload-ui", "重启界面", true, None::<&str>)
+        .map_err(|error| Error::Tray(error.to_string()))?;
     let snip = MenuItem::with_id(app, "snip", "截图", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
     let start = MenuItem::with_id(app, "start", "启动 DSH", true, None::<&str>)
@@ -27,7 +31,9 @@ pub fn build(app: &AppHandle) -> Result<()> {
         .map_err(|error| Error::Tray(error.to_string()))?;
     let menu = Menu::with_items(
         app,
-        &[&show, &snip, &separator, &start, &stop, &separator, &quit],
+        &[
+            &show, &reload_ui, &snip, &separator, &start, &stop, &separator, &quit,
+        ],
     )
     .map_err(|error| Error::Tray(error.to_string()))?;
 
@@ -44,6 +50,21 @@ pub fn build(app: &AppHandle) -> Result<()> {
             "show" => {
                 if let Some(front) = window::front(app) {
                     window::reveal(&front);
+                }
+            }
+            "reload-ui" => {
+                // 重启界面: show + 重载前端 (渲染异常/白屏自愈; supervisor
+                // 与后端零扰动)。reload 重新走前端 boot, 千寻 UI 恢复。
+                // 只能由 Rust 侧发起: tauri 2 的 window 插件没有 reload
+                // 命令 (前端 invoke 不可用), 且白屏时页面 JS 可能已死。
+                if let Some(front) = window::front(app) {
+                    window::reveal(&front);
+                    if let Err(failure) = front.reload() {
+                        crate::logging::log(
+                            "warn",
+                            &format!("托盘重启界面 reload 失败：{failure}"),
+                        );
+                    }
                 }
             }
             "snip" => {
