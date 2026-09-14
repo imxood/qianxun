@@ -60,22 +60,16 @@ pub async fn market_install(app: AppHandle, name: String, version: String) -> Re
         Stream::Stdout,
         format!("[插件] 安装 {name}@{version}（pnpm add → profile）"),
     );
-    // 安装前用详情做硬门槛（弃用/不兼容），不让 registry 之外的状态混进 profile。
-    let detail = match registry::detail(&registry, &name).await {
+    // 安装前按请求的版本做硬门槛（存在性 / 弃用 / 不兼容），不让 registry
+    // 之外的状态混进 profile。刻意不比对 dist-tags.latest：前端列表陈旧
+    // 或用户刻意装旧版都是合理场景，pnpm 精确版本安装本来就支持。
+    let detail = match registry::detail(&registry, &name, &version).await {
         Ok(detail) => detail,
         Err(failure) => {
             supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
             return Err(failure);
         }
     };
-    if detail.version != version {
-        let failure = Error::Market(format!(
-            "registry 最新版本是 {}，与请求的 {version} 不一致；刷新后重试",
-            detail.version
-        ));
-        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
-        return Err(failure);
-    }
     if let Err(failure) = registry::validate(&detail) {
         supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
         return Err(failure);
@@ -112,7 +106,11 @@ pub async fn market_install(app: AppHandle, name: String, version: String) -> Re
     );
     supervisor.note(
         Stream::Stdout,
-        format!("[插件] {name}@{version} 安装完成，DSH 下次启动生效"),
+        // 用 registry versions 条目里复核到的版本（= 请求版本），形成闭环。
+        format!(
+            "[插件] {name}@{} 安装完成，DSH 下次启动生效",
+            detail.version
+        ),
     );
     Ok(())
 }

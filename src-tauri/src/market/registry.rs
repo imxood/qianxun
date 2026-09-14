@@ -1,8 +1,10 @@
-//! 安装预检：读 npm registry 的包 manifest 做硬门槛（弃用 / 不兼容 / 版本一致）。
+//! 安装预检：读 npm registry 的包 manifest 做硬门槛（弃用 / 不兼容 / 版本存在）。
 //!
 //! 浏览与搜索在前端：webview 的 fetch 走系统代理、npmmirror 全端点带 CORS，
 //! 目录（dsh-plugin-catalog）的 tar.gz 解包也由前端完成。Rust 只保留变更面
-//! 的信任边界——安装前在这里复核 registry 最新状态，不信任前端传来的结论。
+//! 的信任边界——安装前在这里按**请求的版本**复核 registry 状态，不信任前端
+//! 传来的结论。刻意不比对 dist-tags.latest：前端列表陈旧或用户刻意选旧版
+//! 都是合理场景，请求版本只要在 registry 上存在就放行。
 
 use std::time::Duration;
 
@@ -15,6 +17,7 @@ const BUDGET: Duration = Duration::from_secs(20);
 /// 一个包的发布详情（安装预检的输入）。
 #[derive(Clone, Debug)]
 pub struct Detail {
+    /// registry 复核到的版本（= 请求版本，来自 versions 条目本身）。
     pub version: String,
     /// 声明了 `dsh.bundle.patch` = 插件；否则只是提及 DSH 的普通包。
     #[allow(dead_code)]
@@ -39,14 +42,37 @@ pub enum Compatibility {
     },
 }
 
-/// 读一个包的最新发布 manifest。
-pub async fn detail(registry: &str, name: &str) -> Result<Detail> {
+/// 读一个包在**指定版本**的 manifest（packed manifest 的 versions 条目）。
+/// 不比对 dist-tags.latest：前端列表可能陈旧、用户也可能刻意装旧版，
+/// 请求版本只要在 registry 上存在就按该版本复核门槛。
+pub async fn detail(registry: &str, name: &str, version: &str) -> Result<Detail> {
     if !is_package_name(name) {
         return Err(Error::Market(format!("{name} 不是合法的包名")));
     }
     let base = registry.trim_end_matches('/');
-    let manifest = fetch_json(&format!("{base}/{name}/latest")).await?;
-    Ok(detail_from_manifest(name, &manifest))
+    let packed = fetch_json(&format!("{base}/{name}")).await?;
+    manifest_for_version(&packed, name, version)
+        .map(|manifest| detail_from_manifest(name, &manifest))
+}
+
+/// 从 packed manifest 提取指定版本的 manifest。不存在才拒绝——这才是
+/// 「刷新后重试」真正该拦的场景（顺带给出 latest 供参考）。
+fn manifest_for_version(
+    packed: &serde_json::Value,
+    name: &str,
+    version: &str,
+) -> Result<serde_json::Value> {
+    // semver 的 major.minor.patch[-pre][+build] 不含 `~` 与 `/`，pointer 安全。
+    if let Some(manifest) = packed.pointer(&format!("/versions/{version}")) {
+        return Ok(manifest.clone());
+    }
+    let latest = packed
+        .pointer("/dist-tags/latest")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("未知");
+    Err(Error::Market(format!(
+        "registry 上没有 {name}@{version}（最新 {latest}）；刷新列表后重试"
+    )))
 }
 
 /// 安装前的硬门槛：弃用与不兼容拒绝安装。
@@ -168,7 +194,28 @@ fn string(value: &serde_json::Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compatibility, detail_from_manifest, is_package_name, validate, Compatibility};
+    use super::{
+        compatibility, detail_from_manifest, is_package_name, manifest_for_version, validate,
+        Compatibility,
+    };
+
+    #[test]
+    fn 版本提取按请求取_缺失给latest提示() {
+        let packed = serde_json::json!({
+            "dist-tags": { "latest": "0.52.0" },
+            "versions": {
+                "0.50.0": { "name": "sample", "version": "0.50.0" },
+                "0.52.0": { "name": "sample", "version": "0.52.0" }
+            }
+        });
+        // 请求旧版本：registry 上存在就原样取出（允许装旧版）。
+        let old = manifest_for_version(&packed, "sample", "0.50.0").unwrap();
+        assert_eq!(old["version"], "0.50.0");
+        // 请求不存在的版本：报错且带 latest 供参考。
+        let err = manifest_for_version(&packed, "sample", "0.49.9").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("0.49.9") && text.contains("0.52.0"), "{text}");
+    }
 
     #[test]
     fn 兼容判定对rc钉版宽松() {
