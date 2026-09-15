@@ -201,10 +201,12 @@
     const stamp = Date.now();
     if (stamp - lastLive < 100) return; // 与后端 tick 节奏对齐：10fps 配 200ms 过渡
     lastLive = stamp;
-    const existing = new Map<string, DiskEntry>();
-    for (const child of top.entry.children) existing.set(child.path, child);
+    // 用对象做 path → entry 索引（svelte/prefer-svelte-reactivity 禁止
+    // 反应式上下文里用普通 Map；这里 Map 仅作局部累加器，仍按 lint 改）。
+    const existing: Record<string, DiskEntry> = {};
+    for (const child of top.entry.children) existing[child.path] = child;
     const merged: DiskEntry[] = frame.topChildren.map((partial) => {
-      const prev = existing.get(partial.path);
+      const prev = existing[partial.path];
       if (prev) {
         // 浅层模型下 children 始终为空：复用旧对象，原地累加 size。
         prev.size = partial.size;
@@ -551,32 +553,27 @@
   interface Block {
     entry: DiskEntry;
     rect: Rect;
-    mix: number;
   }
 
   const blocks = $derived.by<Block[]>(() => {
     const entry = current?.entry;
     if (!entry || view !== 'blocks' || boxSize.w <= 0 || boxSize.h <= 0) return [];
-    const total = entry.size;
     const rects = squarify(
       visibleChildren.map((item) => Math.max(item.size, 1)),
       { x: 0, y: 0, w: boxSize.w, h: boxSize.h },
     );
-    return visibleChildren.map((item, index) => {
-      const share = total > 0 ? item.size / total : 0;
-      const mix = item.dir ? Math.round(10 + 55 * Math.sqrt(share)) : 0;
-      return { entry: item, rect: rects[index]!, mix };
-    });
+    return visibleChildren.map((item, index) => ({
+      entry: item,
+      rect: rects[index]!,
+    }));
   });
 
   function blockStyle(block: Block): string {
-    const pad = 1; // 方块间 2px 缝（相邻各让 1px），缝色即容器底色。
+    // 方块间留 2px 缝：x/y 各 +1、宽高各 -2。缝色 = 容器底色（bg-bg），无
+    // 可见边框、靠"负空间"做分隔——比 WinDirStat 那种 border-2 网格轻得多。
+    const pad = 1;
     const { x, y, w, h } = block.rect;
-    const fill = block.entry.dir
-      ? `color-mix(in oklab, var(--qx-accent) ${block.mix}%, var(--qx-surface))`
-      : block.entry.path
-        ? 'var(--qx-surface)'
-        : 'transparent';
+    const fill = blockFill(block);
     return [
       `left:${x + pad}px`,
       `top:${y + pad}px`,
@@ -586,8 +583,31 @@
     ].join(';');
   }
 
+  /** 两色编码：
+   *  - 目录：按 size/parentSize 比例从 accent-soft 渐变到 accent（保持色相，
+   *    只动明度）——大块显眼、小块含蓄。
+   *  - 文件：surface 上叠 4% accent 暗角（与容器底色微差，不抢目录的戏）。
+   *  - 占位（其余 N 项）：完全透明，靠 dashed 边框。 */
+  function blockFill(block: Block): string {
+    const entry = block.entry;
+    if (!entry.path) return 'transparent';
+    if (!entry.dir) {
+      return 'color-mix(in oklab, var(--qx-accent) 4%, var(--qx-surface))';
+    }
+    const parentSize = current?.entry.size ?? 0;
+    const share = parentSize > 0 ? entry.size / parentSize : 0;
+    const mix = 18 + 72 * Math.sqrt(Math.max(0, Math.min(1, share)));
+    return `color-mix(in oklab, var(--qx-accent) ${mix.toFixed(0)}%, var(--qx-accent-soft))`;
+  }
+
+  /** 块够大才显示标签——带前缀图标 / 名称 / 右下大小三段。 */
   function showLabel(rect: Rect): boolean {
-    return rect.w >= 72 && rect.h >= 34;
+    return rect.w >= 84 && rect.h >= 40;
+  }
+
+  /** 中等大小：只显示名称 + 大小（无图标）。 */
+  function showCompactLabel(rect: Rect): boolean {
+    return rect.w >= 60 && rect.h >= 28 && !showLabel(rect);
   }
 
   // ---- treemap 键盘导航 ------------------------------------------------------
@@ -1016,11 +1036,12 @@
       >
         {#each blocks as block (block.entry.path || block.entry.name)}
           <button
-            class="group absolute overflow-hidden rounded-[3px] text-left transition-[left,top,width,height,opacity] duration-200 ease-out {block
+            class="group absolute overflow-hidden rounded-[4px] text-left transition-[left,top,width,height,opacity,box-shadow,transform] duration-200 ease-out {block
               .entry.path
-              ? 'hover:z-10 hover:ring-2 hover:ring-accent hover:brightness-105'
-              : 'border border-dashed border-line'} {focusKey === blockKeyOf(block.entry)
-              ? 'z-10 ring-2 ring-accent'
+              ? `hover:z-10 ${selected.includes(block.entry.path) ? 'shadow-[inset_0_0_0_2px_var(--qx-accent)]' : 'hover:shadow-[0_4px_18px_-8px_color-mix(in_oklab,var(--qx-accent)_55%,transparent),inset_0_0_0_1px_color-mix(in_oklab,var(--qx-fg)_6%,transparent)]'} hover:scale-[1.005]`
+              : 'border-2 border-dashed border-line/70 bg-transparent'} {focusKey ===
+            blockKeyOf(block.entry)
+              ? 'z-10 ring-2 ring-accent ring-offset-2 ring-offset-bg'
               : ''}"
             tabindex="-1"
             data-key={blockKeyOf(block.entry)}
@@ -1033,15 +1054,63 @@
             onmouseleave={() => (tip = null)}
           >
             {#if showLabel(block.rect) && block.entry.path}
-              <span
-                class="pointer-events-none absolute inset-0 flex flex-col justify-between p-1.5"
-              >
-                <span class="truncate text-xs font-medium leading-4 text-fg">
-                  {label(block.entry)}
+              <span class="pointer-events-none absolute inset-0 flex flex-col p-1.5 text-fg/85">
+                <span class="flex min-w-0 items-center gap-1">
+                  {#if block.entry.dir}
+                    <svg
+                      viewBox="0 0 24 24"
+                      class="size-3 shrink-0"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"
+                      />
+                    </svg>
+                  {:else}
+                    <svg
+                      viewBox="0 0 24 24"
+                      class="size-3 shrink-0"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M7 3h7l4 4v14H7zM14 3v4h4" />
+                    </svg>
+                  {/if}
+                  <span class="truncate text-[11px] font-medium leading-tight">
+                    {label(block.entry)}
+                  </span>
                 </span>
-                <span class="text-[11px] leading-4 text-fg/70">
+                <span
+                  class="self-end font-mono text-[10.5px] tabular-nums leading-tight opacity-75"
+                >
                   {formatBytes(block.entry.size)}
                 </span>
+              </span>
+            {:else if showCompactLabel(block.rect) && block.entry.path}
+              <span class="pointer-events-none absolute inset-0 flex flex-col p-1 text-[10.5px]">
+                <span class="truncate font-medium text-fg/80 leading-tight">
+                  {label(block.entry)}
+                </span>
+                <span class="self-end font-mono tabular-nums text-fg/60 leading-tight">
+                  {formatBytes(block.entry.size)}
+                </span>
+              </span>
+            {/if}
+            {#if current?.partial && block.entry.dir && block.rect.w >= 110 && block.rect.h >= 50}
+              <span
+                class="pointer-events-none absolute right-1 top-1 rounded-full bg-warning/85 px-1.5 py-px text-[9px] font-medium tracking-wide text-warning-fg shadow-sm"
+                title="本次扫描被停止，目录大小为已扫描部分"
+              >
+                部分
               </span>
             {/if}
           </button>

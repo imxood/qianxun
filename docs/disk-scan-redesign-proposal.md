@@ -42,7 +42,7 @@ centered empty-state card filling the `<div class="qx-card …">` at
   rounded-square background tile (`bg-accent-soft`) for visual anchor.
 - **Title:** "扫描数据目录以分析占用" (h2, `text-fg`).
 - **Subtitle:** `千寻的数据目录位于 {home.root}。点击下方按钮开始扫描，
-  或选择其它目录。` — `text-sm text-muted`, monospace path.
+或选择其它目录。` — `text-sm text-muted`, monospace path.
 - **Primary CTA:** `qx-btn qx-btn-primary qx-btn-md`, label
   **"扫描数据目录"** — full-width within the card, ~280 px wide. Clicking
   calls `scan(home.root, 'reset')`. This is the one the user asked for.
@@ -54,18 +54,21 @@ centered empty-state card filling the `<div class="qx-card …">` at
   slightly smaller (h-6). If `externals.length === 0`, this row is hidden.
 
 ### Why an illustration AND a CTA
+
 - DaisyDisk and WinDirStat both use a hero illustration on empty. Without it
-  the page reads as "broken". An illustration also signals *intentional* empty,
+  the page reads as "broken". An illustration also signals _intentional_ empty,
   not a load failure.
 - The CTA must be primary (filled, accent-coloured) — DaisyDisk's "Scan a
   folder" and TreeSize's "Scan" both put it center, full-width.
 
 ### Returning user (cached `session.trail`)
+
 Keep current SWR. Cached tree shows immediately; `background:true` scan
 refreshes silently. The "刚扫描过 / N 分钟前扫描" badge from
 `agoText` (`DiskScan.svelte:138–145`) tells the user the data isn't fresh.
 
 ### External-directories bar on the empty state
+
 Show it (the chips). It is the fastest path back into a non-default directory
 and DaisyDisk/TreeSize both keep "recent folders" visible at empty. After the
 first scan, it lives at its current position above the treemap.
@@ -78,6 +81,7 @@ Three states for the **same button slot** (currently two buttons at
 `DiskScan.svelte:849–869`):
 
 ### Idle, has data
+
 - Top-right toolbar as today: **视图切换 | 重新扫描 | 添加目录**. The
   refresh button is `qx-btn-outline` (secondary) — scanning again is the
   exception, not the rule.
@@ -85,36 +89,40 @@ Three states for the **same button slot** (currently two buttons at
   inside the empty-state card instead.
 
 ### Idle, no data (empty state)
+
 - Toolbar hidden. The card holds the primary CTA only.
 - **添加目录** is reachable via the secondary "选择其它目录…" ghost button
   in the card (same `pickExternal` handler).
 
 ### Scanning (foreground)
+
 - Toolbar stays visible. **停止** button appears at the right end
   (`DiskScan.svelte:860–869`); label toggles to `停止中…` while the cancel
   RPC is in flight (`stopping` flag, `DiskScan.svelte:867`).
-- **重新扫描** is *not* disabled — clicking it rotates to a fresh scan on the
+- **重新扫描** is _not_ disabled — clicking it rotates to a fresh scan on the
   same root (this is what `scan(current.entry.path, 'refresh')` at
   `DiskScan.svelte:853` already does, via `seq++` + `DiskScanManager.rotate`
   in `disk.rs:162–172`).
 - **添加目录** also rotates — useful for "I started the wrong folder" flow.
 
 ### Scanning (background, SWR refresh on return)
+
 - No top-right **停止** — `scanning && background` already hides the toolbar
   stop button because `{#if scanning}` is true but… wait, the current code
-  *does* show it (`DiskScan.svelte:860`). Fix: gate the stop button on
+  _does_ show it (`DiskScan.svelte:860`). Fix: gate the stop button on
   `scanning && !background`. Background refreshes are uninterruptible from
   the user's perspective (they may not even know one is happening).
 - The progress line at `DiskScan.svelte:902–916` already disambiguates via
   `(后台刷新 · {scanningRoot})` (line 913). Good.
 
 ### Error
+
 - A horizontal error strip across the page (`DiskScan.svelte:897–899`
   currently) gains an inline **重试** ghost button on the right that calls
   `scan(scanningRoot || home.root, 'reset')`. Today the strip is text-only,
   so the user has to scroll up and re-click the refresh button.
 - The empty-state card itself gets a red left-border variant for the case
-  where the empty state *is* the error (e.g., `pickExternal` chose a path
+  where the empty state _is_ the error (e.g., `pickExternal` chose a path
   that no longer exists — `disk.rs:200` returns `目录不存在`). The card then
   reads:
   - Title becomes `无法扫描此目录` in `text-danger`.
@@ -123,6 +131,7 @@ Three states for the **same button slot** (currently two buttons at
     secondary **选择其它目录…** stays.
 
 ### Cancellation
+
 Already correct. `stopScan` at `DiskScan.svelte:279–287` sets the backend's
 atomic flag; backend emits a final `Done{cancelled:true}` frame
 (`disk.rs:233–261`); frontend records `partial: {files, dirs}` at
@@ -131,6 +140,7 @@ atomic flag; backend emits a final `Done{cancelled:true}` frame
 this.
 
 ### Mid-scan cancellation visual
+
 Today the progress line just disappears when the scan ends. Add a 600 ms
 fade-out on the progress row, so the "停止" press feels acknowledged.
 
@@ -143,6 +153,7 @@ This is the bug at `DiskScan.svelte:196–204` (the `liveGrow` function) +
 `DiskScan.svelte:955–986` (the block `<button>` markup).
 
 ### Root cause (concrete)
+
 - `liveGrow` does mutate `top.entry.size` and `top.entry.children` correctly.
   The `$derived.by` chain at `DiskScan.svelte:495–524` (`sortedChildren`,
   `visibleChildren`) and `DiskScan.svelte:580–593` (`blocks`) therefore
@@ -151,7 +162,7 @@ This is the bug at `DiskScan.svelte:196–204` (the `liveGrow` function) +
 - The CSS class on the block `<button>` is
   `class="group absolute overflow-hidden rounded-[3px] text-left transition-[filter] …"`
   (line 957). `transition-[filter]` only animates `filter`. `left`, `top`,
-  `width`, `height` *snap*.
+  `width`, `height` _snap_.
 - Result: every 200 ms the layout reflows with no in-between frame. To the
   eye the blocks look like they shuffle, not grow.
 
@@ -172,7 +183,7 @@ Apply these to the block `<button>` (replacing line 957's class):
    one, change the other.
 3. **"Grow ≥ X %" rule** — current code rewrites the entire children array
    every tick. To make the growth feel deliberate, only re-render a child
-   when its `size` changed by ≥ 2 % *or* ≥ 64 KB *or* ≥ 250 ms has passed
+   when its `size` changed by ≥ 2 % _or_ ≥ 64 KB _or_ ≥ 250 ms has passed
    since its last update. (Same throttle already does this globally; the
    per-child guard is for the rare case where one big block grows fast
    while others are stable — keeps the squarify from reshuffling.)
@@ -190,24 +201,26 @@ Apply these to the block `<button>` (replacing line 957's class):
    `transition-opacity duration-150` so it fades in over 150 ms instead of
    popping. Same for the size text.
 6. **The first frame guard** — until the first `Progress` frame arrives
-   *or* `Done` arrives, do **not** render any blocks at the new layer
+   _or_ `Done` arrives, do **not** render any blocks at the new layer
    (`DiskScan.svelte:580–582`). Render a thin skeleton (a 1 px outline at
    `bg-bg` with `animate-pulse`) covering the treemap area. This kills
    the "flash from empty to giant" on fast scans.
 
 ### Throttle policy in one sentence
+
 > Block for a directory resizes smoothly when its partial size grows ≥ 5 %
 > of its current value **or** ≥ 200 ms has passed since its last resize
 > (whichever is later); new children fade in over 200 ms; the entire
 > treemap fades from skeleton to real blocks on first frame.
 
 ### What stays the same
+
 - Backend cadence (~100 ms frames).
 - Throttle at `DiskScan.svelte:200`.
 - Display cap (`DISPLAY_LIMIT = 300`, `DiskScan.svelte:96`). 200–300 blocks
   is well under the per-frame compositor budget for smooth 200 ms
   transitions on modern hardware.
-- Squarify algorithm. It *will* re-shuffle when ratios change a lot — the
+- Squarify algorithm. It _will_ re-shuffle when ratios change a lot — the
   CSS transition turns that "shuffle" into a "morph", which reads as
   growth. Do not chase layout-stable squarify variants.
 
@@ -216,23 +229,27 @@ Apply these to the block `<button>` (replacing line 957's class):
 ## 4. Completion
 
 ### Stable final layout
+
 - When the `Done` frame arrives, `trail` is replaced with the full tree
   (`DiskScan.svelte:257`). The CSS transitions defined above interpolate
   each block from its last live position to its final position.
 - If the final sizes differ meaningfully from the last progress frame
   (they always will, by a few percent), the user sees a 200 ms ease-out
   settle. No flash, no jump.
-- A 200 ms cross-fade is *not* needed in the common case. If you ever
+- A 200 ms cross-fade is _not_ needed in the common case. If you ever
   swap from "live" to a freshly-restored cached tree that has very
   different ratios, that's the one case where a `view-transition`-style
   fade helps; out of scope here.
 
 ### Summary numbers
+
 Already in place at `DiskScan.svelte:815–828`:
+
 - `formatBytes(current.entry.size) · {n} 项 · {agoText(current.at)}`
 - `部分结果` badge when `current.partial` is set.
 
 Two micro-improvements:
+
 1. When `current.skipped > 0`, surface a small badge on the right of the
    summary row (currently only the footer at `DiskScan.svelte:1129–1133`
    shows it). One tap to expand an explanation.
@@ -241,12 +258,14 @@ Two micro-improvements:
    click to refresh.
 
 ### When "Refresh" becomes available
+
 Always. The **重新扫描** button is never disabled in the toolbar
 (`DiskScan.svelte:849–856`). On the empty state, the CTA card is the
 refresh. The clean separation is: **toolbar = has-data actions,
 empty-state card = first-scan CTA**.
 
 ### Background refresh state → foreground
+
 When `session.trail` is non-empty on entry and a background refresh is in
 flight, the treemap is fully visible (no `dimClass` because `dimClass` at
 `DiskScan.svelte:121` evaluates to empty string when `background` is
@@ -258,6 +277,7 @@ background scans (see §2).
 ## 5. Edge interactions
 
 ### Switching target mid-scan
+
 Current flow: clicking an external chip → `scan(path, 'reset')` at
 `DiskScan.svelte:381`, which `++seq`s, sets `scanning = true`, replaces
 `trail = [provisionalItem(path)]`, and starts a new channel. Old frames
@@ -265,6 +285,7 @@ are dropped by `if (ticket !== seq) return` at `DiskScan.svelte:232`.
 Backend rotates via `DiskScanManager.rotate` (`disk.rs:162–172`).
 
 Improvements:
+
 - Add a 1.5 s toast `已切换到 {pathTail(external)}` (`showToast` already
   wired at `DiskScan.svelte:755–762`) so the user understands what
   happened to the scan that was running.
@@ -273,11 +294,13 @@ Improvements:
   Show a thin "准备切换…" overlay instead of an empty box.
 
 ### Returning to root
+
 `goHome()` at `DiskScan.svelte:345–347` calls `scan(home.root, 'reset')`
 unconditionally. That re-scans the entire data directory even when the
 user just clicked the wrong breadcrumb.
 
 Better:
+
 ```
 function goHome() {
   if (trail.length === 1 && normPath(current?.entry.path) === normPath(home.root)) return;
@@ -289,21 +312,25 @@ function goHome() {
   if (root && Date.now() - root.at > 6 * 3600_000) scan(home.root, 'refresh', { background: true });
 }
 ```
+
 This is the single highest-leverage micro-fix in the file.
 
 ### Partial results from a cancelled scan
+
 Already preserved and labelled:
+
 - `current.partial` carries `{files, dirs}` (`DiskScan.svelte:253`).
 - "部分结果" badge in the summary row (`DiskScan.svelte:820–827`).
 - Footer explanation (`DiskScan.svelte:1122–1135`).
 
 Add one more affordance: in the footer, append a **"继续扫描"** ghost
 button next to the "重新扫描" toolbar button — labelled differently so
-the user knows it's the *same* scan resuming, not a fresh one. Internally
+the user knows it's the _same_ scan resuming, not a fresh one. Internally
 it can call `scan(current.entry.path, 'refresh')`; the user-facing
 distinction is just the label.
 
 ### Resize during scan
+
 `ResizeObserver` at `DiskScan.svelte:564–572` already updates `boxSize`,
 which causes `blocks` to recompute. The CSS transition makes the resize
 smooth. Good. Verify no layout thrash — `will-change: left, top, width,
@@ -314,6 +341,7 @@ height` on the treemap container.
 ## 6. Empty / error states
 
 ### Directory not found
+
 - Backend `disk_scan_stream` returns `Err` (`disk.rs:199–201`) which the
   front-end `.catch` at `DiskScan.svelte:266–275` turns into `actionError`.
 - The empty-state card now has the error variant described in §2, so the
@@ -322,6 +350,7 @@ height` on the treemap container.
   action so the chip doesn't keep offering a dead path.
 
 ### Permission errors
+
 - Per-entry permission failures are counted into `current.skipped` and
   shown in the footer (`DiskScan.svelte:1129–1133`). Good.
 - Whole-directory unreadable (`std::fs::read_dir` returns Err →
@@ -329,18 +358,20 @@ height` on the treemap container.
   - Today this renders as "空目录" at `DiskScan.svelte:943–944`. That's
     misleading.
   - Detect it: if `entry.dir && entry.children.length === 0 && !scanning`
-    *and* the entry's metadata came back as unreadable, render
+    _and_ the entry's metadata came back as unreadable, render
     "无权限访问此目录" with a one-line hint about Windows ACLs / macOS
     TCC. (Cheap detection: backend could surface an `error` flag per
     `DiskEntry`; out of scope for this proposal but a one-line addition
     to `disk.rs:43–54` would do it.)
 
 ### Very fast scans (< 200 ms)
+
 The risk: blocks appear empty, then jump to full size with no in-between.
 The first-frame guard in §3 (skeleton until first frame) handles this.
 Specifically:
+
 - Render the skeleton overlay only while `scanning && !progress`.
-- The instant `progress` arrives *or* `Done` arrives, the skeleton is
+- The instant `progress` arrives _or_ `Done` arrives, the skeleton is
   removed and the real blocks mount at their target sizes. CSS animation
   `qx-grow-in` plays once on mount (200 ms ease-out).
 - If the scan completes before the skeleton is even shown (sub-50 ms),
@@ -351,15 +382,16 @@ Specifically:
 
 ## 7. Industry comparison
 
-| Tool | Empty state | Live growth | Cancel | Target switch | Pitfall |
-|---|---|---|---|---|---|
-| **WinDirStat** | None — opens a "select folder" dialog. | No. Scans complete, then renders. | Cancellable. | Always rescan from dialog. | No live feedback; slow drives feel hung. |
-| **DaisyDisk** | Beautiful animated disk illustration + "Scan a folder" CTA. | No. Ring sweeps the *whole* disk surface during scan; treemap appears when scan completes. | Cancellable, partial result retained. | Click a different disk segment on the ring. | Treemap "pops" in at the end (no live morph). |
-| **TreeSize** | "Select folder" dialog + recent paths. | **Yes** — explicit "live treemap" mode where blocks grow as scan progresses. | Cancellable, partial retained. | Dropdown. | Live mode can flash if scan completes before the first paint. |
-| **千寻 today** | "准备扫描…" text, auto-scan starts. | Partial (data updates, no visual transition). | Already implemented. | Already implemented. | Blocks shuffle, not grow; auto-scan surprises the user. |
-| **千寻 proposed** | Illustration + primary CTA + recent dirs. | **Yes** — CSS transitions on geometry + first-frame skeleton. | Already implemented + 600 ms fade. | Same + confirmation toast. | (Avoid by) skeleton-on-empty. |
+| Tool              | Empty state                                                 | Live growth                                                                                | Cancel                                | Target switch                               | Pitfall                                                       |
+| ----------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------- | ------------------------------------------- | ------------------------------------------------------------- |
+| **WinDirStat**    | None — opens a "select folder" dialog.                      | No. Scans complete, then renders.                                                          | Cancellable.                          | Always rescan from dialog.                  | No live feedback; slow drives feel hung.                      |
+| **DaisyDisk**     | Beautiful animated disk illustration + "Scan a folder" CTA. | No. Ring sweeps the _whole_ disk surface during scan; treemap appears when scan completes. | Cancellable, partial result retained. | Click a different disk segment on the ring. | Treemap "pops" in at the end (no live morph).                 |
+| **TreeSize**      | "Select folder" dialog + recent paths.                      | **Yes** — explicit "live treemap" mode where blocks grow as scan progresses.               | Cancellable, partial retained.        | Dropdown.                                   | Live mode can flash if scan completes before the first paint. |
+| **千寻 today**    | "准备扫描…" text, auto-scan starts.                         | Partial (data updates, no visual transition).                                              | Already implemented.                  | Already implemented.                        | Blocks shuffle, not grow; auto-scan surprises the user.       |
+| **千寻 proposed** | Illustration + primary CTA + recent dirs.                   | **Yes** — CSS transitions on geometry + first-frame skeleton.                              | Already implemented + 600 ms fade.    | Same + confirmation toast.                  | (Avoid by) skeleton-on-empty.                                 |
 
 ### Takeaways we apply
+
 1. **Don't auto-scan.** DaisyDisk and WinDirStat both gate entry on a click.
    TreeSize is the only one that starts automatically and it has been
    criticised for it in user reviews for over a decade.
@@ -395,19 +427,19 @@ Specifically:
 
 ## 9. File change list (anchored to current line numbers)
 
-| Where | What |
-|---|---|
-| `DiskScan.svelte:349–368` (`onMount`) | Delete the auto-scan `else` branch. Always wait for a user click on first visit. Keep the SWR branch. |
-| `DiskScan.svelte:345–347` (`goHome`) | Prefer in-memory trail walk-back over `scan(home.root, 'reset')`. Background refresh only when stale. |
-| `DiskScan.svelte:941–944` (empty / 空目录 placeholder) | Replace with the empty-state card described in §1. |
-| `DiskScan.svelte:849–869` (toolbar) | Hide toolbar when `!current`; gate the **停止** button on `!background`. |
-| `DiskScan.svelte:860` | Change `{#if scanning}` → `{#if scanning && !background}` for the stop button. |
-| `DiskScan.svelte:897–899` (`actionError` strip) | Add inline **重试** ghost button. |
-| `DiskScan.svelte:196–204` (`liveGrow`) | No logic change; document the 200 ms = transition-duration pairing. |
-| `DiskScan.svelte:580–582` (`blocks` derived) | Add `&& progress === null` guard: while `scanning && !progress`, return `[]` and let a sibling skeleton render. |
-| `DiskScan.svelte:956–986` (block markup) | Replace `transition-[filter]` with `transition-[left,top,width,height,background,opacity] duration-200 ease-out` + `will-change` on the container + fade-in animation for newly-keyed children + fade for labels. |
-| New `@keyframes qx-grow-in` | Global CSS; opacity 0 → 1, scale 0.96 → 1, 200 ms ease-out. |
-| `DiskScan.svelte:1122–1135` (footer) | Append **继续扫描** ghost button next to **重新扫描** when `current.partial` is set. |
+| Where                                                  | What                                                                                                                                                                                                              |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DiskScan.svelte:349–368` (`onMount`)                  | Delete the auto-scan `else` branch. Always wait for a user click on first visit. Keep the SWR branch.                                                                                                             |
+| `DiskScan.svelte:345–347` (`goHome`)                   | Prefer in-memory trail walk-back over `scan(home.root, 'reset')`. Background refresh only when stale.                                                                                                             |
+| `DiskScan.svelte:941–944` (empty / 空目录 placeholder) | Replace with the empty-state card described in §1.                                                                                                                                                                |
+| `DiskScan.svelte:849–869` (toolbar)                    | Hide toolbar when `!current`; gate the **停止** button on `!background`.                                                                                                                                          |
+| `DiskScan.svelte:860`                                  | Change `{#if scanning}` → `{#if scanning && !background}` for the stop button.                                                                                                                                    |
+| `DiskScan.svelte:897–899` (`actionError` strip)        | Add inline **重试** ghost button.                                                                                                                                                                                 |
+| `DiskScan.svelte:196–204` (`liveGrow`)                 | No logic change; document the 200 ms = transition-duration pairing.                                                                                                                                               |
+| `DiskScan.svelte:580–582` (`blocks` derived)           | Add `&& progress === null` guard: while `scanning && !progress`, return `[]` and let a sibling skeleton render.                                                                                                   |
+| `DiskScan.svelte:956–986` (block markup)               | Replace `transition-[filter]` with `transition-[left,top,width,height,background,opacity] duration-200 ease-out` + `will-change` on the container + fade-in animation for newly-keyed children + fade for labels. |
+| New `@keyframes qx-grow-in`                            | Global CSS; opacity 0 → 1, scale 0.96 → 1, 200 ms ease-out.                                                                                                                                                       |
+| `DiskScan.svelte:1122–1135` (footer)                   | Append **继续扫描** ghost button next to **重新扫描** when `current.partial` is set.                                                                                                                              |
 
 No backend changes required. `disk.rs` already does the right thing.
 
