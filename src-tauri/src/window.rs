@@ -4,7 +4,7 @@
 //! 几何记忆采用「关闭/退出时一次性快照」而非每次移动都写盘：
 //! 设置文件不值得为窗口拖动承受成倍的写入（架构 §4.1 的原子写代价）。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::Serialize;
 use tauri::{
@@ -22,6 +22,19 @@ pub const STANDALONE_PREFIX: &str = "standalone-";
 
 /// 独立窗口计数器（label 唯一性 + 级联偏移）。
 static NEXT_STANDALONE: AtomicU64 = AtomicU64::new(1);
+
+/// 主窗重建进行中：销毁旧窗到新窗建成之间会出现「零窗口」瞬间，
+/// 事件循环对此的默认语义是发 code=None 的 ExitRequested（退出整个
+/// 应用）。置位期间 lib.rs 的 run 回调对该事件 prevent_exit，进程才
+/// 活得过重建间隙。`app.exit(0)`（托盘退出）走 Some(code) 不受影响；
+/// `app.restart()` 的 RESTART_EXIT_CODE 连 prevent 都被框架忽略——
+/// 两条正经退出路径都安然无恙。
+static REBUILDING: AtomicBool = AtomicBool::new(false);
+
+/// 重建标志的读取口（lib.rs 的 run 回调用）。
+pub fn is_rebuilding() -> bool {
+    REBUILDING.load(Ordering::Acquire)
+}
 
 /// 独立窗口支持的两类视图。
 fn standalone_view_meta(view: &str) -> Option<(&'static str, f64, f64)> {
@@ -133,6 +146,125 @@ pub fn persist_geometry(app: &AppHandle) {
             logging::log("error", &format!("窗口几何持久化失败：{error}"));
         }
     }
+}
+
+// ---- 主窗重建（托盘「重建界面」）----
+
+/// 重建主窗：销毁现有 WebView2 实例（controller + 渲染进程）后以同
+/// label 从零建回。页面级 reload 只是往既有实例里投递一条导航指令——
+/// fire-and-forget：WebView2 渲染/browser 进程挂死时调用返回 Ok 却
+/// 无人执行，白屏依旧。只有销毁重建才是真正的「重启 webview」。
+///
+/// 必须 async 并跑在 runtime 线程：sync 上下文里同步 build 新窗会与
+/// WebView2 的异步初始化互相等消息泵而死锁（同 window_spawn_view 注释）。
+pub async fn rebuild_main(app: &AppHandle) -> crate::error::Result<()> {
+    // destroy 走不到 CloseRequested（几何快照挂在那条路径上），先补一次。
+    persist_geometry(app);
+    // 几何在动手前读快照；persist 刚写过，读到的就是当前实况。
+    let geometry = {
+        let state = app.state::<AppState>();
+        let guard = state
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.window.geometry.clone()
+    };
+
+    REBUILDING.store(true, Ordering::Release);
+
+    // 先销毁旧窗：destroy 绕过 CloseRequested 拦截（「关到托盘」），真正
+    // 终结 WebView2 controller + 渲染进程。窗口要在事件循环走完 Destroyed
+    // 后 label 才释放，所以建窗交给下面的重试循环。
+    let destroyed = match front(app) {
+        Some(old) => old
+            .destroy()
+            .map_err(|cause| crate::error::Error::Window(format!("销毁旧主窗失败：{cause}"))),
+        // 没有旧窗（异常残局，如启动期就坏了）：直接建新的。
+        None => Ok(()),
+    };
+
+    let result = match destroyed {
+        Err(cause) => Err(cause),
+        Ok(()) => {
+            // window 与 webview 双注册同 label，二者的释放都挂在事件循环
+            // 的 Destroyed 处理上，刚 destroy 完立刻建必撞 AlreadyExists
+            // （两个变体都可能）——首次立即尝试，撞了稍候重试；事件循环
+            // 一两拍内即腾出 label，5 秒上限只是兜底（超时意味着事件循环
+            // 本身出了问题）。
+            let mut attempted = false;
+            let mut result = Err(crate::error::Error::Window(
+                "重建主窗超时：旧 label 迟迟未释放".to_owned(),
+            ));
+            for _ in 0..50 {
+                if attempted {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                attempted = true;
+                match build_main(app, geometry.as_ref()) {
+                    Ok(()) => {
+                        result = Ok(());
+                        break;
+                    }
+                    Err(
+                        tauri::Error::WindowLabelAlreadyExists(_)
+                        | tauri::Error::WebviewLabelAlreadyExists(_),
+                    ) => continue,
+                    Err(cause) => {
+                        result = Err(crate::error::Error::Window(format!(
+                            "重建主窗失败：{cause}"
+                        )));
+                        break;
+                    }
+                }
+            }
+            result
+        }
+    };
+    REBUILDING.store(false, Ordering::Release);
+
+    match result {
+        Ok(()) => {
+            logging::log("info", "主窗已重建（WebView2 实例焕新）");
+            Ok(())
+        }
+        Err(cause) => {
+            logging::log("error", &format!("主窗重建失败：{cause}"));
+            Err(cause)
+        }
+    }
+}
+
+/// 按 tauri.conf.json 主窗参数建窗（重建路径专用；启动路径由配置文件
+/// 建窗，参数与这里保持一致）。成功后应用 WebView2 偏好、还原几何，
+/// 并自备兜底亮窗——setup 里的 20s 兜底只管启动，前端 boot 若再挂死，
+/// 重建出的窗口至少不会「隐身」。
+fn build_main(app: &AppHandle, geometry: Option<&Geometry>) -> tauri::Result<()> {
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("千寻")
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(880.0, 580.0)
+        .decorations(false)
+        .visible(false); // 前端就绪后自行亮窗（同启动策略，避免白闪）
+    if geometry.is_none() {
+        builder = builder.center();
+    }
+    let _window = builder.build()?;
+    #[cfg(windows)]
+    apply_webview_preferences(&_window);
+    if let Some(geometry) = geometry {
+        restore(app, geometry);
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        if let Some(front) = front(&handle) {
+            if !front.is_visible().unwrap_or(true) {
+                let _ = front.show();
+                let _ = front.set_focus();
+            }
+        }
+    });
+    Ok(())
 }
 
 /// 开/关开发者工具（F12 由前端捕获后调用）。

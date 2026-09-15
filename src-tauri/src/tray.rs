@@ -1,4 +1,4 @@
-//! 托盘：回到窗口、重启界面、截图、DSH 启停、真正退出；tooltip 实时
+//! 托盘：回到窗口、重建界面、截图、DSH 启停、真正退出；tooltip 实时
 //! 反映 DSH 运行状态。左键单击 = 显示窗口，右键 = 菜单。
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -15,9 +15,11 @@ static TRAY: std::sync::OnceLock<TrayIcon> = std::sync::OnceLock::new();
 pub fn build(app: &AppHandle) -> Result<()> {
     let show = MenuItem::with_id(app, "show", "显示千寻", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
-    // 重启界面: webview 白屏/显示异常时重载前端 (supervisor 与后端不动;
-    // 参照 AutoInspection 实测方案, 2026-09-14)。
-    let reload_ui = MenuItem::with_id(app, "reload-ui", "重启界面", true, None::<&str>)
+    // 重建界面: webview 白屏/显示异常时销毁主窗的 WebView2 实例并整窗
+    // 重建（新 controller + 渲染进程；supervisor 与后端零扰动）。页面级
+    // reload 修不了 WebView2 层的挂死——reload 是 fire-and-forget，往
+    // 已挂死的进程里投递指令会返回 Ok 却无人执行，白屏依旧。
+    let rebuild_ui = MenuItem::with_id(app, "rebuild-ui", "重建界面", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
     let snip = MenuItem::with_id(app, "snip", "截图", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
@@ -32,7 +34,7 @@ pub fn build(app: &AppHandle) -> Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &show, &reload_ui, &snip, &separator, &start, &stop, &separator, &quit,
+            &show, &rebuild_ui, &snip, &separator, &start, &stop, &separator, &quit,
         ],
     )
     .map_err(|error| Error::Tray(error.to_string()))?;
@@ -52,20 +54,17 @@ pub fn build(app: &AppHandle) -> Result<()> {
                     window::reveal(&front);
                 }
             }
-            "reload-ui" => {
-                // 重启界面: show + 重载前端 (渲染异常/白屏自愈; supervisor
-                // 与后端零扰动)。reload 重新走前端 boot, 千寻 UI 恢复。
-                // 只能由 Rust 侧发起: tauri 2 的 window 插件没有 reload
-                // 命令 (前端 invoke 不可用), 且白屏时页面 JS 可能已死。
-                if let Some(front) = window::front(app) {
-                    window::reveal(&front);
-                    if let Err(failure) = front.reload() {
-                        crate::logging::log(
-                            "warn",
-                            &format!("托盘重启界面 reload 失败：{failure}"),
-                        );
+            "rebuild-ui" => {
+                // 重建是异步全过程（destroy → 等 label 释放 → build →
+                // 还原几何），托盘回调里只能派发任务，成败都落日志。
+                // 只能由 Rust 侧发起：白屏时页面 JS 可能已死，invoke
+                // 不可用。
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(failure) = window::rebuild_main(&handle).await {
+                        crate::logging::log("warn", &format!("托盘重建界面失败：{failure}"));
                     }
-                }
+                });
             }
             "snip" => {
                 // 鼠标路：与全局热键同一条 start_session 流水线。

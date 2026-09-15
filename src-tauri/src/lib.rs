@@ -339,8 +339,25 @@ pub fn run() {
             sync::commands::sync_pull,
             sync::commands::sync_push,
         ])
-        .run(tauri::generate_context!())
-        .expect("千寻主循环异常退出");
+        .build(tauri::generate_context!())
+        .expect("千寻初始化失败")
+        .run(|_app, event| {
+            // 主窗重建的销毁间隙：最后一个窗口 Destroyed 会触发 code=None
+            // 的 ExitRequested，默认语义是退出整个应用。重建标志置位期间
+            // 挡下，新窗建成即自动恢复。app.exit(0)（托盘退出）走
+            // Some(code) 不受影响；app.restart() 的 RESTART_EXIT_CODE
+            // 连 prevent 都被框架忽略——两条正经退出路径都安然无恙。
+            if let tauri::RunEvent::ExitRequested {
+                code: None,
+                api,
+                ..
+            } = event
+            {
+                if window::is_rebuilding() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 /// 把 supervisor 事件转发给前端（emit）与托盘（状态反射）。
