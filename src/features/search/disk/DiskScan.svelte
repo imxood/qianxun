@@ -191,8 +191,13 @@
 
   /**
    * 边扫边长：进度帧的「根直接子项部分占用」按 path 合并进当前层。
-   * 已有 path 的 entry 复用，仅更新 size（CSS transition 让块丝滑长大）；
-   * 新出现的 path 追加到末尾；消失的 path 保留以避免 keyed each 闪入。
+   * 已有 path 的 entry 复用 + 更新 size；新出现的 path 追加到末尾。
+   * 浅层模型下 children 始终为空数组，因此每帧主要是"size 增长"和
+   * "新子项浮出"。
+   *
+   * 实现要点：**整组替换 trail 末项**（而不是原地 mutate）——Svelte 5
+   * $derived 对替换的响应最稳，对深层 mutate 有时不可见。Entry 对象仍
+   * 复用，size 直接改而不重建，避免每帧 200 个新对象进入 GC 通道。
    * 仅前台扫描生效（后台刷新保持旧快照稳定，Done 时整体换新）。
    */
   function liveGrow(frame: DiskScanProgress): void {
@@ -201,21 +206,21 @@
     const stamp = Date.now();
     if (stamp - lastLive < 100) return; // 与后端 tick 节奏对齐：10fps 配 200ms 过渡
     lastLive = stamp;
-    // 用对象做 path → entry 索引（svelte/prefer-svelte-reactivity 禁止
-    // 反应式上下文里用普通 Map；这里 Map 仅作局部累加器，仍按 lint 改）。
+    // 复用旧 entry 对象：原位改 size 不会触发深 proxy 失效，但
+    // 替换整组 trail 末项会——这条路径是确定触发 $derived 重算的关键。
     const existing: Record<string, DiskEntry> = {};
     for (const child of top.entry.children) existing[child.path] = child;
-    const merged: DiskEntry[] = frame.topChildren.map((partial) => {
+    for (const partial of frame.topChildren) {
       const prev = existing[partial.path];
-      if (prev) {
-        // 浅层模型下 children 始终为空：复用旧对象，原地累加 size。
-        prev.size = partial.size;
-        return prev;
-      }
-      return toEntry(partial);
-    });
-    top.entry.children = merged;
-    top.entry.size = frame.bytes;
+      if (prev) prev.size = partial.size;
+    }
+    // 即便 backend 给的 topChildren 与上一帧同序同 size 也要换数组引用，
+    // 否则 $derived 看不到引用变化、settled 之后界面就会冻在旧状态。
+    const nextChildren = frame.topChildren.map(
+      (partial) => existing[partial.path] ?? toEntry(partial),
+    );
+    const nextEntry: DiskEntry = { ...top.entry, children: nextChildren, size: frame.bytes };
+    trail = [...trail.slice(0, -1), { ...top, entry: nextEntry }];
   }
 
   /**
