@@ -53,10 +53,12 @@ pub struct DiskEntry {
 }
 
 impl DiskEntry {
-    fn new(parent: String, path: PathBuf, name: String, size: u64, is_dir: bool) -> Self {
+    /// 浅层条目（drill 时由 `scan_directory` 产出；children 永远为空）。
+    #[allow(clippy::too_many_arguments)]
+    fn new(parent: String, path: String, name: String, size: u64, is_dir: bool) -> Self {
         Self {
             parent,
-            path: path.to_string_lossy().into_owned(),
+            path,
             name,
             size,
             is_dir,
@@ -245,29 +247,6 @@ pub fn scan_directory(
         }
         dir_sizes.insert(root_key.clone(), file_total);
 
-        // ---- flat entry list (dirs first, then files) ----
-        let mut entries: Vec<DiskEntry> = Vec::with_capacity(dirs.len() + files.len());
-        for (path, name) in &dirs {
-            let parent = parent_key_of(&path_key(path));
-            entries.push(DiskEntry::new(
-                parent,
-                path.clone(),
-                name.clone(),
-                dir_sizes.get(&path_key(path)).copied().unwrap_or(0),
-                true,
-            ));
-        }
-        for (path, name, size) in &files {
-            let parent = parent_key_of(&path_key(path));
-            entries.push(DiskEntry::new(
-                parent,
-                path.clone(),
-                name.clone(),
-                *size,
-                false,
-            ));
-        }
-
         // ---- largest files: select_nth O(n) 选出 TOP N 再排序 ----
         let mut largest_files: Vec<LargeFile> = Vec::new();
         if !files.is_empty() {
@@ -284,42 +263,40 @@ pub fn scan_directory(
             largest_files.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
         }
 
-        // ---- assemble the tree bottom-up ----
-        // 桶按「父路径键」聚合；entries 最深优先，保证处理到某个目录时
-        // 它的直接孩子已经全部到齐（孙辈已先挂进孩子的 children）。
-        let mut parent_map: HashMap<String, Vec<DiskEntry>> = HashMap::new();
-        entries.sort_by(|a, b| {
-            b.path
-                .split(['/', '\\'])
-                .count()
-                .cmp(&a.path.split(['/', '\\']).count())
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        for entry in entries {
-            if entry.is_dir {
-                // 该目录的直接孩子此时已聚齐，整体挂上后把自己交给父桶。
-                let own_key = path_key(Path::new(&entry.path));
-                if let Some(mut children) = parent_map.remove(&own_key) {
-                    sort_children(&mut children);
-                    let mut entry = entry;
-                    entry.children = children;
-                    parent_map
-                        .entry(entry.parent.clone())
-                        .or_default()
-                        .push(entry);
-                    continue;
-                }
+        // ---- shallow tree: only the scan root's direct children, with
+        // each child's recursive size. Deeper levels are intentionally
+        // not assembled: 千寻's UI only renders one layer at a time and
+        // drill-down always issues a fresh `scan_directory` on the new
+        // root. Carrying the full deep tree is wasted work + wasted
+        // memory + wasted IPC for a UI that never reads it.
+        let mut root_children: Vec<DiskEntry> = Vec::with_capacity(dirs.len() + files.len());
+        for (path, name) in &dirs {
+            let key = path_key(path);
+            if parent_key_of(&key) != root_key {
+                continue;
             }
-            parent_map
-                .entry(entry.parent.clone())
-                .or_default()
-                .push(entry);
+            root_children.push(DiskEntry::new(
+                String::new(),
+                path.to_string_lossy().into_owned(),
+                name.clone(),
+                dir_sizes.get(&key).copied().unwrap_or(0),
+                true,
+            ));
         }
-        let mut root_children = parent_map.remove(&root_key).unwrap_or_default();
+        for (path, name, size) in &files {
+            let key = path_key(path);
+            if parent_key_of(&key) != root_key {
+                continue;
+            }
+            root_children.push(DiskEntry::new(
+                String::new(),
+                path.to_string_lossy().into_owned(),
+                name.clone(),
+                *size,
+                false,
+            ));
+        }
         sort_children(&mut root_children);
-        for children in parent_map.values_mut() {
-            sort_children(children);
-        }
 
         let tree_root = DiskEntry {
             parent: String::new(),
@@ -338,6 +315,9 @@ pub fn scan_directory(
             total_size: file_total,
             skipped_count: skipped,
             largest_files,
+            // Deprecated: held for backward-compat with any caller that
+            // still reads `entries`. The shallow tree above is the
+            // authoritative shape now.
             entries: Vec::new(),
             tree_root,
         })
@@ -472,7 +452,7 @@ mod tests {
     fn quiet_tick(_: ScanTick) {}
 
     #[test]
-    fn 扫描任意目录并组装树() {
+    fn 扫描任意目录只组装一层并给递归大小() {
         let dir = std::env::temp_dir().join(format!("fff-disk-{}", std::process::id()));
         // Windows 的 pid 会复用：先清掉上次崩溃残留，避免目录内容污染计数。
         let _ = std::fs::remove_dir_all(&dir);
@@ -489,21 +469,19 @@ mod tests {
         assert_eq!(result.file_count, 3);
         assert_eq!(result.total_size, 160);
         assert_eq!(result.skipped_count, 0);
-        // root children sorted by size: nested(150) before a.txt(10)
+
+        // 浅层模型：root.children 是 dir 的直接子项，递归大小仍正确。
+        // 降序：nested(150) 在 a.txt(10) 前。
         let children = &result.tree_root.children;
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].name, "nested");
         assert_eq!(children[0].size, 150);
-        assert_eq!(children[0].children.len(), 2);
-        // deeper child has recursive parent size
-        let deeper = children[0]
-            .children
-            .iter()
-            .find(|c| c.name == "deeper")
-            .unwrap();
-        assert_eq!(deeper.size, 100);
+        assert!(children[0].is_dir);
+        // deeper 不在 root 层（drill 时再发）。
+        assert!(children[0].children.is_empty());
+        assert!(children[1].children.is_empty());
 
-        // 最大文件 TOP：b.bin(100) > c.log(50) > a.txt(10)。
+        // 最大文件 TOP 仍按全子树选出：b.bin(100) > c.log(50) > a.txt(10)。
         assert_eq!(result.largest_files.len(), 3);
         assert_eq!(result.largest_files[0].name, "b.bin");
         assert_eq!(result.largest_files[0].size, 100);

@@ -190,16 +190,29 @@
   }
 
   /**
-   * 边扫边长：进度帧的「根直接子项部分占用」逐帧长进当前层。
+   * 边扫边长：进度帧的「根直接子项部分占用」按 path 合并进当前层。
+   * 已有 path 的 entry 复用，仅更新 size（CSS transition 让块丝滑长大）；
+   * 新出现的 path 追加到末尾；消失的 path 保留以避免 keyed each 闪入。
    * 仅前台扫描生效（后台刷新保持旧快照稳定，Done 时整体换新）。
    */
   function liveGrow(frame: DiskScanProgress): void {
     const top = trail[trail.length - 1];
     if (!top || normPath(top.entry.path) !== normPath(frame.root)) return;
     const stamp = Date.now();
-    if (stamp - lastLive < 200) return; // 最多 5fps 重排，足够顺滑不空烧
+    if (stamp - lastLive < 100) return; // 与后端 tick 节奏对齐：10fps 配 200ms 过渡
     lastLive = stamp;
-    top.entry.children = frame.topChildren.map(toEntry);
+    const existing = new Map<string, DiskEntry>();
+    for (const child of top.entry.children) existing.set(child.path, child);
+    const merged: DiskEntry[] = frame.topChildren.map((partial) => {
+      const prev = existing.get(partial.path);
+      if (prev) {
+        // 浅层模型下 children 始终为空：复用旧对象，原地累加 size。
+        prev.size = partial.size;
+        return prev;
+      }
+      return toEntry(partial);
+    });
+    top.entry.children = merged;
     top.entry.size = frame.bytes;
   }
 
@@ -219,7 +232,9 @@
     lastLive = 0;
     focusKey = '';
     tip = null;
-    if (!background) selected = [];
+    // 仅在「换目标」时清多选——refresh 模式只走原树更新，不该误清
+    // 用户正准备批量清理的已选项（R4）。
+    if (!background && mode !== 'refresh') selected = [];
 
     if (mode === 'reset') {
       trail = [provisionalItem(path)];
@@ -261,6 +276,13 @@
       stopping = false;
       background = false;
       tip = null;
+      // 用户主动停止的语义反馈：toast + 一键继续。
+      if (event.cancelled && event.files > 0) {
+        showToast(
+          `扫描已停止 · 已发现 ${event.files.toLocaleString()} 项（${formatBytes(item.entry.size)}）`,
+          { label: '继续扫描', run: () => scan(path, mode) },
+        );
+      }
     };
 
     void call('disk_scan_stream', { path, onEvent }).catch((error) => {
@@ -286,49 +308,15 @@
     }
   }
 
-  /** 在已完成的树中按路径查找节点（下钻优先走本地数据，零 IO）。 */
-  function findInTree(root: DiskEntry | null, path: string): DiskEntry | null {
-    if (!root) return null;
-    const target = normPath(path);
-    const walk = (node: DiskEntry): DiskEntry | null => {
-      if (normPath(node.path) === target) return node;
-      for (const child of node.children) {
-        const found = walk(child);
-        if (found) return found;
-      }
-      return null;
-    };
-    return walk(root);
-  }
-
-  /**
-   * 下钻（用户任意时刻可点）：
-   * - 目标已在当前树里 → 直接本地导航，即时且零扫描（继承可信度标注）；
-   * - 目标不在树里（首扫未完成/目录是新增的）→ 以它为根发起新流式扫描，
-   *   旧扫描被后端静默作废——用户操作永远以最后一次点击为准。
-   */
+  /** 下钻即扫描：浅层模型下永远不会命中本地缓存（旧层无深树），
+   * 直接以 entry.path 为根发起新流式扫描，旧扫描被后端静默作废。 */
   function drill(entry: DiskEntry): void {
     if (!entry.dir || !entry.path) return;
-    const from = trail[trail.length - 1];
-    const local = findInTree(from?.entry ?? null, entry.path);
+    seq++; // 任何下钻都让在途帧过期，避免旧 target 的进度污染新层。
     focusKey = '';
     tip = null;
-    if (from && local) {
-      seq++; // 本地下钻同样使在途帧过期。
-      trail = [
-        ...trail,
-        {
-          entry: local,
-          at: from.at,
-          partial: from.partial,
-          skipped: from.skipped,
-          largest: from.largest,
-        },
-      ];
-      progress = null;
-      actionError = '';
-      return;
-    }
+    progress = null;
+    actionError = '';
     scan(entry.path, 'push');
   }
 
@@ -350,15 +338,14 @@
     const heartbeat = setInterval(() => (now = Date.now()), 30_000);
     void (async () => {
       try {
+        // 仅有 home（用于根路径展示与受管目录警告），不主动开扫——
+        // 首次进入呈现空状态卡，由用户点 CTA 决定。
+        home = await call<DiskHome>('disk_home');
+        // 缓存命中：恢复上次浏览轨迹 + 后台静默刷新当前层。
         if (session.trail && session.trail.length > 0) {
-          // 秒开上次结果，再后台刷新当前层（SWR）。
-          home = session.home ?? (await call<DiskHome>('disk_home'));
           trail = session.trail;
           const top = trail[trail.length - 1];
           if (top) scan(top.entry.path, 'refresh', { background: true });
-        } else {
-          home = await call<DiskHome>('disk_home');
-          scan(home.root, 'reset');
         }
       } catch (error) {
         actionError = error instanceof Error ? error.message : String(error);
@@ -376,7 +363,9 @@
   async function pickExternal(): Promise<void> {
     const picked = await open({ directory: true, multiple: false });
     if (typeof picked !== 'string' || !picked.trim()) return;
-    externals = [picked, ...externals.filter((item) => item !== picked)].slice(0, 6);
+    // Windows 大小写不敏感：按 normPath 去重，保留原 casing 显示。
+    const key = normPath(picked);
+    externals = [picked, ...externals.filter((item) => normPath(item) !== key)].slice(0, 6);
     saveExternals();
     scan(picked, 'reset');
   }
@@ -523,23 +512,11 @@
     return head;
   });
 
-  /** 当前层的最大文件（下钻后按子树前缀过滤，仍是这层的答案）。 */
+  /** 当前层的最大文件（每层独立扫一次，largest 本就是该层全子树的 TOP）。 */
   const topFiles = $derived.by<DiskLargeFile[]>(() => {
     const item = current;
     if (!item) return [];
-    const prefix = normPath(item.entry.path);
-    return item.largest
-      .filter((file) => {
-        const path = normPath(file.path);
-        // 段边界匹配：C:\root 不能误吞兄弟目录 C:\root2 的文件。
-        return (
-          path.startsWith(prefix) &&
-          (path.length === prefix.length ||
-            path[prefix.length] === '\\' ||
-            path[prefix.length] === '/')
-        );
-      })
-      .slice(0, 5);
+    return item.largest.slice(0, 5);
   });
 
   // ---- 列表多选（依赖 visibleChildren，置于其声明后）-------------------------
@@ -854,7 +831,11 @@
     >
       重新扫描
     </button>
-    <button class="qx-btn qx-btn-primary qx-btn-sm h-7" onclick={() => void pickExternal()}>
+    <button
+      class="qx-btn qx-btn-primary qx-btn-sm h-7"
+      disabled={cleaning}
+      onclick={() => void pickExternal()}
+    >
       添加目录
     </button>
     {#if scanning}
@@ -873,7 +854,9 @@
     <div class="flex shrink-0 flex-wrap items-center gap-1.5">
       {#each externals as external (external)}
         <span
-          class="group flex items-center gap-1 rounded-full border border-line bg-surface py-0.5 pl-2.5 pr-1 text-xs text-fg transition-colors hover:border-accent"
+          class="group flex items-center gap-1 rounded-full border border-line bg-surface py-0.5 pl-2.5 pr-1 text-xs text-fg transition-colors hover:border-accent {cleaning
+            ? 'pointer-events-none opacity-50'
+            : ''}"
         >
           <button
             class="max-w-48 truncate"
@@ -939,7 +922,85 @@
   <!-- 主体 -->
   <div class="qx-card relative min-h-0 flex-1 overflow-hidden bg-bg">
     {#if !current}
-      <p class="flex h-full items-center justify-center text-sm text-muted">准备扫描…</p>
+      <!-- 空状态：首次进入（无缓存）展示插画 + 主 CTA；按钮触发扫描。 -->
+      <div class="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+        <div
+          class="flex h-28 w-28 items-center justify-center rounded-2xl bg-accent-soft/60"
+          aria-hidden="true"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="size-14 text-accent/40"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            <path d="M3 10h18" />
+          </svg>
+        </div>
+        <div class="space-y-1.5">
+          <h2 class="text-base font-medium text-fg">扫描数据目录以分析占用</h2>
+          {#if home}
+            <p class="text-xs text-muted">
+              千寻的数据目录位于 <span class="font-mono">{home.root}</span>，点击下方按钮开始。
+            </p>
+          {/if}
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            class="qx-btn qx-btn-primary qx-btn-md min-w-56"
+            data-testid="disk-scan-start"
+            disabled={!home || scanning}
+            onclick={() => home && scan(home.root, 'reset')}
+          >
+            {scanning ? '正在启动…' : '扫描数据目录'}
+          </button>
+          <button
+            class="qx-btn qx-btn-ghost qx-btn-md"
+            data-testid="disk-scan-pick-external"
+            disabled={scanning}
+            onclick={() => void pickExternal()}
+          >
+            选择其它目录…
+          </button>
+        </div>
+        {#if externals.length > 0}
+          <div class="mt-2 max-w-md space-y-1.5">
+            <p class="text-[11px] text-muted/70">或扫描最近用过的目录</p>
+            <div class="flex flex-wrap justify-center gap-1.5">
+              {#each externals as external (external)}
+                <button
+                  class="rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs text-fg transition-colors hover:border-accent"
+                  title={external}
+                  onclick={() => scan(external, 'reset')}
+                >
+                  {pathTail(external)}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+    {:else if actionError && current.entry.children.length === 0 && !scanning}
+      <!-- 错误态：避免被误读为"空目录"（与扫描成功但确实空的目录区分开）。 -->
+      <div class="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <p class="text-sm text-danger">{actionError}</p>
+        <div class="flex items-center gap-2">
+          <button
+            class="qx-btn qx-btn-outline qx-btn-md"
+            data-testid="disk-scan-retry"
+            onclick={() => scan(scanningRoot || current?.entry.path || home?.root || '', 'reset')}
+          >
+            重试
+          </button>
+          <button class="qx-btn qx-btn-ghost qx-btn-md" onclick={() => void pickExternal()}>
+            选择其它目录…
+          </button>
+        </div>
+      </div>
     {:else if current.entry.children.length === 0 && !scanning}
       <p class="flex h-full items-center justify-center text-sm text-muted">空目录</p>
     {:else if view === 'blocks'}
@@ -947,6 +1008,7 @@
         bind:this={box}
         class="absolute inset-0 outline-none transition-opacity {dimClass}"
         data-testid="disk-treemap"
+        style="will-change: left, top, width, height"
         tabindex="0"
         role="application"
         aria-label="占用方块图：方向键移动焦点，回车进入目录，Esc 返回上一级"
@@ -954,7 +1016,7 @@
       >
         {#each blocks as block (block.entry.path || block.entry.name)}
           <button
-            class="group absolute overflow-hidden rounded-[3px] text-left transition-[filter] {block
+            class="group absolute overflow-hidden rounded-[3px] text-left transition-[left,top,width,height,opacity] duration-200 ease-out {block
               .entry.path
               ? 'hover:z-10 hover:ring-2 hover:ring-accent hover:brightness-105'
               : 'border border-dashed border-line'} {focusKey === blockKeyOf(block.entry)
@@ -1211,6 +1273,18 @@
       data-testid="disk-clean-confirm"
     >
       <h2 class="text-sm font-medium">移入回收站</h2>
+      {#if managedTargets.length > 0}
+        <!-- 警告上移到路径/大小之前：受管目录删除后需重新下载/安装，醒目。 -->
+        <p
+          class="mt-3 rounded-md border border-warning/50 bg-warning/15 p-2.5 text-xs text-warning"
+          data-testid="disk-clean-managed-warning"
+        >
+          <strong class="font-medium">
+            {managedTargets.map((entry) => home?.labels[entry.name] ?? entry.name).join('、')}
+          </strong>
+          是千寻运行所需目录，清理后相关功能不可用，需重新下载/安装才能恢复。
+        </p>
+      {/if}
       {#if cleanTargets.length === 1}
         <p class="mt-3 break-all rounded-md bg-bg p-2 font-mono text-xs text-muted">
           {cleanTargets[0]?.path}
@@ -1233,12 +1307,6 @@
             <li>… 其余 {cleanTargets.length - 8} 项</li>
           {/if}
         </ul>
-      {/if}
-      {#if managedTargets.length > 0}
-        <p class="mt-3 rounded-md border border-warning/40 bg-warning/10 p-2 text-xs text-warning">
-          {managedTargets.map((entry) => home?.labels[entry.name] ?? entry.name).join('、')}
-          是千寻运行所需目录，清理后相关功能不可用，需重新下载/安装才能恢复。
-        </p>
       {/if}
       <div class="mt-5 flex justify-end gap-2">
         <button class="qx-btn qx-btn-outline qx-btn-md" onclick={() => (cleanTargets = [])}>

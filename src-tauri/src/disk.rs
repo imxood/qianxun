@@ -25,6 +25,10 @@ use crate::error::{Error, Result};
 const CHILDREN_LIMIT: usize = 200;
 
 /// fff 流式扫描条目 → 磁盘页数据形状（字段一一对应，递归转换）。
+///
+/// 千寻只渲染一层：每个 entry 的 `children` 永远为空，drill 必新发起一次
+/// `disk_scan_stream`（参 DiskScan.svelte `drill`）。这里即使 fff 未来某
+/// 一天又把 deep 树带回来，也强制平掉——前端契约只认浅层。
 impl From<fff_search::DiskSpaceEntry> for DiskEntry {
     fn from(value: fff_search::DiskSpaceEntry) -> Self {
         DiskEntry {
@@ -32,7 +36,7 @@ impl From<fff_search::DiskSpaceEntry> for DiskEntry {
             path: value.path,
             size: value.size,
             dir: value.is_dir,
-            children: value.children.into_iter().map(Into::into).collect(),
+            children: Vec::new(),
         }
     }
 }
