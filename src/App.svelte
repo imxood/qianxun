@@ -10,7 +10,6 @@
   import EnvPage from './features/env/EnvPage.svelte';
   import DshPage from './features/dsh/DshPage.svelte';
   import SearchPage from './features/search/SearchPage.svelte';
-  import TerminalPage from './features/terminal/TerminalPage.svelte';
   import RemotePage from './features/remote/RemotePage.svelte';
   import NotesPage from './features/notes/NotesPage.svelte';
   import PluginsPage from './features/plugins/PluginsPage.svelte';
@@ -88,7 +87,7 @@
     if (harness.status.phase === 'ready') nav.visit('dsh');
   });
 
-  // 页面容器显隐：visibility（而非 display）保布局——滚动位置、xterm 尺寸、
+  // 页面容器显隐：visibility（而非 display）保布局——滚动位置、
   // iframe 文档全部原样保留；invisible 元素不接收指针事件、不进 Tab 焦点序。
   const show = (page: PageId): string => (nav.page === page ? '' : 'invisible');
 </script>
@@ -106,11 +105,6 @@
       {#if nav.visited.dsh && !nav.detached.dsh}
         <div class="absolute inset-0 overflow-hidden {show('dsh')}">
           <DshPage />
-        </div>
-      {/if}
-      {#if nav.visited.terminal && !nav.detached.terminal}
-        <div class="absolute inset-0 overflow-hidden {show('terminal')}">
-          <TerminalPage />
         </div>
       {/if}
       {#if nav.visited.remote}

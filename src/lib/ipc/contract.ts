@@ -13,8 +13,6 @@ export const IPC_COMMANDS = [
   'app_meta',
   'app_restart',
   'app_toggle_devtools',
-  'clipboard_read_text',
-  'clipboard_write_text',
   'system_theme',
   'settings_get',
   'settings_update',
@@ -51,22 +49,7 @@ export const IPC_COMMANDS = [
   'shots_pin',
   'shots_close_overlays',
   'shots_open_pin',
-  'terminal_spawn',
-  'terminal_write',
-  'terminal_resize',
-  'terminal_kill',
-  'terminal_replay',
-  'terminal_clear',
-  'terminal_sessions',
-  'terminal_transfer',
-  'terminal_pin',
-  'terminal_unpin',
-  'terminal_pin_resume',
-  'terminal_pinned_list',
-  'terminal_pinned_replay',
   'window_spawn_view',
-  'window_reveal_main',
-  'window_force_close',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -97,11 +80,7 @@ export const IPC_EVENTS = [
   'harness://event',
   'harness://install-progress',
   'system://theme',
-  'terminal://output',
-  'terminal://exit',
-  'terminal://transferred',
   'window://closed',
-  'window://close-requested',
 ] as const;
 
 /**
@@ -170,7 +149,6 @@ export interface Settings {
   mirrors: MirrorsSettings;
   search: SearchSettings;
   hotkeys: HotkeysSettings;
-  terminal: TerminalSettings;
   notes: NotesSettings;
   remote: RemoteSettings;
 }
@@ -186,7 +164,6 @@ export interface SettingsPatch {
   mirrors?: Partial<MirrorsSettings>;
   search?: Partial<SearchSettings>;
   hotkeys?: Partial<HotkeysSettings>;
-  terminal?: Partial<TerminalSettings>;
   notes?: Partial<NotesSettings>;
   remote?: Partial<RemoteSettings>;
 }
@@ -444,84 +421,15 @@ export interface FrozenMonitor {
   image: string;
 }
 
-// ---------------------------------------------------------------------------
-// terminal_*（终端域，M4）
-// ---------------------------------------------------------------------------
-
-/** `terminal_spawn` 的返回：会话 id + 实际解析出的 shell（标签默认标题用）。 */
-export interface TerminalInfo {
-  id: number;
-  shell: string;
-}
-
-export interface TerminalOutputEvent {
-  id: number;
-  data: string;
-}
-
-export interface TerminalExitEvent {
-  id: number;
-  exitCode: number | null;
-}
-
-export interface TerminalSettings {
-  /** auto = pwsh 优先、powershell 兜底；否则为可执行文件路径。 */
-  shell: string;
-  fontSize: number;
-  scrollback: number;
-  /** 块（block）/ 竖线（bar）/ 下划线（underline）。 */
-  cursorStyle: 'block' | 'bar' | 'underline';
-  cursorBlink: boolean;
-}
-
-/** terminal_pinned_list 的返回项：一条固定（PIN）终端的元数据。 */
-export interface PinnedTerminal {
-  pinId: number;
-  title: string;
-  shell: string;
-  cwd: string | null;
-}
-
-/** terminal_sessions 的返回项：某窗口名下存活会话的最小快照。 */
-export interface TerminalSessionSnapshot {
-  id: number;
-  /** Rust 侧存的重命名标题；null = 前端用 shell 名兜底。 */
-  title: string | null;
-  shell: string;
-  cwd: string | null;
-  pinId: number | null;
-}
-
-/** terminal_transfer 的入参：把会话转移给目标窗口。 */
-export interface TerminalTransferArgs {
-  id: number;
-  /** 目标窗口 label：'main' 或独立窗口 label。 */
-  target: string;
-  title: string;
-  shell: string;
-  cwd: string | null;
-  pinId: number | null;
-}
-
-/** terminal://transferred 事件负载：目标窗口据此接管标签。 */
-export interface TerminalTransferEvent {
-  id: number;
-  windowLabel: string;
-  title: string;
-  shell: string;
-  cwd: string | null;
-  pinId: number | null;
-}
-
 /** window_spawn_view 的入参：分离某页到独立窗口。 */
 export interface WindowSpawnViewArgs {
-  view: 'terminal' | 'dsh';
+  view: 'dsh';
 }
 
 /** window://closed 事件负载：主窗据此恢复侧栏项。 */
 export interface StandaloneClosedEvent {
   label: string;
-  view: 'terminal' | 'dsh';
+  view: 'dsh';
 }
 
 // ---------------------------------------------------------------------------

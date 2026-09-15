@@ -67,7 +67,6 @@ xcap = "0.9.8"
 tauri-plugin-global-shortcut = "2.3.2"
 base64 = "0.23.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-portable-pty = "0.9.0"
 # 远程网关（R1，架构 §4.5）：DSH 回环唯一暴露面——axum 终结 HTTP/WS，
 # reqwest 流式转发 /api（含 SSE），tokio-tungstenite 桥两条 WS 下行。
 # native-tls：插件市场（market）是第一个走 HTTPS 的调用方；SChannel 走
@@ -103,8 +102,7 @@ windows-sys = { version = "0.60", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }
-# 终端域（M4）：开启 WebView2 浏览器加速键（Ctrl+F 等），复制/粘贴
-# 由 xterm.attachCustomKeyEventHandler 在终端内自行处理（Ctrl+Shift+C/V）。
+# 窗口域：WebView2 COM 偏好（浏览器加速键开关、首选配色跟随 OS 应用模式）。
 webview2-com = "0.38"
 windows-core = "0.61"
 

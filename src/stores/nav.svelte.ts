@@ -1,12 +1,11 @@
-export type PageId =
-  'env' | 'dsh' | 'files' | 'terminal' | 'remote' | 'notes' | 'plugins' | 'settings';
+export type PageId = 'env' | 'dsh' | 'files' | 'remote' | 'notes' | 'plugins' | 'settings';
 
-/** 外壳导航域。功能域随里程碑各自追加（终端/截屏/笔记…）。 */
+/** 外壳导航域。功能域随里程碑各自追加（截屏/笔记…）。 */
 class NavStore {
   page: PageId = $state('env');
   /**
    * keep-alive：已首次挂载的页面。切页只做显隐，组件与状态永不销毁；
-   * 没进过的页面不挂载（终端不空起 PTY，DSH 不空载 iframe）。
+   * 没进过的页面不挂载（DSH 不空载 iframe）。
    */
   visited: Partial<Record<PageId, boolean>> = $state({ env: true });
   /**

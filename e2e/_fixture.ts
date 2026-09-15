@@ -39,7 +39,7 @@ export type QxFixture = {
     /** 等待一个 url 含指定 hash 的 webview page 出现并返回。 */
     waitForPage: (urlPart: string, timeoutMs?: number) => Promise<Page>;
     /** 打开独立窗口（经主窗 IPC），返回其 page。 */
-    spawnStandalone: (view: 'terminal' | 'dsh') => Promise<Page>;
+    spawnStandalone: (view: 'dsh') => Promise<Page>;
     /** 在任意 page 上调 IPC（window.__qx 调试句柄）。 */
     call: <T>(page: Page, command: string, args?: Record<string, unknown>) => Promise<T>;
   };

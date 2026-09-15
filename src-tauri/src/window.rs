@@ -36,10 +36,9 @@ pub fn is_rebuilding() -> bool {
     REBUILDING.load(Ordering::Acquire)
 }
 
-/// 独立窗口支持的两类视图。
+/// 独立窗口支持的视图。
 fn standalone_view_meta(view: &str) -> Option<(&'static str, f64, f64)> {
     match view {
-        "terminal" => Some(("终端 · 千寻", 900.0, 640.0)),
         "dsh" => Some(("DSH · 千寻", 1040.0, 740.0)),
         _ => None,
     }
@@ -368,8 +367,8 @@ fn os_app_mode_is_dark() -> bool {
     !text.contains("0x1")
 }
 
-/// 分离：创建独立窗口承载某页（终端 / DSH）。返回新窗口 label，
-/// 前端随后把会话/状态转移给它。
+/// 分离：创建独立窗口承载 DSH 页。返回新窗口 label，
+/// 前端随后把状态转移给它。
 ///
 /// 必须是 async 命令：sync 命令在主线程上执行，同步 build 新窗口会与
 /// WebView2 的异步初始化互相等消息泵而死锁（官方文档明示的模式）。
@@ -410,26 +409,6 @@ pub async fn window_spawn_view(app: AppHandle, view: String) -> crate::error::Re
     Ok(label)
 }
 
-/// 前置并聚焦主窗（独立窗口「回到主窗口」按钮用）。
-#[tauri::command]
-pub fn window_reveal_main(app: AppHandle) {
-    if let Some(main) = front(&app) {
-        reveal(&main);
-    }
-}
-
-/// 强制关闭调用方窗口（绕过 CloseRequested 拦截）。只对独立窗口放行，
-/// main 的关闭语义（托盘/几何）不容前端绕过。
-#[tauri::command]
-pub fn window_force_close(window: tauri::WebviewWindow) -> crate::error::Result<()> {
-    if !window.label().starts_with(STANDALONE_PREFIX) {
-        return Err(crate::error::Error::Window("只允许关闭独立窗口".to_owned()));
-    }
-    window
-        .destroy()
-        .map_err(|cause| crate::error::Error::Window(format!("关闭窗口失败：{cause}")))
-}
-
 /// OS「应用模式」是否暗色（前端主题 seed；ThemeChanged 事件实时推送）。
 #[tauri::command]
 pub fn system_theme() -> bool {
@@ -456,32 +435,8 @@ pub fn on_theme_changed(app: &AppHandle) {
     }
 }
 
-/// 独立窗口关闭请求：拦截后转交给该窗口的前端做确认
-/// （有活动终端时弹「结束进程？」对话框），确认后走 window_force_close。
-pub fn on_standalone_close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) {
-    api.prevent_close();
-    let _ = app_emit_to(window, "window://close-requested", ());
-}
-
-/// 向指定窗口转发事件的小包装（Window → AppHandle::emit_to）。
-fn app_emit_to(
-    window: &tauri::Window,
-    event: &str,
-    payload: impl Serialize + Clone,
-) -> tauri::Result<()> {
-    window.app_handle().emit_to(window.label(), event, payload)
-}
-
-/// 独立窗口已销毁：终结它名下的终端会话（固定记录按「进程退出」语义
-/// 保留回放），并广播 closed 事件让主窗恢复侧栏项。
+/// 独立窗口已销毁：广播 closed 事件让主窗恢复侧栏项。
 pub fn on_standalone_destroyed(app: &AppHandle, label: &str) {
-    let killed = crate::terminal::commands::kill_window_sessions(app, label);
-    if killed > 0 {
-        logging::log(
-            "info",
-            &format!("独立窗口 {label} 关闭：结束 {killed} 个终端会话"),
-        );
-    }
     if let Some(view) = standalone_view_of_label(label) {
         let _ = app.emit("window://closed", StandaloneClosedEvent { label, view });
     }

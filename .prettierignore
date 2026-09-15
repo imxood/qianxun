@@ -5,6 +5,7 @@ pnpm-lock.yaml
 mobile/android/build
 mobile/android/.gradle
 mobile/android/app/build
+mobile/android/app/.cxx
 mobile/android/capacitor-cordova-android-plugins/build
 mobile/android/local.properties
 mobile/android/app/src/main/assets

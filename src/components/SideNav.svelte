@@ -1,9 +1,7 @@
 <script lang="ts">
   import { call } from '../lib/ipc';
   import { contextMenu } from '../lib/menu.svelte';
-  import { shellTitle } from '../lib/utils/shell';
   import { nav, type PageId } from '../stores/nav.svelte';
-  import type { TerminalSessionSnapshot } from '../lib/ipc/contract';
 
   /** 主导航项：settings 独立沉底（低频项与工具项分组）。 */
   const items: Array<{ id: PageId; label: string; icon: string; detachable: boolean }> = [
@@ -26,12 +24,6 @@
       detachable: false,
     },
     {
-      id: 'terminal',
-      label: '终端',
-      icon: 'M4 5h16v14H4zM7.5 9l3 3-3 3M12.5 15h4',
-      detachable: true,
-    },
-    {
       id: 'remote',
       label: '远程',
       icon: 'M8 2h8a2 2 0 012 2v16a2 2 0 01-2 2H8a2 2 0 01-2-2V4a2 2 0 012-2zM10 18h4',
@@ -52,31 +44,12 @@
   ];
 
   /** 可分离视图类型（与 Rust standalone_view_meta 对应）。 */
-  const DETACHABLE_VIEWS = new Set<string>(['dsh', 'terminal']);
+  const DETACHABLE_VIEWS = new Set<string>(['dsh']);
 
-  /**
-   * 分离到独立窗口：spawn 成功才让位（失败保持原状）。
-   * 终端页分离 = 整页语义：主窗名下的全部存活会话一并转移给新窗口
-   * （进程不重启，xterm 历史由回放缓冲补齐）；DSH 页 iframe 自建。
-   */
+  /** 分离到独立窗口：spawn 成功才让位（失败保持原状）。 */
   async function detachToWindow(item: { id: PageId; label: string }): Promise<void> {
     try {
-      const label = await call<string>('window_spawn_view', { view: item.id });
-      if (item.id === 'terminal') {
-        const sessions = await call<TerminalSessionSnapshot[]>('terminal_sessions', {
-          label: 'main',
-        });
-        for (const session of sessions) {
-          await call('terminal_transfer', {
-            id: session.id,
-            target: label,
-            title: session.title ?? shellTitle(session.shell),
-            shell: session.shell,
-            cwd: session.cwd,
-            pinId: session.pinId,
-          });
-        }
-      }
+      await call<string>('window_spawn_view', { view: item.id });
       nav.detach(item.id);
     } catch (error) {
       console.error(`分离「${item.label}」失败`, error);

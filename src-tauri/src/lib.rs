@@ -23,7 +23,6 @@ mod shots;
 #[cfg(windows)]
 mod single_instance;
 mod sync;
-mod terminal;
 mod tray;
 mod window;
 
@@ -79,26 +78,6 @@ struct AppMeta {
     name: String,
     version: String,
     identifier: String,
-}
-
-/// 读剪贴板（终端复制/粘贴用）。走 Tauri 插件在主进程完成，不经
-/// WebView2 的 navigator.clipboard——后者每次调用都会弹系统级剪贴板
-/// 权限框（选中后右键被弹窗打断，体验极差），这里彻底绕开。
-#[tauri::command]
-fn clipboard_read_text(app: tauri::AppHandle) -> error::Result<String> {
-    use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard()
-        .read_text()
-        .map_err(|cause| error::Error::Window(format!("读取剪贴板失败：{cause}")))
-}
-
-/// 写剪贴板（终端复制用）。
-#[tauri::command]
-fn clipboard_write_text(app: tauri::AppHandle, text: String) -> error::Result<()> {
-    use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard()
-        .write_text(text)
-        .map_err(|cause| error::Error::Window(format!("写入剪贴板失败：{cause}")))
 }
 
 /// 退出并立即重启千寻（数据备份还原后的生效入口：还原出的设置、
@@ -183,7 +162,6 @@ pub fn run() {
                 remote: Arc::new(remote::commands::RemoteState::default()),
             });
             app.manage(shots::commands::ShotsState::default());
-            app.manage(terminal::commands::TerminalState::default());
             app.manage(disk::DiskScanManager::default());
             forward_events(handle, &supervisor);
             // 远程/回环双端网关：setup 即占位监听回环网关端口（默认
@@ -234,13 +212,10 @@ pub fn run() {
             let label = window.label().to_owned();
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // 「关到托盘」只约束主窗；覆盖窗/贴图窗的关闭就是关闭。
+                    // 「关到托盘」只约束主窗；独立窗口/覆盖窗/贴图窗的
+                    // 关闭就是关闭（终端域已移除，独立窗无需关闭确认）。
                     if label == "main" {
                         window::on_close_requested(window, api);
-                    } else if label.starts_with(window::STANDALONE_PREFIX) {
-                        // 独立窗口：转交前端确认（有活动终端时弹窗），
-                        // 确认后走 window_force_close 真正销毁。
-                        window::on_standalone_close_requested(window, api);
                     }
                 }
                 tauri::WindowEvent::Destroyed => {
@@ -261,8 +236,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_meta,
-            clipboard_read_text,
-            clipboard_write_text,
             app_restart,
             backup::commands::backup_export,
             backup::commands::backup_inspect,
@@ -302,21 +275,6 @@ pub fn run() {
             window::app_toggle_devtools,
             window::system_theme,
             window::window_spawn_view,
-            window::window_reveal_main,
-            window::window_force_close,
-            terminal::commands::terminal_spawn,
-            terminal::commands::terminal_write,
-            terminal::commands::terminal_resize,
-            terminal::commands::terminal_kill,
-            terminal::commands::terminal_replay,
-            terminal::commands::terminal_clear,
-            terminal::commands::terminal_sessions,
-            terminal::commands::terminal_transfer,
-            terminal::commands::terminal_pin,
-            terminal::commands::terminal_unpin,
-            terminal::commands::terminal_pin_resume,
-            terminal::commands::terminal_pinned_list,
-            terminal::commands::terminal_pinned_replay,
             notes::commands::notes_list,
             notes::commands::notes_read,
             notes::commands::notes_save,
@@ -348,9 +306,7 @@ pub fn run() {
             // Some(code) 不受影响；app.restart() 的 RESTART_EXIT_CODE
             // 连 prevent 都被框架忽略——两条正经退出路径都安然无恙。
             if let tauri::RunEvent::ExitRequested {
-                code: None,
-                api,
-                ..
+                code: None, api, ..
             } = event
             {
                 if window::is_rebuilding() {

@@ -180,32 +180,6 @@ impl Default for HotkeysSettings {
     }
 }
 
-/// 终端偏好：标签条上的终端设置按钮即时生效并持久化（scrollback 对
-/// 已开标签由 xterm 原生支持收缩/扩张；字号/光标经 setOption 热应用）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct TerminalSettings {
-    /// auto = pwsh 优先、powershell 兜底；否则为可执行文件路径。
-    pub shell: String,
-    pub font_size: u32,
-    pub scrollback: u32,
-    /// 块（block）/ 竖线（bar）/ 下划线（underline）。
-    pub cursor_style: String,
-    pub cursor_blink: bool,
-}
-
-impl Default for TerminalSettings {
-    fn default() -> Self {
-        Self {
-            shell: "auto".to_owned(),
-            font_size: 13,
-            scrollback: 5000,
-            cursor_style: "block".to_owned(),
-            cursor_blink: true,
-        }
-    }
-}
-
 /// 笔记库（M5）：一个目录 = 一个库（ADR-006 纯文件）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -227,7 +201,6 @@ pub struct Settings {
     pub mirrors: MirrorsSettings,
     pub search: SearchSettings,
     pub hotkeys: HotkeysSettings,
-    pub terminal: TerminalSettings,
     pub notes: NotesSettings,
     pub remote: crate::remote::RemoteSettings,
 }
@@ -242,7 +215,6 @@ impl Default for Settings {
             mirrors: MirrorsSettings::default(),
             search: SearchSettings::default(),
             hotkeys: HotkeysSettings::default(),
-            terminal: TerminalSettings::default(),
             notes: NotesSettings::default(),
             remote: crate::remote::RemoteSettings::default(),
         }
@@ -299,23 +271,6 @@ fn validate(settings: &Settings) -> Result<()> {
     if settings.search.root_history.iter().any(String::is_empty) {
         return Err(Error::SettingsInvalid(
             "search.rootHistory 不能有空条目".to_owned(),
-        ));
-    }
-    if !(8..=32).contains(&settings.terminal.font_size) {
-        return Err(Error::SettingsInvalid(format!(
-            "terminal.fontSize 必须在 8–32 之间，当前为 {}",
-            settings.terminal.font_size
-        )));
-    }
-    if !(100..=100_000).contains(&settings.terminal.scrollback) {
-        return Err(Error::SettingsInvalid(format!(
-            "terminal.scrollback 必须在 100–100000 之间，当前为 {}",
-            settings.terminal.scrollback
-        )));
-    }
-    if settings.terminal.shell.trim().is_empty() {
-        return Err(Error::SettingsInvalid(
-            "terminal.shell 不能为空（auto = 自动探测）".to_owned(),
         ));
     }
     if settings.remote.enabled {

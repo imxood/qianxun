@@ -34,7 +34,14 @@ pub fn build(app: &AppHandle) -> Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &show, &rebuild_ui, &snip, &separator, &start, &stop, &separator, &quit,
+            &show,
+            &rebuild_ui,
+            &snip,
+            &separator,
+            &start,
+            &stop,
+            &separator,
+            &quit,
         ],
     )
     .map_err(|error| Error::Tray(error.to_string()))?;

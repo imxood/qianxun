@@ -17,7 +17,7 @@ if (!target) {
 // hash 路由分流：主窗 / 截屏覆盖窗 / 贴图窗 / 独立窗口 共用同一 bundle。
 // 覆盖窗 URL 形如 index.html#/overlay?monitor=0&path=…
 // 贴图窗 URL 形如 index.html#/pin?path=…
-// 独立窗口 URL 形如 index.html#/standalone/terminal（或 /dsh）。
+// 独立窗口 URL 形如 index.html#/standalone/dsh。
 const hash = window.location.hash;
 let app;
 if (hash.startsWith('#/overlay')) {

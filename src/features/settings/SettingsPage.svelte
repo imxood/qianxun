@@ -127,35 +127,6 @@
     }
   }
 
-  // ---- 终端偏好 ----
-  let terminalShell = $state('auto');
-  let terminalFontInput = $state(13);
-  let terminalScrollInput = $state(5000);
-  let terminalError = $state('');
-
-  $effect(() => {
-    if (settings.current) {
-      terminalShell = settings.current.terminal.shell;
-      terminalFontInput = settings.current.terminal.fontSize;
-      terminalScrollInput = settings.current.terminal.scrollback;
-    }
-  });
-
-  async function applyTerminal(): Promise<void> {
-    terminalError = '';
-    try {
-      await settings.update({
-        terminal: {
-          shell: terminalShell,
-          fontSize: Number(terminalFontInput),
-          scrollback: Number(terminalScrollInput),
-        },
-      });
-    } catch (error) {
-      terminalError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
   // ---- 同步（S1 第一阶段：vault 走 git） ----
   let syncStatus = $state<SyncStatus | null>(null);
   let syncBusy = $state(false);
@@ -471,52 +442,6 @@
     <p class="text-xs text-muted">清空并应用 = 停用。</p>
     {#if hotkeyError}
       <p class="text-sm text-danger">{hotkeyError}</p>
-    {/if}
-  </section>
-
-  <section class="qx-card space-y-3 p-4">
-    <h2 class="qx-h">终端</h2>
-    <div class="flex items-center gap-3">
-      <label for="term-shell" class="w-28 shrink-0 text-sm text-muted">Shell</label>
-      <select
-        id="term-shell"
-        class="qx-select flex-1"
-        value={terminalShell}
-        onchange={(event) => (terminalShell = event.currentTarget.value)}
-      >
-        <option value="auto">自动（pwsh 优先）</option>
-        <option value="pwsh.exe">pwsh</option>
-        <option value="powershell.exe">Windows PowerShell</option>
-        <option value="cmd.exe">cmd</option>
-      </select>
-    </div>
-    <div class="flex items-center gap-3">
-      <label for="term-font" class="w-28 shrink-0 text-sm text-muted">字号</label>
-      <input
-        id="term-font"
-        class="qx-input w-24"
-        type="number"
-        min="8"
-        max="32"
-        bind:value={terminalFontInput}
-      />
-      <label for="term-scroll" class="ml-4 w-28 shrink-0 text-sm text-muted">回滚行数</label>
-      <input
-        id="term-scroll"
-        class="qx-input w-28"
-        type="number"
-        min="100"
-        max="100000"
-        step="100"
-        bind:value={terminalScrollInput}
-      />
-      <button class="qx-btn qx-btn-primary qx-btn-md ml-auto" onclick={() => void applyTerminal()}>
-        应用
-      </button>
-    </div>
-    <p class="text-xs text-muted">对新建标签生效。</p>
-    {#if terminalError}
-      <p class="text-sm text-danger">{terminalError}</p>
     {/if}
   </section>
 
