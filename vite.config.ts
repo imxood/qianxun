@@ -18,8 +18,10 @@ export default defineConfig({
     watch: {
       // 两个会崩掉 dev server 的目录：Rust 构建产物（Windows 锁着其中的
       // .dll，chokidar fs.watch 撞 EBUSY 直接退出）与编辑工具原子写的
-      // `.<name>.<pid>.<uuid>.tmpdir` 临时目录（同样会撞锁）。
-      ignored: ['**/src-tauri/target/**', '**/.*.tmpdir/**'],
+      // `.<name>.<pid>.<uuid>.tmpdir` 临时目录（同样会撞锁）。`.tmp` 是
+      // Agent 调试时落临时脚本/日志的目录（.gitignored），不监听避免 HMR
+      // 抖动；ESLint/Prettier 默认不扫它。
+      ignored: ['**/src-tauri/target/**', '**/.*.tmpdir/**', '**/.tmp/**'],
     },
   },
   optimizeDeps: {

@@ -10,3 +10,9 @@ Thumbs.db
 test-results/
 playwright-report/
 
+# Agent 调试临时目录（探针脚本、日志、缓存等）。统一在项目内 .tmp/，
+# 避开 cwd 根散落；Vite watch 也会忽略。git/rust/cargo/ESLint 默认都不
+# 扫描它（未列入 include/exclude 即跳过）。
+.tmp/
+.tmp/**
+
