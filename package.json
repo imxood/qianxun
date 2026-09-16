@@ -5,7 +5,7 @@
   "type": "module",
   "description": "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --config src-tauri/tauri.debug.conf.json",
     "dev:web": "vite",
     "build": "vite build",
     "preview": "vite preview",
