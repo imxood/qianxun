@@ -1,0 +1,48 @@
+/* 千寻移动端 · Android 软键盘适配
+ * ─────────────────────────────────────────────────────────────
+ * 问题：DSH 聊天页的输入框是底部 fixed 定位时，Android 软键盘弹出
+ * 会遮住输入区域。WebView 默认 `windowSoftInputMode=adjustResize` 会
+ * 缩可视区，但 fixed 定位元素仍按原 viewport 计算位置 → 仍被遮。
+ *
+ * 思路：
+ *  1. 给所有可聚焦元素设 `scroll-margin-bottom: 50vh` —— 一旦聚焦触发
+ *     scrollIntoView，目标停在视口**中心**而不是顶部，自然避开键盘；
+ *  2. root 里加一个"收起键盘"按钮浮于软键盘上方，复制到 `mobile-access/`
+ *     后立即生效。
+ *
+ * 用法：把本目录的 custom.css / custom.js 复制到电脑的
+ *       `<DSH_HOME>/mobile-access/`（千寻隔离模式即
+ *       `%APPDATA%/qianxun/dsh-home/mobile-access/`）。
+ */
+
+/* ── 输入框 / 可编辑区域：聚焦时让滚动目标到视口中央，避开底部键盘 ── */
+input,
+textarea,
+select,
+[contenteditable='true'] {
+  scroll-margin-bottom: 50vh;
+}
+
+/* 根容器内的"收起键盘"按钮：浮于软键盘上方，位置用 visualViewport 动态算 */
+#qx-kb-dismiss {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2147483600; /* 浮于一切，但低于系统弹窗 */
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgb(var(--qx-accent-rgb, 99 102 241) / 92%);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(8px);
+  /* 默认隐藏：仅在检测到软键盘（visualViewport 缩小）时显示 */
+  display: none;
+  transition: opacity 0.15s ease-out;
+}
+#qx-kb-dismiss[data-visible='true'] {
+  display: block;
+}
