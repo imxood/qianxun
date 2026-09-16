@@ -1080,7 +1080,7 @@
         style="will-change: left, top, width, height"
         tabindex="0"
         role="application"
-        aria-label="占用方块图：方向键移动焦点，回车进入目录，Esc 返回上一级"
+        aria-label="占用方块图：方向键移动焦点，回车进入目录（双击方块同样进入），Esc 返回上一级"
         onkeydown={onTreemapKeydown}
       >
         {#each blocks as block (block.entry.path || block.entry.name)}
@@ -1096,7 +1096,7 @@
             data-key={blockKeyOf(block.entry)}
             style={blockStyle(block)}
             aria-label="{label(block.entry)}，占用 {formatBytes(block.entry.size)}"
-            onclick={() => drill(block.entry)}
+            ondblclick={() => drill(block.entry)}
             oncontextmenu={(event) => menuFor(event, block.entry)}
             onmouseenter={(event) => showTip(block, event)}
             onmousemove={(event) => moveTip(event)}
