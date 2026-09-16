@@ -24,11 +24,13 @@ use crate::error::{Error, Result};
 /// 子项列表上限：超出部分聚合成「其余」占位，防止巨目录撑爆 IPC。
 const CHILDREN_LIMIT: usize = 200;
 
-/// fff 流式扫描条目 → 磁盘页数据形状（字段一一对应，递归转换）。
+/// fff 流式扫描条目 → 磁盘页数据形状。
 ///
-/// 千寻只渲染一层：每个 entry 的 `children` 永远为空，drill 必新发起一次
-/// `disk_scan_stream`（参 DiskScan.svelte `drill`）。这里即使 fff 未来某
-/// 一天又把 deep 树带回来，也强制平掉——前端契约只认浅层。
+/// fff 的 `tree_root` 已是浅层树（根带直接子项、子项的 children 恒空）。
+/// 这里根层**必须保留 children**——清空会让前端 Done 后只剩一个
+/// 「空目录」占位（2026-09 排障实录）；子项侧经 [`shallow_child`]
+/// 强制平掉孙辈及以下：千寻只渲染一层，drill 必新发起一次
+/// `disk_scan_stream`（参 DiskScan.svelte `drill`）。
 impl From<fff_search::DiskSpaceEntry> for DiskEntry {
     fn from(value: fff_search::DiskSpaceEntry) -> Self {
         DiskEntry {
@@ -36,8 +38,19 @@ impl From<fff_search::DiskSpaceEntry> for DiskEntry {
             path: value.path,
             size: value.size,
             dir: value.is_dir,
-            children: Vec::new(),
+            children: value.children.into_iter().map(shallow_child).collect(),
         }
+    }
+}
+
+/// 子项强制浅层：丢弃孙辈及以下，前端契约只认一层。
+fn shallow_child(value: fff_search::DiskSpaceEntry) -> DiskEntry {
+    DiskEntry {
+        name: value.name,
+        path: value.path,
+        size: value.size,
+        dir: value.is_dir,
+        children: Vec::new(),
     }
 }
 
@@ -126,8 +139,18 @@ pub async fn disk_clean(app: AppHandle, path: String) -> Result<()> {
 // ---- 流式扫描：fff 并行遍历 + 固定频率事件 ----
 
 /// 流式扫描事件：进度按 ~100ms 节流推送，结束时给完整树快照。
+///
+/// `rename_all_fields` 必须带上：enum 级 `rename_all` 只转换 variant 名，
+/// 字段名不转换的话前端 contract（topChildren/largestFiles）将收到
+/// snake_case 的 undefined——progress 帧会让 liveGrow 抛 TypeError 并
+/// 中断 Channel 消息泵，Done 从此无法派发，UI 永久卡「0 项 · 扫描中」
+/// （2026-09 排障实录，经 CDP 抓原始帧定位）。
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum DiskScanEvent {
     /// 周期进度：实时计数 + 扫描根直接子项的部分占用（前端「边扫边长」）。
     Progress {

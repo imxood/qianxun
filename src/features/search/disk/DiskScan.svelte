@@ -53,12 +53,17 @@
     DiskPartialChild,
     DiskScanEvent,
     DiskScanProgress,
+    DriveInfo,
   } from '../../../lib/ipc/contract';
   import { formatBytes } from '../format';
   import { squarify, type Rect } from './treemap';
 
   // ---- 状态 --------------------------------------------------------------
   let home = $state<DiskHome | null>(null);
+  /** 本机逻辑盘（toolbar 下拉直接选盘扫描；枚举失败留空不阻断）。 */
+  let drives = $state<DriveInfo[]>([]);
+  /** 下拉占位值：change 后归位，避免选中项与实际扫描目标脱节。 */
+  let pickedDrive = $state('');
   /** 面包屑扫描链：trail 末项即 current。每项都是一次流式扫描的完整树根。 */
   let trail = $state<DiskTrailItem[]>([]);
   /** 流式扫描进行中（progress 帧到达中，Done 未到）。 */
@@ -206,6 +211,10 @@
     const stamp = Date.now();
     if (stamp - lastLive < 100) return; // 与后端 tick 节奏对齐：10fps 配 200ms 过渡
     lastLive = stamp;
+    // 契约防御：topChildren 缺失（后端字段漂移）时只放弃本帧的子项合并，
+    // 绝不抛错——onmessage 里的异常会中断 Channel 消息泵，Done 帧从此
+    // 无法派发，UI 将永久卡在「扫描中」（2026-09 排障实录）。
+    if (!Array.isArray(frame.topChildren)) return;
     // 复用旧 entry 对象：原位改 size 不会触发深 proxy 失效，但
     // 替换整组 trail 末项会——这条路径是确定触发 $derived 重算的关键。
     const existing: Record<string, DiskEntry> = {};
@@ -319,6 +328,9 @@
    * 直接以 entry.path 为根发起新流式扫描，旧扫描被后端静默作废。 */
   function drill(entry: DiskEntry): void {
     if (!entry.dir || !entry.path) return;
+    // 双击会连发两次 click：第二击的目标与在途扫描相同，直接吞掉，
+    // 否则会把刚 push 的层 pop/push 互相踩踏（probe 实测退回根层）。
+    if (scanning && normPath(scanningRoot) === normPath(entry.path)) return;
     seq++; // 任何下钻都让在途帧过期，避免旧 target 的进度污染新层。
     focusKey = '';
     tip = null;
@@ -358,6 +370,10 @@
         actionError = error instanceof Error ? error.message : String(error);
       }
     })();
+    // 盘符枚举独立于 home：失败不阻断页面（下拉直接隐藏即可）。
+    void call<DriveInfo[]>('search_list_drives')
+      .then((list) => (drives = list))
+      .catch(() => {});
     return () => clearInterval(heartbeat);
   });
 
@@ -366,6 +382,14 @@
     session.home = home;
     session.trail = trail.length > 0 ? trail : null;
   });
+
+  /** 下拉选中盘/数据目录即扫；随后归位占位项（选中态不驻留，目标以面包屑为准）。 */
+  function pickFromDropdown(event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (!value) return;
+    scan(value, 'reset');
+    pickedDrive = '';
+  }
 
   async function pickExternal(): Promise<void> {
     const picked = await open({ directory: true, multiple: false });
@@ -856,6 +880,26 @@
     >
       重新扫描
     </button>
+    {#if drives.length > 0}
+      <select
+        class="h-7 max-w-44 shrink-0 truncate rounded-md border border-line bg-surface px-1.5 text-xs text-fg outline-none transition-colors hover:border-accent focus:border-accent"
+        bind:value={pickedDrive}
+        onchange={pickFromDropdown}
+        aria-label="选择要扫描的磁盘"
+        data-testid="disk-drive-select"
+      >
+        <option value="" disabled>扫描磁盘…</option>
+        {#if home}
+          <option value={home.root}>数据目录（{pathTail(home.root)}）</option>
+        {/if}
+        {#each drives as drive (drive.path)}
+          <option value={drive.path} title={drive.kind}>
+            {drive.path}
+            {formatBytes(drive.totalBytes)} · 剩 {formatBytes(drive.freeBytes)}
+          </option>
+        {/each}
+      </select>
+    {/if}
     <button
       class="qx-btn qx-btn-primary qx-btn-sm h-7"
       disabled={cleaning}

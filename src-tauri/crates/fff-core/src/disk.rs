@@ -90,6 +90,8 @@ pub struct PartialChild {
     pub path: String,
     /// 遍历中 = 已落进该子树的文件字节和；遍历结束后为精确值。
     pub size: u64,
+    /// 序列化名对齐前端 contract（DiskPartialChild.dir）。
+    #[serde(rename = "dir")]
     pub is_dir: bool,
 }
 
