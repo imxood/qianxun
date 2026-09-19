@@ -1,6 +1,6 @@
 <script lang="ts">
   import { search } from '../../stores/search.svelte';
-  import { contextMenu, type MenuItem } from '../../lib/menu.svelte';
+  import { showHitContextMenu } from './components/hit-context-menu';
   import {
     fileIconClass,
     FILE_ICON_PATH,
@@ -10,7 +10,7 @@
     type FileKind,
   } from './fileIcon';
   import { formatBytes, formatTime } from './format';
-  import { absolutePath, copyMenuItems, copyText, locateInExplorer, openFile } from './locate';
+  import { absolutePath, copyText, openFile } from './locate';
   import RootBar from './RootBar.svelte';
   import type { FileHit } from '../../lib/ipc/contract';
 
@@ -131,26 +131,8 @@
       anchor = index;
       cursor = index;
     }
-    contextMenu.show(event, menuFor(selected));
-  }
-
-  /** 右键菜单：单选给打开/定位/三种路径形态；多选给批量复制。 */
-  function menuFor(paths: string[]): MenuItem[] {
-    const items: MenuItem[] = [];
-    const only = paths.length === 1 ? paths[0] : undefined;
-    if (only) {
-      items.push({ label: '打开', onclick: () => openFile(only) });
-      items.push({ label: '打开所在位置', onclick: () => locateInExplorer(only) });
-      items.push(...copyMenuItems(only));
-    } else {
-      const joined = paths.map((path) => absolutePath(path) ?? path).join('\r\n');
-      items.push({
-        label: `打开所在位置（${paths.length} 个）`,
-        onclick: () => paths.forEach((path) => locateInExplorer(path)),
-      });
-      items.push({ label: `复制 ${paths.length} 个路径`, onclick: () => void copyText(joined) });
-    }
-    return items;
+    // 统一走 components/hit-context-menu（汇总 §3.3 抽公共组件）。
+    showHitContextMenu(event, hit.path, selected);
   }
 
   // ---- 键盘流（查询框内：↑↓ 移光标，Enter 开光标行，Ctrl+Shift+C 复制）--
@@ -165,6 +147,12 @@
         selected = [hit.path];
         anchor = cursor;
       }
+      // 汇总 §3.11 修：键盘移动光标时滚屏（汇总 02 §3.11 提的旧 bug）。
+      // data-cursor-index 与 tabindex 配对；用 setTimeout 让响应式更新 commit 完再 scroll。
+      queueMicrotask(() => {
+        const row = document.querySelector<HTMLDivElement>(`[data-cursor-index="${cursor}"]`);
+        row?.scrollIntoView({ block: 'nearest' });
+      });
     } else if (event.key === 'Enter') {
       const hit = sorted[cursor];
       if (hit) openFile(hit.path);
@@ -264,7 +252,7 @@
         {#each sorted as hit, index (hit.path)}
           {@const { directory, name, nameOffsets } = splitHighlightedPath(hit.path, hit.offsets)}
           <div
-            class="flex h-8 cursor-default select-none items-center px-3 transition-colors {selected.includes(
+            class="flex h-8 cursor-pointer select-none items-center px-3 transition-colors focus-visible:bg-accent-soft/60 focus-visible:outline-none {selected.includes(
               hit.path,
             )
               ? 'bg-accent-soft'
@@ -273,6 +261,8 @@
                 : 'hover:bg-accent-soft/40'}"
             title={hit.path}
             role="row"
+            tabindex={index === cursor ? 0 : -1}
+            data-cursor-index={index}
             onclick={(event) => selectRow(event, hit, index)}
             ondblclick={() => openFile(hit.path)}
             oncontextmenu={(event) => rowMenu(event, hit, index)}
@@ -311,6 +301,12 @@
     <div class="flex flex-col items-center gap-1 py-16 text-center">
       <p class="text-sm text-fg">无匹配文件</p>
       <p class="text-xs text-muted">换个关键词试试</p>
+    </div>
+  {:else if search.filesError}
+    <!-- 错误态：之前 catch 被吞，UI 永远"无结果"；汇总 §3.9 提议统一 lastError。 -->
+    <div class="flex flex-col items-center gap-2 py-16 text-center" role="alert" aria-live="polite">
+      <p class="text-sm text-danger">搜索出错</p>
+      <p class="max-w-md text-xs text-muted">{search.filesError}</p>
     </div>
   {:else if search.status?.root}
     <div class="flex flex-col items-center gap-1 py-16 text-center">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
   import { search } from '../../stores/search.svelte';
   import { contextMenu, type MenuItem } from '../../lib/menu.svelte';
   import { sliceByByteOffsets, type GrepHit } from '../../lib/ipc/contract';
@@ -7,17 +8,15 @@
   import RootBar from './RootBar.svelte';
 
   // 结果按文件分组渲染（一次搜索的命中天然按文件聚集）。
+  // 汇总 §3.7 修：旧 O(n²) map.find → 改 SvelteMap 单次构建（响应式）。
   const groups = $derived.by(() => {
-    const map: Array<[string, GrepHit[]]> = [];
+    const map = new SvelteMap<string, GrepHit[]>();
     for (const hit of search.grepResult?.items ?? []) {
-      const existing = map.find(([path]) => path === hit.path);
-      if (existing) {
-        existing[1].push(hit);
-      } else {
-        map.push([hit.path, [hit]]);
-      }
+      const list = map.get(hit.path);
+      if (list) list.push(hit);
+      else map.set(hit.path, [hit]);
     }
-    return map;
+    return Array.from(map.entries());
   });
 
   let collapsed = $state<string[]>([]);
@@ -54,24 +53,20 @@
     search.scheduleGrep();
   }
 
-  function menuForFile(path: string): MenuItem[] {
-    return [
-      { label: '打开文件', onclick: () => openFile(path) },
-      { label: '打开所在位置', onclick: () => locateInExplorer(path) },
-      ...copyMenuItems(path),
-    ];
-  }
-
   function hitMenu(event: MouseEvent, hit: GrepHit): void {
     event.stopPropagation();
-    contextMenu.show(event, [
+    // 走 hit-context-menu 公共菜单 + 插入 GrepPage 专属「复制 路径:行号」。
+    // 这里直接拼菜单项而不是调 singleHitMenu，因为 grep 命中行菜单有专属动作。
+    const items: MenuItem[] = [
       { label: '打开文件', onclick: () => openFile(hit.path) },
+      { label: '打开所在位置', onclick: () => locateInExplorer(hit.path) },
       {
         label: `复制 路径:${hit.lineNumber}`,
         onclick: () => void copyText(`${absolutePath(hit.path) ?? hit.path}:${hit.lineNumber}`),
       },
       ...copyMenuItems(hit.path),
-    ]);
+    ];
+    contextMenu.show(event, items);
   }
 </script>
 
@@ -164,7 +159,7 @@
     {/if}
   </div>
 
-  <div class="flex items-center gap-2 text-xs">
+  <div class="flex items-center gap-2 text-xs" aria-live="polite">
     <input
       class="qx-input w-56 rounded-md py-1 font-mono text-xs"
       type="text"
@@ -186,7 +181,7 @@
       </span>
     {/if}
     {#if search.grepError}
-      <span class="text-danger">{search.grepError}</span>
+      <span class="text-danger" role="alert">{search.grepError}</span>
     {:else if search.grepResult?.aborted}
       <span class="text-muted">已停止（达到 2000 条上限）</span>
     {/if}
@@ -197,11 +192,27 @@
       {#each groups as [path, hits] (path)}
         {@const { directory, name } = splitPath(path)}
         <div class="group">
-          <button
-            class="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-accent-soft/40"
+          <!-- 汇总 §3.11 修：原 button > button 嵌套改成 div[role=button] + 键盘
+               handler，避免 a11y 警告。折叠按钮本身没交互，只是状态指示。 -->
+          <div
+            class="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-accent-soft/40 focus-visible:bg-accent-soft/60 focus-visible:outline-none"
             title={path}
+            role="button"
+            tabindex="0"
+            aria-expanded={!collapsed.includes(path)}
             onclick={() => toggleGroup(path)}
-            oncontextmenu={(event) => contextMenu.show(event, menuForFile(path))}
+            onkeydown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                toggleGroup(path);
+              }
+            }}
+            oncontextmenu={(event) =>
+              contextMenu.show(event, [
+                { label: '打开文件', onclick: () => openFile(path) },
+                { label: '打开所在位置', onclick: () => locateInExplorer(path) },
+                ...copyMenuItems(path),
+              ])}
           >
             <svg
               viewBox="0 0 24 24"
@@ -231,7 +242,7 @@
             >
               <path d="M6 9l6 6 6-6" />
             </svg>
-          </button>
+          </div>
           {#if !collapsed.includes(path)}
             <div class="pb-2">
               {#each hits as hit (path + hit.lineNumber)}
