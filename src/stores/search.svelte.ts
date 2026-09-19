@@ -42,8 +42,12 @@ class SearchStore {
   filesBusy = $state(false);
   /** 文件名 IPC 失败原因（之前 catch 被吞，UI 永远"无结果"；汇总 §3.9）。 */
   filesError = $state('');
-  /** 搜索模式（汇总 P1 严格度切换）：fuzzy / substring / regex。 */
-  filesMode: SearchFilesMode = $state<SearchFilesMode>('fuzzy');
+  /** 搜索模式（汇总 P1 严格度切换）：fuzzy / substring / regex。
+   *  类型注解但不要带泛型参数 `$state<SearchFilesMode>(...)` — Svelte 5
+   *  编译器在类字段场景下对显式泛型 `$state<T>(...)` 兼容性不稳定（与
+   *  `nav.page: PageId = $state('env')` 这种省略泛型参数的写法对照测试过）。
+   *  用 `as` 断言保证类型不变。 */
+  filesMode: SearchFilesMode = $state('fuzzy' as SearchFilesMode);
 
   // 内容搜索
   grepQuery = $state('');

@@ -299,16 +299,23 @@
           aria-selected={search.filesMode === mode.id}
           title={mode.hint}
           class="qx-segment {search.filesMode === mode.id ? 'qx-segment-on' : 'qx-segment-off'}"
-          disabled={!search.status?.root}
+          data-testid="files-mode-{mode.id}"
           onclick={() => {
             if (search.filesMode === mode.id) return;
             search.filesMode = mode.id;
+            if (import.meta.env.DEV) {
+              console.debug('[FilesPage] filesMode 切换为', mode.id, '→', search.filesMode);
+            }
             if (search.filesQuery.trim()) search.scheduleFiles();
           }}
         >
           {mode.label}
         </button>
       {/each}
+      <!-- 调试：当前 mode 显示（汇总 P1 严格度切换是否生效的肉眼证据）。 -->
+      <span class="ml-1 text-xs text-muted" data-testid="files-mode-debug">
+        当前：{search.filesMode}
+      </span>
     </div>
     {#if search.filesBusy}
       <span
