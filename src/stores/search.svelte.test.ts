@@ -78,6 +78,7 @@ let savedStore: {
   filesResult: unknown;
   filesBusy: boolean;
   filesError: string;
+  filesMode: 'fuzzy' | 'substring' | 'regex';
   grepQuery: string;
   grepOptions: unknown;
   grepWholeWord: boolean;
@@ -101,6 +102,7 @@ function resetStore(): void {
     filesResult: null,
     filesBusy: false,
     filesError: '',
+    filesMode: 'fuzzy' as const,
     grepQuery: '',
     grepOptions: {
       regex: false,
@@ -114,6 +116,8 @@ function resetStore(): void {
     grepBusy: false,
     grepError: '',
   };
+  // grepSeq 是 private，需要单独重置
+  (search as unknown as { grepSeq: number }).grepSeq = 0;
   Object.assign(search, savedStore);
 }
 
@@ -498,5 +502,72 @@ describe('SearchStore.dispose', () => {
     };
     // 没 start 过 poller，stop 不应报错
     expect(() => search.dispose()).not.toThrow();
+  });
+});
+
+describe('SearchStore.严格度切换（汇总 P1）/ 续页（汇总 P3）', () => {
+  beforeEach(() => {
+    resetStore();
+    search.status = {
+      root: 'C:\\test',
+      generation: 1,
+      scanning: false,
+      watcherReady: true,
+      files: 0,
+    };
+  });
+  afterEach(() => resetStore());
+
+  it('runFiles：filesMode 透传到 IPC', async () => {
+    respond('search_files', (args) => {
+      expect(args.mode).toBe('regex');
+      return { items: [], totalMatched: 0, totalFiles: 0 };
+    });
+    search.filesMode = 'regex';
+    search.filesQuery = 'foo';
+    await search.runFiles();
+    expect(ipcCalls.find((c) => c.command === 'search_files')?.args.mode).toBe('regex');
+  });
+
+  it('runFiles：默认 mode=fuzzy 不传', async () => {
+    let seenArgs: Record<string, unknown> | undefined;
+    respond('search_files', (args) => {
+      seenArgs = args;
+      return { items: [], totalMatched: 0, totalFiles: 0 };
+    });
+    search.filesQuery = 'foo';
+    await search.runFiles();
+    expect(seenArgs?.mode).toBe('fuzzy');
+  });
+
+  it('searchMoreFiles：传 offset = alreadyLoaded，返回 items 不写回 filesResult', async () => {
+    let captured: Record<string, unknown> | undefined;
+    respond('search_files', (args) => {
+      captured = args;
+      return {
+        items: [{ path: 'b.rs', score: 50, offsets: [], size: 0, mtime: 0 }],
+        totalMatched: 100,
+        totalFiles: 50,
+      };
+    });
+    const result = await search.searchMoreFiles('foo', 100, 200);
+    expect(captured?.offset).toBe(200);
+    expect(captured?.limit).toBe(200);
+    expect(result).toHaveLength(1);
+    // store.filesResult 不被覆盖（仍是 null）
+    expect(search.filesResult).toBeNull();
+  });
+
+  it('searchMoreFiles：generation 失配 → 返空数组', async () => {
+    respond('search_files', () => ({
+      items: [{ path: 'b.rs', score: 50, offsets: [], size: 0, mtime: 0 }],
+      totalMatched: 100,
+      totalFiles: 50,
+    }));
+    const promise = search.searchMoreFiles('foo', 100, 200);
+    // 期间换根
+    search.status = { ...search.status!, generation: 2 };
+    const result = await promise;
+    expect(result).toEqual([]);
   });
 });

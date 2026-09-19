@@ -2,10 +2,12 @@ import { Channel } from '@tauri-apps/api/core';
 import { call } from '../lib/ipc';
 import type {
   DriveInfo,
+  FileHit,
   FilesPage,
   GrepOptions,
   GrepPage,
   GrepProgress,
+  SearchFilesMode,
   SearchOpen,
   SearchStatus,
 } from '../lib/ipc/contract';
@@ -40,6 +42,8 @@ class SearchStore {
   filesBusy = $state(false);
   /** 文件名 IPC 失败原因（之前 catch 被吞，UI 永远"无结果"；汇总 §3.9）。 */
   filesError = $state('');
+  /** 搜索模式（汇总 P1 严格度切换）：fuzzy / substring / regex。 */
+  filesMode: SearchFilesMode = $state<SearchFilesMode>('fuzzy');
 
   // 内容搜索
   grepQuery = $state('');
@@ -118,11 +122,13 @@ class SearchStore {
     // 快照当前 root generation：与 grepSeq 二选一对照，覆盖前端的代际语义
     // （汇总 §3.6 / PR3.5：根目录切换后旧结果视为过期，区别于 grepSeq 专管 grep）。
     const generationAtStart = this.status?.generation ?? null;
+    const mode = this.filesMode;
     try {
       const page = await call<FilesPage>('search_files', {
         query,
         limit: 200,
         offset: 0,
+        mode,
       });
       // 期间换根 → 静默丢弃结果（汇总 §3.6 第四种未覆盖场景）。
       if (this.status?.generation !== generationAtStart) return;
@@ -134,6 +140,34 @@ class SearchStore {
       this.filesResult = null;
     } finally {
       this.filesBusy = false;
+    }
+  }
+
+  /**
+   * 续页（汇总 P3）：基于已加载 items 总数 +1 取下一页。
+   * 由 FilesPage.loadMore 调用；返回 items 不写回 filesResult（由
+   * FilesPage 自己 accumulate），避免 store 多源真相。
+   */
+  async searchMoreFiles(
+    query: string,
+    _totalMatched: number,
+    _alreadyLoaded: number,
+  ): Promise<FileHit[]> {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+    const generationAtStart = this.status?.generation ?? null;
+    const offset = _alreadyLoaded;
+    try {
+      const page = await call<FilesPage>('search_files', {
+        query: trimmed,
+        limit: 200,
+        offset,
+        mode: this.filesMode,
+      });
+      if (this.status?.generation !== generationAtStart) return [];
+      return page.items;
+    } catch {
+      return [];
     }
   }
 

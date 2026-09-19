@@ -353,6 +353,14 @@ export interface FilesPage {
   totalFiles: number;
 }
 
+/**
+ * 文件名搜索严格度（汇总 §03 「plain/regex 文件名模式降级为打磨项」反转）：
+ * - `fuzzy`：默认，neo_frizbee 字符序列打分（容错最强，可能误中）
+ * - `substring`：纯包含（大小写不敏感），适合已知子串
+ * - `regex`：把整个 query 当 regex 解析，零宽 / 语法错时返回空 results
+ */
+export type SearchFilesMode = 'fuzzy' | 'substring' | 'regex';
+
 export interface GrepHit {
   path: string;
   lineNumber: number;

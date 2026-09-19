@@ -12,7 +12,21 @@
   import { formatBytes, formatTime } from './format';
   import { absolutePath, copyText, openFile } from './locate';
   import RootBar from './RootBar.svelte';
-  import type { FileHit } from '../../lib/ipc/contract';
+  import type { FileHit, SearchFilesMode } from '../../lib/ipc/contract';
+
+  // ---- 严格度切换（汇总 P1）---------------------------------------------
+  const MODES: Array<{ id: SearchFilesMode; label: string; hint: string }> = [
+    { id: 'fuzzy', label: 'Fuzzy', hint: '模糊匹配：字符序列 + bigram 打分（默认）' },
+    { id: 'substring', label: '包含', hint: '纯子串匹配（大小写不敏感）' },
+    { id: 'regex', label: '正则', hint: '把整段输入当作正则表达式（大小写不敏感）' },
+  ];
+
+  /**
+   * 续页页大小（汇总 P3）；和后端 `clamp(1, 500)` 上限对齐。store.searchMoreFiles
+   * 已硬编码 200；此处保留常量作为 UI 文案/逻辑可调的参考点。
+   */
+  const PAGE_SIZE = 200;
+  void PAGE_SIZE;
 
   // ---- 排序 / 类型过滤 ------------------------------------------------
   type SortKey = 'score' | 'name' | 'mtime' | 'size';
@@ -27,6 +41,11 @@
   let sortKey = $state<SortKey>('score');
   let sortAsc = $state(false);
   let kindFilter = $state<FileKind | 'all'>('all');
+  /** 续页累积（汇总 P3）：默认 sort=score 时可逐页追加；切 sort/filter 自动清空。 */
+  let accumulated = $state<FileHit[]>([]);
+  let accumulating = $state(false);
+  /** 当前已加载到第几页（0=未加载，1=已加载 1 页即 ≤200 条）；totalMatched 决定能加载多少页。 */
+  let loadedPages = $state(0);
 
   function setSort(key: SortKey): void {
     if (sortKey === key) {
@@ -36,6 +55,29 @@
     sortKey = key;
     // 名称升序最自然；分数/大小/时间「大/新在前」。
     sortAsc = key === 'name';
+    // 切排序时续页累积不再稳定（需要全量重排），自动重置。
+    accumulated = [];
+    loadedPages = 0;
+  }
+
+  /** 续页：取下一页 append 到末尾。仅当 sort=score 时启用（见 canLoadMore）。 */
+  async function loadMore(): Promise<void> {
+    if (!canLoadMore || accumulating) return;
+    const result = search.filesResult;
+    if (!result) return;
+    accumulating = true;
+    try {
+      const nextPage = await search.searchMoreFiles(
+        search.filesQuery,
+        result.totalMatched,
+        accumulated.length,
+      );
+      // 后端按 score 排序追加到末尾是稳定的；新条目的 score 必须 ≤ 旧条目。
+      accumulated = [...accumulated, ...nextPage];
+      loadedPages += 1;
+    } finally {
+      accumulating = false;
+    }
   }
 
   const ARROW = { asc: '↑', desc: '↓' } as const;
@@ -49,8 +91,49 @@
     return counts;
   });
 
+  /** fuzzy 模式弱匹配阈值：归一化到当前列表最高分的 < 50% 即视为弱（汇总 P2）。
+   *  substring/regex 模式 score=1000 是人为给定的"匹配"标记，应永远视为强匹配。 */
+  function isWeakMatch(hit: FileHit): boolean {
+    if (search.filesMode !== 'fuzzy') return false;
+    const items = search.filesResult?.items ?? [];
+    if (items.length === 0) return false;
+    const maxScore = items.reduce((m, h) => (h.score > m ? h.score : m), -Infinity);
+    if (maxScore <= 0) return false;
+    return hit.score < maxScore * 0.5;
+  }
+
+  /** 续页判定：仅当 sort=score 时续页才有意义（其他排序需全量重排）。 */
+  const canLoadMore = $derived(
+    sortKey === 'score' && accumulated.length < (search.filesResult?.totalMatched ?? 0),
+  );
+
+  /**
+   * 同步 store → accumulated：当 query / mode 改变后 store 返回新第一页
+   * 时，覆写 accumulated（不计累计）；切到 score 排序时由 setSort 主动清，
+   * 此 effect 在 score 排序下承担"接住新一页"的作用。
+   */
+  $effect(() => {
+    const result = search.filesResult;
+    if (!result) {
+      accumulated = [];
+      loadedPages = 0;
+      return;
+    }
+    // 当 accumulated 还没积累（仅第一页）时，跟着 store 同步；
+    // 用户按了"加载更多"后，accumulated 会比 store.items 长，
+    // 此时 store 是首页的"快照"，不覆盖我们的累积。
+    if (accumulated.length === 0 || (loadedPages === 1 && result.items.length > 0)) {
+      accumulated = [...result.items];
+      loadedPages = result.items.length > 0 ? 1 : 0;
+    }
+  });
+
   const filtered = $derived.by(() => {
-    const all = search.filesResult?.items ?? [];
+    // 数据源：accumulated（汇总 P3 续页累积）优先级高于 store 单页。
+    // - query 改变 → runFiles 完成后 FilesPage 同步重置 accumulated
+    // - sort 改变 → setSort 已重置 accumulated
+    // - 续页 → loadMore 追加到末尾
+    const all = accumulated.length > 0 ? accumulated : (search.filesResult?.items ?? []);
     return kindFilter === 'all' ? all : all.filter((hit) => fileKind(hit.path) === kindFilter);
   });
 
@@ -203,13 +286,45 @@
         }}
       />
     </div>
+    <!-- 严格度切换（汇总 P1）：fuzzy 容错 / substring 精确包含 / regex 模式匹配。
+         切换立即重查；空 query 时禁用避免误发请求。 -->
+    <div
+      class="flex shrink-0 items-center gap-0.5 rounded-lg border border-line bg-surface p-1"
+      role="tablist"
+      aria-label="文件名搜索严格度"
+    >
+      {#each MODES as mode (mode.id)}
+        <button
+          role="tab"
+          aria-selected={search.filesMode === mode.id}
+          title={mode.hint}
+          class="qx-segment {search.filesMode === mode.id ? 'qx-segment-on' : 'qx-segment-off'}"
+          disabled={!search.status?.root}
+          onclick={() => {
+            if (search.filesMode === mode.id) return;
+            search.filesMode = mode.id;
+            if (search.filesQuery.trim()) search.scheduleFiles();
+          }}
+        >
+          {mode.label}
+        </button>
+      {/each}
+    </div>
     {#if search.filesBusy}
       <span
         class="inline-block size-4 shrink-0 animate-spin rounded-full border-2 border-line border-t-accent"
         aria-hidden="true"
       ></span>
     {:else if search.filesResult}
-      <span class="shrink-0 text-xs text-muted">{filtered.length} 个结果</span>
+      <span class="shrink-0 text-xs text-muted" aria-live="polite">
+        {#if search.filesResult.totalMatched > search.filesResult.items.length}
+          前 {search.filesResult.items.length} 条 · 共 {search.filesResult.totalMatched} 条
+        {:else if search.filesResult.totalMatched > 0}
+          {search.filesResult.totalMatched} 个结果
+        {:else if search.filesQuery.trim()}
+          （无匹配）
+        {/if}
+      </span>
     {/if}
   </div>
 
@@ -251,6 +366,7 @@
       <div class="divide-y divide-line/40">
         {#each sorted as hit, index (hit.path)}
           {@const { directory, name, nameOffsets } = splitHighlightedPath(hit.path, hit.offsets)}
+          {@const weak = isWeakMatch(hit)}
           <div
             class="flex h-8 cursor-pointer select-none items-center px-3 transition-colors focus-visible:bg-accent-soft/60 focus-visible:outline-none {selected.includes(
               hit.path,
@@ -258,8 +374,8 @@
               ? 'bg-accent-soft'
               : index === cursor
                 ? 'bg-accent-soft/50'
-                : 'hover:bg-accent-soft/40'}"
-            title={hit.path}
+                : 'hover:bg-accent-soft/40'} {weak ? 'opacity-60' : ''}"
+            title={weak ? `${hit.path}\n弱匹配：${hit.score} 分` : hit.path}
             role="row"
             tabindex={index === cursor ? 0 : -1}
             data-cursor-index={index}
@@ -285,6 +401,8 @@
                 >{#each highlightName(name, nameOffsets) as segment, i (hit.path + i)}{#if segment.matched}<mark
                       class="rounded bg-accent-soft text-fg">{segment.text}</mark
                     >{:else}{segment.text}{/if}{/each}
+                {#if weak}<span class="ml-1 text-warning" title="弱匹配：可能不是您要找的">·</span
+                  >{/if}
               </span>
             </span>
             <span class="w-20 shrink-0 text-right text-xs text-muted tabular-nums">
@@ -296,6 +414,21 @@
           </div>
         {/each}
       </div>
+      <!-- 续页按钮（汇总 P3）：仅在 score 排序且未达 totalMatched 时显示。
+           数据增长方向：已加载 N / 共 M；点一下加 PAGE_SIZE。 -->
+      {#if canLoadMore}
+        <div class="flex justify-center pt-3">
+          <button
+            class="qx-btn qx-btn-outline qx-btn-sm"
+            disabled={accumulating}
+            onclick={() => void loadMore()}
+          >
+            {accumulating
+              ? '加载中…'
+              : `加载更多（已显示 ${accumulated.length} / ${search.filesResult?.totalMatched ?? 0}）`}
+          </button>
+        </div>
+      {/if}
     </div>
   {:else if search.filesResult}
     <div class="flex flex-col items-center gap-1 py-16 text-center">
