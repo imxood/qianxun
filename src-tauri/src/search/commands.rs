@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{Error, Result};
+use log::{debug, info, warn};
 
 /// 内容搜索的每个分片：短时间预算既给引擎内的 abort 检查留粒度，
 /// 又让「新搜索顶掉旧搜索」在分片边界即时生效；循环推进 file_offset
@@ -129,6 +130,7 @@ pub fn search_open(root: String, state: State<'_, crate::AppState>) -> Result<Se
     let canonical = normalize_root(Path::new(&root))?;
     let search = &state.search;
     if search.root().as_ref() == Some(&canonical) {
+        debug!("search_open 同根短路 root={}", canonical.display());
         return Ok(SearchOpen {
             root: canonical.to_string_lossy().into_owned(),
             generation: search.generation(),
@@ -148,6 +150,11 @@ pub fn search_open(root: String, state: State<'_, crate::AppState>) -> Result<Se
             search.stash_warm(previous_root, previous);
         }
         search.set_root(Some(canonical.clone()));
+        info!(
+            "search_open 暖缓存命中 root={} generation={}",
+            canonical.display(),
+            generation,
+        );
         return Ok(SearchOpen {
             root: canonical.to_string_lossy().into_owned(),
             generation,
@@ -179,13 +186,25 @@ pub fn search_open(root: String, state: State<'_, crate::AppState>) -> Result<Se
             cache_budget: None,
         },
     )
-    .map_err(|cause| Error::Search(format!("无法索引 {}：{cause}", canonical.display())))?;
+    .map_err(|cause| {
+        warn!(
+            "search_open 冷建索引失败 root={} error={}",
+            canonical.display(),
+            cause,
+        );
+        Error::Search(format!("无法索引 {}：{cause}", canonical.display()))
+    })?;
     let previous = search.picker();
     search.set_picker(fresh_shared);
     if let Some(previous_root) = search.root() {
         search.stash_warm(previous_root, previous);
     }
     search.set_root(Some(canonical.clone()));
+    info!(
+        "search_open 冷根建索引 root={} generation={}",
+        canonical.display(),
+        generation,
+    );
     Ok(SearchOpen {
         root: canonical.to_string_lossy().into_owned(),
         generation,
@@ -237,6 +256,12 @@ pub fn search_files(
             total_files: 0,
         });
     }
+    debug!(
+        "search_files query={} limit={} offset={}",
+        query,
+        limit.unwrap_or(100),
+        offset.unwrap_or(0),
+    );
     let picker_arc = state.search.picker();
     let guard = picker_arc
         .read()
@@ -265,24 +290,14 @@ pub fn search_files(
         .zip(result.scores.iter())
         .zip(result.match_byte_offsets.iter())
         .map(|((item, score), offsets)| {
-            // stat 补大小/修改时间（≤500 行/页，毫秒级）；失败记 0 不阻断。
-            let absolute = state
-                .search
-                .root()
-                .map(|root| root.join(item.relative_path(picker)));
-            let (size, mtime) = absolute
-                .as_deref()
-                .and_then(|path| std::fs::metadata(path).ok())
-                .map(|meta| {
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_millis() as i64)
-                        .unwrap_or(0);
-                    (meta.len(), mtime)
-                })
-                .unwrap_or((0, 0));
+            // 大小/修改时间直接从 FileItem 读：walker 阶段已 stat 写入
+            // (`fff-core/src/file_picker.rs:1492-1501`)，单位为秒。
+            // 之前每次 fuzzy 都重读 stat，200 条命中 ≈ 20ms 全在 picker
+            // 读锁内，阻塞 `search_status` 轮询；这里消除 N+1 syscall。
+            // 注意：watcher reload 后内存 modified 可能略陈旧于磁盘，
+            // UI 端用于排序（最近修改）足够，文件存在性已在模糊搜索过滤。
+            let size = item.size;
+            let mtime = (item.modified as i64) * 1000;
             FileHit {
                 path: item.relative_path(picker),
                 score: score.total,
@@ -325,12 +340,26 @@ pub async fn search_content(
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
-    if let Some(pattern) = &glob {
-        glob_to_regex(pattern)?; // 先校验语法，坏 pattern 即时报错不静默。
-    }
+    // 一次编译 glob 正则：之前每个分片每条命中都重编译，最坏 2000 次
+    // `Regex::new`（commands.rs:570-583）；入口编译后闭包内零分配复用。
+    let glob_re: Option<regex::Regex> = match glob.as_deref() {
+        Some(pattern) => Some(glob_to_regex(pattern)?),
+        None => None,
+    };
+    let glob_match_path = glob.as_deref().is_some_and(|p| p.contains('/'));
     let token = state.search.rotate_abort();
     let start_generation = state.search.generation();
     let search = state.search.clone();
+    info!(
+        "search_content start query={} regex={} smart_case={} before={} after={} glob={} generation={}",
+        query,
+        opts.regex,
+        opts.smart_case,
+        opts.before_context.min(10),
+        opts.after_context.min(10),
+        glob.as_deref().unwrap_or(""),
+        start_generation,
+    );
 
     // 引擎 grep 是阻塞调用：整个分片循环放进 blocking 线程，主循环
     // （窗口/其他命令）全程不被冻结——这是「取消按钮立即生效」的前提。
@@ -394,10 +423,16 @@ pub async fn search_content(
                             .get(hit.file_index)
                             .map(|item| item.relative_path(picker))
                             .unwrap_or_default();
-                        if !glob
-                            .as_deref()
-                            .is_none_or(|pattern| hit_matches_glob(&relative, pattern))
-                        {
+                        if !glob_re.as_ref().is_some_and(|re| {
+                            if glob_match_path {
+                                re.is_match(&relative)
+                            } else {
+                                relative
+                                    .rsplit(['/', '\\'])
+                                    .next()
+                                    .is_some_and(|name| re.is_match(name))
+                            }
+                        }) {
                             return None;
                         }
                         Some(GrepHit {
@@ -447,10 +482,23 @@ pub async fn search_content(
             }
             match next_offset {
                 0 => break,                      // 搜完。
-                next if next == offset => break, // 防御：游标不动则退出，避免死循环。
+                next if next == offset => {
+                    // 防御：游标不动则退出，避免死循环。
+                    warn!("search_content 游标未推进，疑似引擎 bug offset={}", offset);
+                    break;
+                }
                 next => offset = next,
             }
         }
+
+        info!(
+            "search_content done files_searched={} files_with_matches={} total_items={} aborted={} generation={}",
+            files_searched,
+            files_with_matches,
+            all_items.len(),
+            aborted,
+            start_generation,
+        );
 
         Ok(GrepPage {
             items: all_items,
@@ -469,6 +517,7 @@ pub async fn search_content(
 #[tauri::command]
 pub fn search_cancel(state: State<'_, crate::AppState>) -> Result<()> {
     state.search.cancel_search();
+    debug!("search_cancel 置 token=true");
     Ok(())
 }
 
@@ -496,6 +545,8 @@ fn list_drives() -> Vec<DriveInfo> {
 
     let bitmask = unsafe { GetLogicalDrives() };
     if bitmask == 0 {
+        // API 调用失败：之前静默返空，前端无法区分「真没盘」vs「失败」（汇总 §03 M4）。
+        warn!("search_list_drives GetLogicalDrives bitmask=0，可能是 API 调用失败");
         return Vec::new();
     }
     let mut drives = Vec::new();
@@ -567,6 +618,10 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex> {
 }
 
 /// 相对路径是否命中 glob：pattern 不含 `/` 时按文件名匹配，否则按全路径。
+///
+/// 测试专用便利包装：生产路径 `search_content` 在入口一次编译后通过
+/// `glob_re.is_match` 复用，避免每个分片每条命中都 `Regex::new`。
+#[cfg(test)]
 fn hit_matches_glob(relative: &str, pattern: &str) -> bool {
     let Ok(re) = glob_to_regex(pattern) else {
         return true; // 校验在入口做过；这里兜底放行，不静默吞结果。

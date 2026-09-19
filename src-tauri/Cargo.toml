@@ -1,6 +1,6 @@
 [package]
 name = "qianxun"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
@@ -92,6 +92,13 @@ hostname = "0.4"
 tauri-plugin-dialog = "2.7.3"
 # 磁盘清理（磁盘清理页）：删除走回收站，可撤销。
 trash = "5"
+# 结构化日志：fff-core 内 `log::*` 默认 no-op；汇总 §7.2 + 04 报告 §3.1
+# 指出应用从未 init logger 导致 16 处 log 调用全丢。env_logger 是最轻量
+# 方案（不开 log4rs/tracing 避免再增依赖面）；由 lib.rs setup `try_init`
+# 兜底失败不阻断启动，`RUST_LOG` 默认 `info`。
+env_logger = "0.11"
+# log facade（env_logger 的运行时；fff-core 也通过 log::* 上报）。
+log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 # 盘符枚举（搜索根选择器，M2 深化）：与 proc-guard 同一条 windows-sys 主线，

@@ -121,6 +121,13 @@ pub fn run() {
             let handle = app.handle();
 
             logging::init(paths::log_path(handle)?);
+            // 让 fff-core 内 16 处 `log::*` 复活（汇总 §7.2）：env_logger 是
+            // 最轻量方案，落 stderr 不与文件 logging 冲突；失败兜底不阻断
+            // 启动（双 init 也无害）。
+            let _ = env_logger::Builder::from_env(
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            )
+            .try_init();
             let loaded = settings::load(handle)?;
             let autostart = loaded.dsh.autostart;
             if let Some(geometry) = loaded.window.geometry.clone() {
