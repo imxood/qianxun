@@ -7,6 +7,7 @@
   import SideNav from './components/SideNav.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ContextMenuLayer from './components/ContextMenuLayer.svelte';
+  import ToastLayer from './components/ToastLayer.svelte';
   import EnvPage from './features/env/EnvPage.svelte';
   import DshPage from './features/dsh/DshPage.svelte';
   import SearchPage from './features/search/SearchPage.svelte';
@@ -141,4 +142,5 @@
   </div>
   <StatusBar />
   <ContextMenuLayer />
+  <ToastLayer />
 </div>
