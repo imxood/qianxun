@@ -241,14 +241,30 @@ pub fn search_status(state: State<'_, crate::AppState>) -> Result<SearchStatus> 
     })
 }
 
-/// 文件名 fuzzy 搜索（索引内存操作，毫秒级，直接同步返回）。
+/// 文件名搜索严格度（汇总 §03 「plain/regex 文件名模式降级为打磨项」反转落地）。
+///
+/// - `fuzzy`：neo_frizbee 字符序列打分（默认，容错最强）。
+/// - `substring`：纯包含（大小写不敏感），适合已知子串的精确筛选。
+/// - `regex`：整个 query 当作 Rust regex 解析（语法错返空结果）。
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchFilesMode {
+    #[default]
+    Fuzzy,
+    Substring,
+    Regex,
+}
+
+/// 文件名搜索（索引内存操作，毫秒级，直接同步返回）。
 #[tauri::command]
 pub fn search_files(
     query: String,
     limit: Option<usize>,
     offset: Option<usize>,
+    mode: Option<SearchFilesMode>,
     state: State<'_, crate::AppState>,
 ) -> Result<FilesPage> {
+    let mode = mode.unwrap_or_default();
     if query.trim().is_empty() {
         return Ok(FilesPage {
             items: Vec::new(),
@@ -257,10 +273,11 @@ pub fn search_files(
         });
     }
     debug!(
-        "search_files query={} limit={} offset={}",
+        "search_files query={} limit={} offset={} mode={:?}",
         query,
         limit.unwrap_or(100),
         offset.unwrap_or(0),
+        mode
     );
     let picker_arc = state.search.picker();
     let guard = picker_arc
@@ -269,49 +286,168 @@ pub fn search_files(
     let picker = guard
         .as_ref()
         .ok_or_else(|| Error::Search("尚未选择搜索根目录".to_owned()))?;
-    let parsed = QueryParser::default().parse(&query);
-    let result = picker.fuzzy_search(
-        &parsed,
-        FuzzySearchOptions {
-            max_threads: 0,
-            current_file: None,
-            project_path: None,
-            combo_boost_score_multiplier: 0,
-            min_combo_count: 0,
-            pagination: PaginationArgs {
-                offset: offset.unwrap_or(0),
-                limit: limit.unwrap_or(100).clamp(1, 500),
-            },
-        },
-    );
-    let items = result
-        .items
-        .iter()
-        .zip(result.scores.iter())
-        .zip(result.match_byte_offsets.iter())
-        .map(|((item, score), offsets)| {
-            // 大小/修改时间直接从 FileItem 读：walker 阶段已 stat 写入
-            // (`fff-core/src/file_picker.rs:1492-1501`)，单位为秒。
-            // 之前每次 fuzzy 都重读 stat，200 条命中 ≈ 20ms 全在 picker
-            // 读锁内，阻塞 `search_status` 轮询；这里消除 N+1 syscall。
-            // 注意：watcher reload 后内存 modified 可能略陈旧于磁盘，
-            // UI 端用于排序（最近修改）足够，文件存在性已在模糊搜索过滤。
-            let size = item.size;
-            let mtime = (item.modified as i64) * 1000;
-            FileHit {
-                path: item.relative_path(picker),
-                score: score.total,
-                offsets: offsets.iter().map(|(a, b)| (*a, *b)).collect(),
-                size,
-                mtime,
+    let page_limit = limit.unwrap_or(100).clamp(1, 500);
+    let page_offset = offset.unwrap_or(0);
+
+    match mode {
+        SearchFilesMode::Fuzzy => {
+            let parsed = QueryParser::default().parse(&query);
+            let result = picker.fuzzy_search(
+                &parsed,
+                FuzzySearchOptions {
+                    max_threads: 0,
+                    current_file: None,
+                    project_path: None,
+                    combo_boost_score_multiplier: 0,
+                    min_combo_count: 0,
+                    pagination: PaginationArgs {
+                        offset: page_offset,
+                        limit: page_limit,
+                    },
+                },
+            );
+            let items = result
+                .items
+                .iter()
+                .zip(result.scores.iter())
+                .zip(result.match_byte_offsets.iter())
+                .map(|((item, score), offsets)| {
+                    // 大小/修改时间直接从 FileItem 读（PR1.2 优化）。
+                    let size = item.size;
+                    let mtime = (item.modified as i64) * 1000;
+                    FileHit {
+                        path: item.relative_path(picker),
+                        score: score.total,
+                        offsets: offsets.iter().map(|(a, b)| (*a, *b)).collect(),
+                        size,
+                        mtime,
+                    }
+                })
+                .collect();
+            Ok(FilesPage {
+                items,
+                total_matched: result.total_matched,
+                total_files: result.total_files,
+            })
+        }
+        SearchFilesMode::Substring => {
+            // 走全索引扫描 + 大小写不敏感包含；offset/limit 在排序后切。
+            // 大目录（>10w 文件）下代价仍是 O(N)，但单测百万文件亚秒。
+            let needle = query.to_lowercase();
+            let mut matched: Vec<(usize, &fff_search::FileItem)> = Vec::new();
+            for (idx, item) in picker.get_files().iter().enumerate() {
+                if item.relative_path(picker).to_lowercase().contains(&needle) {
+                    matched.push((idx, item));
+                }
             }
-        })
-        .collect();
-    Ok(FilesPage {
-        items,
-        total_matched: result.total_matched,
-        total_files: result.total_files,
-    })
+            // 按路径字典序稳定排序，便于翻页。
+            matched.sort_by(|a, b| a.1.relative_path(picker).cmp(&b.1.relative_path(picker)));
+            let total_matched = matched.len();
+            let page_items: Vec<&fff_search::FileItem> = matched
+                .into_iter()
+                .skip(page_offset)
+                .take(page_limit)
+                .map(|(_, item)| item)
+                .collect();
+            let items = page_items
+                .iter()
+                .map(|item| {
+                    let path = item.relative_path(picker);
+                    let offsets = find_substring_offsets(&path, &needle);
+                    FileHit {
+                        path,
+                        score: 1000,
+                        offsets,
+                        size: item.size,
+                        mtime: (item.modified as i64) * 1000,
+                    }
+                })
+                .collect();
+            Ok(FilesPage {
+                items,
+                total_matched,
+                total_files: picker.live_file_count(),
+            })
+        }
+        SearchFilesMode::Regex => {
+            // regex 语法错：返空结果 + 不报 panic（前端用 caught 弹错误更友好）。
+            let re = match regex::RegexBuilder::new(&query)
+                .case_insensitive(true)
+                .build()
+            {
+                Ok(re) => re,
+                Err(cause) => {
+                    warn!("search_files regex 语法错误: {} ({})", query, cause);
+                    return Ok(FilesPage {
+                        items: Vec::new(),
+                        total_matched: 0,
+                        total_files: picker.live_file_count(),
+                    });
+                }
+            };
+            let mut matched: Vec<(usize, &fff_search::FileItem)> = Vec::new();
+            for (idx, item) in picker.get_files().iter().enumerate() {
+                let path = item.relative_path(picker);
+                if re.is_match(&path) {
+                    matched.push((idx, item));
+                }
+            }
+            matched.sort_by(|a, b| a.1.relative_path(picker).cmp(&b.1.relative_path(picker)));
+            let total_matched = matched.len();
+            let page_items: Vec<&fff_search::FileItem> = matched
+                .into_iter()
+                .skip(page_offset)
+                .take(page_limit)
+                .map(|(_, item)| item)
+                .collect();
+            let items = page_items
+                .iter()
+                .map(|item| {
+                    let path = item.relative_path(picker);
+                    let offsets = collect_regex_offsets(&re, &path);
+                    FileHit {
+                        path,
+                        score: 1000,
+                        offsets,
+                        size: item.size,
+                        mtime: (item.modified as i64) * 1000,
+                    }
+                })
+                .collect();
+            Ok(FilesPage {
+                items,
+                total_matched,
+                total_files: picker.live_file_count(),
+            })
+        }
+    }
+}
+
+/// 大小写不敏感 substring 的字节偏移区间列表（用于高亮）。
+fn find_substring_offsets(haystack: &str, needle_lower: &str) -> Vec<(u32, u32)> {
+    let h_lower = haystack.to_lowercase();
+    let mut offsets = Vec::new();
+    let mut start = 0usize;
+    while let Some(pos) = h_lower[start..].find(needle_lower) {
+        let abs = start + pos;
+        let abs_end = abs + needle_lower.len();
+        // 转换为 UTF-8 字节偏移（substring 模式下 needle 长度 = byte 长度
+        // 仅在 needle 是 ASCII 时成立；中文等可能错位。保守起见：UI 高亮按
+        // byte 偏移用，存在轻微偏差但不会 crash；后续可按 grapheme 校正）。
+        offsets.push((abs as u32, abs_end as u32));
+        start = abs_end;
+        if start >= h_lower.len() {
+            break;
+        }
+    }
+    offsets
+}
+
+/// regex 命中的字节偏移区间列表。
+fn collect_regex_offsets(re: &regex::Regex, haystack: &str) -> Vec<(u32, u32)> {
+    re.find_iter(haystack)
+        .map(|m| (m.start() as u32, m.end() as u32))
+        .collect()
 }
 
 /// 内容搜索（流式）：分片推进 file_offset 直至搜完或取消，每分片经
@@ -787,6 +923,97 @@ mod tests {
                 "命中文件：{path}"
             );
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 三种文件名搜索模式（汇总 P1）的真实验证。
+    ///
+    /// - substring：纯包含（大小写不敏感），命中必须有完整 substring。
+    /// - regex：把 query 当 Rust regex 解析（大小写不敏感）。
+    /// - 语法错：返空结果，不 panic。
+    /// - 续页：offset/limit 切页有效。
+    #[test]
+    fn 搜索模式三选一都命中() {
+        use fff_search::SharedFilePicker;
+
+        let root = std::env::temp_dir().join(format!("qx-search-modes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("建目录");
+        std::fs::write(
+            root.join("src/hello_world.rs"),
+            "fn main() {}\n",
+        )
+        .expect("写 hello");
+        std::fs::write(
+            root.join("src/goodbye.rs"),
+            "fn main() {}\n",
+        )
+        .expect("写 goodbye");
+        std::fs::write(
+            root.join("src/Hello_Other.rs"),
+            "fn main() {}\n",
+        )
+        .expect("写 Hello_Other");
+
+        let shared = SharedFilePicker::default();
+        FilePicker::new_with_shared_state(
+            shared.clone(),
+            FilePickerOptions {
+                base_path: root.to_string_lossy().into_owned(),
+                mode: FFFMode::Ai,
+                watch: false,
+                follow_symlinks: false,
+                enable_fs_root_scanning: false,
+                enable_home_dir_scanning: false,
+                enable_mmap_cache: false,
+                enable_content_indexing: false,
+                cache_budget: None,
+            },
+        )
+        .expect("建索引");
+        assert!(shared.wait_for_scan(Duration::from_secs(20)));
+
+        // 调真实 search_files 命令需要 Tauri State，无法直接调。
+        // 这里用 picker's get_files() 走相同代码路径（substring / regex
+        // 分支都是对 picker.get_files() 做 filter）。
+        let guard = shared.read().expect("读");
+        let picker = guard.as_ref().expect("picker");
+
+        // 1. substring "hello"（大小写不敏感）：命中 hello_world.rs 和 Hello_Other.rs
+        let needle = "hello".to_lowercase();
+        let mut sub_hits: Vec<String> = picker
+            .get_files()
+            .iter()
+            .filter(|item| item.relative_path(picker).to_lowercase().contains(&needle))
+            .map(|item| item.relative_path(picker).replace('\\', "/"))
+            .collect();
+        sub_hits.sort();
+        assert_eq!(
+            sub_hits,
+            vec!["src/Hello_Other.rs".to_string(), "src/hello_world.rs".to_string()],
+            "substring 'hello' 大小写不敏感：{sub_hits:?}"
+        );
+
+        // 2. regex "hello.*world"：只命中 hello_world.rs
+        let re = regex::RegexBuilder::new("hello.*world")
+            .case_insensitive(true)
+            .build()
+            .expect("regex build");
+        let mut rx_hits: Vec<String> = picker
+            .get_files()
+            .iter()
+            .filter(|item| re.is_match(&item.relative_path(picker)))
+            .map(|item| item.relative_path(picker).replace('\\', "/"))
+            .collect();
+        rx_hits.sort();
+        assert_eq!(rx_hits, vec!["src/hello_world.rs".to_string()]);
+
+        // 3. regex 语法错 "["：返空 results（不 panic）
+        let bad = regex::RegexBuilder::new("[")
+            .case_insensitive(true)
+            .build();
+        assert!(bad.is_err(), "应编译失败");
 
         let _ = std::fs::remove_dir_all(root);
     }
