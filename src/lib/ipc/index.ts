@@ -36,9 +36,25 @@ function toMessage(raw: unknown): string {
 }
 
 export async function call<T>(command: IpcCommand, args?: Record<string, unknown>): Promise<T> {
+  const started = performance.now();
+  // dev 模式下输出结构化日志（汇总 §7.2 + 04 §3.1）：前端 IPC 域零埋点
+  // → Chrome DevTools console 即是排查通道；release build 自动 tree-shake 掉。
+  if (import.meta.env.DEV) {
+    console.debug(`[ipc] → ${command}`, args);
+  }
   try {
-    return await invoke<T>(command, args);
+    const result = await invoke<T>(command, args);
+    if (import.meta.env.DEV) {
+      const elapsed = (performance.now() - started).toFixed(1);
+      console.debug(`[ipc] ← ${command} ok latency_ms=${elapsed}`);
+    }
+    return result;
   } catch (error) {
-    throw new AppError(command, toMessage(error));
+    const message = toMessage(error);
+    if (import.meta.env.DEV) {
+      const elapsed = (performance.now() - started).toFixed(1);
+      console.error(`[ipc] × ${command} failed latency_ms=${elapsed}`, message);
+    }
+    throw new AppError(command, message);
   }
 }
