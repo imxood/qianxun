@@ -71,9 +71,12 @@ export const FILE_ICON_PATH = 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-
 
 const encoder = new TextEncoder();
 
-/** 相对路径拆成目录（含尾分隔符）与文件名。 */
+/** 相对路径拆成目录（含尾分隔符）与文件名。
+ * Windows 路径用 `\` 分隔（后端 fff-core 在 Windows 上返回 `relative_path`
+ * 即带反斜杠）；之前只识别 `/`，导致 Windows 上"目录"段被吞掉整条路径。
+ * 汇总 §3.18：splitPath 接受 `\` 也算分隔符。 */
 export function splitPath(path: string): { directory: string; name: string } {
-  const separator = path.lastIndexOf('/');
+  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   return separator >= 0
     ? { directory: path.slice(0, separator + 1), name: path.slice(separator + 1) }
     : { directory: '', name: path };
