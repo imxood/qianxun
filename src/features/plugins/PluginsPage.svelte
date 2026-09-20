@@ -21,6 +21,7 @@
   import { fetchNpmDetail, registryBase, searchNpm } from '../../lib/market/npm';
   import { compatBadge, count, filesize } from '../../lib/market/format';
   import type { CatalogData, MarketDetail, MarketListing } from '../../lib/market/types';
+  import type { SyncItemResult } from '../../lib/ipc/contract';
   import { pinnedDshVersion } from '../../lib/utils/dsh-version';
   import { harness } from '../../stores/harness.svelte';
   import { settings } from '../../stores/settings.svelte';
@@ -30,7 +31,6 @@
   /** 推荐排序键：目录顺序 = 上游策展原序（类内按收录时间倒序）。 */
   type FeaturedSort = 'downloads' | 'added' | 'stars' | 'catalog';
   type SearchSort = 'relevance' | 'updated' | 'downloads' | 'name';
-
   const DEBOUNCE_MS = 320;
   const PAGE_SIZE = 100;
   const DETAIL_CONCURRENCY = 4;
@@ -247,6 +247,36 @@
     }
   }
 
+  // ---- 清单同步（08 设计 §4）：逐项补装，单个失败不影响其余 ----------
+  let syncing = $state(false);
+  let syncResults = $state<SyncItemResult[] | null>(null);
+  let syncError = $state('');
+
+  /** 安全模式激活时冻结一切插件变更（08 设计 §11.3-4）。 */
+  const frozen = $derived(harness.recovery.safeMode);
+
+  async function syncPinned(): Promise<void> {
+    syncing = true;
+    syncError = '';
+    syncResults = null;
+    try {
+      syncResults = await call<SyncItemResult[]>('market_sync_pinned');
+      await refreshInstalled();
+    } catch (failure) {
+      syncError = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      syncing = false;
+    }
+  }
+
+  function dismissSyncResults(): void {
+    syncResults = null;
+    syncError = '';
+  }
+
+  /** 同步失败项计数（结果面板底部汇总文案用）。 */
+  const syncFailedCount = $derived(syncResults?.filter((item) => !item.ok).length ?? 0);
+
   /** 从系统浏览器打开插件主页（GitHub 等）。 */
   function httpsLink(link: string): boolean {
     return /^https?:\/\//iu.test(link);
@@ -423,7 +453,8 @@
         {:else}
           <button
             class="rounded-md border border-line px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent-soft disabled:opacity-40"
-            disabled={working !== null}
+            disabled={working !== null || frozen}
+            title={frozen ? '安全模式中：插件变更已冻结' : undefined}
             onclick={() => void install(listing.name, listing.version)}
           >
             {working === listing.name ? '安装中…' : '安装'}
@@ -611,10 +642,96 @@
         </ul>
       {/if}
     {:else if installed.length === 0}
+      <div class="px-6">
+        <!-- 同步清单栏（08 设计 §4.2）：无已装插件时同样可点（幂等）。
+             还原备份 / 换机器后从这里一键恢复清单里的插件。 -->
+        <div class="flex items-center justify-between gap-3 py-3">
+          <p class="text-xs text-muted">
+            {settings.current?.plugins.pinned.length ?? 0} 个插件在清单中
+          </p>
+          <button
+            class="qx-btn qx-btn-outline qx-btn-sm"
+            disabled={syncing || frozen || working !== null}
+            data-testid="market-sync"
+            onclick={() => void syncPinned()}
+          >
+            {syncing ? '同步中…' : '同步清单'}
+          </button>
+        </div>
+      </div>
       <p class="py-12 text-center text-sm text-muted">
         {installedLoading ? '读取中…' : '尚未安装插件'}
       </p>
     {:else}
+      <div class="px-6">
+        <div class="flex items-center justify-between gap-3 py-3">
+          <p class="text-xs text-muted">
+            清单 {settings.current?.plugins.pinned.length ?? 0} 项 · 已装 {installed.filter(
+              (entry) => !entry.builtin,
+            ).length} 个
+          </p>
+          <button
+            class="qx-btn qx-btn-outline qx-btn-sm"
+            disabled={syncing || frozen || working !== null}
+            data-testid="market-sync"
+            onclick={() => void syncPinned()}
+          >
+            {syncing ? '同步中…' : '同步清单'}
+          </button>
+        </div>
+        {#if frozen}
+          <!-- 安全模式冻结（08 设计 §11.3-4） -->
+          <p
+            class="mb-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"
+            data-testid="plugins-frozen"
+          >
+            安全模式中：安装 / 卸载 / 同步已冻结。请到环境页返回默认 profile 后再操作。
+          </p>
+        {/if}
+        {#if syncing}
+          <p class="mb-3 text-xs text-accent">正在按清单逐个补装（单个失败不影响其余）…</p>
+        {/if}
+        {#if syncError}
+          <p class="mb-3 flex items-center justify-between gap-2 text-xs text-danger">
+            {syncError}
+            <button class="text-muted hover:text-fg" onclick={dismissSyncResults}>×</button>
+          </p>
+        {:else if syncResults}
+          <div
+            class="mb-3 rounded-lg border border-line bg-surface/60 p-3 text-xs"
+            data-testid="sync-results"
+          >
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="font-medium">清单同步结果</span>
+              <button class="text-muted hover:text-fg" onclick={dismissSyncResults}>×</button>
+            </div>
+            <ul class="space-y-1">
+              {#each syncResults as item (item.name)}
+                <li class="flex items-baseline gap-2">
+                  {#if item.ok && item.skipped}
+                    <span class="shrink-0 text-muted">✓</span>
+                    <span class="truncate text-muted">{item.name}</span>
+                    <span class="shrink-0 text-muted/70">{item.detail}</span>
+                  {:else if item.ok}
+                    <span class="shrink-0 text-ok">✓</span>
+                    <span class="truncate">{item.name}</span>
+                    <span class="shrink-0 text-ok/80">{item.detail}</span>
+                  {:else}
+                    <span class="shrink-0 text-danger">✗</span>
+                    <span class="truncate">{item.name}</span>
+                    <span class="shrink-0 text-danger">{item.detail}</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            <p class="mt-1.5 text-muted/80">
+              {syncFailedCount > 0
+                ? `其余 ${syncResults.length - syncFailedCount} 项已就绪。失败项可再次点击「同步清单」重试，已成功项会跳过。`
+                : '全部就绪。'}
+            </p>
+          </div>
+        {/if}
+      </div>
       <ul>
         {#each installed as entry (entry.name)}
           <li class="flex items-center gap-3 border-b border-line/60 py-2.5 last:border-b-0">
@@ -641,7 +758,7 @@
             {#if !entry.builtin}
               <button
                 class="shrink-0 rounded-md border border-line px-2.5 py-1 text-xs text-danger transition-colors hover:bg-danger/10 disabled:opacity-40"
-                disabled={working !== null}
+                disabled={working !== null || frozen}
                 onclick={() => void remove(entry.name)}
               >
                 {working === entry.name ? '卸载中…' : '卸载'}

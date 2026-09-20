@@ -28,6 +28,9 @@ export const IPC_COMMANDS = [
   'harness_install',
   'harness_install_node',
   'harness_log',
+  'harness_recovery_status',
+  'harness_recover_known_good',
+  'harness_safe_mode_start',
   'disk_home',
   'disk_scan',
   'disk_scan_stream',
@@ -62,6 +65,7 @@ export const IPC_COMMANDS = [
   'market_installed',
   'market_install',
   'market_remove',
+  'market_sync_pinned',
   'remote_interfaces',
   'remote_status',
   'remote_pair',
@@ -151,6 +155,8 @@ export interface Settings {
   hotkeys: HotkeysSettings;
   notes: NotesSettings;
   remote: RemoteSettings;
+  /** 插件清单（08 设计 §2）。 */
+  plugins: PluginsSettings;
 }
 
 /**
@@ -194,6 +200,8 @@ export interface BackupManifest {
   dshVersion: string | null;
   workspaceCount: number;
   sessionCount: number;
+  /** 插件清单条数（旧包读出 0，serde default 兼容）。 */
+  pluginCount: number;
   /** 包内数据文件总数（不含 manifest 自身）。 */
   fileCount: number;
 }
@@ -202,6 +210,8 @@ export interface BackupManifest {
 export interface BackupRestoreReport {
   restoredFiles: number;
   preRestoreBackup: string | null;
+  /** 还原的清单里当前 profile 未落盘的插件个数（>0 时显示「补装插件」）。 */
+  pluginsMissing: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +592,26 @@ export interface MarketInstalled {
   builtin: boolean;
 }
 
+/** market_sync_pinned 的逐项结果（08 设计 §4.1，前端逐行渲染）。 */
+export interface SyncItemResult {
+  name: string;
+  ok: boolean;
+  /** 已落盘且版本一致 → 跳过（幂等，不算失败）。 */
+  skipped: boolean;
+  /** 成功：版本；跳过：「已是 x.y.z」；失败：错误摘要。 */
+  detail: string;
+}
+
+/** harness_recovery_status 返回（08 设计 §11.5）。 */
+export interface RecoveryStatus {
+  /** known-good 快照是否存在（失败态「恢复」按钮的显示条件）。 */
+  snapshotAvailable: boolean;
+  /** 安全 profile 是否就绪。 */
+  safeProfileReady: boolean;
+  /** 当前运行的 DSH 是否来自安全 profile。 */
+  safeMode: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // remote_*（远程网关域，R1）
 // ---------------------------------------------------------------------------
@@ -600,6 +630,20 @@ export interface RemoteSettings {
   bindIp: string;
   port: number;
   devices: RemoteDevice[];
+}
+
+// ---------------------------------------------------------------------------
+// plugins（插件清单，08 设计 §2）
+// ---------------------------------------------------------------------------
+
+/** 清单条目：装成功的 name@version（内核包不入清单）。 */
+export interface PinnedPlugin {
+  name: string;
+  version: string;
+}
+
+export interface PluginsSettings {
+  pinned: PinnedPlugin[];
 }
 
 export interface NetInterface {

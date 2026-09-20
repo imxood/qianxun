@@ -8,6 +8,8 @@
     void harness.refreshEnvironment();
     // 晚开页不空白：回填缓冲的启动/安装日志。
     void harness.backfillLogs();
+    // 失败态按钮与安全模式徽标的数据源（08 设计 §11.5）。
+    void harness.refreshRecovery();
   });
 
   /** Node 来源标注（信息块用）。 */
@@ -64,6 +66,33 @@
       actionError = error instanceof Error ? error.message : String(error);
     }
   }
+
+  /** 恢复到上次能启动的配置（08 设计 §11.5；后端停机→恢复→重启一次完成）。 */
+  async function recoverKnownGood(): Promise<void> {
+    actionError = '';
+    recoverSummary = '';
+    try {
+      const removed = await harness.recoverKnownGood();
+      recoverSummary =
+        removed.length > 0
+          ? `已恢复并重启。从装配清单卸下：${removed.join('、')}（文件保留，可在插件页重装）`
+          : '已恢复并重启。';
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** 进入最小安全环境（逃生舱；默认 profile 不受影响）。 */
+  async function safeMode(): Promise<void> {
+    actionError = '';
+    try {
+      await harness.safeModeStart();
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  let recoverSummary = $state('');
 
   const statusTone: Record<string, string> = {
     stopped: 'text-muted',
@@ -140,6 +169,45 @@
         </div>
         {#if harness.status.phase === 'failed'}
           <p class="mt-2 text-xs text-danger">{harness.status.reason}</p>
+          <!-- 三级自救 UI（08 设计 §11.5）：到这里说明启动链（含快照自动
+               恢复重试）已失败。快照在 → 手动恢复按钮；安全模式兜底。 -->
+          <div class="mt-3 flex flex-col gap-2">
+            {#if harness.recovery.snapshotAvailable}
+              <button
+                class="qx-btn qx-btn-outline qx-btn-md w-full"
+                disabled={harness.recovering}
+                data-testid="harness-recover"
+                onclick={() => void recoverKnownGood()}
+              >
+                {harness.recovering ? '恢复中…' : '恢复到上次能启动的配置'}
+              </button>
+            {/if}
+            <button
+              class="qx-btn qx-btn-outline qx-btn-md w-full"
+              disabled={harness.recovering}
+              data-testid="harness-safe-mode"
+              onclick={() => void safeMode()}
+            >
+              安全模式启动
+            </button>
+            <p class="text-muted/80">
+              {harness.recovery.snapshotAvailable
+                ? '自动恢复已尝试仍失败：可手动重试，或进入只读的安全模式排查插件。'
+                : '没有可用快照。安全模式是只读的最小环境，默认 profile 不受影响。'}
+            </p>
+          </div>
+        {/if}
+        {#if recoverSummary}
+          <p class="mt-2 text-xs text-ok" role="status">{recoverSummary}</p>
+        {/if}
+        {#if harness.recovery.safeMode && harness.status.phase === 'ready'}
+          <!-- 安全模式徽标（08 设计 §11.5）：插件变更被冻结的提示位。 -->
+          <p
+            class="mt-2 rounded-lg border border-warning/40 bg-warning/10 px-2 py-1.5 text-xs text-warning"
+            data-testid="safe-mode-badge"
+          >
+            安全模式中：插件变更已冻结。「重启 DSH」即返回默认 profile。
+          </p>
         {/if}
         {#if actionError}
           <p class="mt-2 text-xs text-danger">{actionError}</p>

@@ -11,6 +11,7 @@ import type {
   HarnessEvent,
   HarnessStatus,
   InstallProgress,
+  RecoveryStatus,
 } from '../lib/ipc/contract';
 
 const LOG_LIMIT = 2000;
@@ -33,6 +34,17 @@ class HarnessStore {
   logs: string[] = $state([]);
   /** 进程仍在跑（starting/ready/restarting）时置 true，控制按钮可用性。 */
   busy = $state(false);
+  /**
+   * 启动失败自救状态（08 设计 §11.5）：快照是否存在（失败态「恢复」按钮）、
+   * 安全 profile 是否就绪、当前是否跑在安全模式。失败/成功相位变化后刷新。
+   */
+  recovery: RecoveryStatus = $state({
+    snapshotAvailable: false,
+    safeProfileReady: false,
+    safeMode: false,
+  });
+  /** 手动恢复/安全模式动作进行中（按钮禁用用）。 */
+  recovering = $state(false);
   private wired = false;
   private unlisten: UnlistenFn | null = null;
   private unlistenProgress: UnlistenFn | null = null;
@@ -53,6 +65,7 @@ class HarnessStore {
       // 状态拿不到不阻塞页面：显示默认的「未运行」。
     }
     await this.refreshProxyUrl();
+    await this.refreshRecovery();
   }
 
   dispose(): void {
@@ -72,6 +85,9 @@ class HarnessStore {
         status.phase === 'starting' || status.phase === 'ready' || status.phase === 'restarting';
       if (status.phase === 'ready') this.starting = false;
       if (status.phase === 'failed' || status.phase === 'stopped') this.starting = false;
+      // 快照/安全模式是文件与启动路径的事实：相位变化后刷新一次
+      // （失败态按钮与安全模式徽标的数据源；fire-and-forget）。
+      void this.refreshRecovery();
       return;
     }
     this.logs.push(`${event.stream === 'stderr' ? '⚠ ' : ''}${event.line}`);
@@ -163,6 +179,41 @@ class HarnessStore {
     } finally {
       this.installing = false;
       this.installProgress = null;
+    }
+  }
+
+  /** 拉取启动失败自救状态（快照/安全 profile/是否安全模式）。 */
+  async refreshRecovery(): Promise<void> {
+    try {
+      this.recovery = await call<RecoveryStatus>('harness_recovery_status');
+    } catch {
+      // 拿不到保持上次值：按钮显示条件宁可保守（不显示）。
+    }
+  }
+
+  /**
+   * 手动恢复到上次能启动的配置（08 设计 §11.5）：停机 → 恢复快照 →
+   * 重启默认 profile。返回被卸下的插件名（前端展示恢复摘要）。
+   */
+  async recoverKnownGood(): Promise<string[]> {
+    this.recovering = true;
+    try {
+      const removed = await call<string[]>('harness_recover_known_good');
+      await this.refreshRecovery();
+      return removed;
+    } finally {
+      this.recovering = false;
+    }
+  }
+
+  /** 以最小安全 profile 启动（逃生舱；默认 profile 不受影响）。 */
+  async safeModeStart(): Promise<void> {
+    this.recovering = true;
+    try {
+      await call<string>('harness_safe_mode_start');
+      await this.refreshRecovery();
+    } finally {
+      this.recovering = false;
     }
   }
 

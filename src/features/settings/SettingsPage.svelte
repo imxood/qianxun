@@ -9,6 +9,7 @@
     BackupManifest,
     BackupRestoreReport,
     HarnessStatus,
+    SyncItemResult,
     SyncStatus,
     ThemePreference,
   } from '../../lib/ipc/contract';
@@ -175,7 +176,7 @@
       ? `创建于 ${restoreSummary.createdAt} · 千寻 v${restoreSummary.appVersion}` +
           `${restoreSummary.dshVersion ? ` · DSH ${restoreSummary.dshVersion}` : ''}；` +
           `工作区 ${restoreSummary.workspaceCount} 个 · 会话 ${restoreSummary.sessionCount} 个 · ` +
-          `文件 ${restoreSummary.fileCount} 个。` +
+          `插件清单 ${restoreSummary.pluginCount} 条 · 文件 ${restoreSummary.fileCount} 个。` +
           '还原将覆盖当前全部千寻设置与 DSH 数据（含 agents 配置与 API Key），' +
           '还原前会自动保存一份当前状态快照；DSH 会被先停止。'
       : '',
@@ -185,9 +186,37 @@
     restoreReport
       ? `已还原 ${restoreReport.restoredFiles} 个文件` +
           `${restoreReport.preRestoreBackup ? `，还原前状态已保存到 ${restoreReport.preRestoreBackup}` : ''}。` +
+          (restoreReport.pluginsMissing > 0
+            ? `清单中有 ${restoreReport.pluginsMissing} 个插件未随包落盘，可在下方一键补装。`
+            : '') +
           '重启千寻以加载还原的数据。'
       : '',
   );
+
+  // ---- 清单补装（08 设计 §5.2）：还原报告里 N > 0 时给一键补装 --------
+  let pinningBack = $state(false);
+  let pinBackMessage = $state('');
+  /** 最近一次还原的清单缺失数（>0 时在备份区显示补装入口；随还原更新）。 */
+  let restoreMissing = $state(0);
+
+  async function pinBack(): Promise<void> {
+    pinningBack = true;
+    pinBackMessage = '';
+    try {
+      const results = await call<SyncItemResult[]>('market_sync_pinned');
+      const failed = results.filter((item) => !item.ok);
+      if (failed.length === 0) {
+        restoreMissing = 0;
+        pinBackMessage = `补装完成：${results.length} 项全部就绪`;
+      } else {
+        pinBackMessage = `补装完成：${results.length - failed.length} 成功，${failed.length} 失败（可重试，已成功项会跳过）`;
+      }
+    } catch (error) {
+      pinBackMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      pinningBack = false;
+    }
+  }
 
   function formatSize(bytes: number): string {
     if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -265,6 +294,7 @@
         await call('harness_stop');
       }
       restoreReport = await call<BackupRestoreReport>('backup_restore', { path });
+      restoreMissing = restoreReport.pluginsMissing;
     } catch (error) {
       backupError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -569,6 +599,27 @@
     onconfirm={() => void restartNow()}
     oncancel={dismissRestoreReport}
   />
+
+  {#if restoreMissing > 0 && restoreReport === null}
+    <div
+      class="flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3"
+    >
+      <p class="text-xs text-warning">
+        上次还原的清单有 {restoreMissing} 个插件未落盘，可一键补装（单个失败不影响其余）。
+      </p>
+      <button
+        class="qx-btn qx-btn-outline qx-btn-sm shrink-0"
+        disabled={pinningBack}
+        data-testid="backup-pin-back"
+        onclick={() => void pinBack()}
+      >
+        {pinningBack ? '补装中…' : `补装插件（${restoreMissing}）`}
+      </button>
+    </div>
+  {/if}
+  {#if pinBackMessage}
+    <p class="text-xs text-muted" role="status">{pinBackMessage}</p>
+  {/if}
 
   <section class="qx-card space-y-1 p-4 text-xs text-muted">
     <h2 class="qx-h">关于</h2>
