@@ -22,6 +22,7 @@
   import { compatBadge, count, filesize } from '../../lib/market/format';
   import type { CatalogData, MarketDetail, MarketListing } from '../../lib/market/types';
   import type { SyncItemResult } from '../../lib/ipc/contract';
+  import { summarizeSyncResults } from '../../lib/market/sync';
   import { pinnedDshVersion } from '../../lib/utils/dsh-version';
   import { harness } from '../../stores/harness.svelte';
   import { settings } from '../../stores/settings.svelte';
@@ -273,9 +274,6 @@
     syncResults = null;
     syncError = '';
   }
-
-  /** 同步失败项计数（结果面板底部汇总文案用）。 */
-  const syncFailedCount = $derived(syncResults?.filter((item) => !item.ok).length ?? 0);
 
   /** 从系统浏览器打开插件主页（GitHub 等）。 */
   function httpsLink(link: string): boolean {
@@ -724,11 +722,7 @@
                 </li>
               {/each}
             </ul>
-            <p class="mt-1.5 text-muted/80">
-              {syncFailedCount > 0
-                ? `其余 ${syncResults.length - syncFailedCount} 项已就绪。失败项可再次点击「同步清单」重试，已成功项会跳过。`
-                : '全部就绪。'}
-            </p>
+            <p class="mt-1.5 text-muted/80">{summarizeSyncResults(syncResults)}</p>
           </div>
         {/if}
       </div>
