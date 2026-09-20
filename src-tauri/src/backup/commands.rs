@@ -56,6 +56,10 @@ pub(crate) struct BackupManifest {
     workspace_count: usize,
     /// 会话记录文件个数（dsh-home/sessions 递归计数）。
     session_count: usize,
+    /// 插件清单条数（settings.json 的 plugins.pinned，读取失败计 0；
+    /// serde default 兼容读取旧包，08 设计 §5.1）。
+    #[serde(default)]
+    plugin_count: usize,
     /// 包内数据文件总数（不含 manifest 自身）。
     file_count: u64,
 }
@@ -70,9 +74,26 @@ impl BackupManifest {
             dsh_version,
             workspace_count: count_workspaces(data_root),
             session_count: count_sessions(data_root),
+            plugin_count: count_pinned_plugins(data_root),
             file_count,
         }
     }
+}
+
+/// 从数据根的 settings.json 数插件清单条数（08 设计 §5.1）。
+/// 任何读取/解析失败都计 0——manifest 是展示信息，不该让导出失败。
+fn count_pinned_plugins(data_root: &Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(data_root.join(SETTINGS_ENTRY)) else {
+        return 0;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return 0;
+    };
+    value
+        .pointer("/plugins/pinned")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| entries.len())
+        .unwrap_or(0)
 }
 
 /// backup_export 返回：落盘位置与体量（前端结果条展示用）。
@@ -91,6 +112,9 @@ pub struct BackupExportResult {
 pub struct BackupRestoreReport {
     pub restored_files: u64,
     pub pre_restore_backup: Option<String>,
+    /// 还原的清单里，当前 profile 未落盘的插件个数（08 设计 §5.2；
+    /// > 0 时前端显示「补装插件（N）」按钮）。
+    pub plugins_missing: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +307,7 @@ fn restore_archive(archive_path: &Path, data_root: &Path) -> Result<BackupRestor
     Ok(BackupRestoreReport {
         restored_files,
         pre_restore_backup: pre_restore,
+        plugins_missing: 0,
     })
 }
 
@@ -572,17 +597,24 @@ pub async fn backup_restore(app: AppHandle, path: String) -> Result<BackupRestor
             .settings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = fresh;
+        *guard = fresh.clone();
     }
+    // 清单对账（08 设计 §5.2）：还原后有多少 pinned 插件未落盘。
+    let plugins_missing = crate::market::plugins_missing(&app, &fresh);
     crate::logging::log(
         "info",
         &format!(
-            "[backup] 已还原 {} 个文件（回滚包：{}）",
+            "[backup] 已还原 {} 个文件（回滚包：{}；清单缺 {} 个插件）",
             report.restored_files,
-            report.pre_restore_backup.as_deref().unwrap_or("无")
+            report.pre_restore_backup.as_deref().unwrap_or("无"),
+            plugins_missing
         ),
     );
-    Ok(report)
+    Ok(BackupRestoreReport {
+        restored_files: report.restored_files,
+        pre_restore_backup: report.pre_restore_backup,
+        plugins_missing,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -756,6 +788,7 @@ mod tests {
             dsh_version: None,
             workspace_count: 0,
             session_count: 0,
+            plugin_count: 0,
             file_count: 0,
         };
         writer
@@ -794,6 +827,7 @@ mod tests {
             dsh_version: None,
             workspace_count: 0,
             session_count: 0,
+            plugin_count: 0,
             file_count: 0,
         };
         writer
