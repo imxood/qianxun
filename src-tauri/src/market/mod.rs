@@ -8,6 +8,7 @@
 
 pub mod registry;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -16,14 +17,45 @@ use tauri::{AppHandle, Manager};
 use crate::error::{Error, Result};
 use crate::harness::{self, install, supervisor::Stream, DEFAULT_PROFILE};
 use crate::paths;
-use crate::settings::Settings;
+use crate::settings::{PinnedPlugin, Settings};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// profile 模板自带的内核包：不在市场里管理、不可卸载。
-const BUILTIN_PREFIX: &str = "@deepseek-ai/";
+pub const BUILTIN_PREFIX: &str = "@deepseek-ai/";
+
+/// market 域并发位（08 设计 §7）：挡住「同步进行中又点单个安装」。
+/// 只挡本域，不做跨窗队列；进程级即可（千寻单实例，ADR 见 lib.rs）。
+static MARKET_BUSY: AtomicBool = AtomicBool::new(false);
+
+fn claim_busy() -> Result<BusyGuard> {
+    if MARKET_BUSY.swap(true, Ordering::SeqCst) {
+        return Err(Error::Market(
+            "已有插件变更在进行中，请等它完成再操作".to_owned(),
+        ));
+    }
+    Ok(BusyGuard)
+}
+
+struct BusyGuard;
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        MARKET_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 安全模式激活时冻结一切插件变更（08 设计 §11.3-4）。
+fn ensure_not_safe_mode(app: &AppHandle) -> Result<()> {
+    if harness::commands::safe_mode_active(app) {
+        return Err(Error::Market(
+            "安全模式中不进行插件变更：请先恢复默认 profile 再操作".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 /// 已装清单里的一项（profile package.json 事实）。
 #[derive(Serialize)]
@@ -52,6 +84,8 @@ pub fn market_installed(app: AppHandle) -> Result<Vec<InstalledBundle>> {
 /// 安装精确版本并加入 bundles。每一步与 pnpm 输出都进 supervisor 日志。
 #[tauri::command]
 pub async fn market_install(app: AppHandle, name: String, version: String) -> Result<()> {
+    let _busy = claim_busy()?;
+    ensure_not_safe_mode(&app)?;
     let settings = crate::settings_snapshot(&app)?;
     let registry = settings.mirrors.registry_url();
     let profile = profile_dir(&app, &settings)?;
@@ -104,6 +138,38 @@ pub async fn market_install(app: AppHandle, name: String, version: String) -> Re
         Stream::Stdout,
         "[插件] 已写入装配清单（dsh.profile.bundles）".to_owned(),
     );
+    // 反向校验（08 设计 §3）：pnpm 退出码 0 不够，node_modules 里得真有
+    // 这个版本才算装成功。不一致时报错但保留现场（bundles 已含该包），
+    // 让用户用卸载清理——不做自动回滚。
+    if let Some(actual) = deployed_version(&profile, &name) {
+        if actual != detail.version {
+            let failure = Error::Market(format!(
+                "安装完成但落盘校验失败：期望 {name}@{}，实际 {actual}；请在已安装列表卸载后重试",
+                detail.version
+            ));
+            supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+            return Err(failure);
+        }
+    } else {
+        let failure = Error::Market(format!(
+            "安装完成但 {name} 未落盘（node_modules 缺失）；请在已安装列表卸载后重试"
+        ));
+        supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
+        return Err(failure);
+    }
+    // 记入插件清单（08 设计 §2）：失败只记 warn 不回滚安装——清单是增强信息。
+    if let Err(failure) = crate::settings::update(&app, |settings| {
+        settings
+            .plugins
+            .pin(PinnedPlugin::new(&name, &detail.version));
+    }) {
+        supervisor.note(
+            Stream::Stderr,
+            format!("[插件] 警告：清单未更新（{failure}），不影响本次安装"),
+        );
+    } else {
+        supervisor.note(Stream::Stdout, "[插件] 已记入插件清单".to_owned());
+    }
     supervisor.note(
         Stream::Stdout,
         // 用 registry versions 条目里复核到的版本（= 请求版本），形成闭环。
@@ -118,6 +184,8 @@ pub async fn market_install(app: AppHandle, name: String, version: String) -> Re
 /// 卸载：移出 bundles + pnpm rm。每一步与 pnpm 输出都进 supervisor 日志。
 #[tauri::command]
 pub async fn market_remove(app: AppHandle, name: String) -> Result<()> {
+    let _busy = claim_busy()?;
+    ensure_not_safe_mode(&app)?;
     let settings = crate::settings_snapshot(&app)?;
     let profile = profile_dir(&app, &settings)?;
     if name.starts_with(BUILTIN_PREFIX) {
@@ -147,6 +215,13 @@ pub async fn market_remove(app: AppHandle, name: String) -> Result<()> {
         supervisor.note(Stream::Stderr, format!("[插件] 卸载失败：{failure}"));
         return outcome;
     }
+    // 从清单移除（08 设计 §3）：失败只记 warn 不回滚卸载。
+    if let Err(failure) = crate::settings::update(&app, |settings| settings.plugins.unpin(&name)) {
+        supervisor.note(
+            Stream::Stderr,
+            format!("[插件] 警告：清单未更新（{failure}），不影响本次卸载"),
+        );
+    }
     supervisor.note(
         Stream::Stdout,
         format!("[插件] {name} 卸载完成，DSH 下次启动生效"),
@@ -167,6 +242,56 @@ fn profile_dir(app: &AppHandle, settings: &Settings) -> Result<std::path::PathBu
         )));
     }
     Ok(dir)
+}
+
+/// 反向校验（08 设计 §3）：node_modules/<name>/package.json 存在且读出
+/// version 字段。None = 未落盘或 manifest 不合法。
+pub(crate) fn deployed_version(profile: &std::path::Path, name: &str) -> Option<String> {
+    let manifest_path = profile.join("node_modules").join(name).join("package.json");
+    let body = std::fs::read_to_string(manifest_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    value.get("version")?.as_str().map(str::to_owned)
+}
+
+/// 清单里当前 profile 未落盘的插件个数（备份还原后的对账，08 设计 §5.2）。
+pub fn plugins_missing(app: &AppHandle, settings: &Settings) -> usize {
+    let Ok(profile) = profile_dir(app, settings) else {
+        return settings.plugins.pinned.len();
+    };
+    settings
+        .plugins
+        .pinned
+        .iter()
+        .filter(|entry| {
+            deployed_version(&profile, &entry.name).as_deref() != Some(entry.version.as_str())
+        })
+        .count()
+}
+
+/// 单项同步动作（纯数据，便于单测）：sync 前先规划，再逐项执行。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SyncAction {
+    /// 已落盘且版本一致 → 跳过（幂等）。
+    Skip,
+    /// 需要执行安装（含 registry 复核 + pnpm + bundles + 反向校验）。
+    Install,
+    /// 条目本身有问题（内核包 / 名字或版本非法）→ 跳过并报告原因。
+    Reject(&'static str),
+}
+
+/// 规划一个清单条目（08 设计 §4.1 步骤 1 的纯函数形态）。
+pub(crate) fn plan_sync_entry(entry: &PinnedPlugin, deployed: Option<&str>) -> SyncAction {
+    use crate::settings::PluginsSettings;
+    if PluginsSettings::is_builtin(&entry.name) {
+        return SyncAction::Reject("内核组件不走清单");
+    }
+    if entry.name.trim().is_empty() || entry.version.trim().is_empty() {
+        return SyncAction::Reject("清单条目无效");
+    }
+    if deployed == Some(entry.version.as_str()) {
+        return SyncAction::Skip;
+    }
+    SyncAction::Install
 }
 
 /// 从 profile manifest 读已装事实；profile 还没有 package.json 时为空。
@@ -356,6 +481,167 @@ fn market_error(failure: crate::error::Error) -> Error {
     Error::Market(text.to_owned())
 }
 
+// ---- 清单同步（08 设计 §4）-------------------------------------------------
+
+/// 逐项结果：前端逐行渲染。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncItemResult {
+    pub name: String,
+    pub ok: bool,
+    /// 已落盘且版本一致 → 跳过（幂等，不算失败）。
+    pub skipped: bool,
+    /// 成功：版本；跳过：「已是 x.y.z」；失败：错误摘要。
+    pub detail: String,
+}
+
+/// 按清单逐个补装。顺序执行不并发（pnpm 对同一 profile 的并发写会互踩）；
+/// 单项失败记录后**继续下一项**（G4），外层 Err 只留给整体性故障。
+#[tauri::command]
+pub async fn market_sync_pinned(app: AppHandle) -> Result<Vec<SyncItemResult>> {
+    let _busy = claim_busy()?;
+    ensure_not_safe_mode(&app)?;
+    let settings = crate::settings_snapshot(&app)?;
+    let profile = profile_dir(&app, &settings)?;
+    let supervisor = app.state::<crate::AppState>().harness.supervisor.clone();
+    let total = settings.plugins.pinned.len();
+    supervisor.note(Stream::Stdout, format!("[插件] 开始同步清单（{total} 项）"));
+
+    let mut results = Vec::new();
+    for entry in &settings.plugins.pinned {
+        let deployed = deployed_version(&profile, &entry.name);
+        // 规划与执行分离：纯函数部分可单测（plan_sync_entry）。
+        match plan_sync_entry(entry, deployed.as_deref()) {
+            SyncAction::Skip => {
+                results.push(SyncItemResult {
+                    name: entry.name.clone(),
+                    ok: true,
+                    skipped: true,
+                    detail: format!("已是 {}", entry.version),
+                });
+            }
+            SyncAction::Reject(reason) => {
+                results.push(SyncItemResult {
+                    name: entry.name.clone(),
+                    ok: false,
+                    skipped: true,
+                    detail: reason.to_owned(),
+                });
+            }
+            SyncAction::Install => {
+                let item = install_pinned_item(&app, &settings, &supervisor, entry).await;
+                results.push(item);
+            }
+        }
+    }
+
+    let failed = results.iter().filter(|item| !item.ok).count();
+    let installed = results
+        .iter()
+        .filter(|item| item.ok && !item.skipped)
+        .count();
+    supervisor.note(
+        Stream::Stdout,
+        format!(
+            "[插件] 清单同步完成：安装 {installed}，跳过 {}，失败 {failed}",
+            results.len() - installed - failed
+        ),
+    );
+    Ok(results)
+}
+
+/// 执行一个清单条目的安装（registry 复核 → pnpm → bundles → 反向校验 → 记清单）。
+/// 失败不影响调用方继续下一项（G4）。
+async fn install_pinned_item(
+    app: &AppHandle,
+    settings: &Settings,
+    supervisor: &std::sync::Arc<harness::supervisor::Supervisor>,
+    entry: &PinnedPlugin,
+) -> SyncItemResult {
+    let name = &entry.name;
+    let registry = settings.mirrors.registry_url();
+    let mut failure_text = String::new();
+    let mut ok = false;
+
+    let detail = registry::detail(&registry, name, &entry.version).await;
+    let detail = match detail {
+        Ok(detail) => Some(detail),
+        Err(failure) => {
+            failure_text = failure.to_string();
+            None
+        }
+    };
+    if let Some(detail) = &detail {
+        if let Err(failure) = registry::validate(detail) {
+            failure_text = failure.to_string();
+        }
+    }
+    if failure_text.is_empty() {
+        if let Err(failure) = run_pnpm(
+            app,
+            settings,
+            supervisor,
+            ["add".into(), format!("{name}@{}", entry.version)],
+            "清单补装",
+            true,
+        )
+        .await
+        {
+            failure_text = failure.to_string();
+        }
+    }
+    if failure_text.is_empty() {
+        if let Err(failure) =
+            mutate_bundles(&profile_dir(app, settings).unwrap_or_default(), |bundles| {
+                if !bundles.iter().any(|existing| existing == name) {
+                    bundles.push(name.clone());
+                }
+            })
+        {
+            failure_text = failure.to_string();
+        }
+    }
+    if failure_text.is_empty() {
+        let profile = profile_dir(app, settings).unwrap_or_default();
+        if deployed_version(&profile, name).as_deref() != Some(entry.version.as_str()) {
+            failure_text = format!("落盘校验失败：node_modules 里不是 {}", entry.version);
+        }
+    }
+    if failure_text.is_empty() {
+        // 记清单失败不视为该项失败（与 market_install 同口径：清单是增强信息）。
+        if let Err(failure) = crate::settings::update(app, |settings| {
+            settings
+                .plugins
+                .pin(PinnedPlugin::new(name, &entry.version));
+        }) {
+            supervisor.note(
+                Stream::Stderr,
+                format!("[插件] 警告：{name} 清单未更新（{failure}）"),
+            );
+        }
+        supervisor.note(
+            Stream::Stdout,
+            format!("[插件] {}@{} 补装完成", name, entry.version),
+        );
+        ok = true;
+    } else {
+        supervisor.note(
+            Stream::Stderr,
+            format!("[插件] {}@{} 补装失败：{failure_text}", name, entry.version),
+        );
+    }
+    SyncItemResult {
+        name: name.clone(),
+        ok,
+        skipped: false,
+        detail: if ok {
+            format!("已安装 {}", entry.version)
+        } else {
+            failure_text
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{bundles_of, installed, mutate_bundles};
@@ -434,5 +720,97 @@ mod tests {
                 .unwrap();
         assert_eq!(bundles_of(&manifest), ["b"]);
         fs::remove_dir_all(&profile).ok();
+    }
+
+    // ---- 清单与同步（08 设计 §2/§3/§4）------------------------------------
+
+    use super::{deployed_version, plan_sync_entry, SyncAction};
+    use crate::settings::{PinnedPlugin, PluginsSettings};
+
+    #[test]
+    fn pinned清单记入更新去重排序() {
+        let mut plugins = PluginsSettings::default();
+        plugins.pin(PinnedPlugin::new("zeta", "1.0.0"));
+        plugins.pin(PinnedPlugin::new("alpha", "0.2.0"));
+        plugins.pin(PinnedPlugin::new("zeta", "1.1.0"));
+        // 更新不重复（同包新版本覆盖）。
+        assert_eq!(plugins.pinned.len(), 2);
+        // 按包名小写排序。
+        assert_eq!(plugins.pinned[0].name, "alpha");
+        assert_eq!(plugins.pinned[1].version, "1.1.0");
+
+        plugins.unpin("alpha");
+        assert_eq!(plugins.pinned.len(), 1);
+        // 不存在的移除是 no-op。
+        plugins.unpin("ghost");
+        assert_eq!(plugins.pinned.len(), 1);
+    }
+
+    #[test]
+    fn settings老文件无plugins字段时清单为空() {
+        let text = r#"{
+            "schemaVersion": 1,
+            "theme": "system",
+            "window": { "closeToTray": true, "startMinimized": false, "geometry": null },
+            "dsh": { "port": 23090, "allowRandomFallback": false, "versionStrategy": "pinned", "autostart": true, "home": "isolated" },
+            "mirrors": { "nodeBinary": "auto", "npmRegistry": "npmmirror" },
+            "search": { "rootHistory": [] },
+            "hotkeys": { "screenshot": "Ctrl+Shift+A" },
+            "notes": { "vaultDir": "" }
+        }"#;
+        let settings: crate::settings::Settings = serde_json::from_str(text).unwrap();
+        assert!(settings.plugins.pinned.is_empty());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn deployed_version三态_缺失为None_一致与他版都能读出() {
+        let profile = scratch("deployed");
+        fs::create_dir_all(profile.join("node_modules/pkg")).unwrap();
+        // 缺失：None。
+        assert_eq!(deployed_version(&profile, "pkg"), None);
+        // 落盘：读出版本。
+        fs::write(
+            profile.join("node_modules/pkg/package.json"),
+            r#"{ "name": "pkg", "version": "1.2.3" }"#,
+        )
+        .unwrap();
+        assert_eq!(deployed_version(&profile, "pkg").as_deref(), Some("1.2.3"));
+        // manifest 不合法 → None（按未落盘处理）。
+        fs::write(profile.join("node_modules/pkg/package.json"), "not json").unwrap();
+        assert_eq!(deployed_version(&profile, "pkg"), None);
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn sync规划_跳过与安装与拒绝() {
+        // 已落盘且版本一致 → Skip（幂等：重复点同步不重装）。
+        assert_eq!(
+            plan_sync_entry(&PinnedPlugin::new("a", "1.0.0"), Some("1.0.0")),
+            SyncAction::Skip
+        );
+        // 未落盘或版本漂移 → Install（pnpm add 精确版本天然收敛）。
+        assert_eq!(
+            plan_sync_entry(&PinnedPlugin::new("a", "1.0.0"), None),
+            SyncAction::Install
+        );
+        assert_eq!(
+            plan_sync_entry(&PinnedPlugin::new("a", "2.0.0"), Some("1.0.0")),
+            SyncAction::Install
+        );
+        // 内核包混入 → 拒绝。
+        assert_eq!(
+            plan_sync_entry(&PinnedPlugin::new("@deepseek-ai/dsh-base", "1.0.0"), None),
+            SyncAction::Reject("内核组件不走清单")
+        );
+        // 条目非法 → 拒绝。
+        assert_eq!(
+            plan_sync_entry(&PinnedPlugin::new("", "1.0.0"), None),
+            SyncAction::Reject("清单条目无效")
+        );
+        assert_eq!(
+            plan_sync_entry(&PinnedPlugin::new("a", "  "), None),
+            SyncAction::Reject("清单条目无效")
+        );
     }
 }

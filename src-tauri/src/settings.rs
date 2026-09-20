@@ -164,6 +164,58 @@ pub struct SearchSettings {
     pub root_history: Vec<String>,
 }
 
+/// 插件清单里的一项（08 设计 §2.1）：装成功的 name@version。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PinnedPlugin {
+    /// npm 包名；内核包（@deepseek-ai/ 前缀）不入清单。
+    pub name: String,
+    /// 安装时的精确版本（registry detail 复核值）。
+    pub version: String,
+}
+
+impl PinnedPlugin {
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+}
+
+/// 插件清单域（08 设计 §2）：`plugins.pinned` 随 settings.json 进备份包。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PluginsSettings {
+    pub pinned: Vec<PinnedPlugin>,
+}
+
+impl PluginsSettings {
+    /// 记入/更新一项并保持去重 + 按包名小写排序（文件 diff 干净）。
+    pub fn pin(&mut self, plugin: PinnedPlugin) {
+        self.pinned.retain(|entry| entry.name != plugin.name);
+        self.pinned.push(plugin);
+        self.normalize();
+    }
+
+    /// 移除一项；不存在是 no-op。
+    pub fn unpin(&mut self, name: &str) {
+        self.pinned.retain(|entry| entry.name != name);
+        self.normalize();
+    }
+
+    /// 内核包混入检测（08 设计 §7）：@deepseek-ai/ 前缀不走清单。
+    pub fn is_builtin(name: &str) -> bool {
+        name.starts_with(crate::market::BUILTIN_PREFIX)
+    }
+
+    fn normalize(&mut self) {
+        self.pinned
+            .sort_by_key(|entry| entry.name.to_ascii_lowercase());
+        self.pinned.dedup_by(|a, b| a.name == b.name);
+    }
+}
+
 /// 截屏热键（M3）：Tauri 快捷键语法，如 "Ctrl+Shift+A"。空串 = 不注册。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -203,6 +255,8 @@ pub struct Settings {
     pub hotkeys: HotkeysSettings,
     pub notes: NotesSettings,
     pub remote: crate::remote::RemoteSettings,
+    /// 插件清单（08 设计 §2）：装成功的 name@version，随备份包走。
+    pub plugins: PluginsSettings,
 }
 
 impl Default for Settings {
@@ -217,6 +271,7 @@ impl Default for Settings {
             hotkeys: HotkeysSettings::default(),
             notes: NotesSettings::default(),
             remote: crate::remote::RemoteSettings::default(),
+            plugins: PluginsSettings::default(),
         }
     }
 }
@@ -340,8 +395,14 @@ fn parse(text: &str) -> Result<Settings> {
 fn migrate(mut settings: Settings) -> Settings {
     // 网关端口：17400 是历史默认；持久化过旧默认的设置文件迁移到
     // 按构建模式的新默认（release 23090 / debug 23091）。
-    if settings.remote.port == crate::remote::LEGACY_GATEWAY_PORT {
-        settings.remote.port = crate::remote::default_gateway_port();
+    // 备份还原场景下也会带进另一构建模式（debug ↔ release）的默认值——
+    // 那个端口此刻正被原实例占用，会撞 EADDRINUSE；同样迁到当前模式默认。
+    let current_default = crate::remote::default_gateway_port();
+    let other_mode_default = if cfg!(debug_assertions) { 23090 } else { 23091 };
+    if settings.remote.port == crate::remote::LEGACY_GATEWAY_PORT
+        || settings.remote.port == other_mode_default
+    {
+        settings.remote.port = current_default;
     }
     settings
 }
@@ -350,6 +411,26 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     let text = serde_json::to_string_pretty(settings)
         .map_err(|error| Error::SettingsWrite(error.to_string()))?;
     atomic::write(path, text.as_bytes()).map_err(|error| Error::SettingsWrite(error.to_string()))
+}
+
+/// 就地更新设置并落盘（08 设计：插件清单由后端命令在安装/卸载成功后维护）。
+/// 先落盘再更新内存，失败时内存仍是旧值（同 settings_update 的顺序）。
+pub fn update<F>(app: &AppHandle, change: F) -> Result<()>
+where
+    F: FnOnce(&mut Settings),
+{
+    use tauri::Manager;
+    let path = paths::settings_path(app)?;
+    let state = app.state::<crate::AppState>();
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut next = guard.clone();
+    change(&mut next);
+    save(&path, &next)?;
+    *guard = next;
+    Ok(())
 }
 
 /// 剥除补丁里不允许前端修改的字段：schemaVersion 与窗口几何。
@@ -454,6 +535,21 @@ mod tests {
         // 用户显式配置过的其它端口原样保留，不被迁移波及。
         let custom = parse(r#"{"remote": {"port": 30000}}"#).unwrap();
         assert_eq!(custom.remote.port, 30000);
+    }
+
+    #[test]
+    fn 另一构建模式的网关端口也迁移() {
+        // release 备份还原到 debug：备份里 port=23090（release 默认），
+        // 此刻该端口被 release 实例占用会 EADDRINUSE，必须迁到 23091。
+        // debug 备份还原到 release：对称地 23091 → 23090。
+        let other_mode_port = if cfg!(debug_assertions) {
+            23090u16
+        } else {
+            23091
+        };
+        let text = format!(r#"{{"remote": {{"port": {other_mode_port}}}}}"#);
+        let settings = parse(&text).unwrap();
+        assert_eq!(settings.remote.port, crate::remote::default_gateway_port());
     }
 
     #[test]
