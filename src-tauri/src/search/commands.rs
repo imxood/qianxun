@@ -341,7 +341,7 @@ pub fn search_files(
                 }
             }
             // 按路径字典序稳定排序，便于翻页。
-            matched.sort_by(|a, b| a.1.relative_path(picker).cmp(&b.1.relative_path(picker)));
+            matched.sort_by_key(|entry| entry.1.relative_path(picker));
             let total_matched = matched.len();
             let page_items: Vec<&fff_search::FileItem> = matched
                 .into_iter()
@@ -392,7 +392,7 @@ pub fn search_files(
                     matched.push((idx, item));
                 }
             }
-            matched.sort_by(|a, b| a.1.relative_path(picker).cmp(&b.1.relative_path(picker)));
+            matched.sort_by_key(|entry| entry.1.relative_path(picker));
             let total_matched = matched.len();
             let page_items: Vec<&fff_search::FileItem> = matched
                 .into_iter()
@@ -940,21 +940,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("qx-search-modes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).expect("建目录");
-        std::fs::write(
-            root.join("src/hello_world.rs"),
-            "fn main() {}\n",
-        )
-        .expect("写 hello");
-        std::fs::write(
-            root.join("src/goodbye.rs"),
-            "fn main() {}\n",
-        )
-        .expect("写 goodbye");
-        std::fs::write(
-            root.join("src/Hello_Other.rs"),
-            "fn main() {}\n",
-        )
-        .expect("写 Hello_Other");
+        std::fs::write(root.join("src/hello_world.rs"), "fn main() {}\n").expect("写 hello");
+        std::fs::write(root.join("src/goodbye.rs"), "fn main() {}\n").expect("写 goodbye");
+        std::fs::write(root.join("src/Hello_Other.rs"), "fn main() {}\n").expect("写 Hello_Other");
 
         let shared = SharedFilePicker::default();
         FilePicker::new_with_shared_state(
@@ -991,7 +979,10 @@ mod tests {
         sub_hits.sort();
         assert_eq!(
             sub_hits,
-            vec!["src/Hello_Other.rs".to_string(), "src/hello_world.rs".to_string()],
+            vec![
+                "src/Hello_Other.rs".to_string(),
+                "src/hello_world.rs".to_string()
+            ],
             "substring 'hello' 大小写不敏感：{sub_hits:?}"
         );
 
@@ -1009,10 +1000,10 @@ mod tests {
         rx_hits.sort();
         assert_eq!(rx_hits, vec!["src/hello_world.rs".to_string()]);
 
-        // 3. regex 语法错 "["：返空 results（不 panic）
-        let bad = regex::RegexBuilder::new("[")
-            .case_insensitive(true)
-            .build();
+        // 3. regex 语法错 "["：返空 results（不 panic）。
+        // 故意传非法 pattern 验证容错路径，屏蔽 clippy 的 invalid_regex。
+        #[allow(clippy::invalid_regex)]
+        let bad = regex::RegexBuilder::new("[").case_insensitive(true).build();
         assert!(bad.is_err(), "应编译失败");
 
         let _ = std::fs::remove_dir_all(root);
