@@ -9,6 +9,7 @@ pub mod health;
 pub mod install;
 pub mod node_install;
 pub mod readiness;
+pub mod recovery;
 pub mod supervisor;
 
 use std::path::PathBuf;
@@ -212,8 +213,14 @@ pub fn dsh_home(app: &tauri::AppHandle, settings: &Settings) -> PathBuf {
     }
 }
 
-/// 把当前环境变成可运行的启动计划，或说清缺什么。
-pub fn launch_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<LaunchPlan> {
+/// 把当前环境变成可运行的启动计划（指定 profile），或说清缺什么。
+/// `profile`：默认启动用 `DEFAULT_PROFILE`，安全模式用
+/// `recovery::SAFE_PROFILE`（08 设计 §11）。
+pub fn launch_plan_for(
+    app: &tauri::AppHandle,
+    settings: &Settings,
+    profile: &str,
+) -> Result<LaunchPlan> {
     let environment = environment(app, settings);
 
     let node = environment.node.clone().ok_or(Error::NoNodeRuntime {
@@ -257,7 +264,7 @@ pub fn launch_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<Launch
     Ok(LaunchPlan {
         node: node.path,
         entry: environment.dsh_entry,
-        profile: DEFAULT_PROFILE.to_owned(),
+        profile: profile.to_owned(),
         workspace: environment.workspace,
         host: BIND_HOST.to_owned(),
         // ADR-002 修订：启动端口恒为 0（OS 分配随机空闲端口）。内核层面

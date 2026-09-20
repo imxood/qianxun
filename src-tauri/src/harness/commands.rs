@@ -21,6 +21,9 @@ pub struct HarnessState {
     installing: AtomicBool,
     /// 串行化所有会观察或替换运行时的操作（安装前停机等）。
     lifecycle: Mutex<()>,
+    /// 当前运行的 DSH 是否来自最小安全 profile（08 设计 §11）。
+    /// 启动默认 profile 时复位；market 域据此冻结插件变更。
+    safe_mode: AtomicBool,
 }
 
 impl HarnessState {
@@ -29,8 +32,17 @@ impl HarnessState {
             supervisor,
             installing: AtomicBool::new(false),
             lifecycle: Mutex::new(()),
+            safe_mode: AtomicBool::new(false),
         }
     }
+}
+
+/// market 域冻结检查用（08 设计 §11.3-4）。
+pub fn safe_mode_active(app: &AppHandle) -> bool {
+    app.state::<crate::AppState>()
+        .harness
+        .safe_mode
+        .load(Ordering::SeqCst)
 }
 
 /// 一行 DSH 输出（日志面板的数据形状）。
@@ -91,6 +103,7 @@ pub async fn harness_stop(app: AppHandle) -> Result<()> {
 
 /// 重启 DSH：按当前设置先停（等监督循环退出）再拉起；未运行时等价启动。
 /// 桥/设置/版本变化后的「重启生效」都走这里，与生命周期闸门串行。
+/// 复用 start_locked：失败时同样享受 known-good 一级自救（08 设计 §11.2）。
 #[tauri::command]
 pub async fn harness_restart(app: AppHandle) -> Result<String> {
     let state = app.state::<crate::AppState>();
@@ -99,9 +112,7 @@ pub async fn harness_restart(app: AppHandle) -> Result<String> {
     supervisor.note(Stream::Stdout, "[DSH] 重启".to_owned());
     supervisor.stop().await;
     supervisor.wait_until_inactive().await?;
-    let settings = crate::settings_snapshot(&app)?;
-    let plan = super::launch_plan(&app, &settings)?;
-    Arc::clone(&state.harness.supervisor).start(plan).await
+    start_locked(&app).await
 }
 
 /// 安装（或重装）DSH。pnpm 的每一行输出都通过日志事件实时转发，
@@ -118,10 +129,14 @@ pub async fn harness_install(app: AppHandle) -> Result<()> {
     progress(InstallProgress::Done);
 
     match &outcome {
-        Ok(()) => state
-            .harness
-            .supervisor
-            .note(Stream::Stdout, format!("{} 安装完成", install::PACKAGE)),
+        Ok(()) => {
+            state
+                .harness
+                .supervisor
+                .note(Stream::Stdout, format!("{} 安装完成", install::PACKAGE));
+            // 安全 profile 预热（08 设计 §11.4）：首次安装成功后就地建好。
+            ensure_safe_profile_warm(&app);
+        }
         Err(failure) => state
             .harness
             .supervisor
@@ -223,11 +238,186 @@ pub fn harness_log(state: State<'_, crate::AppState>) -> Vec<LogLine> {
 pub async fn start_managed(app: &AppHandle) -> Result<String> {
     let state = app.state::<crate::AppState>();
     let _gate = state.harness.lifecycle.lock().await;
+    start_locked(app).await
+}
+
+/// 持有生命周期闸门后的启动路径（start_managed 与 harness_restart 共用）。
+///
+/// 内含启动失败的一级自救（08 设计 §11.2）：默认 profile 启动失败且
+/// known-good 快照与当前 manifest 不同 → 自动恢复快照重试一次。快照相同
+/// 说明 manifest 不是故障原因，重试没有意义，直接报原始错误。
+async fn start_locked(app: &AppHandle) -> Result<String> {
+    let state = app.state::<crate::AppState>();
     let settings = crate::settings_snapshot(app)?;
-    let plan = super::launch_plan(app, &settings)?;
+    let profile_dir = default_profile_dir(app, &settings);
+    let plan = super::launch_plan_for(app, &settings, super::DEFAULT_PROFILE)?;
     state
         .harness
         .supervisor
         .note(Stream::Stdout, "[DSH] 启动".to_owned());
-    Arc::clone(&state.harness.supervisor).start(plan).await
+    state.harness.safe_mode.store(false, Ordering::SeqCst);
+    match Arc::clone(&state.harness.supervisor).start(plan).await {
+        Ok(origin) => {
+            after_successful_start(app, &profile_dir);
+            Ok(origin)
+        }
+        Err(failure) => {
+            // 一级自救：known-good 快照恢复 + 重试一次。
+            if !super::recovery::snapshot_differs(&profile_dir) {
+                return Err(failure);
+            }
+            state
+                .harness
+                .supervisor
+                .note(Stream::Stderr, format!("[DSH] 启动失败：{failure}"));
+            state.harness.supervisor.note(
+                Stream::Stderr,
+                "[DSH] 尝试恢复到上次能启动的配置…".to_owned(),
+            );
+            let summary = match super::recovery::recover(&profile_dir) {
+                Ok(summary) => summary,
+                Err(cause) => {
+                    state
+                        .harness
+                        .supervisor
+                        .note(Stream::Stderr, format!("[DSH] 快照恢复失败：{cause}"));
+                    return Err(failure);
+                }
+            };
+            if !summary.removed_plugins.is_empty() {
+                state.harness.supervisor.note(
+                    Stream::Stderr,
+                    format!(
+                        "[DSH] 已从装配清单卸下：{}（文件保留，可重新安装）",
+                        summary.removed_plugins.join("、")
+                    ),
+                );
+            }
+            let retry_plan = super::launch_plan_for(app, &settings, super::DEFAULT_PROFILE)?;
+            match Arc::clone(&state.harness.supervisor)
+                .start(retry_plan)
+                .await
+            {
+                Ok(origin) => {
+                    state
+                        .harness
+                        .supervisor
+                        .note(Stream::Stdout, "[DSH] 已用已知良好配置启动成功".to_owned());
+                    after_successful_start(app, &profile_dir);
+                    Ok(origin)
+                }
+                Err(retry_failure) => {
+                    state.harness.supervisor.note(
+                        Stream::Stderr,
+                        format!("[DSH] 已知良好配置也无法启动：{retry_failure}"),
+                    );
+                    Err(retry_failure)
+                }
+            }
+        }
+    }
+}
+
+/// 成功启动默认 profile 之后的两件家务（都只记 warn，不阻断）：
+/// ① 快照当前 manifest 为 known-good；② 校验安全 profile 仍在（预热）。
+fn after_successful_start(app: &AppHandle, profile_dir: &std::path::Path) {
+    if let Err(cause) = super::recovery::write_snapshot(profile_dir) {
+        crate::logging::log("warn", &format!("[DSH] known-good 快照写入失败：{cause}"));
+    }
+    ensure_safe_profile_warm(app);
+}
+
+/// 安全 profile 预热（08 设计 §11.4）：缺失即静默重建。它没有依赖要装
+/// （内核包随运行时落位），真正需要逃生舱时不应有等待。
+fn ensure_safe_profile_warm(app: &AppHandle) {
+    let Ok(settings) = crate::settings_snapshot(app) else {
+        return;
+    };
+    let profiles_dir = super::dsh_home(app, &settings).join("profiles");
+    if super::recovery::safe_profile_ready(&profiles_dir) {
+        return;
+    }
+    if let Err(cause) = super::recovery::prepare_safe_profile(&profiles_dir) {
+        crate::logging::log("warn", &format!("[DSH] 安全 profile 预热失败：{cause}"));
+    }
+}
+
+fn default_profile_dir(
+    app: &AppHandle,
+    settings: &crate::settings::Settings,
+) -> std::path::PathBuf {
+    super::dsh_home(app, settings)
+        .join("profiles")
+        .join(super::DEFAULT_PROFILE)
+}
+
+/// 恢复状态速览（前端决定失败态显示哪些按钮）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryStatus {
+    /// known-good 快照是否存在（失败态「恢复」按钮的显示条件）。
+    pub snapshot_available: bool,
+    /// 安全 profile 是否就绪。
+    pub safe_profile_ready: bool,
+    /// 当前运行的 DSH 是否来自安全 profile。
+    pub safe_mode: bool,
+}
+
+#[tauri::command]
+pub fn harness_recovery_status(app: AppHandle) -> Result<RecoveryStatus> {
+    let settings = crate::settings_snapshot(&app)?;
+    let profiles_dir = super::dsh_home(&app, &settings).join("profiles");
+    Ok(RecoveryStatus {
+        snapshot_available: super::recovery::snapshot_exists(&default_profile_dir(&app, &settings)),
+        safe_profile_ready: super::recovery::safe_profile_ready(&profiles_dir),
+        safe_mode: safe_mode_active(&app),
+    })
+}
+
+/// 手动恢复到上次能启动的配置（08 设计 §11.5）：停机 → 恢复快照 →
+/// 以默认 profile 重新启动。返回卸下的插件名（前端展示恢复摘要）。
+#[tauri::command]
+pub async fn harness_recover_known_good(app: AppHandle) -> Result<Vec<String>> {
+    let state = app.state::<crate::AppState>();
+    let _gate = state.harness.lifecycle.lock().await;
+    let supervisor = Arc::clone(&state.harness.supervisor);
+    supervisor.stop().await;
+    supervisor.wait_until_inactive().await?;
+
+    let settings = crate::settings_snapshot(&app)?;
+    let profile_dir = default_profile_dir(&app, &settings);
+    let summary = super::recovery::recover(&profile_dir)?;
+    if !summary.removed_plugins.is_empty() {
+        supervisor.note(
+            Stream::Stderr,
+            format!(
+                "[DSH] 已从装配清单卸下：{}（文件保留，可重新安装）",
+                summary.removed_plugins.join("、")
+            ),
+        );
+    }
+    start_locked(&app).await?;
+    Ok(summary.removed_plugins)
+}
+
+/// 以最小安全 profile 启动（08 设计 §11.4）：用户默认 profile 一个字节不动。
+/// 安全 profile 启动成功**不写** known-good 快照（规则 §11.3-2）。
+#[tauri::command]
+pub async fn harness_safe_mode_start(app: AppHandle) -> Result<String> {
+    let state = app.state::<crate::AppState>();
+    let _gate = state.harness.lifecycle.lock().await;
+    let supervisor = Arc::clone(&state.harness.supervisor);
+    supervisor.stop().await;
+    supervisor.wait_until_inactive().await?;
+
+    let settings = crate::settings_snapshot(&app)?;
+    let profiles_dir = super::dsh_home(&app, &settings).join("profiles");
+    super::recovery::prepare_safe_profile(&profiles_dir)?;
+    let plan = super::launch_plan_for(&app, &settings, super::recovery::SAFE_PROFILE)?;
+    supervisor.note(
+        Stream::Stdout,
+        "[DSH] 安全模式启动：默认 profile 不受影响".to_owned(),
+    );
+    state.harness.safe_mode.store(true, Ordering::SeqCst);
+    supervisor.start(plan).await
 }
