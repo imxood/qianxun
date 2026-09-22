@@ -165,17 +165,23 @@ async function main(): Promise<void> {
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
+  // Windows 上 shell:true 会有 cmd→node 中间层,kill() 只杀直接子进程;
+  // 用 taskkill /T 连树杀(仅限探针自己 spawn 的 PID,绝不碰其他进程)
+  const killTree = (child: ChildProcess | undefined): void => {
+    if (!child?.pid) return;
+    try {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      } else {
+        child.kill('SIGTERM');
+      }
+    } catch {
+      /* ignore */
+    }
+  };
   const cleanup = (): void => {
-    try {
-      proc.kill();
-    } catch {
-      /* ignore */
-    }
-    try {
-      viteProc?.kill();
-    } catch {
-      /* ignore */
-    }
+    killTree(proc);
+    killTree(viteProc);
   };
   process.on('exit', cleanup);
 
