@@ -33,7 +33,7 @@ pub const PACKAGE: &str = "@deepseek-ai/dsh";
 ///
 /// 由千寻验证后随版本发布，用户不可改——改了就没有验证意义。
 /// 升级 DSH = 升级千寻：改这里、跑全部验收、发版。
-pub const PINNED_VERSION: &str = "0.1.7-alpha.1";
+pub const PINNED_VERSION: &str = "0.1.7-alpha.2";
 
 /// 安装说明符：始终钉死精确版本，绝不 `latest`——latest 装出未验证
 /// 的上游版本，等于把运行时的正确性交给运气。
