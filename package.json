@@ -13,8 +13,11 @@
     "check:fix": "prettier --write . && eslint . --fix",
     "rust:check": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml --workspace",
     "all:check": "pnpm check && pnpm rust:check",
+    "build:websearch": "pnpm --dir packages/websearch install --silent && pnpm --dir packages/websearch build",
+    "sync:websearch": "pnpm build:websearch && node packages/websearch/scripts/sync-assets.mjs",
     "e2e:build": "tauri build --debug --no-bundle --config e2e/tauri.e2e.conf.json",
     "e2e": "playwright test",
+    "e2e:doctor": "npx tsx e2e/doctor.ts",
     "tauri": "tauri"
   },
   "engines": {
@@ -46,6 +49,7 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-svelte": "^3.8.0",
     "globals": "^17.12.0",
+    "playwright-core": "^1.63.0",
     "prettier": "^3.8.3",
     "prettier-plugin-svelte": "^3.4.0",
     "svelte-check": "^4.3.0",
