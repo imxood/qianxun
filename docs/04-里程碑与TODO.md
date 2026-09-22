@@ -306,6 +306,22 @@ V0.5.1 仅同锚点内的 alpha 递增（`0.1.6-alpha.1` → `0.1.6-alpha.2`）�
 - [ ] 插件市场真机验收（推荐目录拉取 + 安装 → 重启 DSH 生效 → 卸载）
 - [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
 
+## V0.6 · 千寻 0.6 适配锚点切换（DSH 0.1.7）
+
+**目标**：DSH 适配锚点由 `0.1.6` 切到 `0.1.7`（当前钉 `0.1.7-alpha.1`），
+千寻版本号 `0.5.2` → `0.6.0`。锚点代号映射：`0.6` ↔ `0.1.7`（ADR-015，手工约定）；
+`0.1.7-alpha.1` 已在 npmjs / npmmirror 双源确认存在。
+
+### 落地项
+
+- [ ] `install::PINNED_VERSION` 由 `0.1.6-alpha.2` 升到 `0.1.7-alpha.1` ✅（代码侧）
+- [ ] 千寻版本号 `0.5.2` → `0.6.0` ✅（包元数据：root / tauri / mobile / Cargo.lock / mobile lockfile / iOS MARKETING_VERSION / Android versionName）
+- [ ] iOS MARKETING_VERSION / Android versionName 漂移修正 ✅（0.5.1 / 0.5.2 两次修订漏同步原生壳，停在 0.5.0，本次一并归位）
+- [ ] install / market 单元测试通过（兼容判定对 rc/alpha 钉版「原样 + 去预发布」双形态宽松语义不变）
+- [ ] DSH 0.1.7 真机验收（按 V0.2.1 纪律：readiness 行格式 / 鉴权契约 / iframe 链路 / 网关代持）
+- [ ] 插件市场真机验收（推荐目录拉取 + 安装 → 重启 DSH 生效 → 卸载）
+- [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
+
 ## 里程碑间的纪律
 
 1. 任何里程碑开工前，先读 `03-编码规范`，门禁脚本必须已在跑；
