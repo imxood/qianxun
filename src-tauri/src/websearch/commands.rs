@@ -69,7 +69,17 @@ pub fn ensure(app: &AppHandle) {
         return; // profile 尚不存在：首次启动流程稍后会再触发。
     };
     if plugin_dir.join("dsh").join("index.js").is_file() {
-        // 文件已在：补/迁移 patch 行 + 对齐动态值（moliPath/fetchProxy），
+        // 内容指纹自愈：文件存在 ≠ 内容最新。升级千寻（include_str! 常量随
+        // 重编译变化）或 debug 期间改 assets 后，profile 副本会静默滞后，
+        // DSH 加载的永远是旧文件。逐文件比对，不一致即强制重写部署。
+        if plugin_stale(&plugin_dir) {
+            crate::logging::log("info", "内置联网搜索副本过期，重新部署");
+            if let Err(cause) = deploy(app, &settings) {
+                crate::logging::log("warn", &format!("内置联网搜索重部署失败：{cause}"));
+                return;
+            }
+        }
+        // 文件已就位：补/迁移 patch 行 + 对齐动态值（moliPath/fetchProxy），
         // 不重复写大文件。
         let Ok(patch) = patch_path(app, &settings) else {
             return;
@@ -90,6 +100,26 @@ pub fn ensure(app: &AppHandle) {
 }
 
 // ---- 内部 ----
+
+/// profile 副本是否与编译期内置不一致（任一文件缺失或内容不同 = 过期）。
+/// 内容比对是微秒级开销，换取"升级/改动必然生效"的硬保证。
+fn plugin_stale(plugin_dir: &std::path::Path) -> bool {
+    let files: [(&str, &str); 7] = [
+        ("package.json", PLUGIN_PACKAGE_JSON),
+        ("dsh/index.js", PLUGIN_INDEX),
+        ("dsh/client.js", PLUGIN_CLIENT),
+        ("dsh/spawnHidden.js", PLUGIN_SPAWN_HIDDEN),
+        ("dsh/search-schema.json", PLUGIN_SEARCH_SCHEMA),
+        ("dsh/fetch-schema.json", PLUGIN_FETCH_SCHEMA),
+        ("dist/main.js", PLUGIN_CLI),
+    ];
+    files.iter().any(|(rel, want)| {
+        let path = rel.split('/').fold(plugin_dir.to_path_buf(), |p, seg| p.join(seg));
+        std::fs::read_to_string(&path)
+            .map(|have| have != *want)
+            .unwrap_or(true)
+    })
+}
 
 fn deploy(app: &AppHandle, settings: &Settings) -> Result<()> {
     let plugin_dir = plugin_dir(app, settings)?;
@@ -411,6 +441,34 @@ mod tests {
         );
         assert!(text.contains(r#"moliPath: "D:/new-moli.exe""#));
         assert_eq!(text.matches("moliPath:").count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 内容指纹自愈缺文件或旧内容判定过期() {
+        let dir = std::env::temp_dir().join(format!("qx-ws-stale-{}", std::process::id()));
+        let dsh = dir.join("dsh");
+        let dist = dir.join("dist");
+        std::fs::create_dir_all(&dsh).unwrap();
+        std::fs::create_dir_all(&dist).unwrap();
+
+        // 全新目录：缺文件 = 过期。
+        assert!(plugin_stale(&dir));
+
+        // 全部写入当前内置内容 → 新鲜。
+        std::fs::write(dir.join("package.json"), PLUGIN_PACKAGE_JSON).unwrap();
+        std::fs::write(dsh.join("index.js"), PLUGIN_INDEX).unwrap();
+        std::fs::write(dsh.join("client.js"), PLUGIN_CLIENT).unwrap();
+        std::fs::write(dsh.join("spawnHidden.js"), PLUGIN_SPAWN_HIDDEN).unwrap();
+        std::fs::write(dsh.join("search-schema.json"), PLUGIN_SEARCH_SCHEMA).unwrap();
+        std::fs::write(dsh.join("fetch-schema.json"), PLUGIN_FETCH_SCHEMA).unwrap();
+        std::fs::write(dist.join("main.js"), PLUGIN_CLI).unwrap();
+        assert!(!plugin_stale(&dir));
+
+        // 只改一个文件（模拟 debug 改 assets / 升级千寻）→ 过期。
+        std::fs::write(dsh.join("index.js"), "// stale\n").unwrap();
+        assert!(plugin_stale(&dir));
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
