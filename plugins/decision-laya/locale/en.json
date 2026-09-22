@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Laya Decision Engine",
+    "description": "System-1 structured decisions: registers the laya_decide tool backed by the local laya-server; emits Decision + policy_hint only"
+  }
+}

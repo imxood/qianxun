@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Laya 决策引擎",
+    "description": "System-1 结构化决策:注册 laya_decide 工具,调用本机 laya-server,只产出 Decision + policy_hint"
+  }
+}

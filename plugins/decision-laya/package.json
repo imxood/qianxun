@@ -1,0 +1,17 @@
+{
+  "name": "@qianxun/decision-laya",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Laya System-1 决策引擎接入:注册 laya_decide 工具,调用本机 laya-server sidecar,只产出结构化 Decision,不执行动作",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": ["locale/*.json", "icon.svg"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}
