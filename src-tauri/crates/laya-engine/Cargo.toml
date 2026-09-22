@@ -1,0 +1,21 @@
+[package]
+name = "laya-engine"
+description = "Laya System-1 决策模型的 Rust/ONNX 推理引擎(对齐 laya-mlx 与 @receptron/laya 语义)"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+# load-dynamic:运行时加载自备的 onnxruntime.dll(vendor/onnxruntime/),
+# 避开 ort-sys 预编译静态库(/MT)与 Rust 默认 /MD 的 CRT 冲突(LNK2005/LNK1169)。
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+tokenizers = "0.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "2.0"
+
+[features]
+default = []
+# 可选执行后端: Windows 上 DirectML 走任意 DX12 GPU; CUDA 走 NVIDIA。
+directml = ["ort/directml"]
+cuda = ["ort/cuda"]

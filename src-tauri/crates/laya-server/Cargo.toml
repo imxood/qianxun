@@ -1,0 +1,11 @@
+[package]
+name = "laya-server"
+description = "Laya 决策引擎 localhost HTTP sidecar(127.0.0.1 only,供 dsh decision-laya 插件调用)"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+laya-engine = { path = "../laya-engine" }
+tiny_http = "0.12"
+serde_json = "1.0"

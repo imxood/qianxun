@@ -16,3 +16,9 @@ playwright-report/
 .tmp/
 .tmp/**
 
+# Laya 决策引擎的重资产：模型 bundle 与 onnxruntime DLL（见 docs/08）
+models/
+vendor/
+*.onnx
+*.onnx.data
+

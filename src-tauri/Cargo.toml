@@ -5,13 +5,17 @@ edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
 [workspace]
-# 五个移植/收编 crate 与主包同仓同构建；src-tauri 即 workspace 根。
+# 移植/收编 crate 与主包同仓同构建；src-tauri 即 workspace 根。
+# laya-*：Laya System-1 决策模型的 Rust/ONNX 推理引擎、探针与 localhost sidecar（见 docs/09）。
 members = [
     "crates/proc-guard",
     "crates/node-runtime",
     "crates/fff-core",
     "crates/fff-grep",
     "crates/fff-query-parser",
+    "crates/laya-engine",
+    "crates/laya-cli",
+    "crates/laya-server",
 ]
 
 [lib]
