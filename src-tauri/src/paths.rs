@@ -81,6 +81,11 @@ pub fn managed_node_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("node"))
 }
 
+/// 受管外部工具目录（R001）：moli 等按需下载的二进制落在这里。
+pub fn tools_dir(app: &AppHandle) -> Result<PathBuf> {
+    Ok(data_dir(app)?.join("tools"))
+}
+
 /// ADR-009：隔离模式下的 DSH_HOME。系统 ~/.dsh 可能被外部 DSH 实例占用，
 /// 千寻默认用自己的副本，会话/存储/插件互不干扰。
 pub fn dsh_home(app: &AppHandle) -> Result<PathBuf> {

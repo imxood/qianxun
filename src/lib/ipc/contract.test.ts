@@ -99,6 +99,7 @@ const RESPONSE_TYPES = [
   'GrepHit',
   'GrepOptions',
   'DriveInfo',
+  'MoliStatus',
 ] as const;
 
 type StructInfo = { name: string; fields: Set<string>; block: string };

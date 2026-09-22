@@ -61,6 +61,9 @@ export const IPC_COMMANDS = [
   'notes_init',
   'bridge_deploy',
   'bridge_status',
+  'websearch_deploy',
+  'websearch_status',
+  'moli_status',
   'plugins_list',
   'market_installed',
   'market_install',
@@ -145,6 +148,42 @@ export interface SearchSettings {
   rootHistory: string[];
 }
 
+/** 联网搜索的一个引擎（R001 D2）。 */
+export interface WebEngineSettings {
+  id: string;
+  /** bing / duckduckgo / searxng（baidu 已移除：对无 cookie 抓取硬反爬）。 */
+  kind: 'bing' | 'duckduckgo' | 'searxng';
+  /** searxng 实例地址（其余类型为空串）。 */
+  endpoint: string;
+}
+
+/** 联网搜索设置（R001）。 */
+export interface WebSettings {
+  defaultEngine: string;
+  engines: WebEngineSettings[];
+  resultLimit: number;
+  /**
+   * moli 抓取代理（R001-TUN）：空 = 直连；'off' = 显式直连；
+   * 其它 = 传给 moli --http-proxy（如 socks5://127.0.0.1:1080）。
+   */
+  proxy: string;
+}
+
+/** Moli 本机管理设置（R001 D8/D10）。 */
+export interface MoliSettings {
+  enabled: boolean;
+  pinnedVersion: string;
+  /** 自备二进制绝对路径；空 = 受管安装。 */
+  binaryPath: string;
+}
+
+/** 工具管理设置（R001）。 */
+export interface ToolsSettings {
+  moli: MoliSettings;
+  /** playwright-core 加载路径；空 = 桥按约定位置自动探测。 */
+  playwrightCorePath: string;
+}
+
 export interface Settings {
   schemaVersion: number;
   theme: ThemePreference;
@@ -152,11 +191,15 @@ export interface Settings {
   dsh: DshSettings;
   mirrors: MirrorsSettings;
   search: SearchSettings;
+  /** 联网搜索域（R001）。 */
+  web: WebSettings;
   hotkeys: HotkeysSettings;
   notes: NotesSettings;
   remote: RemoteSettings;
   /** 插件清单（08 设计 §2）。 */
   plugins: PluginsSettings;
+  /** 工具管理（R001）：Moli 无头浏览器。 */
+  tools: ToolsSettings;
 }
 
 /**
@@ -169,6 +212,8 @@ export interface SettingsPatch {
   dsh?: Partial<Omit<DshSettings, never>>;
   mirrors?: Partial<MirrorsSettings>;
   search?: Partial<SearchSettings>;
+  web?: Partial<WebSettings>;
+  tools?: { moli?: Partial<MoliSettings>; playwrightCorePath?: string };
   hotkeys?: Partial<HotkeysSettings>;
   notes?: Partial<NotesSettings>;
   remote?: Partial<RemoteSettings>;
@@ -328,6 +373,36 @@ export type InstallProgress =
       totalHint: number | null;
     }
   | { stage: 'done' };
+
+// ---------------------------------------------------------------------------
+// moli_status（工具管理，R001）
+// ---------------------------------------------------------------------------
+
+/** moli 检测来源。 */
+export type MoliSource = 'custom' | 'managed' | 'path' | 'none';
+
+/** moli_status 返回（R001 契约）。 */
+export interface MoliStatus {
+  installed: boolean;
+  version: string | null;
+  path: string | null;
+  source: MoliSource;
+}
+
+// ---------------------------------------------------------------------------
+// websearch_deploy / websearch_status（内置联网搜索，R001）
+// ---------------------------------------------------------------------------
+
+/** websearch 状态：部署事实 + DSH 运行态。 */
+export interface WebsearchStatus {
+  /** 插件文件已在 profile node_modules 就位。 */
+  deployed: boolean;
+  /** cordis.patch.yml 已含本包的 web 覆盖行。 */
+  patchEntry: boolean;
+  pluginDir: string;
+  /** DSH 进程当前是否在跑（跑着则需重启才加载）。 */
+  dshRunning: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // search_*（搜索域，M2）

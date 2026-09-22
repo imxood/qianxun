@@ -164,6 +164,90 @@ pub struct SearchSettings {
     pub root_history: Vec<String>,
 }
 
+/// 联网搜索的一个引擎（R001 D2）。`kind` 决定 URL 模板；`searxng` /
+/// `custom` 必须带 https endpoint。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WebEngineSettings {
+    /// 用户可见标识（唯一）。
+    pub id: String,
+    /// 引擎类型：bing / baidu / duckduckgo / searxng。
+    pub kind: String,
+    /// searxng 实例地址（其余类型留空）。
+    pub endpoint: String,
+}
+
+impl Default for WebEngineSettings {
+    fn default() -> Self {
+        Self {
+            id: "bing".to_owned(),
+            kind: "bing".to_owned(),
+            endpoint: String::new(),
+        }
+    }
+}
+
+/// 联网搜索设置（R001）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WebSettings {
+    /// 默认引擎 id（必须能在 engines 里找到）。
+    pub default_engine: String,
+    /// 引擎清单（上限 8，id 唯一）。
+    pub engines: Vec<WebEngineSettings>,
+    /// 单次搜索返回条数（1–50）。
+    pub result_limit: u32,
+    /// moli 抓取代理（R001-TUN）：空 = 直连；"off" = 显式直连；
+    /// 其它 = 传给 moli `--http-proxy`（如 socks5://127.0.0.1:1080）。
+    /// TUN/fake-ip 网络下域名会被解析成 198.18.0.0/15 假 IP，被 moli
+    /// private-network 守卫拦截；走代理时由代理侧解析，守卫不适用。
+    pub proxy: String,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self {
+            default_engine: "duckduckgo".to_owned(),
+            engines: vec![
+                WebEngineSettings {
+                    id: "duckduckgo".to_owned(),
+                    kind: "duckduckgo".to_owned(),
+                    endpoint: String::new(),
+                },
+                WebEngineSettings {
+                    id: "bing".to_owned(),
+                    kind: "bing".to_owned(),
+                    endpoint: String::new(),
+                },
+            ],
+            result_limit: 10,
+            proxy: String::new(),
+        }
+    }
+}
+
+/// Moli 无头浏览器的本机管理设置（R001 D8/D10）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MoliSettings {
+    /// false = 桥内 web 能力走 Node fetch 降级路径。
+    pub enabled: bool,
+    /// 锁定版本（检测时与实际 `--version` 比对展示）。
+    pub pinned_version: String,
+    /// 自备二进制绝对路径；空 = 使用数据目录 tools/moli/ 下的受管安装。
+    pub binary_path: String,
+}
+
+impl Default for MoliSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pinned_version: "1.1.9".to_owned(),
+            binary_path: String::new(),
+        }
+    }
+}
+
 /// 插件清单里的一项（08 设计 §2.1）：装成功的 name@version。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -252,11 +336,26 @@ pub struct Settings {
     pub dsh: DshSettings,
     pub mirrors: MirrorsSettings,
     pub search: SearchSettings,
+    /// 联网搜索域（R001）。
+    pub web: WebSettings,
     pub hotkeys: HotkeysSettings,
     pub notes: NotesSettings,
     pub remote: crate::remote::RemoteSettings,
     /// 插件清单（08 设计 §2）：装成功的 name@version，随备份包走。
     pub plugins: PluginsSettings,
+    /// 工具管理（R001）：Moli 无头浏览器。
+    pub tools: ToolsSettings,
+}
+
+/// 工具管理设置（R001 D8）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ToolsSettings {
+    /// Moli 无头浏览器。
+    pub moli: MoliSettings,
+    /// playwright-core 的加载路径（R001 browser_* 工具）；空 = 桥内
+    /// 按 tools/playwright-core/ 约定位置与 require 链自动探测。
+    pub playwright_core_path: String,
 }
 
 impl Default for Settings {
@@ -268,12 +367,98 @@ impl Default for Settings {
             dsh: DshSettings::default(),
             mirrors: MirrorsSettings::default(),
             search: SearchSettings::default(),
+            web: WebSettings::default(),
             hotkeys: HotkeysSettings::default(),
             notes: NotesSettings::default(),
             remote: crate::remote::RemoteSettings::default(),
             plugins: PluginsSettings::default(),
+            tools: ToolsSettings::default(),
         }
     }
+}
+
+/// 联网搜索段校验（R001）：kind 白名单、searxng 必带 https endpoint、
+/// id 非空且唯一、default_engine 必须存在、resultLimit 1–50。
+/// baidu 已移除（对无 cookie 抓取硬反爬，实测不可用）。
+fn validate_web(web: &WebSettings) -> Result<()> {
+    const KINDS: [&str; 3] = ["bing", "duckduckgo", "searxng"];
+    if web.engines.is_empty() {
+        return Err(Error::SettingsInvalid("web.engines 不能为空".to_owned()));
+    }
+    if web.engines.len() > 8 {
+        return Err(Error::SettingsInvalid(
+            "web.engines 最多 8 个引擎".to_owned(),
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for (index, engine) in web.engines.iter().enumerate() {
+        if engine.id.trim().is_empty() {
+            return Err(Error::SettingsInvalid(format!(
+                "web.engines[{index}].id 不能为空"
+            )));
+        }
+        if !ids.insert(engine.id.as_str()) {
+            return Err(Error::SettingsInvalid(format!(
+                "web.engines[{index}].id 重复：{}",
+                engine.id
+            )));
+        }
+        if !KINDS.contains(&engine.kind.as_str()) {
+            return Err(Error::SettingsInvalid(format!(
+                "web.engines[{index}].kind 只能是 bing/duckduckgo/searxng，当前为 {}",
+                engine.kind
+            )));
+        }
+        if engine.kind == "searxng" && !engine.endpoint.starts_with("https://") {
+            return Err(Error::SettingsInvalid(format!(
+                "web.engines[{index}]（searxng）必须提供 https:// 实例地址"
+            )));
+        }
+        if engine.kind != "searxng" && !engine.endpoint.is_empty() {
+            return Err(Error::SettingsInvalid(format!(
+                "web.engines[{index}]（{}）不需要 endpoint",
+                engine.kind
+            )));
+        }
+    }
+    if !web
+        .engines
+        .iter()
+        .any(|engine| engine.id == web.default_engine)
+    {
+        return Err(Error::SettingsInvalid(format!(
+            "web.defaultEngine 不在 engines 清单里：{}",
+            web.default_engine
+        )));
+    }
+    if !(1..=50).contains(&web.result_limit) {
+        return Err(Error::SettingsInvalid(format!(
+            "web.resultLimit 必须在 1–50 之间，当前为 {}",
+            web.result_limit
+        )));
+    }
+    // proxy：空或 "off"（显式直连）之外的值必须是 moli 认的代理 URL。
+    let proxy = web.proxy.trim();
+    if !proxy.is_empty() && !proxy.eq_ignore_ascii_case("off") {
+        const SCHEMES: [&str; 6] = [
+            "http://",
+            "https://",
+            "socks5://",
+            "socks5h://",
+            "socks4://",
+            "socks4a://",
+        ];
+        let lower = proxy.to_ascii_lowercase();
+        let has_scheme_and_host = SCHEMES
+            .iter()
+            .any(|scheme| lower.len() > scheme.len() && lower.starts_with(scheme));
+        if !has_scheme_and_host {
+            return Err(Error::SettingsInvalid(format!(
+                "web.proxy 必须是 http(s):// 或 socks4(a)/socks5(h):// 代理地址、off（显式直连）或留空，当前为：{proxy}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate(settings: &Settings) -> Result<()> {
@@ -328,6 +513,7 @@ fn validate(settings: &Settings) -> Result<()> {
             "search.rootHistory 不能有空条目".to_owned(),
         ));
     }
+    validate_web(&settings.web)?;
     if settings.remote.enabled {
         if settings.remote.bind_ip.trim().is_empty() {
             return Err(Error::SettingsInvalid(
@@ -384,15 +570,37 @@ pub fn load(app: &AppHandle) -> Result<Settings> {
 
 /// 纯解析路径，供测试直接使用。
 fn parse(text: &str) -> Result<Settings> {
-    let settings: Settings =
+    let mut settings: Settings =
         serde_json::from_str(text).map_err(|error| Error::SettingsInvalid(error.to_string()))?;
+    // 先迁移后校验：迁移会把旧文件里的已移除引擎（如 baidu）清掉，
+    // 若先校验，老文件会被整体拒掉并触发「损坏回退默认」，误伤其余设置。
+    settings = migrate(settings);
     validate(&settings)?;
-    Ok(migrate(settings))
+    Ok(settings)
 }
 
 /// 字段级就地迁移（读入后、使用前）：旧默认值跟走到新默认。
 /// 用户显式配置过的其它值原样保留。
 fn migrate(mut settings: Settings) -> Settings {
+    // R001：百度对无 cookie 的无头抓取硬反爬（超时/空内容），已从引擎
+    // 清单移除——旧设置文件里的 baidu 引擎就地剔除，默认引擎跟走：
+    // 优先 duckduckgo（实测相关性最好），否则清单首位。
+    settings.web.engines.retain(|engine| engine.kind != "baidu");
+    if !settings
+        .web
+        .engines
+        .iter()
+        .any(|engine| engine.id == settings.web.default_engine)
+    {
+        settings.web.default_engine = settings
+            .web
+            .engines
+            .iter()
+            .find(|engine| engine.kind == "duckduckgo")
+            .or_else(|| settings.web.engines.first())
+            .map(|engine| engine.id.clone())
+            .unwrap_or_else(|| "duckduckgo".to_owned());
+    }
     // 网关端口：17400 是历史默认；持久化过旧默认的设置文件迁移到
     // 按构建模式的新默认（release 23090 / debug 23091）。
     // 备份还原场景下也会带进另一构建模式（debug ↔ release）的默认值——
@@ -477,6 +685,144 @@ fn merge(target: &mut Map<String, Value>, patch: Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- R001：web / tools.moli 设置段 ----
+
+    #[test]
+    fn web段缺省解析为默认引擎清单() {
+        let settings = parse("{}").unwrap();
+        assert_eq!(settings.web.default_engine, "duckduckgo");
+        assert_eq!(settings.web.engines.len(), 2);
+        assert_eq!(settings.web.engines[0].kind, "duckduckgo");
+        assert_eq!(settings.web.engines[1].kind, "bing");
+        assert_eq!(settings.web.result_limit, 10);
+        assert!(settings.web.proxy.is_empty());
+        assert!(settings.tools.moli.enabled);
+        assert_eq!(settings.tools.moli.pinned_version, "1.1.9");
+        assert!(settings.tools.moli.binary_path.is_empty());
+    }
+
+    #[test]
+    fn web段迁移_剔除baidu并跟走默认引擎() {
+        // 旧默认清单（bing/baidu/duckduckgo）+ 默认引擎指向 baidu：
+        // 迁移应剔除 baidu、默认引擎落到清单首位。
+        let settings = parse(
+            r#"{"web": {"defaultEngine": "baidu", "engines": [
+                {"id": "bing", "kind": "bing"},
+                {"id": "baidu", "kind": "baidu"},
+                {"id": "duckduckgo", "kind": "duckduckgo"}
+            ]}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.web.engines.len(), 2);
+        assert!(settings
+            .web
+            .engines
+            .iter()
+            .all(|engine| engine.kind != "baidu"));
+        assert_eq!(settings.web.default_engine, "duckduckgo");
+    }
+
+    #[test]
+    fn web段旧文件零迁移可读() {
+        // 旧 settings.json 无 web/tools 字段：serde default 兜底。
+        let settings = parse(r#"{"schemaVersion": 1, "theme": "dark"}"#).unwrap();
+        assert_eq!(settings.web, WebSettings::default());
+        assert_eq!(settings.tools, ToolsSettings::default());
+        // 往返后再写盘不带空段（serde 只序列化有值字段？不——
+        // rename_all + default 序列化仍会写出全部字段，但读取端兼容）。
+        let text = to_text(&settings);
+        assert!(text.contains("defaultEngine"));
+    }
+
+    #[test]
+    fn web段校验_searxng缺endpoint拒绝() {
+        let settings = parse(
+            r#"{"web": {"defaultEngine": "s", "engines": [{"id": "s", "kind": "searxng"}]}}"#,
+        );
+        assert!(settings.is_err());
+    }
+
+    #[test]
+    fn web段校验_kind白名单外拒绝() {
+        let settings =
+            parse(r#"{"web": {"defaultEngine": "x", "engines": [{"id": "x", "kind": "google"}]}}"#);
+        assert!(settings.is_err());
+    }
+
+    #[test]
+    fn web段迁移_defaultengine不在清单时跟走() {
+        // 读入路径：default_engine 指向不存在的 id 由迁移兜底（跟走清单首位），
+        // 不再是校验错误——校验错误留给 apply_patch 等不走迁移的入口。
+        let settings = parse(
+            r#"{"web": {"defaultEngine": "ghost", "engines": [{"id": "bing", "kind": "bing"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.web.default_engine, "bing");
+    }
+
+    #[test]
+    fn web段校验_id重复拒绝() {
+        let settings = parse(
+            r#"{"web": {"engines": [
+                {"id": "b", "kind": "bing"},
+                {"id": "b", "kind": "duckduckgo"}
+            ]}}"#,
+        );
+        assert!(settings.is_err());
+    }
+
+    #[test]
+    fn web段校验_合法searxng通过() {
+        let settings = parse(
+            r#"{"web": {"defaultEngine": "s", "resultLimit": 20, "engines": [
+                {"id": "s", "kind": "searxng", "endpoint": "https://searx.example.com"}
+            ]}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.web.result_limit, 20);
+        assert_eq!(
+            settings.web.engines[0].endpoint,
+            "https://searx.example.com"
+        );
+    }
+
+    #[test]
+    fn web段校验_resultlimit越界拒绝() {
+        let settings = parse(r#"{"web": {"resultLimit": 0}}"#);
+        assert!(settings.is_err());
+        let settings = parse(r#"{"web": {"resultLimit": 51}}"#);
+        assert!(settings.is_err());
+    }
+
+    #[test]
+    fn web段proxy_空off与合法代理通过() {
+        // 空 = 直连（缺省已测）；"off" = 显式直连；各 scheme 形态都放行。
+        for proxy in [
+            "",
+            "off",
+            "OFF",
+            "socks5://127.0.0.1:1080",
+            "http://127.0.0.1:7890",
+            "socks5h://proxy.lan:1080",
+        ] {
+            let settings = parse(&format!(r#"{{"web": {{"proxy": "{proxy}"}}}}"#)).unwrap();
+            assert_eq!(settings.web.proxy, proxy);
+        }
+    }
+
+    #[test]
+    fn web段proxy_非法值拒绝() {
+        for proxy in ["127.0.0.1:1080", "ftp://x", "socks5://", "just text"] {
+            let settings = parse(&format!(r#"{{"web": {{"proxy": "{proxy}"}}}}"#));
+            assert!(settings.is_err(), "应拒绝：{proxy}");
+        }
+    }
+
+    /// parse 私有 helper 沿用上方测试的入口；这里补 to_text 引用避免死码。
+    fn to_text(settings: &Settings) -> String {
+        serde_json::to_string(settings).unwrap_or_default()
+    }
 
     #[test]
     fn 空对象解析为默认设置() {

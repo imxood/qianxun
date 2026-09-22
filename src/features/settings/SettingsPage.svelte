@@ -451,6 +451,65 @@
     <p class="text-sm text-danger">保存失败：{saveError}</p>
   {/if}
 
+  {#if settings.current}
+    <section class="qx-card space-y-3 p-4" data-testid="settings-web">
+      <h2 class="qx-h">联网搜索</h2>
+      <p class="text-xs text-muted">
+        「联网」页与 DSH Agent 的 web_search 共用引擎清单；searxng 需提供 https 实例地址。 Moli
+        未安装时走降级纯文本抓取。
+      </p>
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">默认引擎</span>
+        <select
+          class="qx-select"
+          value={settings.current?.web.defaultEngine ?? ''}
+          onchange={(event) => {
+            const value = (event.currentTarget as HTMLSelectElement).value;
+            if (settings.current) void save({ web: { defaultEngine: value } });
+          }}
+          data-testid="web-default-engine"
+        >
+          {#each settings.current?.web.engines as engine (engine.id)}
+            <option value={engine.id}>{engine.id}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">Moli 自备路径</span>
+        <input
+          class="qx-input min-w-0 flex-1"
+          placeholder="留空 = 使用受管安装（tools/moli/）"
+          value={settings.current?.tools.moli.binaryPath ?? ''}
+          onchange={(event) => {
+            const value = (event.currentTarget as HTMLInputElement).value.trim();
+            void save({ tools: { moli: { binaryPath: value } } });
+          }}
+          data-testid="web-moli-path"
+        />
+      </div>
+      <div class="flex items-center justify-between gap-4 text-sm">
+        <span class="shrink-0">抓取代理</span>
+        <input
+          class="qx-input min-w-0 flex-1 font-mono"
+          placeholder="留空 = 直连；TUN/fake-ip 网络填 socks5://127.0.0.1:1080"
+          value={settings.current?.web.proxy ?? ''}
+          onchange={(event) => {
+            const value = (event.currentTarget as HTMLInputElement).value.trim();
+            void save({ web: { proxy: value } });
+          }}
+          data-testid="web-proxy"
+        />
+      </div>
+      <p class="text-xs text-muted">
+        代理仅作用于 Moli 抓取（web_search / web_read / 联网页），域名由代理侧解析。 开启 TUN 且 DNS
+        解析为 198.18.x.x（fake-ip）时，直连会被内网安全守卫拦截，填本机代理端口即可。
+      </p>
+      <p class="text-xs text-muted">
+        已装引擎 {settings.current?.web.engines.length} 个；修改引擎清单请编辑 settings.json（web.engines）。
+      </p>
+    </section>
+  {/if}
+
   <section class="qx-card space-y-3 p-4">
     <h2 class="qx-h">快捷键</h2>
     <div class="flex items-center gap-3">
