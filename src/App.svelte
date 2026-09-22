@@ -11,6 +11,7 @@
   import EnvPage from './features/env/EnvPage.svelte';
   import DshPage from './features/dsh/DshPage.svelte';
   import SearchPage from './features/search/SearchPage.svelte';
+  import WebPage from './features/web/WebPage.svelte';
   import RemotePage from './features/remote/RemotePage.svelte';
   import NotesPage from './features/notes/NotesPage.svelte';
   import PluginsPage from './features/plugins/PluginsPage.svelte';
@@ -126,6 +127,11 @@
       {#if nav.visited.files}
         <div class="absolute inset-0 overflow-hidden {show('files')}">
           <SearchPage />
+        </div>
+      {/if}
+      {#if nav.visited.web}
+        <div class="absolute inset-0 overflow-y-auto p-6 {show('web')}">
+          <WebPage />
         </div>
       {/if}
       {#if nav.visited.plugins}

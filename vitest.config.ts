@@ -5,6 +5,10 @@ export default defineConfig({
   plugins: [svelte()],
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: [
+      'src/**/*.test.ts',
+      'src-tauri/src/bridge/assets/**/*.test.js',
+      'src-tauri/src/bridge/assets/**/*.test.ts',
+    ],
   },
 });

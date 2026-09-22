@@ -23,7 +23,9 @@ mod shots;
 #[cfg(windows)]
 mod single_instance;
 mod sync;
+mod tools;
 mod tray;
+mod websearch;
 mod window;
 
 use std::sync::{Arc, Mutex};
@@ -191,6 +193,9 @@ pub fn run() {
             // 桥自愈：部署过但插件文件被 DSH 重装清掉时静默补齐（M6）。
             bridge::commands::heal(handle);
 
+            // 内置联网搜索：安装包自带能力，启动时幂等确保部署（文件 + patch）。
+            websearch::commands::ensure(handle);
+
             // 关闭 WebView2 浏览器加速键：Ctrl+Shift+C 不再误开 devtools
             // 元素选择器、Ctrl+Shift+V 不再触发「原样粘贴」（双重粘贴的
             // 元凶）。同时把主题色方案设为 AUTO（prefers-color-scheme
@@ -294,6 +299,9 @@ pub fn run() {
             bridge::commands::bridge_deploy,
             bridge::commands::bridge_status,
             bridge::commands::plugins_list,
+            websearch::commands::websearch_deploy,
+            websearch::commands::websearch_status,
+            tools::moli::moli_status,
             market::market_installed,
             market::market_install,
             market::market_remove,

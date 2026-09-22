@@ -1,0 +1,1099 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { FETCH_RESULT_SCHEMA, SEARCH_RESULT_SCHEMA } from './schema.ts';
+
+const SEARCH_SCHEMA_PATH = new URL('../dsh/search-schema.json', import.meta.url);
+const FETCH_SCHEMA_PATH = new URL('../dsh/fetch-schema.json', import.meta.url);
+
+describe('dsh plugin bundle', () => {
+  it('ships tool output schemas in lockstep with the source of truth', () => {
+    // dsh/index.js cannot import the TS source, so it carries JSON copies;
+    // these are the lockstep checks that keep the copies honest.
+    const search = JSON.parse(fs.readFileSync(SEARCH_SCHEMA_PATH, 'utf-8'));
+    expect(search.properties.summary).toEqual(SEARCH_RESULT_SCHEMA.properties.summary);
+    expect(search.properties.items).toEqual(SEARCH_RESULT_SCHEMA.properties.items);
+    expect(search.properties.uncertainty).toEqual(SEARCH_RESULT_SCHEMA.properties.uncertainty);
+    expect(search.required).toEqual(
+      expect.arrayContaining([...SEARCH_RESULT_SCHEMA.required, 'status', 'source']),
+    );
+
+    const fetch = JSON.parse(fs.readFileSync(FETCH_SCHEMA_PATH, 'utf-8'));
+    expect(fetch).toEqual(FETCH_RESULT_SCHEMA);
+  });
+
+  it('wires the deploy manifest to the plugin and the client half', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(new URL('../package.json', import.meta.url), 'utf-8'),
+    ) as {
+      dsh?: {
+        bundle?: { patch?: string };
+        client?: { inject?: string[]; platform?: string; immediately?: boolean };
+      };
+      exports?: Record<string, string>;
+    };
+    // 部署方式是宿主托管（千寻写 patch 行 + 落盘 node_modules），包内不再携带
+    // bundle patch；patch 行里 `name: qx-websearch` 解析到这里的 exports。
+    expect(pkg.dsh?.bundle).toBeUndefined();
+    // The browser half rides the same manifest: without `dsh.client` the host
+    // never loads dsh/client.js and the settings card silently never exists.
+    expect(pkg.dsh?.client).toEqual({ inject: [], platform: 'web', immediately: true });
+    expect(pkg.exports?.['.']).toBe('./dsh/index.js');
+    expect(pkg.exports?.['./dsh']).toBe('./dsh/index.js');
+    expect(pkg.exports?.['./client']).toBe('./dsh/client.js');
+  });
+});
+
+interface RegisteredTool {
+  name: string;
+  parameters: unknown;
+  output: {
+    schema: unknown;
+    render: (args: unknown, value: never) => Array<{ type: string; text: string }>;
+    presentationMeta?: (args: unknown, value: never) => { sources: unknown[] };
+  };
+  presentResult?: (
+    args: unknown,
+    result: { content: unknown[]; isError: boolean; meta?: { sources: unknown[] } },
+  ) => { card: string; kind: string; sources: unknown[] } | undefined;
+  execute: (args: unknown, exec: { signal?: AbortSignal }) => Promise<Record<string, unknown>>;
+}
+
+interface RegisteredProvider {
+  id: string;
+  available: () => boolean;
+  search: (
+    request: { query: string; maxResults?: number },
+    signal?: AbortSignal,
+  ) => Promise<{ content: string; sources: Array<Record<string, unknown>>; truncated: boolean }>;
+}
+
+interface RegisteredFetchProvider {
+  id: string;
+  available: () => boolean;
+  fetch: (
+    request: { url: string },
+    signal?: AbortSignal,
+  ) => Promise<{
+    url: string;
+    statusCode: number;
+    body: { kind: 'html' | 'text'; content: string };
+    truncated: boolean;
+  }>;
+}
+
+async function load(config?: Record<string, unknown>) {
+  // The plugin is plain JS by design (no build step, no dsh type deps).
+  // @ts-expect-error untyped on purpose
+  const plugin = (await import('../dsh/index.js')) as {
+    apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+  };
+  const tools = new Map<string, RegisteredTool>();
+  const providers: RegisteredProvider[] = [];
+  const fetchProviders: RegisteredFetchProvider[] = [];
+  const ctx = {
+    tools: {
+      register: (definition: RegisteredTool) => {
+        tools.set(definition.name, definition);
+      },
+    },
+    web: {
+      registerSearchProvider: (provider: RegisteredProvider) => {
+        providers.push(provider);
+      },
+      registerFetchProvider: (provider: RegisteredFetchProvider) => {
+        fetchProviders.push(provider);
+      },
+    },
+  };
+  plugin.apply(ctx as never, config);
+  return { tools, providers, fetchProviders };
+}
+
+/** The named registered tool, or a loud failure when registration skipped it. */
+function toolNamed(tools: Map<string, RegisteredTool>, name: string): RegisteredTool {
+  const definition = tools.get(name);
+  if (!definition) {
+    throw new Error(`tool ${name} was not registered`);
+  }
+  return definition;
+}
+
+const created: string[] = [];
+const originalElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+
+afterEach(() => {
+  delete process.env.QX_WEBSEARCH_CLI;
+  delete process.env.QX_WEBSEARCH_MOLI;
+  if (originalElectronRunAsNode === undefined) {
+    delete process.env.ELECTRON_RUN_AS_NODE;
+  } else {
+    process.env.ELECTRON_RUN_AS_NODE = originalElectronRunAsNode;
+  }
+  Reflect.deleteProperty(process.versions, 'electron');
+  while (created.length > 0) {
+    fs.rmSync(created.pop() as string, { recursive: true, force: true });
+  }
+});
+
+/** Point QX_WEBSEARCH_CLI at a node script whose stdout is this envelope. */
+function fakeCli(body: string): void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qx-websearch-dsh-cli-'));
+  created.push(dir);
+  const file = path.join(dir, 'cli.js');
+  fs.writeFileSync(file, body);
+  process.env.QX_WEBSEARCH_CLI = file;
+}
+
+function envelopeCli(entry: Record<string, unknown>): void {
+  fakeCli(`console.log(JSON.stringify({ results: [${JSON.stringify(entry)}] }))`);
+}
+
+const okSearchEntry = {
+  source: 'web',
+  requestedSource: 'web',
+  engine: 'antigravity-cli',
+  status: 'ok',
+  warnings: [],
+  attempts: [{ engine: 'antigravity-cli', ok: true, durationSeconds: 3 }],
+  durationSeconds: 3,
+  summary: 'What the web says.',
+  items: [
+    { title: 'A', url: 'https://a.example', snippet: 'sa', published_at: '2026-08-01' },
+    { title: 'B', url: 'https://b.example', snippet: 'sb' },
+    { title: 'junk-without-url', snippet: 'dropped' },
+  ],
+  uncertainty: ['dates approximate'],
+};
+
+describe('dsh web fetch provider', () => {
+  /** Point QX_WEBSEARCH_MOLI at a node script printing the given stdout. */
+  function fakeMoli(body: string): void {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qx-websearch-dsh-moli-'));
+    created.push(dir);
+    const file = path.join(dir, 'moli.js');
+    fs.writeFileSync(file, body);
+    process.env.QX_WEBSEARCH_MOLI = file;
+  }
+
+  const okMoliJson = {
+    final_url: 'https://example.com/',
+    status: 200,
+    title: 'Example Domain',
+    headers: [
+      { name: 'Content-Type', value: 'text/html' },
+      { name: 'server', value: 'cloudflare' },
+    ],
+    redirect_chain: [],
+    html: '<!DOCTYPE html><html><body><h1>Example Domain</h1></body></html>',
+  };
+
+  const okFetchEntry = {
+    source: 'web',
+    requestedSource: 'web',
+    engine: 'firecrawl',
+    status: 'ok',
+    warnings: ['Fetched through Firecrawl in the cloud.'],
+    attempts: [{ engine: 'firecrawl', ok: true, durationSeconds: 3 }],
+    durationSeconds: 3,
+    summary: 'Example page digest.',
+    content: 'The page body as served.',
+    links: [],
+    uncertainty: [],
+  };
+
+  it('registers once with the seam id', async () => {
+    const { fetchProviders } = await load();
+    expect(fetchProviders).toHaveLength(1);
+    expect(fetchProviders[0].id).toBe('qx-websearch');
+    expect(fetchProviders[0].available()).toBe(true);
+  });
+
+  it('skips registration when the fetch provider is switched off', async () => {
+    const { fetchProviders } = await load({ fetchProvider: false });
+    expect(fetchProviders).toHaveLength(0);
+  });
+
+  it('renders a moli json dump into the seam result shape', async () => {
+    fakeMoli(`console.log(JSON.stringify(${JSON.stringify(okMoliJson)}));`);
+    const { fetchProviders } = await load({ moliPath: '' });
+    const result = await fetchProviders[0].fetch({ url: 'https://example.com' });
+    expect(result).toEqual({
+      url: 'https://example.com/',
+      statusCode: 200,
+      body: { kind: 'html', content: okMoliJson.html },
+      truncated: false,
+    });
+  });
+
+  it('passes a non-2xx through as data, not an error', async () => {
+    fakeMoli(
+      `console.log(JSON.stringify({ ...${JSON.stringify(okMoliJson)}, status: 404 }));`,
+    );
+    const { fetchProviders } = await load({ moliPath: '' });
+    const result = await fetchProviders[0].fetch({ url: 'https://example.com/missing' });
+    expect(result.statusCode).toBe(404);
+    expect(result.body.kind).toBe('html');
+  });
+
+  it('falls back to the CLI digest fetch when moli is not configured', async () => {
+    envelopeCli(okFetchEntry);
+    const { fetchProviders } = await load();
+    const result = await fetchProviders[0].fetch({ url: 'https://example.com' });
+    expect(result.statusCode).toBe(200);
+    expect(result.body.kind).toBe('text');
+    expect(result.body.content).toContain('Example page digest.');
+    expect(result.body.content).toContain('The page body as served.');
+    expect(result.truncated).toBe(false);
+  });
+
+  it('falls back to the CLI digest when moli fails mid-run', async () => {
+    fakeMoli(`process.stderr.write('boom'); process.exit(1);`);
+    envelopeCli(okFetchEntry);
+    const { fetchProviders } = await load({ moliPath: '' });
+    const result = await fetchProviders[0].fetch({ url: 'https://example.com' });
+    expect(result.body.kind).toBe('text');
+    expect(result.body.content).toContain('Example page digest.');
+  });
+
+  it('rejects unsupported content types with the seam code, without degrading', async () => {
+    fakeMoli(
+      `console.log(JSON.stringify({ ...${JSON.stringify(okMoliJson)}, headers: [{ name: 'Content-Type', value: 'application/octet-stream' }] }));`,
+    );
+    const { fetchProviders } = await load({ moliPath: '' });
+    await expect(fetchProviders[0].fetch({ url: 'https://example.com/file' })).rejects.toMatchObject({
+      code: 'WEB_UNSUPPORTED_CONTENT_TYPE',
+    });
+  });
+
+  it('caps the moli body at 100k characters and flags the cut', async () => {
+    const big = 'x'.repeat(150_000);
+    fakeMoli(
+      `console.log(JSON.stringify({ ...${JSON.stringify(okMoliJson)}, html: ${JSON.stringify(big)} }));`,
+    );
+    const { fetchProviders } = await load({ moliPath: '' });
+    const result = await fetchProviders[0].fetch({ url: 'https://example.com' });
+    expect(result.truncated).toBe(true);
+    expect(result.body.content).toHaveLength(100_000);
+  });
+
+  it('rejects non-http(s) urls before spawning anything', async () => {
+    fakeMoli(`process.exit(42);`);
+    const { fetchProviders } = await load({ moliPath: '' });
+    await expect(
+      fetchProviders[0].fetch({ url: 'ftp://example.com/file' }),
+    ).rejects.toMatchObject({ code: 'WEB_INVALID_URL' });
+  });
+
+  it('queues beyond the slot limit and fails queued waiters on abort', async () => {
+    // 渲染槽位的纯单元面：占满 → 排队 → 随信号中止（而非挂死）→ 释放可复用。
+    // @ts-expect-error untyped on purpose
+    const { __fetch } = (await import('../dsh/index.js')) as {
+      __fetch: {
+        createSemaphore: (limit: number) => {
+          take: (signal?: AbortSignal) => Promise<void>;
+          give: () => void;
+        };
+      };
+    };
+    const slots = __fetch.createSemaphore(1);
+    await slots.take();
+    const controller = new AbortController();
+    const queued = slots.take(controller.signal);
+    controller.abort();
+    await expect(queued).rejects.toMatchObject({ code: 'WEB_ABORTED' });
+    slots.give();
+    await expect(slots.take()).resolves.toBeUndefined();
+    slots.give();
+  });
+});
+
+describe('dsh web search provider', () => {
+  it('runs the CLI in Node mode when the plugin is hosted by Electron', async () => {
+    delete process.env.ELECTRON_RUN_AS_NODE;
+    Object.defineProperty(process.versions, 'electron', {
+      value: '43.4.0',
+      configurable: true,
+    });
+    fakeCli(`
+      if (process.env.ELECTRON_RUN_AS_NODE !== '1') {
+        process.stderr.write('Electron Node mode was not enabled');
+        process.exit(1);
+      }
+      console.log(JSON.stringify({ results: [${JSON.stringify(okSearchEntry)}] }));
+    `);
+
+    const { providers } = await load();
+    await expect(providers[0].search({ query: 'anything' })).resolves.toMatchObject({
+      content: expect.stringContaining('What the web says.'),
+    });
+  });
+
+  it('maps the CLI envelope to the seam result shape', async () => {
+    const { providers } = await load();
+    expect(providers).toHaveLength(1);
+    expect(providers[0].id).toBe('qx-websearch');
+    expect(providers[0].available()).toBe(true);
+    envelopeCli(okSearchEntry);
+    const result = await providers[0].search({ query: 'anything', maxResults: 5 });
+    expect(result.content).toContain('What the web says.');
+    expect(result.content).toContain('Uncertain: dates approximate');
+    expect(result.truncated).toBe(false);
+    // Junk without a URL is dropped; published_at becomes the seam's camelCase.
+    expect(result.sources).toEqual([
+      { title: 'A', url: 'https://a.example', snippet: 'sa', publishedAt: '2026-08-01' },
+      { title: 'B', url: 'https://b.example', snippet: 'sb' },
+    ]);
+  });
+
+  it('names the attempt trail when every engine failed', async () => {
+    envelopeCli({
+      ...okSearchEntry,
+      status: 'unavailable',
+      summary: '',
+      items: [],
+      attempts: [{ engine: 'antigravity-cli', ok: false, error: 'not signed in' }],
+    });
+    const { providers } = await load();
+    await expect(providers[0].search({ query: 'anything' })).rejects.toThrow(
+      /antigravity-cli: not signed in.*doctor/s,
+    );
+  });
+
+  it('surfaces a non-zero CLI exit with its stderr', async () => {
+    fakeCli(`process.stderr.write('Error: no engines'); process.exit(1)`);
+    const { providers } = await load();
+    await expect(providers[0].search({ query: 'anything' })).rejects.toThrow(/exit 1.*no engines/s);
+  });
+});
+
+describe('dsh x_search tool', () => {
+  it('returns evidence plus provenance as the canonical value', async () => {
+    const { tools } = await load();
+    const tool = toolNamed(tools, 'x_search');
+    envelopeCli({ ...okSearchEntry, source: 'x', requestedSource: 'x', engine: 'grok-cli' });
+    const value = await tool.execute({ query: 'what is @dev saying' }, {});
+    expect(value).toEqual({
+      status: 'ok',
+      source: 'x',
+      summary: 'What the web says.',
+      items: okSearchEntry.items,
+      uncertainty: ['dates approximate'],
+    });
+  });
+
+  it('marks a web stand-in answer as degraded in value and render', async () => {
+    const { tools } = await load();
+    const tool = toolNamed(tools, 'x_search');
+    envelopeCli({ ...okSearchEntry, requestedSource: 'x', status: 'degraded' });
+    const value = await tool.execute({ query: 'reactions to the launch' }, {});
+    expect(value.status).toBe('degraded');
+    expect(value.source).toBe('web');
+    const [block] = tool.output.render({}, value as never);
+    expect(block.text).toContain('second-hand');
+    expect(block.text).toContain('1. A (2026-08-01) — https://a.example');
+  });
+
+  it('projects citation sources for the native web card', async () => {
+    const { tools } = await load();
+    const tool = toolNamed(tools, 'x_search');
+    const value = {
+      status: 'ok',
+      source: 'x',
+      summary: 's',
+      items: okSearchEntry.items,
+      uncertainty: [],
+    };
+    const meta = tool.output.presentationMeta?.({}, value as never);
+    expect(meta?.sources).toHaveLength(2);
+    const card = tool.presentResult?.({}, { content: [], isError: false, meta });
+    expect(card).toEqual({
+      card: 'web',
+      kind: 'search',
+      sources: meta?.sources,
+      truncated: false,
+    });
+    expect(tool.presentResult?.({}, { content: [], isError: true })).toBeUndefined();
+  });
+
+  it('rejects an empty query before spawning anything', async () => {
+    const { tools } = await load();
+    await expect(toolNamed(tools, 'x_search').execute({ query: '  ' }, {})).rejects.toThrow(
+      /non-empty string "query"/,
+    );
+  });
+});
+
+describe('dsh read_page tool', () => {
+  it('returns the fetch evidence fields as the canonical value', async () => {
+    const { tools } = await load();
+    const tool = toolNamed(tools, 'read_page');
+    envelopeCli({
+      source: 'web',
+      requestedSource: 'web',
+      engine: 'antigravity-cli',
+      status: 'ok',
+      warnings: ['Fetched through Firecrawl in the cloud.'],
+      attempts: [],
+      durationSeconds: 2,
+      summary: 'The page in one line.',
+      content: 'Full extracted content.',
+      links: [{ text: 'docs', url: 'https://a.example/docs' }],
+      uncertainty: [],
+    });
+    const value = await tool.execute({ url: 'https://a.example', query: 'rate limits' }, {});
+    expect(value).toEqual({
+      summary: 'The page in one line.',
+      content: 'Full extracted content.',
+      links: [{ text: 'docs', url: 'https://a.example/docs' }],
+      uncertainty: [],
+      warnings: ['Fetched through Firecrawl in the cloud.'],
+    });
+    const [block] = tool.output.render({}, value as never);
+    expect(block.text).toContain('Full extracted content.');
+    expect(block.text).toContain('- docs — https://a.example/docs');
+    expect(block.text).toContain('Fetched through Firecrawl in the cloud.');
+  });
+
+  it('rejects a non-http url before spawning anything', async () => {
+    const { tools } = await load();
+    const tool = toolNamed(tools, 'read_page');
+    await expect(tool.execute({ url: 'file:///etc/passwd' }, {})).rejects.toThrow(/http\(s\)/);
+  });
+});
+
+type RouteHandler = (req: unknown, res: unknown) => Promise<void>;
+
+interface Namespace {
+  ns: string;
+  schema: ((value: unknown) => unknown) & { toJSON: () => unknown };
+  options: unknown;
+}
+
+/** A host that offers webServer and settings on scoped injects, like dsh's web profile. */
+function house() {
+  const routes: Record<string, RouteHandler> = {};
+  const namespaces: Namespace[] = [];
+  const injected: string[][] = [];
+  const ctx = {
+    tools: { register: () => {} },
+    web: { registerSearchProvider: () => {} },
+    inject: (deps: string[], run: (scope: unknown) => void) => {
+      injected.push(deps);
+      if (deps.includes('webServer')) {
+        run({
+          webServer: {
+            register: (route: { name: string; handler: RouteHandler }) => {
+              routes[route.name] = route.handler;
+            },
+          },
+        });
+      }
+      if (deps.includes('settings')) {
+        run({
+          settings: {
+            register: (ns: string, schema: Namespace['schema'], options: unknown) => {
+              namespaces.push({ ns, schema, options });
+              return { get: () => ({}), watch: () => () => {} };
+            },
+          },
+        });
+      }
+    },
+  };
+  return { routes, namespaces, injected, ctx };
+}
+
+async function callRoute(
+  handler: RouteHandler,
+  req: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  let status = 0;
+  let body = '';
+  await handler(
+    { headers: { host: '127.0.0.1:3080' }, ...req },
+    {
+      writeHead: (code: number) => {
+        status = code;
+        return { end: () => {} };
+      },
+      end: (chunk: string) => {
+        body = chunk ?? '';
+      },
+    },
+  );
+  return { status, body: body === '' ? {} : JSON.parse(body) };
+}
+
+/** A POST request whose body is this JSON payload. */
+function postOf(payload: Record<string, unknown>): Record<string, unknown> {
+  return {
+    method: 'POST',
+    url: '/qx/websearch/config',
+    [Symbol.asyncIterator]: async function* () {
+      yield Buffer.from(JSON.stringify(payload));
+    },
+  };
+}
+
+/** Run against a temporary HOME holding this config file. */
+async function withConfig(
+  contents: unknown,
+  run: (handler: RouteHandler, file: string, stage: ReturnType<typeof house>) => Promise<void>,
+  pluginConfig: Record<string, unknown> = {},
+): Promise<void> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'qx-websearch-home-'));
+  const file = path.join(home, '.qianxun', 'websearch', 'config.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, typeof contents === 'string' ? contents : JSON.stringify(contents));
+  const realHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    // @ts-expect-error untyped on purpose
+    const plugin = (await import('../dsh/index.js')) as {
+      apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+    };
+    const stage = house();
+    plugin.apply(stage.ctx as never, pluginConfig);
+    await run(stage.routes['qx-websearch-config'], file, stage);
+  } finally {
+    process.env.HOME = realHome.HOME;
+    process.env.USERPROFILE = realHome.USERPROFILE;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+describe('dsh settings card route', () => {
+  // The card is the browser half; this covers the host half it talks to,
+  // where the API keys live. Every assertion here is about a key not leaving,
+  // not being lost, and no other setting moving underneath the save.
+  it('never puts an API key on the wire, only whether one is stored', async () => {
+    await withConfig(
+      {
+        engine: 'tavily',
+        engines: {
+          tavily: { apiKey: 'tvly-secret', baseURL: 'https://gw.example' },
+          exa: { model: 'unused', enabled: false },
+        },
+      },
+      async (handler) => {
+        const { status, body } = await callRoute(handler, {
+          method: 'GET',
+          url: '/qx/websearch/config',
+        });
+        expect(status).toBe(200);
+        expect(JSON.stringify(body)).not.toContain('tvly-secret');
+        expect(body.engine).toBe('tavily');
+        const engines = body.engines as Record<
+          string,
+          { hasKey: boolean; keySource: string | null; baseURL: string; enabled: boolean }
+        >;
+        expect(engines.tavily.hasKey).toBe(true);
+        expect(engines.tavily.keySource).toBe('file');
+        expect(engines.tavily.baseURL).toBe('https://gw.example');
+        expect(engines.tavily.enabled).toBe(true);
+        expect(engines.exa.hasKey).toBe(false);
+        expect(engines.exa.keySource).toBe(null);
+        expect(engines.exa.enabled).toBe(false);
+      },
+    );
+  });
+
+  it('does not report comma-only API key settings as stored keys', async () => {
+    await withConfig(
+      { engine: 'tavily', engines: { tavily: { apiKey: ', ,' } } },
+      async (handler) => {
+        const { body } = await callRoute(handler, { method: 'GET', url: '/qx/websearch/config' });
+        const engines = body.engines as Record<
+          string,
+          { hasKey: boolean; keySource: string | null }
+        >;
+        expect(engines.tavily.hasKey).toBe(false);
+        expect(engines.tavily.keySource).toBeNull();
+      },
+    );
+  });
+
+  it('keeps the stored key when the card submits the blank field it was shown', async () => {
+    await withConfig(
+      { engine: '', engines: { tavily: { apiKey: 'tvly-secret' } } },
+      async (handler, file) => {
+        const { status } = await callRoute(
+          handler,
+          postOf({ target: 'tavily', apiKey: '', baseURL: 'https://gw2.example' }),
+        );
+        expect(status).toBe(200);
+        const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        expect(saved.engines.tavily.apiKey).toBe('tvly-secret');
+        expect(saved.engines.tavily.baseURL).toBe('https://gw2.example');
+      },
+    );
+  });
+
+  it('stores a comma-separated key list as one trimmed setting', async () => {
+    await withConfig({ engine: '', engines: {} }, async (handler, file) => {
+      const { status } = await callRoute(
+        handler,
+        postOf({ target: 'tavily', apiKey: ' first-key, second-key ' }),
+      );
+      expect(status).toBe(200);
+      const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      expect(saved.engines.tavily.apiKey).toBe('first-key, second-key');
+    });
+  });
+
+  it('stores only disabled engine overrides and removes them when re-enabled', async () => {
+    await withConfig(
+      {
+        engine: 'tavily',
+        engines: {
+          tavily: { apiKey: 'tvly-secret', enabled: false },
+          exa: { apiKey: 'exa-secret' },
+          local: { enabled: false },
+          firecrawl: { keylessFetch: false },
+        },
+      },
+      async (handler, file) => {
+        const { status } = await callRoute(
+          handler,
+          postOf({ enabled: { tavily: true, exa: false, local: true } }),
+        );
+        expect(status).toBe(200);
+        const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        expect(saved.engine).toBe('tavily');
+        expect(saved.engines.tavily).toEqual({ apiKey: 'tvly-secret' });
+        expect(saved.engines.exa).toEqual({ apiKey: 'exa-secret', enabled: false });
+        expect(saved.engines.local).toBeUndefined();
+        expect(saved.engines.firecrawl).toEqual({ keylessFetch: false });
+      },
+    );
+  });
+
+  it('leaves every setting the card does not own exactly as it was', async () => {
+    // bin, allowPrivateNetwork, cooldown and keylessFetch are CLI-only on
+    // purpose. A card save must be unable to touch them, including the ones
+    // sitting on the very engine being edited.
+    const before = {
+      engine: 'tavily',
+      cooldown: 'off',
+      allowPrivateNetwork: true,
+      engines: {
+        tavily: { apiKey: 'tvly-secret', bin: '/opt/tavily' },
+        'antigravity-cli': { bin: '/opt/agy' },
+        firecrawl: { keylessFetch: false },
+      },
+    };
+    await withConfig(before, async (handler, file) => {
+      const { status } = await callRoute(
+        handler,
+        postOf({
+          engine: 'exa',
+          target: 'tavily',
+          apiKey: '',
+          baseURL: 'https://gw.example',
+          bin: '/tmp/evil',
+          allowPrivateNetwork: true,
+          cooldown: 'off',
+          keylessFetch: true,
+        }),
+      );
+      expect(status).toBe(200);
+      const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      expect(saved.cooldown).toBe('off');
+      expect(saved.allowPrivateNetwork).toBe(true);
+      expect(saved.engines['antigravity-cli']).toEqual({ bin: '/opt/agy' });
+      expect(saved.engines.firecrawl).toEqual({ keylessFetch: false });
+      expect(saved.engines.tavily).toEqual({
+        apiKey: 'tvly-secret',
+        bin: '/opt/tavily',
+        baseURL: 'https://gw.example',
+      });
+      // Only the two things the card owns moved.
+      expect(saved.engine).toBe('exa');
+    });
+  });
+
+  it('leaves an engine the card never showed exactly as the file had it', async () => {
+    // The card's chain lists only the search engines doctor found ready here,
+    // so an engine this machine cannot run has no row, and neither has `local`,
+    // which fetches pages rather than searching. Their stored `enabled: false`
+    // must survive a save that was about something else: out of sight is not
+    // the same as given up.
+    const before = {
+      engine: '',
+      engines: {
+        tavily: { apiKey: 'tvly-secret' },
+        exa: { apiKey: 'exa-secret', enabled: false, baseURL: 'https://exa.example' },
+        local: { enabled: false },
+      },
+    };
+    await withConfig(before, async (handler, file) => {
+      const { status } = await callRoute(handler, postOf({ enabled: { tavily: false } }));
+      expect(status).toBe(200);
+      const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      expect(saved.engines.exa).toEqual(before.engines.exa);
+      expect(saved.engines.local).toEqual(before.engines.local);
+      expect(saved.engines.tavily).toEqual({ apiKey: 'tvly-secret', enabled: false });
+    });
+  });
+
+  it('keeps an unknown top-level key rather than migrating the file underneath a save', async () => {
+    await withConfig(
+      { engine: '', proxy: 'http://127.0.0.1:7890', engines: { agy: { bin: '/opt/agy' } } },
+      async (handler, file) => {
+        await callRoute(handler, postOf({ target: 'antigravity-cli', model: 'gemini-3-pro' }));
+        const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        expect(saved.proxy).toBe('http://127.0.0.1:7890');
+        // The alias entry already holds this engine's settings, so the model
+        // lands there instead of in a second entry the CLI would never read.
+        expect(saved.engines.agy).toEqual({ bin: '/opt/agy', model: 'gemini-3-pro' });
+        expect(saved.engines['antigravity-cli']).toBeUndefined();
+      },
+    );
+  });
+
+  it('writes only the engine it was given, never the one before it', async () => {
+    await withConfig(
+      {
+        engine: 'tavily',
+        engines: {
+          tavily: { apiKey: 'tvly-a', baseURL: 'https://a.example' },
+          exa: { apiKey: 'exa-b' },
+        },
+      },
+      async (handler, file) => {
+        await callRoute(handler, postOf({ engine: 'exa', target: 'exa', apiKey: 'exa-c' }));
+        const saved = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        expect(saved.engine).toBe('exa');
+        expect(saved.engines.exa).toEqual({ apiKey: 'exa-c' });
+        expect(saved.engines.tavily).toEqual({
+          apiKey: 'tvly-a',
+          baseURL: 'https://a.example',
+        });
+      },
+    );
+  });
+
+  it('removes a cleared endpoint override instead of writing an official default', async () => {
+    await withConfig(
+      {
+        engine: 'tavily',
+        engines: { tavily: { apiKey: 'tvly-secret', baseURL: 'https://gw.example' } },
+      },
+      async (handler, file) => {
+        const { status } = await callRoute(
+          handler,
+          postOf({ target: 'tavily', apiKey: '', baseURL: '' }),
+        );
+        expect(status).toBe(200);
+        const savedText = fs.readFileSync(file, 'utf-8');
+        const saved = JSON.parse(savedText);
+        expect(saved.engines.tavily).toEqual({ apiKey: 'tvly-secret' });
+        expect(savedText).not.toContain('api.tavily.com');
+      },
+    );
+  });
+
+  it('refuses a base URL that is not http(s), the same rule the CLI applies', async () => {
+    await withConfig({ engine: '', engines: {} }, async (handler, file) => {
+      const before = fs.readFileSync(file, 'utf-8');
+      const { status, body } = await callRoute(
+        handler,
+        postOf({ target: 'tavily', baseURL: 'javascript:alert(1)' }),
+      );
+      expect(status).toBe(400);
+      expect(String(body.error)).toContain('http');
+      expect(fs.readFileSync(file, 'utf-8')).toBe(before);
+    });
+  });
+
+  it('refuses a key for an engine that has nowhere to put one', async () => {
+    await withConfig({ engine: '', engines: {} }, async (handler, file) => {
+      const before = fs.readFileSync(file, 'utf-8');
+      const { status, body } = await callRoute(
+        handler,
+        postOf({ target: 'grok-cli', apiKey: 'xai-secret' }),
+      );
+      expect(status).toBe(400);
+      expect(String(body.error)).toContain('grok-cli');
+      expect(fs.readFileSync(file, 'utf-8')).toBe(before);
+    });
+  });
+
+  it('refuses an engine name it does not know', async () => {
+    await withConfig({ engine: '' }, async (handler) => {
+      expect((await callRoute(handler, postOf({ engine: 'nope' }))).status).toBe(400);
+      expect((await callRoute(handler, postOf({ target: 'nope' }))).status).toBe(400);
+    });
+  });
+
+  it.each([
+    { host: 'dsh.example.com', origin: 'https://dsh.example.com' },
+    { host: '192.168.1.10:3080', origin: 'http://192.168.1.10:3080' },
+    { host: '127.0.0.1:3080', origin: 'https://dsh.example.com' },
+    { host: 'dsh.example.com' },
+    {
+      host: '127.0.0.1:3080',
+      origin: 'https://dsh.example.com',
+      'sec-fetch-site': 'cross-site',
+    },
+  ])('reads and saves settings without a plugin host/origin policy: %j', async (headers) => {
+    await withConfig(
+      { engine: 'tavily', engines: { tavily: { apiKey: 'tvly-secret' } } },
+      async (handler, file) => {
+        const read = await callRoute(handler, {
+          method: 'GET',
+          url: '/qx/websearch/config',
+          headers,
+        });
+        expect(read.status).toBe(200);
+        expect(read.body.engine).toBe('tavily');
+        expect(JSON.stringify(read.body)).not.toContain('tvly-secret');
+
+        const write = await callRoute(handler, {
+          ...postOf({ engine: 'exa' }),
+          headers,
+        });
+        expect(write.status).toBe(200);
+        expect(write.body.engine).toBe('exa');
+        expect(JSON.stringify(write.body)).not.toContain('tvly-secret');
+        expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toEqual({
+          engine: 'exa',
+          engines: { tavily: { apiKey: 'tvly-secret' } },
+        });
+      },
+    );
+  });
+
+  it('reports a broken config instead of treating it as empty', async () => {
+    await withConfig('{ this is not json', async (handler, file) => {
+      const read = await callRoute(handler, { method: 'GET', url: '/qx/websearch/config' });
+      expect(read.status).toBe(409);
+      expect(String(read.body.error)).toContain('JSON');
+      const write = await callRoute(handler, postOf({ target: 'tavily', apiKey: 'x' }));
+      expect(write.status).toBe(400);
+      expect(fs.readFileSync(file, 'utf-8')).toBe('{ this is not json');
+    });
+  });
+
+  it('refuses to write through a symlinked config file', async (ctx) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'qx-websearch-home-'));
+    created.push(home);
+    const real = path.join(home, 'real.json');
+    const file = path.join(home, '.qianxun', 'websearch', 'config.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(real, JSON.stringify({ engine: 'tavily' }));
+    try {
+      fs.symlinkSync(real, file);
+    } catch (error) {
+      // Windows 无符号链接特权（非管理员/开发者模式）时建链本身被拒：
+      // 被测行为无法构造，跳过而不是红。
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') ctx.skip();
+      throw error;
+    }
+    const realHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      // @ts-expect-error untyped on purpose
+      const plugin = (await import('../dsh/index.js')) as {
+        apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+      };
+      const stage = house();
+      plugin.apply(stage.ctx as never, {});
+      const { status, body } = await callRoute(
+        stage.routes['qx-websearch-config'],
+        postOf({ target: 'tavily', apiKey: 'tvly-x' }),
+      );
+      expect(status).toBe(400);
+      expect(String(body.error)).toContain('symlink');
+      expect(JSON.parse(fs.readFileSync(real, 'utf-8'))).toEqual({ engine: 'tavily' });
+    } finally {
+      process.env.HOME = realHome.HOME;
+      process.env.USERPROFILE = realHome.USERPROFILE;
+    }
+  });
+
+  it('writes with the same 0600 mode the CLI uses', async () => {
+    await withConfig({ engine: '' }, async (handler, file) => {
+      fs.chmodSync(file, 0o644);
+      await callRoute(handler, postOf({ target: 'tavily', apiKey: 'tvly-x' }));
+      if (process.platform !== 'win32') {
+        expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      }
+    });
+  });
+
+  it('reads an environment key as present without ever echoing it', async () => {
+    process.env.TAVILY_API_KEY = 'tvly-from-env';
+    try {
+      await withConfig({ engine: '', engines: {} }, async (handler) => {
+        const { body } = await callRoute(handler, { method: 'GET', url: '/qx/websearch/config' });
+        expect(JSON.stringify(body)).not.toContain('tvly-from-env');
+        const engines = body.engines as Record<string, { hasKey: boolean; keySource: string }>;
+        expect(engines.tavily.hasKey).toBe(true);
+        expect(engines.tavily.keySource).toBe('env');
+      });
+    } finally {
+      delete process.env.TAVILY_API_KEY;
+    }
+  });
+
+  it('reports engine readiness from doctor, and says nothing rather than guessing', async () => {
+    fakeCli(`
+      if (process.argv[2] !== 'doctor' || process.argv[3] !== '--json') {
+        process.exit(9);
+      }
+      console.log(JSON.stringify({
+        roles: [
+          {
+            role: 'search',
+            candidates: [
+              { engine: 'firecrawl', ready: true, reason: 'keyless', keySource: null },
+              { engine: 'tavily', ready: false, reason: 'no API key', keySource: null },
+            ],
+          },
+          {
+            role: 'social',
+            candidates: [{ engine: 'grok-cli', ready: false, reason: 'binary not found' }],
+          },
+        ],
+      }));
+    `);
+    await withConfig({ engine: '' }, async (handler) => {
+      const { body } = await callRoute(handler, {
+        method: 'GET',
+        url: '/qx/websearch/config?doctor=1',
+      });
+      const readiness = body.readiness as Array<Record<string, unknown>>;
+      expect(readiness).toContainEqual(
+        expect.objectContaining({ engine: 'firecrawl', ready: true }),
+      );
+      expect(readiness).toContainEqual(
+        expect.objectContaining({ engine: 'tavily', ready: false, keySource: null }),
+      );
+      expect(readiness).toContainEqual(
+        expect.objectContaining({ engine: 'grok-cli', ready: false }),
+      );
+    });
+
+    fakeCli(`process.stderr.write('doctor exploded'); process.exit(1)`);
+    await withConfig({ engine: '' }, async (handler) => {
+      const { status, body } = await callRoute(handler, {
+        method: 'GET',
+        url: '/qx/websearch/config?doctor=1',
+      });
+      // A failed probe must not fail the card: the readiness section simply
+      // has nothing to show.
+      expect(status).toBe(200);
+      expect(body.readiness).toBe(null);
+    });
+  });
+
+  it('forgets the cached doctor verdict once a save has rewritten the config', async () => {
+    // The probe costs a process start, so its answer is cached for a minute.
+    // That minute is exactly when a user saves the key that makes an engine
+    // ready, and a stale verdict would tell the card the engine is still unset.
+    fakeCli(`
+      const fs = require('fs');
+      const path = require('path');
+      const counter = path.join(__dirname, 'calls');
+      const calls = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf-8')) : 0) + 1;
+      fs.writeFileSync(counter, String(calls));
+      console.log(JSON.stringify({
+        roles: [{
+          role: 'search',
+          candidates: [{ engine: 'tavily', ready: calls > 1, reason: 'probe ' + calls, keySource: null }],
+        }],
+      }));
+    `);
+    await withConfig({ engine: '' }, async (handler) => {
+      const probe = { method: 'GET', url: '/qx/websearch/config?doctor=1' };
+      const first = await callRoute(handler, probe);
+      expect(first.body.readiness).toContainEqual(
+        expect.objectContaining({ engine: 'tavily', ready: false }),
+      );
+      // Second read inside the window: the same answer, without paying again.
+      const cached = await callRoute(handler, probe);
+      expect(cached.body.readiness).toEqual(first.body.readiness);
+
+      await callRoute(handler, postOf({ target: 'tavily', apiKey: 'tvly-new' }));
+      const after = await callRoute(handler, probe);
+      expect(after.body.readiness).toContainEqual(
+        expect.objectContaining({ engine: 'tavily', ready: true }),
+      );
+    });
+  });
+
+  it('serves the settings namespace the card is keyed by', async () => {
+    await withConfig({ engine: '' }, async (_handler, _file, stage) => {
+      expect(stage.namespaces).toHaveLength(1);
+      expect(stage.namespaces[0].ns).toBe('qx-websearch');
+      const schema = stage.namespaces[0].schema;
+      expect(schema(undefined)).toEqual({});
+      expect(schema({ kept: 1 })).toEqual({ kept: 1 });
+      expect(schema.toJSON()).toEqual({
+        uid: 0,
+        refs: { 0: { type: 'object', meta: { default: {} }, dict: {} } },
+      });
+      expect(stage.injected).toContainEqual(['webServer']);
+      expect(stage.injected).toContainEqual(['settings']);
+    });
+  });
+
+  it('registers neither the route nor the namespace when the card is switched off', async () => {
+    await withConfig(
+      { engine: '' },
+      async (handler, _file, stage) => {
+        // No route means dsh answers 404, which is how the browser half knows
+        // to stand down instead of rendering a broken card.
+        expect(handler).toBeUndefined();
+        expect(stage.namespaces).toEqual([]);
+      },
+      { settingsCard: false },
+    );
+  });
+});
+
+describe('dsh plugin config switches', () => {
+  it('registers nothing when every surface is switched off', async () => {
+    const { tools, providers } = await load({
+      searchProvider: false,
+      xSearch: false,
+      readPage: false,
+    });
+    expect(tools.size).toBe(0);
+    expect(providers).toHaveLength(0);
+  });
+
+  it('stays a tools-only plugin when the web seam surface moved', async () => {
+    // @ts-expect-error untyped on purpose
+    const plugin = (await import('../dsh/index.js')) as {
+      apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+    };
+    const tools = new Map<string, RegisteredTool>();
+    plugin.apply(
+      {
+        tools: {
+          register: (definition: RegisteredTool) => {
+            tools.set(definition.name, definition);
+          },
+        },
+        web: {},
+      } as never,
+      {},
+    );
+    expect([...tools.keys()].sort()).toEqual(['read_page', 'x_search']);
+  });
+
+  it('keeps search, x_search and read_page on a host with no scoped injects at all', async () => {
+    // Headless profiles have neither webServer nor settings, and older hosts
+    // have no ctx.inject to hang them on. The settings card is the only thing
+    // that may go missing there.
+    const { tools, providers } = await load();
+    expect([...tools.keys()].sort()).toEqual(['read_page', 'x_search']);
+    expect(providers).toHaveLength(1);
+  });
+});

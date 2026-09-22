@@ -1,0 +1,46 @@
+{
+  "name": "qx-websearch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "千寻内置联网搜索：网页/X 搜索与单页抓取，免费引擎链开箱即用",
+  "type": "module",
+  "bin": {
+    "qx-websearch": "./dist/main.js"
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome lint",
+    "format": "biome format --write"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "exports": {
+    ".": "./dsh/index.js",
+    "./dsh": "./dsh/index.js",
+    "./client": "./dsh/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "undici": "^7.29.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.7",
+    "@types/node": "^22.19.7",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.1",
+    "vitest": "3.2.4"
+  }
+}

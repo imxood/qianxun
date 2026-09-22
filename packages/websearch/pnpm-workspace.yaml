@@ -1,0 +1,4 @@
+# 独立 workspace：让 pnpm 就地解析依赖，不并入上层工程。
+# esbuild 的 postinstall 用于校验/回退平台二进制安装（白名单制）。
+allowBuilds:
+  esbuild: true

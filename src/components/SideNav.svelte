@@ -36,6 +36,12 @@
       detachable: false,
     },
     {
+      id: 'web',
+      label: '联网',
+      icon: 'M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z',
+      detachable: false,
+    },
+    {
       id: 'plugins',
       label: '插件',
       icon: 'M9 3v4M15 3v4M6 7h12v3a6 6 0 01-12 0V7zM12 16v5',

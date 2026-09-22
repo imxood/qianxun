@@ -1,0 +1,619 @@
+// The `local` engine: direct HTTP page fetch, ported from the retired modfetch
+// project. No LLM, no browser, no key, no quota: it opens the URL, strips the
+// markup, and hands back the visible text. Quality is below the agy route (no
+// synthesis, no focus extraction, and JS-rendered pages come back thin), but it
+// is the only fetch engine that works with nothing installed.
+//
+// This module is the transport and the engine adapter: it drives one fetch
+// (with every redirect hop re-validated), reads the body under caps, and maps
+// the result onto the shared engine contract. The SSRF guards live in
+// ./http/network.ts and the markup handling in ./http/htmlExtract.ts.
+import * as tls from 'node:tls';
+import { Agent, EnvHttpProxyAgent, type Dispatcher } from 'undici';
+import { assertSafeRemoteTarget, normalizeFetchUrl, type PinnedTarget } from './http/network.ts';
+import {
+  extractLinks,
+  extractVisibleTextFromHtml,
+  normalizeWhitespace,
+} from './http/htmlExtract.ts';
+import type { EngineRequest, EngineOutput, SearchEngine } from './index.ts';
+import { MAX_CONTENT_CHARS } from './limits.ts';
+
+export interface FetchOptions {
+  url: string;
+  timeoutMs?: number;
+  maxBytes?: number;
+  maxChars?: number;
+  maxRedirects?: number;
+  userAgent?: string;
+  allowPrivateNetwork?: boolean;
+}
+
+export interface FetchResult {
+  /** Raw body, kept so callers can pull links out of it. */
+  rawHtml?: string;
+  requestUrl: string;
+  finalUrl: string;
+  status: number;
+  statusText: string;
+  contentType: string;
+  title: string | null;
+  text: string;
+  meta: {
+    fetchedAt: string;
+    bytes: number;
+    truncated: boolean;
+    redirectChain: string[];
+    timeoutMs: number;
+    maxBytes: number;
+    maxChars: number;
+    privateNetworkAllowed: boolean;
+    /** True if any hop used the system HTTP proxy. Always present. */
+    proxied: boolean;
+  };
+}
+
+interface FetchStepResult {
+  response: Response;
+  elapsedMs: number;
+}
+
+interface ReadBodyResult {
+  body: Uint8Array;
+  bytes: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_MAX_BYTES = 2_000_000;
+const DEFAULT_MAX_CHARS = MAX_CONTENT_CHARS;
+const DEFAULT_MAX_REDIRECTS = 4;
+
+function firstNonEmpty(values: Array<string | undefined>): string | null {
+  for (const value of values) {
+    if (value === undefined) {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed !== '') {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+function proxyUriForProtocol(protocol: string, env: NodeJS.ProcessEnv): string | null {
+  if (protocol === 'http:') {
+    return firstNonEmpty([env.http_proxy, env.HTTP_PROXY]);
+  }
+  if (protocol === 'https:') {
+    return firstNonEmpty([env.https_proxy, env.HTTPS_PROXY, env.http_proxy, env.HTTP_PROXY]);
+  }
+  return null;
+}
+
+function urlPort(url: URL): number {
+  if (url.port) {
+    return Number.parseInt(url.port, 10);
+  }
+  return url.protocol === 'https:' ? 443 : 80;
+}
+
+function isExcludedByNoProxy(url: URL, env: NodeJS.ProcessEnv): boolean {
+  const raw = env.no_proxy ?? env.NO_PROXY;
+  if (raw === undefined) {
+    return false;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return false;
+  }
+  if (trimmed === '*') {
+    return true;
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  const port = urlPort(url);
+
+  for (const part of trimmed.split(/[,\s]/)) {
+    if (!part) {
+      continue;
+    }
+    if (part === '*') {
+      return true;
+    }
+    const parsed = part.match(/^(.+):(\d+)$/);
+    const hostRaw = parsed ? parsed[1] : part;
+    const entryHost = hostRaw.replace(/^\*?\./, '').toLowerCase();
+    const entryPort = parsed ? Number.parseInt(parsed[2], 10) : undefined;
+    if (entryPort !== undefined && entryPort !== port) {
+      continue;
+    }
+    if (hostname === entryHost || hostname.endsWith(`.${entryHost}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Which system HTTP proxy to use for this URL, or null to go direct. */
+export function resolveProxyForUrl(url: URL, env: NodeJS.ProcessEnv): string | null {
+  const proxyUrl = proxyUriForProtocol(url.protocol, env);
+  if (!proxyUrl) {
+    return null;
+  }
+  if (isExcludedByNoProxy(url, env)) {
+    return null;
+  }
+  return proxyUrl;
+}
+
+export async function runFetch(options: FetchOptions): Promise<FetchResult> {
+  const requestUrl = normalizeFetchUrl(options.url);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+  const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
+  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const allowPrivateNetwork = options.allowPrivateNetwork ?? false;
+  const userAgent = options.userAgent ?? 'qx-websearch (+https://github.com/liustack/qx-websearch)';
+
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('Invalid timeoutMs. Use a positive integer.');
+  }
+
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+    throw new Error('Invalid maxBytes. Use a positive integer.');
+  }
+
+  if (!Number.isFinite(maxChars) || maxChars <= 0) {
+    throw new Error('Invalid maxChars. Use a positive integer.');
+  }
+
+  if (!Number.isFinite(maxRedirects) || maxRedirects < 0) {
+    throw new Error('Invalid maxRedirects. Use a non-negative integer.');
+  }
+
+  let currentUrl = requestUrl;
+  const redirectChain: string[] = [];
+  // One deadline for the whole run: DNS, every redirect hop, and the body.
+  const deadline = AbortSignal.timeout(timeoutMs);
+  // Dispatchers created along the way, closed when the run ends.
+  const dispatchers: Dispatcher[] = [];
+  let proxied = false;
+
+  try {
+    for (let i = 0; i <= maxRedirects; i += 1) {
+      // Preflight every hop. Pin the socket on the direct path. A system HTTP
+      // proxy does DNS itself, so that path does not pin.
+      const pinned = await assertSafeRemoteTarget(currentUrl, allowPrivateNetwork);
+      const proxyUrl = resolveProxyForUrl(currentUrl, process.env);
+      const dispatcher = proxyUrl
+        ? proxyDispatcher(proxyUrl, allowPrivateNetwork)
+        : pinnedDispatcher(pinned, allowPrivateNetwork);
+      if (proxyUrl) {
+        proxied = true;
+      }
+      dispatchers.push(dispatcher);
+
+      const { response } = await fetchOnce(currentUrl, dispatcher, deadline, timeoutMs, userAgent);
+      if (isRedirectStatus(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) {
+          throw new Error(`Redirect response (${response.status}) missing location header.`);
+        }
+
+        if (i === maxRedirects) {
+          throw new Error(`Too many redirects. Max redirects: ${maxRedirects}.`);
+        }
+
+        const nextUrl = new URL(location, currentUrl);
+        redirectChain.push(currentUrl.toString());
+        currentUrl = nextUrl;
+        continue;
+      }
+
+      const contentTypeHeader = response.headers.get('content-type') || '';
+      if (!isTextLikeContentType(contentTypeHeader)) {
+        throw new Error(
+          `Unsupported content-type: ${contentTypeHeader || 'unknown'}. Only text-like content is allowed.`,
+        );
+      }
+
+      const readBody = await readBodyWithLimit(response, maxBytes, timeoutMs);
+      const decoded = decodeBody(readBody.body, contentTypeHeader);
+
+      const normalizedContentType = contentTypeHeader.split(';')[0]?.trim().toLowerCase() || '';
+      const extraction =
+        normalizedContentType.includes('html') || normalizedContentType.includes('xhtml')
+          ? extractVisibleTextFromHtml(decoded)
+          : {
+              title: null,
+              text: normalizeWhitespace(decoded),
+            };
+
+      const trimmed = trimToMaxChars(extraction.text, maxChars);
+
+      return {
+        rawHtml: normalizedContentType.includes('html') ? decoded : undefined,
+        requestUrl: requestUrl.toString(),
+        finalUrl: currentUrl.toString(),
+        status: response.status,
+        statusText: response.statusText,
+        contentType: contentTypeHeader,
+        title: extraction.title,
+        text: trimmed.text,
+        meta: {
+          fetchedAt: new Date().toISOString(),
+          bytes: readBody.bytes,
+          truncated: trimmed.truncated,
+          redirectChain,
+          timeoutMs,
+          maxBytes,
+          maxChars,
+          privateNetworkAllowed: allowPrivateNetwork,
+          proxied,
+        },
+      };
+    }
+
+    throw new Error('Failed to fetch target URL.');
+  } finally {
+    // The body is fully read into memory before we return, so closing the
+    // dispatchers here frees their sockets without cutting a live read.
+    for (const dispatcher of dispatchers) {
+      dispatcher.close().catch(() => {});
+    }
+  }
+}
+
+/**
+ * TCP goes to the proxy host, not the target, so pinning lookup to the checked
+ * IP would mis-route the socket. The proxy does DNS.
+ * ProxyAgent ignores AgentOptions.connect. Origin TLS is requestTls, TLS to
+ * the proxy is proxyTls.
+ */
+function proxyDispatcher(proxyUrl: string, allowPrivateNetwork: boolean): EnvHttpProxyAgent {
+  const ca = allowPrivateNetwork ? mergedOsCaCertificates() : undefined;
+  const tls = ca ? { ca } : undefined;
+  return new EnvHttpProxyAgent({
+    httpProxy: proxyUrl,
+    httpsProxy: proxyUrl,
+    noProxy: '',
+    ...(tls ? { requestTls: tls, proxyTls: tls } : {}),
+  });
+}
+
+/**
+ * An undici dispatcher whose DNS lookup is hard-wired to the one IP the safety
+ * check validated. The connection goes to that IP, while the URL's hostname
+ * still drives the Host header and TLS SNI, so a DNS answer that changes after
+ * the check cannot redirect the socket.
+ */
+function pinnedDispatcher(pinned: PinnedTarget, allowPrivateNetwork: boolean): Agent {
+  // `ca` replaces Node's default trust store, so merge default + system rather
+  // than passing system alone.
+  const ca = allowPrivateNetwork ? mergedOsCaCertificates() : undefined;
+  return new Agent({
+    connect: {
+      lookup: (_hostname, options, callback) => {
+        const record = { address: pinned.address, family: pinned.family };
+        // undici asks with { all: true } and expects an array; be tolerant of
+        // the single-record signature too.
+        if (options && (options as { all?: boolean }).all) {
+          (callback as (err: Error | null, addresses: Array<{ address: string; family: number }>) => void)(
+            null,
+            [record],
+          );
+        } else {
+          (callback as (err: Error | null, address: string, family: number) => void)(
+            null,
+            pinned.address,
+            pinned.family,
+          );
+        }
+      },
+      ...(ca ? { ca } : {}),
+    },
+  });
+}
+
+type GetCACertificates = (type?: string) => string[];
+
+// undefined: not loaded. null: unavailable or empty. array: merged PEM list.
+let cachedOsCa: string[] | null | undefined;
+
+function mergedOsCaCertificates(): string[] | undefined {
+  if (cachedOsCa !== undefined) {
+    return cachedOsCa ?? undefined;
+  }
+
+  const getCACertificates = (tls as { getCACertificates?: GetCACertificates }).getCACertificates;
+  if (typeof getCACertificates !== 'function') {
+    cachedOsCa = null;
+    return undefined;
+  }
+
+  try {
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const cert of [...getCACertificates('default'), ...getCACertificates('system')]) {
+      if (seen.has(cert)) {
+        continue;
+      }
+      seen.add(cert);
+      merged.push(cert);
+    }
+    cachedOsCa = merged.length === 0 ? null : merged;
+    return cachedOsCa ?? undefined;
+  } catch {
+    cachedOsCa = null;
+    return undefined;
+  }
+}
+
+/**
+ * One request against an already validated target. The caller owns the signal
+ * so it stays armed while the body streams: aborting only on response headers
+ * left a slow body able to hang forever.
+ */
+async function fetchOnce(
+  url: URL,
+  dispatcher: Dispatcher,
+  signal: AbortSignal,
+  timeoutMs: number,
+  userAgent: string,
+): Promise<FetchStepResult> {
+  const started = Date.now();
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'manual',
+      signal,
+      // `dispatcher` is a Node/undici extension to fetch's options, not in the
+      // DOM RequestInit type, so it is attached through a cast.
+      dispatcher,
+      headers: {
+        'user-agent': userAgent,
+        accept:
+          'text/html,application/xhtml+xml,application/json,text/plain,application/xml,text/xml;q=0.9,*/*;q=0.5',
+      },
+    } as unknown as RequestInit & { dispatcher: Dispatcher });
+
+    return {
+      response,
+      elapsedMs: Date.now() - started,
+    };
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`Request timed out after ${timeoutMs} ms.`);
+    }
+    throw new Error(`Request failed for ${url.toString()}: ${formatErrorWithCause(error)}`);
+  }
+}
+
+async function readBodyWithLimit(
+  response: Response,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<ReadBodyResult> {
+  const body = response.body;
+  if (!body) {
+    return {
+      body: new Uint8Array(),
+      bytes: 0,
+    };
+  }
+
+  const contentLengthHeader = response.headers.get('content-length');
+  if (contentLengthHeader) {
+    const contentLength = Number.parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      throw new Error(`Response body exceeds max size ${maxBytes} bytes.`);
+    }
+  }
+
+  const reader = body.getReader();
+  // The shared deadline aborts this stream too: report it as a timeout rather
+  // than as an opaque stream error.
+  const asTimeout = (error: unknown) => {
+    if (isAbortError(error)) {
+      throw new Error(`Request timed out after ${timeoutMs} ms while reading the body.`);
+    }
+    throw error;
+  };
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read().catch(asTimeout);
+    if (done) {
+      break;
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    total += value.length;
+    if (total > maxBytes) {
+      throw new Error(`Response body exceeds max size ${maxBytes} bytes.`);
+    }
+
+    chunks.push(value);
+  }
+
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return {
+    body: result,
+    bytes: total,
+  };
+}
+
+function decodeBody(body: Uint8Array, contentTypeHeader: string): string {
+  const charset = parseCharset(contentTypeHeader) || 'utf-8';
+  try {
+    return new TextDecoder(charset).decode(body);
+  } catch {
+    return new TextDecoder('utf-8').decode(body);
+  }
+}
+
+function parseCharset(contentTypeHeader: string): string | null {
+  const matched = /charset=([^;]+)/i.exec(contentTypeHeader);
+  if (!matched) {
+    return null;
+  }
+
+  return matched[1].trim().toLowerCase().replace(/^"|"$/g, '');
+}
+
+function isTextLikeContentType(contentTypeHeader: string): boolean {
+  const normalized = contentTypeHeader.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  if (normalized.startsWith('text/')) {
+    return true;
+  }
+
+  return (
+    normalized.includes('json') ||
+    normalized.includes('xml') ||
+    normalized.includes('html') ||
+    normalized.includes('javascript') ||
+    normalized.includes('x-www-form-urlencoded')
+  );
+}
+
+function trimToMaxChars(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) {
+    return {
+      text,
+      truncated: false,
+    };
+  }
+
+  return {
+    text: text.slice(0, maxChars),
+    truncated: true,
+  };
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function isAbortError(error: unknown): boolean {
+  // AbortSignal.timeout rejects with TimeoutError, not AbortError, so a plain
+  // name check reported real timeouts as generic request failures.
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return true;
+  }
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const err = error as { name?: string; code?: string };
+  return err.name === 'AbortError' || err.code === 'ABORT_ERR';
+}
+
+function formatErrorWithCause(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause;
+    if (cause instanceof Error) {
+      return `${error.message}; cause: ${cause.message}`;
+    }
+
+    if (cause !== undefined) {
+      return `${error.message}; cause: ${String(cause)}`;
+    }
+
+    return error.message;
+  }
+
+  return String(error);
+}
+
+// ---------- qx-websearch engine surface ----------
+
+export async function executeHttpFetch(options: EngineRequest): Promise<EngineOutput> {
+  if (options.mode !== 'fetch' || !options.url) {
+    throw new Error(
+      'The local engine does not support search (-q). It fetches one page at a time.',
+    );
+  }
+
+  const startedAt = Date.now();
+  const allowPrivate = options.allowPrivateNetwork === true;
+  const result = await runFetch({
+    url: options.url,
+    timeoutMs: Math.min(options.timeoutMs, 60_000),
+    allowPrivateNetwork: allowPrivate,
+  });
+
+  // How the page was fetched (method, truncation, redirects, private-network
+  // override) is a runtime warning, not a fact the page was unsure about.
+  const warnings: string[] = [
+    'Fetched directly by the local engine with no LLM synthesis: this is the page text as served, not a restructured summary.',
+  ];
+  if (result.meta.truncated) {
+    warnings.push(`Content truncated at ${result.meta.maxChars} characters.`);
+  }
+  if (result.meta.redirectChain.length > 0) {
+    warnings.push(`Followed ${result.meta.redirectChain.length} redirect(s) to ${result.finalUrl}.`);
+  }
+  if (options.extraPrompt || options.query) {
+    warnings.push(
+      'This engine cannot narrow the page to a focus. The full text is here, so pick out the relevant parts yourself.',
+    );
+  }
+  if (allowPrivate) {
+    warnings.push(
+      'Private network protection was disabled for this fetch, so the URL was trusted as given.',
+    );
+  }
+  if (result.meta.proxied) {
+    warnings.push(
+      'This request went through the system HTTP proxy. The proxy resolved the hostname, so the connection was not pinned to a checked IP.',
+    );
+  }
+
+  // A page that came back nearly empty is genuine doubt about the evidence: the
+  // content may be incomplete. That is epistemic, so it stays in uncertainty.
+  const uncertainty: string[] = [];
+  if (result.text.length < 200) {
+    uncertainty.push(
+      'Very little text came back. The page is probably rendered by JavaScript, which this engine does not run.',
+    );
+  }
+
+  return {
+    result: {
+      summary: `${result.title ?? result.finalUrl} (local fetch, ${result.status} ${result.statusText})`,
+      content: result.text,
+      links: result.rawHtml ? extractLinks(result.rawHtml, result.finalUrl) : [],
+      uncertainty,
+      warnings,
+    },
+    meta: {
+      conversationId: null,
+      durationSeconds: (Date.now() - startedAt) / 1000,
+      usage: { bytes: result.meta.bytes, redirects: result.meta.redirectChain.length },
+    },
+  };
+}
+
+export const httpFetchProvider: SearchEngine = {
+  name: 'local',
+  roles: ['fetch'],
+  requirement: 'nothing, it always works',
+  isAvailable: () => true,
+  execute: executeHttpFetch,
+};

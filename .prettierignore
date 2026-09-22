@@ -1,6 +1,8 @@
 node_modules
 dist
+.tmp
 src-tauri
+packages/websearch
 pnpm-lock.yaml
 mobile/android/build
 mobile/android/.gradle

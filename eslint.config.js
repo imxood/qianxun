@@ -9,9 +9,13 @@ export default tseslint.config(
     ignores: [
       'dist/',
       'node_modules/',
+      // agent 探针/临时脚本（AGENTS 约定：.tmp 不入门禁、可随时清空）。
+      '.tmp/',
       'src-tauri/target/',
       'src-tauri/gen/',
       'src-tauri/src/',
+      // 内置联网搜索包：自带 biome 工具链与独立测试，不并外壳 lint。
+      'packages/websearch/',
       // Android 构建产物与生成物（RN 模板生成）：非外壳源码，不 lint。
       'mobile/android/build/',
       'mobile/android/.gradle/',
