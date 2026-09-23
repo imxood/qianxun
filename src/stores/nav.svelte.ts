@@ -1,4 +1,5 @@
-export type PageId = 'env' | 'dsh' | 'files' | 'web' | 'remote' | 'notes' | 'plugins' | 'settings';
+export type PageId =
+  'env' | 'dsh' | 'files' | 'web' | 'remote' | 'notes' | 'games' | 'plugins' | 'settings';
 
 /** 外壳导航域。功能域随里程碑各自追加（截屏/笔记…）。 */
 class NavStore {

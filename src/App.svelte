@@ -14,6 +14,7 @@
   import WebPage from './features/web/WebPage.svelte';
   import RemotePage from './features/remote/RemotePage.svelte';
   import NotesPage from './features/notes/NotesPage.svelte';
+  import GamesPage from './features/games/GamesPage.svelte';
   import PluginsPage from './features/plugins/PluginsPage.svelte';
   import SettingsPage from './features/settings/SettingsPage.svelte';
   import type { PageId } from './stores/nav.svelte';
@@ -132,6 +133,11 @@
       {#if nav.visited.web}
         <div class="absolute inset-0 overflow-y-auto p-6 {show('web')}">
           <WebPage />
+        </div>
+      {/if}
+      {#if nav.visited.games}
+        <div class="absolute inset-0 overflow-y-auto p-6 {show('games')}">
+          <GamesPage />
         </div>
       {/if}
       {#if nav.visited.plugins}

@@ -42,6 +42,12 @@
       detachable: false,
     },
     {
+      id: 'games',
+      label: '游戏',
+      icon: 'M6 9h4m-2-2v4M15 8h.01M18 10h.01M7.5 4h9A4.5 4.5 0 0121 8.5v5a4.5 4.5 0 01-4.5 4.5h-9A4.5 4.5 0 013 13.5v-5A4.5 4.5 0 017.5 4zM8 14h2m-1-1v2m7-1h.01M17.5 15h.01',
+      detachable: false,
+    },
+    {
       id: 'plugins',
       label: '插件',
       icon: 'M9 3v4M15 3v4M6 7h12v3a6 6 0 01-12 0V7zM12 16v5',
