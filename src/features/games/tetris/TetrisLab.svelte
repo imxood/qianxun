@@ -36,6 +36,9 @@
     type DriveMode,
     type Snapshot,
   } from './brain';
+  import { boardToText } from './engine';
+
+  const LAYA_ENDPOINT = 'http://127.0.0.1:10230';
 
   type Phase = 'idle' | 'running' | 'paused' | 'over';
 
@@ -73,6 +76,60 @@
   let decideTimer: ReturnType<typeof setInterval> | undefined;
   let deciding = false;
   const startedAt = { v: 0 };
+
+  // ---- 可追溯日志(sidecar 落盘 JSONL,供离线复盘/竞态分析) ----
+  let sessionId = $state<string | null>(null);
+  let pendingLogs = $state<Array<Record<string, unknown>>>([]);
+  let logSeq = 0;
+  let flushingLogs = false;
+
+  async function startSession(): Promise<void> {
+    await flushLogs();
+    try {
+      const r = await fetch(`${LAYA_ENDPOINT}/session/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          game: 'laya-tetris',
+          meta: {
+            mode: driveMode,
+            intervalMs,
+            gravityMs,
+            gateExecute: brain.gateExecute,
+            gateEscalate: brain.gateEscalate,
+          },
+        }),
+      });
+      const j = (await r.json()) as { id?: string };
+      sessionId = j.id ?? null;
+    } catch {
+      sessionId = null; // sidecar 不在:游戏照常,只是没有落盘日志
+    }
+  }
+
+  function pushLogEntry(entry: Record<string, unknown>): void {
+    logSeq += 1;
+    pendingLogs.push({ ts: Date.now(), seq: logSeq, ...entry });
+    if (pendingLogs.length >= 6) void flushLogs();
+  }
+
+  async function flushLogs(): Promise<void> {
+    if (!sessionId || pendingLogs.length === 0 || flushingLogs) return;
+    flushingLogs = true;
+    const batch = pendingLogs.slice();
+    pendingLogs = [];
+    try {
+      await fetch(`${LAYA_ENDPOINT}/session/log`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId, entries: batch }),
+      });
+    } catch {
+      pendingLogs = [...batch, ...pendingLogs]; // 失败回插队首,下次再试
+    } finally {
+      flushingLogs = false;
+    }
+  }
 
   const COLORS: Record<number, string> = {
     1: '#22d3ee',
@@ -129,14 +186,21 @@
   }
 
   // ---- 游戏核心 ----
+  /** 方块代次:每次出生 +1。异步决策返回后代次不匹配 = 决策过期,必须丢弃,
+   * 否则旧决策(如 hard_drop)会打到新方块上——「紫框刚出现方块就砸底」的根因。 */
+  let pieceGen = $state(0);
+
   function spawnNext(): boolean {
     const id = nextPiece;
     nextPiece = makeNext();
     const x = id === PIECE_IDS.O ? 4 : 3;
+    pieceGen += 1;
     if (collides(board, id, 0, x, 0)) {
       current = { id, rot: 0, x, y: 0 };
       stop('over');
       addLog(`GAME OVER score=${score}`, 'text-red-400');
+      pushLogEntry({ type: 'event', event: 'gameover', score, lines, board: boardToText(board) });
+      void flushLogs();
       return false;
     }
     current = { id, rot: 0, x, y: 0 };
@@ -150,6 +214,16 @@
     lockPiece(board, current.id, current.rot, current.x, current.y);
     const { board: cleared, cleared: n } = clearLines(board);
     board = cleared;
+    pushLogEntry({
+      type: 'lock',
+      gen: pieceGen,
+      piece: PIECE_NAMES[current.id - 1],
+      rot: current.rot,
+      x: current.x,
+      linesCleared: n,
+      score,
+      board: boardToText(board),
+    });
     if (n > 0) {
       lines += n;
       score += ([0, 100, 300, 500, 800][n] ?? 0) * level;
@@ -229,10 +303,49 @@
   async function decideOnce(): Promise<void> {
     if (deciding || phase !== 'running' || !current) return;
     deciding = true;
+    const gen = pieceGen;
     try {
       errorText = '';
       const snap = snapshot();
+
+      // reflex 短路:已对齐目标 → 同帧 hard_drop 收尾,零 Laya 调用(无竞态)
+      if (driveMode === 'reflex' && atTarget(snap, currentPlan)) {
+        applyAction('hard_drop');
+        stats.decisions += 1;
+        stats.avgLat = stats.avgLat + (0 - stats.avgLat) / stats.decisions;
+        addLog('EXEC hard_drop(已对齐,免推理)', 'text-emerald-400');
+        pushLogEntry({
+          type: 'decision',
+          gen,
+          piece: PIECE_NAMES[snap.pieceId - 1],
+          action: 'hard_drop',
+          conf: 1,
+          gate: 'EXECUTE',
+          latencyMs: 0,
+          applied: true,
+          note: 'aligned-shortcut',
+        });
+        return;
+      }
+
       const d: Decision = await brain.decide(snap);
+
+      // 竞态防线:决策期间方块被重力锁定/切换 → 旧动作作废(落盘留痕,供复盘)
+      if (gen !== pieceGen) {
+        addLog(`[stale] 决策过期:方块已切换(gen ${gen}→${pieceGen})`, 'text-muted');
+        pushLogEntry({
+          type: 'decision',
+          gen,
+          piece: PIECE_NAMES[snap.pieceId - 1],
+          action: d.action,
+          conf: d.conf,
+          gate: d.gate,
+          latencyMs: d.latencyMs,
+          applied: false,
+          note: 'stale-piece-switch',
+        });
+        return;
+      }
       lastDecision = d;
 
       if (d.gate === 'ESCALATE') {
@@ -241,18 +354,27 @@
         escalatePlace();
         addLog(`ESCALATE → S2 place (${d.latencyMs.toFixed(0)}ms)`, 'text-red-400');
       } else {
-        let acted = d.action;
-        // reflex 模式下已对齐目标则一步 hard_drop 收尾(语义等价,不悬停)
-        if (driveMode === 'reflex' && atTarget(snap, currentPlan) && d.action !== 'hard_drop') {
-          acted = 'hard_drop';
-        }
-        applyAction(acted);
+        applyAction(d.action);
         addLog(
-          `EXEC ${acted} conf=${d.conf.toFixed(2)} (${d.latencyMs.toFixed(1)}ms)`,
+          `EXEC ${d.action} conf=${d.conf.toFixed(2)} (${d.latencyMs.toFixed(1)}ms)`,
           d.gate === 'EXECUTE' ? 'text-emerald-400' : 'text-amber-400',
         );
         if (d.sensed > 1) stats.reSense += 1;
       }
+
+      pushLogEntry({
+        type: 'decision',
+        gen,
+        piece: PIECE_NAMES[snap.pieceId - 1],
+        action: lastDecision?.action ?? d.action,
+        conf: d.conf,
+        gate: d.gate,
+        latencyMs: d.latencyMs,
+        probs: d.probs,
+        plan: d.plan ? { rot: d.plan.rot, x: d.plan.x, score: Math.round(d.plan.score) } : null,
+        applied: true,
+        sensed: d.sensed,
+      });
 
       stats.decisions += 1;
       const n = stats.decisions;
@@ -270,9 +392,13 @@
   function applyTimers(): void {
     clearInterval(gravityTimer);
     clearInterval(decideTimer);
-    gravityTimer = setInterval(() => {
-      if (phase === 'running') softDrop();
-    }, gravityMs);
+    // 难度曲线:每升 1 级重力缩短 12%(下限 150ms),level 不再只是数字
+    gravityTimer = setInterval(
+      () => {
+        if (phase === 'running') softDrop();
+      },
+      Math.max(150, Math.round(gravityMs * Math.pow(0.88, level - 1))),
+    );
     // 人玩不跑决策循环;Laya 模式按滑杆频率感知
     if (driveMode !== 'human') {
       decideTimer = setInterval(() => void decideOnce(), intervalMs);
@@ -294,6 +420,8 @@
       brain.mode = driveMode;
       brain.reset();
       startedAt.v = Date.now();
+      void startSession();
+      pushLogEntry({ type: 'event', event: 'start', mode: driveMode, gravityMs, intervalMs });
       spawnNext();
     }
     phase = 'running';
@@ -324,6 +452,12 @@
     currentPlan = driveMode === 'reflex' && current ? planTarget(snapshot()) : null;
     if (phase === 'running') applyTimers();
   }
+
+  // level 变化 → 重力加速生效(难度曲线)
+  $effect(() => {
+    void level;
+    if (phase === 'running') applyTimers();
+  });
 
   // ---- 人玩键盘 ----
   function onKey(e: KeyboardEvent): void {

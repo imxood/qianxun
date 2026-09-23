@@ -12,11 +12,11 @@
  */
 
 import {
-  boardToText,
-  dropY,
-  features,
-  pieceName,
+  COLS,
+  ROWS,
   solvePlacements,
+  pieceName,
+  features,
   stackHeight,
   type Board,
   type Placement,
@@ -110,7 +110,7 @@ export function candidateActions(snap: Snapshot, plan: PlanTarget): Action[] {
   return acts;
 }
 
-/** 生成 laya-server 的 questions(候选动作 choice + danger score)。 */
+/** 生成 laya-server 的 questions(reflex:仅候选动作单题,控制每步延迟)。 */
 export function buildQuestions(candidates: readonly Action[]): Record<string, unknown> {
   const criteria: Record<string, string> = {};
   for (const a of candidates) criteria[a] = ACTION_HINTS[a];
@@ -118,19 +118,24 @@ export function buildQuestions(candidates: readonly Action[]): Record<string, un
     action: {
       type: 'choice',
       instructions:
-        'Tetris reflex step. The board is shown top row first, "." empty "#" filled. The falling piece, the plan target (when present) and board pressure are given. Choose exactly one next action.',
+        'Tetris reflex step. The board is 20 rows top-first, hex encoded: each row is 10 cells, 4 hex chars, bit 9 (MSB) = leftmost column, bit set = filled. The falling piece, plan target and board pressure are given. Choose exactly one next action.',
       criteria,
     },
-    danger: {
-      type: 'score',
-      instructions: 'How dangerous is the board right now?',
-      criteria: [
-        'calm - low stack, no holes',
-        'risky - rising stack or a few holes',
-        'critical - holes deep or stack near top',
-      ],
-    },
   };
+}
+
+/** 棋盘 hex 编码:每行 10 格 → 4 个 hex 字符(bit9=最左列),20 行空格连接。
+ * 相比 210 字符的点阵文本 token 数大减,控制每步推理延迟。 */
+function boardToHex(board: Board): string {
+  const rows: string[] = [];
+  for (let y = 0; y < ROWS; y += 1) {
+    let bits = 0;
+    for (let x = 0; x < COLS; x += 1) {
+      if ((board[y * COLS + x] ?? 0) !== 0) bits |= 1 << (COLS - 1 - x);
+    }
+    rows.push(bits.toString(16).padStart(4, '0'));
+  }
+  return rows.join(' ');
 }
 
 /** 把快照(含可选规划目标)文本化为 state。 */
@@ -141,14 +146,13 @@ export function buildState(
 ): Record<string, unknown> {
   const f = features(snap.board, 0);
   const height = stackHeight(snap.board);
-  const rows = boardToText(snap.board);
   const state: Record<string, unknown> = {
-    board: rows.join('\n'),
+    board_hex: boardToHex(snap.board),
     falling_piece: `${pieceName(snap.pieceId)} rot=${snap.pieceRot} x=${snap.pieceX} y=${snap.pieceY}`,
     next_piece: pieceName(snap.nextPieceId),
     board_pressure: `stack_height=${height}/20 holes=${f.holes} bumpiness=${colBumpiness(snap.board)}`,
   };
-  if (mode !== 'pure' && plan?.placement) {
+  if (mode === 'reflex' && plan?.placement) {
     const p = plan.placement;
     const rotDelta = shortestRotation(snap.pieceRot, p.rot);
     state.plan_target =
@@ -269,7 +273,6 @@ export class LayaBrain {
     sensed: number,
   ): Decision {
     const actionAns = raw.answers?.action ?? {};
-    const dangerAns = raw.answers?.danger ?? {};
     const inSet = (a: string | undefined): a is Action =>
       a !== undefined && (candidates as readonly string[]).includes(a);
     // 候选集过滤:Laya 选到集外(或没选)时,按其在候选上的概率回退。
@@ -293,7 +296,7 @@ export class LayaBrain {
       gate,
       latencyMs: 0,
       probs: {},
-      danger: Number(dangerAns.score ?? 0),
+      danger: 0,
       plan: null,
       sensed,
     };
@@ -332,6 +335,3 @@ export function atTarget(snap: Snapshot, plan: PlanTarget | null): boolean {
   if (!plan?.placement) return false;
   return snap.pieceRot === plan.placement.rot && snap.pieceX === plan.placement.x;
 }
-
-/** dropY 便捷再导出(供 UI 判定 hard_drop 是否安全)。 */
-export { dropY };
