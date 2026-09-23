@@ -65,6 +65,12 @@ export const IPC_COMMANDS = [
   'websearch_deploy',
   'websearch_status',
   'moli_status',
+  'laya_status',
+  'laya_start',
+  'laya_stop',
+  'qwen_status',
+  'qwen_start',
+  'qwen_stop',
   'plugins_list',
   'market_installed',
   'market_install',
@@ -178,9 +184,56 @@ export interface MoliSettings {
   binaryPath: string;
 }
 
+/** Laya 决策引擎环境（环境页配置；权重不入 git，docs/09 §5.1）。 */
+export interface LayaSettings {
+  /** sidecar 可执行文件；空 = 按探测链定位。 */
+  serverExe: string;
+  /** 模型 bundle 目录（含 laya.onnx）；空 = 探测 exe 同级 models/。 */
+  modelDir: string;
+  port: number;
+  threads: number;
+}
+
+/** Laya 侧车状态（laya_status/start/stop 返回）。 */
+export interface LayaStatus {
+  /** /health 探测通过（含外部启动的实例）。 */
+  running: boolean;
+  healthCheckpoint: string | null;
+  /** 千寻自有子进程 PID；外部实例为 null。 */
+  pid: number | null;
+  port: number;
+  threads: number;
+  serverExe: string | null;
+  modelDir: string | null;
+  detail: string | null;
+}
+
+/** QWen 本地推理服务配置（OpenAI 兼容，如 llama-server）。 */
+export interface QwenSettings {
+  /** 服务可执行文件绝对路径（必填）。 */
+  serverExe: string;
+  /** 启动参数（空白分词透传；缺 --port 时千寻自动追加配置端口）。 */
+  args: string;
+  port: number;
+}
+
+/** QWen 服务状态。 */
+export interface QwenStatus {
+  /** 端口有监听者（含外部实例）。 */
+  running: boolean;
+  /** /health 明确 200（llama-server 加载中为 503）。 */
+  ready: boolean;
+  pid: number | null;
+  port: number;
+  serverExe: string | null;
+  detail: string | null;
+}
+
 /** 工具管理设置（R001）。 */
 export interface ToolsSettings {
   moli: MoliSettings;
+  laya: LayaSettings;
+  qwen: QwenSettings;
   /** playwright-core 加载路径；空 = 桥按约定位置自动探测。 */
   playwrightCorePath: string;
 }
@@ -214,7 +267,12 @@ export interface SettingsPatch {
   mirrors?: Partial<MirrorsSettings>;
   search?: Partial<SearchSettings>;
   web?: Partial<WebSettings>;
-  tools?: { moli?: Partial<MoliSettings>; playwrightCorePath?: string };
+  tools?: {
+    moli?: Partial<MoliSettings>;
+    laya?: Partial<LayaSettings>;
+    qwen?: Partial<QwenSettings>;
+    playwrightCorePath?: string;
+  };
   hotkeys?: Partial<HotkeysSettings>;
   notes?: Partial<NotesSettings>;
   remote?: Partial<RemoteSettings>;

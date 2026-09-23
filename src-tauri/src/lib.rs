@@ -44,6 +44,13 @@ struct AppState {
     harness: Arc<harness::commands::HarnessState>,
     search: Arc<search::SearchState>,
     remote: Arc<remote::commands::RemoteState>,
+    /// Laya 侧车自有子进程（仅记录千寻启动的实例，退出统一收割）。
+    /// 经 Manager::state 借用访问，编译器认作未读；是侧车生命周期锚点。
+    #[allow(dead_code)]
+    laya_proc: tools::laya::LayaProcState,
+    /// QWen 推理服务自有子进程（同上）。
+    #[allow(dead_code)]
+    qwen_proc: tools::qwen::QwenProcState,
 }
 
 /// 读设置快照：托管的启动/安装计划都以它为准。
@@ -169,6 +176,8 @@ pub fn run() {
                 ))),
                 search: Arc::new(search::SearchState::new()),
                 remote: Arc::new(remote::commands::RemoteState::default()),
+                laya_proc: tools::laya::LayaProcState::default(),
+                qwen_proc: tools::qwen::QwenProcState::default(),
             });
             app.manage(shots::commands::ShotsState::default());
             app.manage(disk::DiskScanManager::default());
@@ -290,6 +299,7 @@ pub fn run() {
             window::app_toggle_devtools,
             window::system_theme,
             window::window_spawn_view,
+            window::window_open_external,
             notes::commands::notes_list,
             notes::commands::notes_read,
             notes::commands::notes_save,
@@ -302,6 +312,12 @@ pub fn run() {
             websearch::commands::websearch_deploy,
             websearch::commands::websearch_status,
             tools::moli::moli_status,
+            tools::laya::laya_status,
+            tools::laya::laya_start,
+            tools::laya::laya_stop,
+            tools::qwen::qwen_status,
+            tools::qwen::qwen_start,
+            tools::qwen::qwen_stop,
             market::market_installed,
             market::market_install,
             market::market_remove,
@@ -331,6 +347,13 @@ pub fn run() {
                 if window::is_rebuilding() {
                     api.prevent_exit();
                 }
+                return;
+            }
+            if matches!(event, tauri::RunEvent::Exit) {
+                // 正经退出（含托盘退出）收割 Laya / QWen 侧车：
+                // 只杀千寻启动的实例。
+                tools::laya::kill_owned(_app);
+                tools::qwen::kill_owned(_app);
             }
         });
 }

@@ -347,12 +347,67 @@ pub struct Settings {
     pub tools: ToolsSettings,
 }
 
+/// Laya 决策引擎本机环境（环境页配置；权重与 sidecar 不入 git，见 docs/09 §5.1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LayaSettings {
+    /// laya-server.exe 绝对路径；空 = 按探测链定位
+    /// （当前 exe 目录 → 其上级 release → 资源目录）。
+    pub server_exe: String,
+    /// 模型 bundle 目录（含 laya.onnx 与 manifest.json）；空 = 探测 exe 同级 models/。
+    pub model_dir: String,
+    /// 回环监听端口（与游戏页/侧车约定一致）。
+    pub port: u16,
+    /// ONNX intra-op 线程数（docs/09 §6.1 实测 8 最优）。
+    pub threads: u16,
+}
+
+impl Default for LayaSettings {
+    fn default() -> Self {
+        Self {
+            server_exe: String::new(),
+            model_dir: String::new(),
+            port: 10230,
+            threads: 8,
+        }
+    }
+}
+
+/// QWen 本地推理服务的启动配置（环境页手动启停）。
+/// OpenAI 兼容服务（vLLM/llama.cpp server 等）：状态以端口探活为准。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct QwenSettings {
+    /// 服务可执行文件绝对路径（必填；空 = 未配置）。
+    pub server_exe: String,
+    /// 启动参数（按空白分词原样透传，如 `serve -m qwen3.5.gguf --port 8000`）。
+    pub args: String,
+    /// 回环监听端口（探活用）。
+    pub port: u16,
+}
+
+impl Default for QwenSettings {
+    fn default() -> Self {
+        Self {
+            server_exe: String::new(),
+            args: String::new(),
+            // 8080 太通用易撞；17230 与 Laya(10230)/DSH(17300) 错开。
+            // 千寻启动时若参数缺 --port 会自动追加，保证与探活端口一致。
+            port: 17230,
+        }
+    }
+}
+
 /// 工具管理设置（R001 D8）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ToolsSettings {
     /// Moli 无头浏览器。
     pub moli: MoliSettings,
+    /// Laya 决策引擎（环境页配置与启动控制）。
+    pub laya: LayaSettings,
+    /// QWen 本地推理服务（环境页手动启停）。
+    pub qwen: QwenSettings,
     /// playwright-core 的加载路径（R001 browser_* 工具）；空 = 桥内
     /// 按 tools/playwright-core/ 约定位置与 require 链自动探测。
     pub playwright_core_path: String,
