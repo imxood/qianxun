@@ -177,6 +177,17 @@ ONNX↔PyTorch parity:max|dlogits| = 6.2e-06,max|dact| = 0.0(external_data=False
 压测:200 iter × 4 并发,deterministic PASS,0 errors,5.9 qps
 ```
 
+延迟旋钮是 ORT `intra_threads`(默认 4)与题目数,**与 debug/release 构建无关**
+(计算全在 onnxruntime.dll,Rust 包装层差异 ≈1.5% 噪声,实测 20 轮 P50):
+
+| intra_threads | 2 | 4 | **8(最优)** | 12 | 16 |
+|---|---|---|---|---|---|
+| 3 题 P50 | 218.6ms | 124.1ms | **81.8ms** | 84.5ms | 93.7ms |
+
+8 ≈ 物理核数最优点,超过后调度开销回落。sidecar 已按 `--threads 8` 运行:
+单题 ~26ms。并发场景注意总线程预算(如 4 并发 × 4 线程会争抢同一物理核,
+压测 P50 680ms 即此因)。
+
 ### 6.1 实施结果(2026-07-31 全量落地)
 
 - **仓库整合**:laya-engine / laya-cli / laya-server 三个 crate 并入 `src-tauri/crates/`,
