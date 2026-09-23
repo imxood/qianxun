@@ -153,7 +153,13 @@ pub fn heal(app: &AppHandle) {
         return;
     };
     if plugin_dir.join("index.js").is_file() {
-        return;
+        // 内容指纹自愈：文件存在 ≠ 内容最新。升级千寻（include_str! 常量
+        // 随重编译变化）或 debug 期间改 assets 后，profile 副本会静默滞后，
+        // DSH 加载的永远是旧文件。逐文件比对，一致才免于重写。
+        if !plugin_stale(&plugin_dir) {
+            return;
+        }
+        crate::logging::log("info", "桥插件副本过期，重新部署");
     }
     if let Err(cause) = bridge_deploy(app.clone()) {
         crate::logging::log("warn", &format!("桥自愈失败：{cause}"));
@@ -161,6 +167,22 @@ pub fn heal(app: &AppHandle) {
 }
 
 // ---- 内部 ----
+
+/// profile 副本是否与编译期内置不一致（任一文件缺失或内容不同 = 过期）。
+fn plugin_stale(plugin_dir: &std::path::Path) -> bool {
+    [
+        ("index.js", PLUGIN_INDEX),
+        ("websearch.js", PLUGIN_WEBSEARCH),
+        ("browsersession.js", PLUGIN_BROWSERSESSION),
+        ("package.json", PLUGIN_PACKAGE_JSON),
+    ]
+    .iter()
+    .any(|(name, want)| {
+        std::fs::read_to_string(plugin_dir.join(name))
+            .map(|have| have != *want)
+            .unwrap_or(true)
+    })
+}
 
 /// moli 自备路径（可为空 = 桥走降级）；空值也写入，保证 patch 与设置一致。
 fn moli_path_of(settings: &Settings) -> String {
@@ -423,6 +445,28 @@ mod tests {
         assert!(!text.contains("[]"), "[] 残留会产出非法 YAML：{text}");
         assert!(text.contains("id: qx-bridge"));
         assert!(text.contains(r#"vault: "D:/docs/v2""#));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 内容指纹自愈缺文件或旧内容判定过期() {
+        let dir = std::env::temp_dir().join(format!("qx-bridge-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 全新目录：缺文件 = 过期。
+        assert!(plugin_stale(&dir));
+
+        // 全部写入当前内置内容 → 新鲜。
+        std::fs::write(dir.join("index.js"), PLUGIN_INDEX).unwrap();
+        std::fs::write(dir.join("websearch.js"), PLUGIN_WEBSEARCH).unwrap();
+        std::fs::write(dir.join("browsersession.js"), PLUGIN_BROWSERSESSION).unwrap();
+        std::fs::write(dir.join("package.json"), PLUGIN_PACKAGE_JSON).unwrap();
+        assert!(!plugin_stale(&dir));
+
+        // 只改一个文件（模拟 debug 改 assets / 升级千寻）→ 过期。
+        std::fs::write(dir.join("websearch.js"), "// stale\n").unwrap();
+        assert!(plugin_stale(&dir));
 
         std::fs::remove_dir_all(&dir).ok();
     }
