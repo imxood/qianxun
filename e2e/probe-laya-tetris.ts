@@ -29,10 +29,11 @@ async function main(): Promise<void> {
   const viteUp = await fetch('http://localhost:5190/').then((r) => r.ok).catch(() => false);
   if (!viteUp) {
     log('启动 vite…');
-    viteProc = spawn('pnpm.cmd', ['dev:web'], {
+    // 直接用当前 node 跑 vite.js:没有 cmd/pnpm 中间层,进程树只有一层,
+    // 强杀/正常退出都能可靠终止(经 shell 包一层是 5190 孤儿进程的根因)。
+    viteProc = spawn(process.execPath, ['node_modules/vite/bin/vite.js'], {
       cwd: path.resolve(import.meta.dirname, '..'),
       stdio: 'ignore',
-      shell: process.platform === 'win32',
     });
     for (let i = 0; i < 60; i += 1) {
       if (await fetch('http://localhost:5190/').then((r) => r.ok).catch(() => false)) break;
@@ -54,9 +55,20 @@ async function main(): Promise<void> {
       spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
     } else child.kill('SIGTERM');
   };
-  process.on('exit', () => {
+  const cleanup = (): void => {
     killTree(proc);
     killTree(viteProc);
+  };
+  // exit 钩子在强杀(job kill / 管道断裂)下不执行——SIGINT/SIGTERM 也挂上;
+  // vite 已无中间层,node 直跑,kill() 与 taskkill 均可精确命中。
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    cleanup();
+    process.exit(143);
   });
 
   for (let i = 0; i < 120; i += 1) {

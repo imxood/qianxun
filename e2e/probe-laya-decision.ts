@@ -132,11 +132,11 @@ async function main(): Promise<void> {
     .catch(() => false);
   if (!viteUp) {
     log('启动 vite dev:web(5190)…');
-    viteProc = spawn(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['dev:web'], {
+    // 直接用当前 node 跑 vite.js:无 cmd/pnpm 中间层,强杀也能可靠终止
+    viteProc = spawn(process.execPath, ['node_modules/vite/bin/vite.js'], {
       cwd: path.resolve(import.meta.dirname, '..'),
       env: process.env,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      shell: process.platform === 'win32',
+      stdio: 'ignore',
     });
     const started = Date.now();
     while (Date.now() - started < 60_000) {
@@ -183,7 +183,16 @@ async function main(): Promise<void> {
     killTree(proc);
     killTree(viteProc);
   };
+  // exit 钩子在强杀(job kill / 管道断裂)下不执行——SIGINT/SIGTERM 也挂上
   process.on('exit', cleanup);
+  process.on('SIGINT', () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    cleanup();
+    process.exit(143);
+  });
 
   try {
     await waitForCdp(CDP_PORT, 60_000);
