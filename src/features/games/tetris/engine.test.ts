@@ -10,6 +10,7 @@ import {
   makeBag,
   newBoard,
   solvePlacements,
+  solvePlacements2,
   stackHeight,
 } from './engine';
 
@@ -86,6 +87,33 @@ describe('tetris engine', () => {
     // I 竖放(x=9, rot=1)一次补两层洞:存在消 2 行的候选,且它应是最高分
     expect(placements.filter((p) => p.cleared >= 2).length).toBeGreaterThan(0);
     expect(placements[0]?.cleared).toBe(2);
+  });
+
+  it('2-block lookahead:为下一块预留通道(单块贪心会制造死缝)', () => {
+    // 场景:左侧一堆 9 高,右侧平地 3 高,当前 O 块、下一块 I。
+    // 单块贪心倾向把 O 平放高处;2-block 会偏向右侧低位,给 I 留出消行通道。
+    const b = newBoard();
+    for (let y = 11; y < 20; y += 1) {
+      for (let x = 0; x < 5; x += 1) b[y * 10 + x] = PIECE_IDS.O;
+    }
+    for (let y = 17; y < 20; y += 1) {
+      for (let x = 5; x < 10; x += 1) b[y * 10 + x] = PIECE_IDS.O;
+    }
+    const greedy = solvePlacements(b, PIECE_IDS.O)[0];
+    const look = solvePlacements2(b, PIECE_IDS.O, PIECE_IDS.I)[0];
+    expect(greedy).toBeDefined();
+    expect(look).toBeDefined();
+    if (!greedy || !look) return;
+    // 落定后:2-block 的盘面给 I 块的最优评分应不低于贪心的(排序核心性质)
+    const evalForI = (p: { rot: number; x: number }): number => {
+      const y = dropY(b, PIECE_IDS.O, p.rot, p.x);
+      if (y < 0) return Number.NEGATIVE_INFINITY;
+      const mid = b.slice();
+      lockPiece(mid, PIECE_IDS.O, p.rot, p.x, y);
+      const { board: after } = clearLines(mid);
+      return solvePlacements(after, PIECE_IDS.I)[0]?.score ?? Number.NEGATIVE_INFINITY;
+    };
+    expect(evalForI(look)).toBeGreaterThanOrEqual(evalForI(greedy) - 1e-6);
   });
 
   it('7-bag:每 7 次发牌恰为一套完整七种', () => {

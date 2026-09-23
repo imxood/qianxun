@@ -392,12 +392,16 @@
   function applyTimers(): void {
     clearInterval(gravityTimer);
     clearInterval(decideTimer);
-    // 难度曲线:每升 1 级重力缩短 12%(下限 150ms),level 不再只是数字
+    // 难度曲线:每升 1 级重力缩短 12%。下限 300ms = Laya 决策延迟 p50(~250ms)
+    // 的安全线——重力若快过决策,方块未对齐即触底(半路锁定),这才是真实死因
+    //(headless 实验证明:纯求解器无此约束时无限存活,洞全部来自执行侧)。
+    // 人玩(kb reflex)无此负担,下限 120ms。
+    const floorMs = driveMode === 'human' ? 120 : 300;
     gravityTimer = setInterval(
       () => {
         if (phase === 'running') softDrop();
       },
-      Math.max(150, Math.round(gravityMs * Math.pow(0.88, level - 1))),
+      Math.max(floorMs, Math.round(gravityMs * Math.pow(0.88, level - 1))),
     );
     // 人玩不跑决策循环;Laya 模式按滑杆频率感知
     if (driveMode !== 'human') {

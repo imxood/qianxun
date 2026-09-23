@@ -452,6 +452,37 @@ export function solvePlacements(board: Board, pieceId: number): Placement[] {
   return out;
 }
 
+/**
+ * System 2 进阶:2-block lookahead。
+ * 对当前块每个合法放置,先模拟落定,再用下一块的 1-block 最优评分评价该局面——
+ * 「这步放完后,下一块最好能怎样」。修复单块贪心在后期堆高时的死局倾向
+ * (本次留 1 格缝、下次填不上)。当前块自身评分作为 tie-break 加入,避免
+ * 「两步幻想」:为下一块的高分牺牲眼前(消行仍按两块累计计)。
+ * 性能:≤40×≤40 次特征评估,JS 每次调用 <10ms,仅在新块出生时调用一次。
+ */
+export function solvePlacements2(board: Board, pieceId: number, nextPieceId: number): Placement[] {
+  const first = solvePlacements(board, pieceId);
+  if (first.length === 0) return first;
+  const scored: Placement[] = [];
+  for (const p of first) {
+    // 复现该放置落定后的盘面
+    const y = dropY(board, pieceId, p.rot, p.x);
+    if (y < 0) continue;
+    const mid = cloneBoard(board);
+    lockPiece(mid, pieceId, p.rot, p.x, y);
+    const { board: after, cleared } = clearLines(mid);
+    // 下一块的最优 1-block 评分(无合法放置 = -∞,该分支视为死路)
+    const nextBest = solvePlacements(after, nextPieceId)[0];
+    const nextScore = nextBest?.score ?? Number.NEGATIVE_INFINITY;
+    scored.push({
+      ...p,
+      score: nextScore + p.score * 0.5 + W.cleared * cleared * 2,
+    });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
 /** 当前堆高(最高列)。 */
 export function stackHeight(board: Board): number {
   for (let y = 0; y < ROWS; y += 1) {

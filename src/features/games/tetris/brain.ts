@@ -14,7 +14,7 @@
 import {
   COLS,
   ROWS,
-  solvePlacements,
+  solvePlacements2,
   pieceName,
   features,
   stackHeight,
@@ -71,9 +71,9 @@ const MAX_RE_SENSE = 2;
 
 export type PlanTarget = { placement: Placement; pieceName: string };
 
-/** System 2 规划:给当前 piece 找最优放置(棋盘已满时可能为 null)。 */
+/** System 2 规划:2-block lookahead(看一眼下一块),棋盘已满时为 null。 */
 export function planTarget(snap: Snapshot): PlanTarget | null {
-  const best = solvePlacements(snap.board, snap.pieceId)[0];
+  const best = solvePlacements2(snap.board, snap.pieceId, snap.nextPieceId)[0];
   if (!best) return null;
   return {
     placement: best,
