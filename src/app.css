@@ -245,11 +245,20 @@ summary {
     @apply text-muted hover:text-fg;
   }
 
-  /* 导航激活态：柔和品牌底 + 细描边。整块渐变大底在窄侧栏里过亮过大、
-     压过内容区；低饱和底色 + 同色文字足够锚定当前位置。 */
+  /* 导航激活态：柔和品牌底 + 左缘指示条。窄图标栏里，位置感来自
+     左缘 2px 竖条（视觉锚点）+ 同色图标（低饱和不压内容）。 */
   .qx-nav-active {
     @apply bg-accent-soft text-accent;
-    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--qx-accent) 22%, transparent);
+  }
+  .qx-nav-active::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 9999px;
+    background: var(--qx-accent);
   }
 
   /* 内容区极光：内容背景顶部的一道品牌色氛围光。

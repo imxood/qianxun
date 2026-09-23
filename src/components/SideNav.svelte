@@ -79,11 +79,15 @@
   }
 </script>
 
-<nav class="flex w-16 shrink-0 flex-col gap-1.5 border-r border-line bg-surface px-1.5 py-2">
+<!--
+  纯图标窄栏（48px）：位置感由左缘指示条 + 图标同色承担，文字收敛为
+  tooltip / aria-label。比文字纵排窄 16px，视觉也更静。
+-->
+<nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-surface py-2">
   {#each items.filter((item) => !nav.detached[item.id]) as item (item.id)}
     {@const active = nav.page === item.id}
     <button
-      class="group mx-auto flex w-12 flex-col items-center gap-1 rounded-lg py-2 outline-none transition-all focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface {active
+      class="group relative flex size-9 items-center justify-center rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/50 {active
         ? 'qx-nav-active'
         : 'text-muted hover:bg-accent-soft/50 hover:text-fg'}"
       aria-label={item.label}
@@ -95,7 +99,7 @@
     >
       <svg
         viewBox="0 0 24 24"
-        class="size-5 shrink-0 transition-colors"
+        class="size-[18px] shrink-0 transition-colors"
         fill="none"
         stroke="currentColor"
         stroke-width={active ? 1.9 : 1.6}
@@ -105,17 +109,14 @@
       >
         <path d={item.icon} />
       </svg>
-      <span class="text-[11px] leading-none {active ? 'font-medium' : ''}">
-        {item.label}
-      </span>
     </button>
   {/each}
 
   {#if !nav.detached.settings}
     <!-- 设置沉底：与工具项分组，栏内层级一眼可辨。 -->
-    <div class="mt-auto border-t border-line/60 pt-1.5">
+    <div class="mt-auto flex w-full justify-center border-t border-line/60 pt-1.5">
       <button
-        class="group mx-auto flex w-12 flex-col items-center gap-1 rounded-lg py-2 outline-none transition-all focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface {nav.page ===
+        class="group relative flex size-9 items-center justify-center rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/50 {nav.page ===
         'settings'
           ? 'qx-nav-active'
           : 'text-muted hover:bg-accent-soft/50 hover:text-fg'}"
@@ -127,7 +128,7 @@
       >
         <svg
           viewBox="0 0 24 24"
-          class="size-5 shrink-0 transition-colors"
+          class="size-[18px] shrink-0 transition-colors"
           fill="none"
           stroke="currentColor"
           stroke-width={nav.page === 'settings' ? 1.9 : 1.6}
@@ -139,9 +140,6 @@
             d="M12 8a4 4 0 100 8 4 4 0 000-8zM19 12l2-1-2-4-2 1-2-1V4h-2.2L12 6l-2.8-2H7v3l-2 1-2-1-2 4 2 1v2l-2 1 2 4 2-1 2 1v3h2.8L12 18l2.8 2H17v-3l2-1 2 1 2-4-2-1z"
           />
         </svg>
-        <span class="text-[11px] leading-none {nav.page === 'settings' ? 'font-medium' : ''}">
-          设置
-        </span>
       </button>
     </div>
   {/if}
