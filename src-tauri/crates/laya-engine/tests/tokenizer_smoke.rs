@@ -2,9 +2,9 @@
 //! models/laya-onnx 缺失时跳过。
 
 use laya_engine::config::LayaConfig;
+use laya_engine::questions::QuestionDef;
 use laya_engine::sequence::build_sequence;
 use laya_engine::tokenizer::LayaTokenizer;
-use laya_engine::questions::QuestionDef;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -45,12 +45,27 @@ fn tokenizer_and_sequence_smoke() {
     let cfg = LayaConfig::load(&bundle_dir()).expect("load config");
     assert_eq!(cfg.max_len, 512);
     // choice:11+ 桶 0.1006 必须被钳制
-    assert!(cfg.temperature_by_options["choice:11+"] >= 0.5, "sharpening temperature must be clamped");
+    assert!(
+        cfg.temperature_by_options["choice:11+"] >= 0.5,
+        "sharpening temperature must be clamped"
+    );
 
-    let pq = build_sequence(&tok, &state, &q, "department", cfg.max_len, cfg.head_max_len, false)
-        .expect("build sequence");
+    let pq = build_sequence(
+        &tok,
+        &state,
+        &q,
+        "department",
+        cfg.max_len,
+        cfg.head_max_len,
+        false,
+    )
+    .expect("build sequence");
     assert_eq!(pq.ids[0], tok.cls_token_id, "sequence starts with [CLS]");
-    assert_eq!(*pq.ids.last().unwrap(), tok.sep_token_id, "sequence ends with [SEP]");
+    assert_eq!(
+        *pq.ids.last().unwrap(),
+        tok.sep_token_id,
+        "sequence ends with [SEP]"
+    );
     assert_eq!(pq.markers.len(), 2, "one marker per choice option");
     for m in &pq.markers {
         assert_eq!(pq.ids[*m], tok.mask_token_id, "marker points at [MASK]");

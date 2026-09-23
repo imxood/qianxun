@@ -50,6 +50,14 @@ export default tseslint.config(
     },
   },
   {
+    // DSH Host 插件跑在宿主 Node 进程里（fetch/process 等 Node 全局合法），
+    // 与外壳（WebView/browser globals）分区声明。
+    files: ['plugins/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
     rules: {
       // 千寻规范 §3：不用无信息命名；§5：状态与展示分离。
       // ignoreRestSiblings：`const { kind, ...rest }` 的剥离式解构不算未使用。

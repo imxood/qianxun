@@ -53,12 +53,11 @@ impl LayaAgent {
     ) -> Result<Vec<(String, PreparedQuestion)>> {
         let mut prepared = Vec::with_capacity(questions.len());
         for (qid, def_value) in questions {
-            let def: QuestionDef = serde_json::from_value(def_value.clone()).map_err(|e| {
-                LayaError::Question {
+            let def: QuestionDef =
+                serde_json::from_value(def_value.clone()).map_err(|e| LayaError::Question {
                     qid: qid.clone(),
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             let internal: InternalQuestion = def.to_internal();
             let pq = build_sequence(
                 &self.tokenizer,
@@ -92,7 +91,8 @@ impl LayaAgent {
             for (row, (qid, pq)) in chunk.iter().enumerate() {
                 input_tokens += pq.ids.len();
                 let k = pq.markers.len();
-                let row_logits: Vec<f64> = out.logits[row * batch.max_markers..row * batch.max_markers + k]
+                let row_logits: Vec<f64> = out.logits
+                    [row * batch.max_markers..row * batch.max_markers + k]
                     .iter()
                     .map(|v| *v as f64)
                     .collect();
@@ -116,7 +116,14 @@ impl LayaAgent {
 fn collate(items: &[(String, PreparedQuestion)], pad_id: u32) -> BatchInput {
     let n = items.len();
     let seq_len = items.iter().map(|(_, p)| p.ids.len()).max().unwrap_or(1);
-    let max_markers = std::cmp::max(2, items.iter().map(|(_, p)| p.markers.len()).max().unwrap_or(2));
+    let max_markers = std::cmp::max(
+        2,
+        items
+            .iter()
+            .map(|(_, p)| p.markers.len())
+            .max()
+            .unwrap_or(2),
+    );
 
     let mut input_ids = vec![pad_id as i64; n * seq_len];
     let mut attention_mask = vec![0i64; n * seq_len];
@@ -148,7 +155,12 @@ fn collate(items: &[(String, PreparedQuestion)], pad_id: u32) -> BatchInput {
     }
 }
 
-fn build_answer(pq: &PreparedQuestion, row_logits: &[f64], act_prob: f64, cfg: &LayaConfig) -> Value {
+fn build_answer(
+    pq: &PreparedQuestion,
+    row_logits: &[f64],
+    act_prob: f64,
+    cfg: &LayaConfig,
+) -> Value {
     let k = pq.markers.len();
     let kind = match pq.qtype {
         0 => QuestionKind::Choice,
@@ -214,11 +226,7 @@ fn entropy_confidence(p: &[f64], k: usize) -> f64 {
     if k < 2 {
         return 1.0;
     }
-    let ent: f64 = p
-        .iter()
-        .take(k)
-        .map(|v| -v * v.max(1e-12).ln())
-        .sum();
+    let ent: f64 = p.iter().take(k).map(|v| -v * v.max(1e-12).ln()).sum();
     (1.0 - ent / (k as f64).ln()).clamp(0.0, 1.0)
 }
 

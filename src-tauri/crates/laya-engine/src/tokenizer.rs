@@ -79,13 +79,11 @@ impl LayaTokenizer {
                 .ok_or_else(|| {
                     LayaError::Tokenizer(format!("tokenizer_config.json is missing {name}"))
                 })?;
-            let id = backend
-                .token_to_id(&content)
-                .ok_or_else(|| {
-                    LayaError::Tokenizer(format!(
-                        "token {content:?} ({name}) not found in tokenizer.json"
-                    ))
-                })?;
+            let id = backend.token_to_id(&content).ok_or_else(|| {
+                LayaError::Tokenizer(format!(
+                    "token {content:?} ({name}) not found in tokenizer.json"
+                ))
+            })?;
             Ok((content, id))
         }
 

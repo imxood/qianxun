@@ -53,8 +53,8 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 }
 
 fn run_once(agent: &LayaAgent, questions: &Questions, state: &str) -> Result<Value> {
-    let state_value: Value = serde_json::from_str(state)
-        .unwrap_or(Value::String(state.to_string()));
+    let state_value: Value =
+        serde_json::from_str(state).unwrap_or(Value::String(state.to_string()));
     let v = agent.predict(&state_value, questions)?;
     // 形状断言:每个答案必有 type/confidence
     for (qid, a) in v["answers"].as_object().expect("answers obj") {
@@ -121,7 +121,10 @@ pub fn run(model_dir: &Path, iterations: usize, concurrency: usize, threads: u16
                 let state = STATES[i % STATES.len()];
                 let t = Instant::now();
                 match run_once(&agent, &questions, state) {
-                    Ok(_) => latencies.lock().unwrap().push(t.elapsed().as_secs_f64() * 1000.0),
+                    Ok(_) => latencies
+                        .lock()
+                        .unwrap()
+                        .push(t.elapsed().as_secs_f64() * 1000.0),
                     Err(e) => errors.lock().unwrap().push(format!("iter {i}: {e}")),
                 }
                 i += concurrency.max(1);

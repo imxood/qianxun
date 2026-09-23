@@ -100,10 +100,14 @@ async function main(): Promise<void> {
     log(`main page: ${main.url()}`);
 
     // 等前端就绪(__qx 注入)
-    await main.waitForFunction(() => {
-      const w = window as unknown as { __qx?: unknown };
-      return Boolean(w.__qx);
-    }, undefined, { timeout: 30_000 });
+    await main.waitForFunction(
+      () => {
+        const w = window as unknown as { __qx?: unknown };
+        return Boolean(w.__qx);
+      },
+      undefined,
+      { timeout: 30_000 },
+    );
     log('__qx 就绪');
 
     const env = await qx<Record<string, unknown>>(main, 'harness_environment', {});
@@ -128,7 +132,8 @@ async function main(): Promise<void> {
         }));
       });
       log(`frame url=${frame.url().slice(0, 90)} textbox=${editors.length}`);
-      for (const e of editors) log(`  · <${e.tag}> placeholder="${e.placeholder.slice(0, 40)}" cls="${e.cls}"`);
+      for (const e of editors)
+        log(`  · <${e.tag}> placeholder="${e.placeholder.slice(0, 40)}" cls="${e.cls}"`);
     }
 
     log('✓ 侦察完成');

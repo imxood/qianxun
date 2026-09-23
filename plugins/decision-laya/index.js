@@ -53,17 +53,25 @@ const tool = {
     schema: { type: 'object' },
     render(_args, value) {
       const answers = value?.answers ?? {};
-      const lines = [`policy_hint: ${value?.policy_hint?.hint} (min_confidence=${value?.policy_hint?.min_confidence})`];
+      const lines = [
+        `policy_hint: ${value?.policy_hint?.hint} (min_confidence=${value?.policy_hint?.min_confidence})`,
+      ];
       for (const [qid, a] of Object.entries(answers)) {
         if (a.type === 'choice') {
-          lines.push(`${qid}: ${a.choice} (P=${a.probabilities?.[a.choice]}, confidence=${a.confidence})`);
+          lines.push(
+            `${qid}: ${a.choice} (P=${a.probabilities?.[a.choice]}, confidence=${a.confidence})`,
+          );
         } else if (a.type === 'score') {
-          lines.push(`${qid}: score=${a.score}/${Object.keys(a.probabilities ?? {}).length - 1} (confidence=${a.confidence})`);
+          lines.push(
+            `${qid}: score=${a.score}/${Object.keys(a.probabilities ?? {}).length - 1} (confidence=${a.confidence})`,
+          );
         } else if (a.type === 'noul') {
           lines.push(`${qid}: P(true)=${a.noul} (confidence=${a.confidence})`);
         }
       }
-      lines.push(`model: ${value?.model} · output_tokens: ${value?.usage?.output_tokens} · latency: ${value?.latency_ms}ms`);
+      lines.push(
+        `model: ${value?.model} · output_tokens: ${value?.usage?.output_tokens} · latency: ${value?.latency_ms}ms`,
+      );
       return [{ type: 'text', text: lines.join('\n') }];
     },
   },
@@ -78,10 +86,11 @@ const tool = {
         signal: signal ?? AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
-      const reason = err?.name === 'TimeoutError' || err?.name === 'AbortError'
-        ? `laya-server 响应超时(${TIMEOUT_MS}ms)`
-        : `laya-server 不可达(${ENDPOINT});请确认 sidecar 已启动: laya-server --model-dir models\\laya-onnx`;
-      throw new Error(reason);
+      const reason =
+        err?.name === 'TimeoutError' || err?.name === 'AbortError'
+          ? `laya-server 响应超时(${TIMEOUT_MS}ms)`
+          : `laya-server 不可达(${ENDPOINT});请确认 sidecar 已启动: laya-server --model-dir models\\laya-onnx`;
+      throw new Error(reason, { cause: err });
     }
     if (!response.ok) {
       const detail = await response.text().catch(() => '');

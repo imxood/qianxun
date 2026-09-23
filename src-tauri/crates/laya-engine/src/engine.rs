@@ -82,9 +82,13 @@ pub fn ensure_ort_dylib() -> Result<()> {
 pub enum Ep {
     Cpu,
     #[cfg(feature = "directml")]
-    DirectML { device_id: i32 },
+    DirectML {
+        device_id: i32,
+    },
     #[cfg(feature = "cuda")]
-    Cuda { device_id: i32 },
+    Cuda {
+        device_id: i32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -145,10 +149,7 @@ impl OrtEngine {
         // receptron 官方 bundle 权重外置(.data);自导出(export_onnx external_data=False)
         // 为单文件内嵌权重——图文件足够大即视为已含权重,不再硬性要求 .data。
         if !data_path.exists() {
-            let graph_len = model_path
-                .metadata()
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let graph_len = model_path.metadata().map(|m| m.len()).unwrap_or(0);
             if graph_len < 100_000_000 {
                 return Err(LayaError::IncompleteBundle {
                     dir: model_dir.display().to_string(),
@@ -193,13 +194,13 @@ impl OrtEngine {
             Ep::Cuda { device_id } => {
                 use ort::ep::CUDA;
                 builder
-                    .with_execution_providers([CUDA::default()
-                        .with_device_id(*device_id)
-                        .build()])
+                    .with_execution_providers([CUDA::default().with_device_id(*device_id).build()])
                     .map_err(ort_err)?
             }
         };
-        let session = builder.commit_from_file(&self.model_path).map_err(ort_err)?;
+        let session = builder
+            .commit_from_file(&self.model_path)
+            .map_err(ort_err)?;
         *guard = Some(session);
         Ok(guard)
     }
@@ -235,7 +236,9 @@ impl OrtEngine {
             ])
             .map_err(ort_err)?;
 
-        let (_, logits) = outputs["logits"].try_extract_tensor::<f32>().map_err(ort_err)?;
+        let (_, logits) = outputs["logits"]
+            .try_extract_tensor::<f32>()
+            .map_err(ort_err)?;
         let (_, act) = outputs["act_probs"]
             .try_extract_tensor::<f32>()
             .map_err(ort_err)?;

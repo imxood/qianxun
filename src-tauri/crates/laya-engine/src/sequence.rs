@@ -87,7 +87,8 @@ pub fn build_prefix(
     let head_keep = std::cmp::max(HEAD_FLOOR as isize, opt_budget).max(0) as usize;
     head_ids.truncate(head_keep);
 
-    let mut ids = Vec::with_capacity(head_ids.len() + opt_ids.iter().map(|o| o.len()).sum::<usize>() + 2);
+    let mut ids =
+        Vec::with_capacity(head_ids.len() + opt_ids.iter().map(|o| o.len()).sum::<usize>() + 2);
     ids.push(tok.cls_token_id);
     ids.extend(head_ids);
     ids.push(tok.sep_token_id);
@@ -156,11 +157,11 @@ mod tests {
 
     #[test]
     fn serialize_state_matches_python() {
-        let v: Value = serde_json::from_str(
-            r#"{"a": 1, "b": "文本", "list": [1, 2]}"#,
-        )
-        .unwrap();
-        assert_eq!(serialize_state(&v), r#"{"a": 1, "b": "文本", "list": [1, 2]}"#);
+        let v: Value = serde_json::from_str(r#"{"a": 1, "b": "文本", "list": [1, 2]}"#).unwrap();
+        assert_eq!(
+            serialize_state(&v),
+            r#"{"a": 1, "b": "文本", "list": [1, 2]}"#
+        );
         assert_eq!(serialize_state(&Value::String("plain".into())), "plain");
     }
 }

@@ -114,7 +114,9 @@ fn plugin_stale(plugin_dir: &std::path::Path) -> bool {
         ("dist/main.js", PLUGIN_CLI),
     ];
     files.iter().any(|(rel, want)| {
-        let path = rel.split('/').fold(plugin_dir.to_path_buf(), |p, seg| p.join(seg));
+        let path = rel
+            .split('/')
+            .fold(plugin_dir.to_path_buf(), |p, seg| p.join(seg));
         std::fs::read_to_string(&path)
             .map(|have| have != *want)
             .unwrap_or(true)

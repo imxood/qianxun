@@ -91,12 +91,17 @@ async function main(): Promise<void> {
     const browser: Browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     const context = browser.contexts()[0];
     if (!context) fail('无 CDP context');
-    const main = context.pages().find((p) => !p.url().includes('#/standalone')) ?? context.pages()[0];
+    const main =
+      context.pages().find((p) => !p.url().includes('#/standalone')) ?? context.pages()[0];
     if (!main) fail('无 page');
-    await main.waitForFunction(() => {
-      const w = window as unknown as { __qx?: unknown };
-      return Boolean(w.__qx);
-    }, undefined, { timeout: 30_000 });
+    await main.waitForFunction(
+      () => {
+        const w = window as unknown as { __qx?: unknown };
+        return Boolean(w.__qx);
+      },
+      undefined,
+      { timeout: 30_000 },
+    );
     log('__qx 就绪');
 
     let env = await qx<Record<string, unknown>>(main, 'harness_environment', {});
@@ -119,7 +124,8 @@ async function main(): Promise<void> {
         phase?: string;
       };
       log(`status.phase = ${status.phase}`);
-      if (status.phase === 'running' || status.phase === 'ready' || status.phase === 'healthy') break;
+      if (status.phase === 'running' || status.phase === 'ready' || status.phase === 'healthy')
+        break;
       if (status.phase === 'failed') fail(`DSH 启动失败:${JSON.stringify(status)}`);
       await new Promise((r) => setTimeout(r, 2000));
     }

@@ -13,7 +13,14 @@ import os from 'node:os';
 import fs from 'node:fs';
 
 const CDP_PORT = 10222;
-const TAURI_BIN = path.resolve(import.meta.dirname, '..', 'src-tauri', 'target', 'debug', 'qianxun.exe');
+const TAURI_BIN = path.resolve(
+  import.meta.dirname,
+  '..',
+  'src-tauri',
+  'target',
+  'debug',
+  'qianxun.exe',
+);
 
 function log(msg: string): void {
   console.log(`[tetris-e2e] ${msg}`);
@@ -26,7 +33,9 @@ function fail(msg: string): never {
 async function main(): Promise<void> {
   const userDataDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'qx-tetris-')));
   let viteProc: ChildProcess | undefined;
-  const viteUp = await fetch('http://localhost:5190/').then((r) => r.ok).catch(() => false);
+  const viteUp = await fetch('http://localhost:5190/')
+    .then((r) => r.ok)
+    .catch(() => false);
   if (!viteUp) {
     log('启动 vite…');
     // 直接用当前 node 跑 vite.js:没有 cmd/pnpm 中间层,进程树只有一层,
@@ -36,7 +45,12 @@ async function main(): Promise<void> {
       stdio: 'ignore',
     });
     for (let i = 0; i < 60; i += 1) {
-      if (await fetch('http://localhost:5190/').then((r) => r.ok).catch(() => false)) break;
+      if (
+        await fetch('http://localhost:5190/')
+          .then((r) => r.ok)
+          .catch(() => false)
+      )
+        break;
       await new Promise((r) => setTimeout(r, 500));
     }
   }
@@ -72,13 +86,22 @@ async function main(): Promise<void> {
   });
 
   for (let i = 0; i < 120; i += 1) {
-    if (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`).then((r) => r.ok).catch(() => false)) break;
+    if (
+      await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)
+        .then((r) => r.ok)
+        .catch(() => false)
+    )
+      break;
     await new Promise((r) => setTimeout(r, 500));
   }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
   const main = browser.contexts()[0]?.pages()[0];
   if (!main) fail('无 page');
-  await main.waitForFunction(() => Boolean((window as unknown as { __qx?: unknown }).__qx), undefined, { timeout: 30_000 });
+  await main.waitForFunction(
+    () => Boolean((window as unknown as { __qx?: unknown }).__qx),
+    undefined,
+    { timeout: 30_000 },
+  );
 
   // 进入游戏页
   await main.locator('[data-testid="nav-games"]').click({ timeout: 10_000 });
@@ -100,8 +123,13 @@ async function main(): Promise<void> {
     if (execLines >= 3) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
-  await main.screenshot({ path: path.resolve(import.meta.dirname, '..', '.tmp', 'tetris-e2e.png'), fullPage: false });
-  const bodyTail = await main.evaluate(() => document.body.innerText.slice(-900).replace(/\s+/g, ' '));
+  await main.screenshot({
+    path: path.resolve(import.meta.dirname, '..', '.tmp', 'tetris-e2e.png'),
+    fullPage: false,
+  });
+  const bodyTail = await main.evaluate(() =>
+    document.body.innerText.slice(-900).replace(/\s+/g, ' '),
+  );
   log(`EXEC 决策行数: ${execLines}`);
   log(`页面尾部: ${bodyTail.slice(0, 500)}`);
   if (execLines >= 3) {

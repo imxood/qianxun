@@ -92,7 +92,10 @@ fn main() {
                 } else {
                     match handle_predict(&agent, &body) {
                         Ok(json) => (200, json),
-                        Err(e) => (500, format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string()))),
+                        Err(e) => (
+                            500,
+                            format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
+                        ),
                     }
                 }
             }
@@ -104,7 +107,10 @@ fn main() {
                     let is_start = url.as_str() == "/session/start";
                     match handle_session(&sessions, &log_dir, is_start, &body) {
                         Ok(json) => (200, json),
-                        Err(e) => (500, format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string()))),
+                        Err(e) => (
+                            500,
+                            format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
+                        ),
                     }
                 }
             }
@@ -139,8 +145,11 @@ fn main() {
                 .unwrap(),
             )
             .with_header(
-                tiny_http::Header::from_bytes(&b"X-Latency-Ms"[..], format!("{latency_ms:.1}").as_bytes())
-                    .unwrap(),
+                tiny_http::Header::from_bytes(
+                    &b"X-Latency-Ms"[..],
+                    format!("{latency_ms:.1}").as_bytes(),
+                )
+                .unwrap(),
             );
         let _ = request.respond(response);
     }
@@ -148,10 +157,7 @@ fn main() {
 
 fn handle_predict(agent: &LayaAgent, body: &str) -> Result<String, Box<dyn std::error::Error>> {
     let req: Value = serde_json::from_str(body)?;
-    let state = req
-        .get("state")
-        .cloned()
-        .ok_or("missing field: state")?;
+    let state = req.get("state").cloned().ok_or("missing field: state")?;
     let questions = req
         .get("questions")
         .and_then(|q| q.as_object())
@@ -193,7 +199,11 @@ fn handle_session(
             .insert(id.clone(), path);
         return Ok(serde_json::json!({ "ok": true, "id": id }).to_string());
     }
-    let id = req.get("id").and_then(|v| v.as_str()).ok_or("missing id")?.to_string();
+    let id = req
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing id")?
+        .to_string();
     let path = {
         let map = sessions.lock().map_err(|_| "session map poisoned")?;
         map.get(&id).cloned().ok_or("unknown session id")?

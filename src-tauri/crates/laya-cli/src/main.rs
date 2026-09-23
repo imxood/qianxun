@@ -63,8 +63,12 @@ fn main() -> Result<()> {
         let model_dir = get("--model-dir")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("models/laya-multilingual-onnx"));
-        let iterations = get("--iterations").and_then(|v| v.parse().ok()).unwrap_or(200);
-        let concurrency = get("--concurrency").and_then(|v| v.parse().ok()).unwrap_or(4);
+        let iterations = get("--iterations")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let concurrency = get("--concurrency")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
         let threads = get("--threads").and_then(|v| v.parse().ok()).unwrap_or(4);
         return stress::run(&model_dir, iterations, concurrency, threads);
     }
@@ -74,7 +78,6 @@ fn main() -> Result<()> {
 }
 
 fn run_single(args: Args) -> Result<()> {
-
     let state: Value = if let Some(path) = &args.state_file {
         serde_json::from_str(
             &std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
@@ -88,8 +91,8 @@ fn run_single(args: Args) -> Result<()> {
 
     let questions_text = std::fs::read_to_string(&args.questions)
         .with_context(|| format!("read {}", args.questions.display()))?;
-    let questions: laya_engine::Questions =
-        serde_json::from_str(&questions_text).with_context(|| "parse questions json".to_string())?;
+    let questions: laya_engine::Questions = serde_json::from_str(&questions_text)
+        .with_context(|| "parse questions json".to_string())?;
 
     eprintln!(
         "loading model from {} (first load pays ORT init)...",

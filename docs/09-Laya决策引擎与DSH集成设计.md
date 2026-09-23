@@ -57,14 +57,14 @@ DSH Agent → laya_decide tool → HTTP 127.0.0.1:10230/predict → laya-engine 
 
 ### 3.1 laya-engine(推理引擎 crate)
 
-| 模块 | 职责 | 对齐参考 |
-|---|---|---|
-| `sequence.rs` | 提示序列构造:`[CLS] <type> question: <ins> [SEP] [MASK] opt… [SEP] state [SEP]`,选项 48 token 截断、head 192 预算、marker 定位 | laya-mlx `common.py` 逐行移植 |
-| `config.rs` | `laya_config.json` 解析 + **温度钳制 [0.5, 5.0]**(checkpoint 自带 `choice:11+ = 0.1006` ≈10 倍锐化,会把近似随机报成确定,必须拒绝) | laya-mlx `clamp_temperature` |
-| `questions.rs` | typed questions(choice/score/noul)与选项渲染;state 为 dict/list 时按 Python `json.dumps` 默认分隔符序列化 | 上游 `RLAgent` |
-| `tokenizer.rs` | 原生加载 `tokenizer.json`(Rust `tokenizers` 库,即 Python 侧的底层),cls/sep/pad/mask 特殊 token 解析 | laya-mlx `tokenizer.py` |
-| `engine.rs` | ORT 会话:懒加载 + Mutex(仿 egui_hikvision_app `OnnxRunner` 模式)+ `ensure_ort_dylib()` DLL 自动发现 | — |
-| `agent.rs` | `system_one` 编排:collate → forward → 温度校准 → 熵置信度 → 答案形状;`{model, answers, usage}` | laya-mlx `agent.py` |
+| 模块           | 职责                                                                                                                              | 对齐参考                      |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `sequence.rs`  | 提示序列构造:`[CLS] <type> question: <ins> [SEP] [MASK] opt… [SEP] state [SEP]`,选项 48 token 截断、head 192 预算、marker 定位    | laya-mlx `common.py` 逐行移植 |
+| `config.rs`    | `laya_config.json` 解析 + **温度钳制 [0.5, 5.0]**(checkpoint 自带 `choice:11+ = 0.1006` ≈10 倍锐化,会把近似随机报成确定,必须拒绝) | laya-mlx `clamp_temperature`  |
+| `questions.rs` | typed questions(choice/score/noul)与选项渲染;state 为 dict/list 时按 Python `json.dumps` 默认分隔符序列化                         | 上游 `RLAgent`                |
+| `tokenizer.rs` | 原生加载 `tokenizer.json`(Rust `tokenizers` 库,即 Python 侧的底层),cls/sep/pad/mask 特殊 token 解析                               | laya-mlx `tokenizer.py`       |
+| `engine.rs`    | ORT 会话:懒加载 + Mutex(仿 egui_hikvision_app `OnnxRunner` 模式)+ `ensure_ort_dylib()` DLL 自动发现                               | —                             |
+| `agent.rs`     | `system_one` 编排:collate → forward → 温度校准 → 熵置信度 → 答案形状;`{model, answers, usage}`                                    | laya-mlx `agent.py`           |
 
 ONNX 输入输出契约(receptron/laya-onnx 定义,与 PyTorch 参考实现 logit diff ≈1e-5):
 
@@ -114,14 +114,14 @@ GET  /health    → {ok, model, checkpoint}
 
 ## 4. 关键技术决策
 
-| 决策 | 理由 |
-|---|---|
+| 决策                                         | 理由                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Rust + `ort`(onnxruntime)而非 OpenCV DNN** | egui_hikvision_app 的 OpenCV DNN 适合 PP-OCR 这类 CNN 图像 blob;Laya 是 ModernBERT transformer(int64/bool 多输入、动态序列长),DNN 导入器覆盖不了。且 onnxruntime 与官方 Node 实现(@receptron/laya)同引擎,数值语义可直接对齐,未来可插 DirectML/CUDA EP 用 RTX 4080。egui 项目的**架构模式**(懒加载+Mutex+预设构造器)原样沿用 |
-| **`load-dynamic` + 自备 DLL** | ort-sys 预编译静态库是 `/MT` 编译,与 Rust `/MD` 冲突(LNK2005/LNK1169);官方 release 的 `onnxruntime.dll` 动态加载彻底绕开 CRT 问题,且符合"库与模型都是本机静态文件"的部署模型 |
-| **DLL 自动发现** | `ensure_ort_dylib()`:`ORT_DYLIB_PATH` 环境变量优先 → exe 目录 → 从 exe/cwd 向上逐级找 `vendor\onnxruntime\onnxruntime.dll`(与 cargo test 深路径、exe 部署、qianxun 打包布局均兼容) |
-| **优化等级用 `All` 不用 `Level3`** | ort rc.13 的 `Level3` 映射 `ORT_ENABLE_LAYOUT`(新版 ORT 才有),官方 1.22.x DLL 报 `graph_optimization_level is not valid`;`All(ORT_ENABLE_ALL)` 全版本有效 |
-| **Session 泄漏式退出** | ORT 在进程收尾销毁全局线程池时偶发 fail-fast(0xC0000409),与 pyke ort "环境常驻" 同源问题。CLI 显式 `exit(0)`;测试 `mem::forget(agent)`;长期进程(server/qianxun)Session 常驻天然不受影响 |
-| **fp32 导出不量化** | "不能降低性能(准确性)" 硬约束:receptron 导出与 PyTorch 参考实现四位小数/1e-5 logit 对齐;量化留待自建 Decision Benchmark 验收后再议 |
+| **`load-dynamic` + 自备 DLL**                | ort-sys 预编译静态库是 `/MT` 编译,与 Rust `/MD` 冲突(LNK2005/LNK1169);官方 release 的 `onnxruntime.dll` 动态加载彻底绕开 CRT 问题,且符合"库与模型都是本机静态文件"的部署模型                                                                                                                                                |
+| **DLL 自动发现**                             | `ensure_ort_dylib()`:`ORT_DYLIB_PATH` 环境变量优先 → exe 目录 → 从 exe/cwd 向上逐级找 `vendor\onnxruntime\onnxruntime.dll`(与 cargo test 深路径、exe 部署、qianxun 打包布局均兼容)                                                                                                                                          |
+| **优化等级用 `All` 不用 `Level3`**           | ort rc.13 的 `Level3` 映射 `ORT_ENABLE_LAYOUT`(新版 ORT 才有),官方 1.22.x DLL 报 `graph_optimization_level is not valid`;`All(ORT_ENABLE_ALL)` 全版本有效                                                                                                                                                                   |
+| **Session 泄漏式退出**                       | ORT 在进程收尾销毁全局线程池时偶发 fail-fast(0xC0000409),与 pyke ort "环境常驻" 同源问题。CLI 显式 `exit(0)`;测试 `mem::forget(agent)`;长期进程(server/qianxun)Session 常驻天然不受影响                                                                                                                                     |
+| **fp32 导出不量化**                          | "不能降低性能(准确性)" 硬约束:receptron 导出与 PyTorch 参考实现四位小数/1e-5 logit 对齐;量化留待自建 Decision Benchmark 验收后再议                                                                                                                                                                                          |
 
 ## 5. 模型资产管线
 
@@ -147,16 +147,17 @@ models/laya-multilingual-onnx/
 
 原则:**权重不入库,manifest 入库,脚本管校验**。三层划分:
 
-| 层 | 内容 | 做法 |
-|---|---|---|
-| ① git 直管 | 源码、几 KB 配置、**manifest.json**(逐文件 sha256+大小+来源)、校验脚本 | 常规提交 |
-| ② ignore+manifest+脚本 | `*.onnx`/`*.onnx.data`(共 2.81GB)、onnxruntime DLL、一切构建产物(moli.exe 等) | `.gitignore` + manifest 保障可验证/可恢复 |
-| ③ Git LFS | ——(暂不采用) | 单人开发;GitHub 免费 10GB 存储/带宽,1.2GB 权重每次 clone 全量耗带宽,超量付费 |
+| 层                     | 内容                                                                          | 做法                                                                         |
+| ---------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| ① git 直管             | 源码、几 KB 配置、**manifest.json**(逐文件 sha256+大小+来源)、校验脚本        | 常规提交                                                                     |
+| ② ignore+manifest+脚本 | `*.onnx`/`*.onnx.data`(共 2.81GB)、onnxruntime DLL、一切构建产物(moli.exe 等) | `.gitignore` + manifest 保障可验证/可恢复                                    |
+| ③ Git LFS              | ——(暂不采用)                                                                  | 单人开发;GitHub 免费 10GB 存储/带宽,1.2GB 权重每次 clone 全量耗带宽,超量付费 |
 
 为什么不直接进 git:历史不可逆(commit 过即永久膨胀);GitHub 单文件 100MB 硬限
 直接拒推;二进制 diff 无效,每改一版全量存储。
 
 操作:
+
 ```powershell
 # 校验全部 bundle(大小+sha256 逐文件比对)
 powershell -File scripts/verify-laya-models.ps1
@@ -174,13 +175,13 @@ powershell -File scripts/verify-laya-models.ps1 -Bundle laya-onnx
 
 ## 6. 测试与验证体系
 
-| 层 | 内容 | 状态 |
-|---|---|---|
-| 单元测试(10) | 温度分桶/钳制、熵置信度、softmax、选项渲染、JSON 序列化对齐 | ✅ 绿 |
-| tokenizer smoke | 真实 tokenizer 加载 + 序列结构(cls=101/sep=102/pad=0/mask=103、marker 对位、预算截断) | ✅ 绿 |
-| model parity | 真实权重加载 + 推理:概率归一、score 值域、noul 语义(退款邮件 P(true)>0.5) | ✅ 绿 |
-| **stress** | `laya-cli stress`:混合 8 状态(中/英/trace)循环 200 次 × 4 并发,确定性逐字节一致,0 错误,P50 680ms(并发争抢)/串行 P50 122.7ms | ✅ PASS |
-| **CDP e2e** | `e2e/probe-laya-decision.ts`:spawn debug 千寻 → `connectOverCDP(10222)` → DSH 新会话 → 10 条中文工单驱动 agent 调 `laya_decide` → 断言 `部门=<choice>` 回复 | ✅ **10/10 通过** |
+| 层              | 内容                                                                                                                                                        | 状态              |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| 单元测试(10)    | 温度分桶/钳制、熵置信度、softmax、选项渲染、JSON 序列化对齐                                                                                                 | ✅ 绿             |
+| tokenizer smoke | 真实 tokenizer 加载 + 序列结构(cls=101/sep=102/pad=0/mask=103、marker 对位、预算截断)                                                                       | ✅ 绿             |
+| model parity    | 真实权重加载 + 推理:概率归一、score 值域、noul 语义(退款邮件 P(true)>0.5)                                                                                   | ✅ 绿             |
+| **stress**      | `laya-cli stress`:混合 8 状态(中/英/trace)循环 200 次 × 4 并发,确定性逐字节一致,0 错误,P50 680ms(并发争抢)/串行 P50 122.7ms                                 | ✅ PASS           |
+| **CDP e2e**     | `e2e/probe-laya-decision.ts`:spawn debug 千寻 → `connectOverCDP(10222)` → DSH 新会话 → 10 条中文工单驱动 agent 调 `laya_decide` → 断言 `部门=<choice>` 回复 | ✅ **10/10 通过** |
 
 English 基线实测(Windows 11 · CPU EP · 3 题一次 forward · 254 tokens):
 
@@ -209,9 +210,9 @@ ONNX↔PyTorch parity:max|dlogits| = 6.2e-06,max|dact| = 0.0(external_data=False
 延迟旋钮是 ORT `intra_threads`(默认 4)与题目数,**与 debug/release 构建无关**
 (计算全在 onnxruntime.dll,Rust 包装层差异 ≈1.5% 噪声,实测 20 轮 P50):
 
-| intra_threads | 2 | 4 | **8(最优)** | 12 | 16 |
-|---|---|---|---|---|---|
-| 3 题 P50 | 218.6ms | 124.1ms | **81.8ms** | 84.5ms | 93.7ms |
+| intra_threads | 2       | 4       | **8(最优)** | 12     | 16     |
+| ------------- | ------- | ------- | ----------- | ------ | ------ |
+| 3 题 P50      | 218.6ms | 124.1ms | **81.8ms**  | 84.5ms | 93.7ms |
 
 8 ≈ 物理核数最优点,超过后调度开销回落。sidecar 已按 `--threads 8` 运行:
 单题 ~26ms。并发场景注意总线程预算(如 4 并发 × 4 线程会争抢同一物理核,
@@ -229,8 +230,7 @@ ONNX↔PyTorch parity:max|dlogits| = 6.2e-06,max|dact| = 0.0(external_data=False
 - **插件**:`@qianxun/decision-laya` 注册 `laya_decide` 工具(policy_version
   `local-v1-min-confidence`,min<0.6 → escalate hint),dev/release 两套 dsh-home profile
   均以 Junction + cordis.patch.yml install 条目方式接入。
-- **e2e 链路**:`npx tsx e2e/probe-laya-decision.ts --times 10`——探针自带 vite(dev:web,
-  5190)、spawn debug 二进制(CDP 10222)、`harness_start`、经 UI 点 DSH → 新会话
+- **e2e 链路**:`npx tsx e2e/probe-laya-decision.ts --times 10`——探针自带 vite(dev:web, 5190)、spawn debug 二进制(CDP 10222)、`harness_start`、经 UI 点 DSH → 新会话
   (exact-match,避开侧栏同名会话)、composer 定位(placeholder 含「调用指令」)、
   发送校验(fill 读值 + Enter 后清空检查 + 发送按钮兜底)、断言 agent 回复
   `部门=<choice>,置信度=…`。默认模型若为 MiniMax(账号 429)自动经二级菜单切 GLM-5.3-Flash。
@@ -253,14 +253,14 @@ ONNX↔PyTorch parity:max|dlogits| = 6.2e-06,max|dact| = 0.0(external_data=False
 
 ## 8. 与既有架构文档的映射
 
-| 领域文档(docs 01-07) | 本设计的落点 |
-|---|---|
-| 02 Laya Decision Plane | §1 定位与红线;Tool 只产 Decision + policy_hint |
-| 04 Zero-Fork 插件 | §3.4 bundle 形态;不改 packages/core / Agent Loop |
-| 05 Runtime & Deployment | §2 端口与 127.0.0.1 边界;`Laya: local only, no network` |
-| 06 Native Capability Bridge | 未来 laya-server 由 Rust supervisor 拉起;插件→HTTP→Rust 不越级 |
-| 07 Decision Contract | `{decision_id, task_id, kind, choice, confidence, policy_version, model, timestamp}` 由插件层补齐包装 |
-| 07 Phase 2 | "先 standalone benchmark,再 plugin"——本文 §6 顺序即此 |
+| 领域文档(docs 01-07)        | 本设计的落点                                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 02 Laya Decision Plane      | §1 定位与红线;Tool 只产 Decision + policy_hint                                                        |
+| 04 Zero-Fork 插件           | §3.4 bundle 形态;不改 packages/core / Agent Loop                                                      |
+| 05 Runtime & Deployment     | §2 端口与 127.0.0.1 边界;`Laya: local only, no network`                                               |
+| 06 Native Capability Bridge | 未来 laya-server 由 Rust supervisor 拉起;插件→HTTP→Rust 不越级                                        |
+| 07 Decision Contract        | `{decision_id, task_id, kind, choice, confidence, policy_version, model, timestamp}` 由插件层补齐包装 |
+| 07 Phase 2                  | "先 standalone benchmark,再 plugin"——本文 §6 顺序即此                                                 |
 
 ## 9. 路线图
 

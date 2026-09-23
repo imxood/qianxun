@@ -16,8 +16,8 @@ fn predict_shapes_and_ranges() {
             return;
         }
     };
-    let agent = LayaAgent::load(std::path::Path::new(&dir), 16, Default::default())
-        .expect("load agent");
+    let agent =
+        LayaAgent::load(std::path::Path::new(&dir), 16, Default::default()).expect("load agent");
 
     let questions: Questions = serde_json::from_value(json!({
         "department": {
@@ -59,9 +59,14 @@ fn predict_shapes_and_ranges() {
     assert_eq!(department["type"], "choice");
     let choice = department["choice"].as_str().expect("choice label");
     assert!(["billing", "technical", "sales", "other"].contains(&choice));
-    let probs = department["probabilities"].as_object().expect("probabilities");
+    let probs = department["probabilities"]
+        .as_object()
+        .expect("probabilities");
     let sum: f64 = probs.values().map(|v| v.as_f64().unwrap()).sum();
-    assert!((sum - 1.0).abs() < 0.01, "probabilities should sum to ~1, got {sum}");
+    assert!(
+        (sum - 1.0).abs() < 0.01,
+        "probabilities should sum to ~1, got {sum}"
+    );
     assert!((0.0..=1.0).contains(&department["confidence"].as_f64().unwrap()));
 
     let urgency = &answers["urgency"];
@@ -71,7 +76,10 @@ fn predict_shapes_and_ranges() {
     let refund = &answers["refund"];
     assert_eq!(refund["type"], "noul");
     // 退款请求邮件,P(true) 应明显高于随机。
-    assert!(refund["noul"].as_f64().unwrap() > 0.5, "refund noul should lean true");
+    assert!(
+        refund["noul"].as_f64().unwrap() > 0.5,
+        "refund noul should lean true"
+    );
 
     // ONNX Runtime 在 Session 析构/进程收尾销毁全局线程池时会偶发 fail-fast
     // (0xC0000409),与 pyke ort "环境常驻" 的处理一致:故意泄漏,交给进程回收。

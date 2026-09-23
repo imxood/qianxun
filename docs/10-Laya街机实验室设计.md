@@ -21,6 +21,7 @@ System 2 规划意图           动作概率分布(7 动作)            决策�
 ```
 
 关键实现要点:
+
 1. **System 2 是经典求解器**(非学习):Dellacherie 特征(洞/崎岖/井)枚举
    所有 rot×x 放置,单次 0.2ms——截图里的 plan score/eval 字段就是它;
 2. **System 1 反射模型只做单步决策**:看状态选 7 个离散动作之一 +
@@ -30,13 +31,13 @@ System 2 规划意图           动作概率分布(7 动作)            决策�
 
 ## 2. Laya 可行性对照
 
-| 要素 | JEV Lab | Laya 方案 | 结论 |
-|---|---|---|---|
-| System 1 原语 | choice+confidence | choice/score/noul+confidence | ✅ 同构 |
-| 调用延迟 | 0.1ms(其模型极小) | 26ms(单题)/280ms(棋盘长文本) | ✅ 决策频率 1-6Hz 可玩 |
-| System 2 | Dellacherie 求解器 | 同款(JS 枚举+el-Tetris 权重) | ✅ 已实现 |
-| 游戏域置信度 | 96.8%(蒸馏过) | **0.169(未蒸馏,OOD)** | ⚠ 见 §4 |
-| 服务形态 | 本地引擎 | laya-server sidecar(已有) | ✅ 零新增基建 |
+| 要素          | JEV Lab            | Laya 方案                    | 结论                   |
+| ------------- | ------------------ | ---------------------------- | ---------------------- |
+| System 1 原语 | choice+confidence  | choice/score/noul+confidence | ✅ 同构                |
+| 调用延迟      | 0.1ms(其模型极小)  | 26ms(单题)/280ms(棋盘长文本) | ✅ 决策频率 1-6Hz 可玩 |
+| System 2      | Dellacherie 求解器 | 同款(JS 枚举+el-Tetris 权重) | ✅ 已实现              |
+| 游戏域置信度  | 96.8%(蒸馏过)      | **0.169(未蒸馏,OOD)**        | ⚠ 见 §4                |
+| 服务形态      | 本地引擎           | laya-server sidecar(已有)    | ✅ 零新增基建          |
 
 ## 3. 已落地架构(千寻「游戏」页)
 
@@ -52,6 +53,7 @@ System 2 规划意图           动作概率分布(7 动作)            决策�
 ```
 
 驱动模式(实验开关):
+
 - **reflex**(默认):System 2 给目标写入 state,Laya 逐步选动作逼近;
 - **pure**:不给目标,纯 System 1 看盘——检验 Laya 原始水平;
 - **solver**:求解器直控(对照基线,不经 Laya);

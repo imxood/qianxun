@@ -100,7 +100,13 @@ pub fn to_spaced_json(value: &Value) -> String {
         Value::Object(map) => {
             let inner: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("{}: {}", serde_json::to_string(k).unwrap_or_default(), to_spaced_json(v)))
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        to_spaced_json(v)
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
@@ -243,8 +249,10 @@ mod tests {
 
     #[test]
     fn spaced_json_matches_python_defaults() {
-        let v: Value =
-            serde_json::from_str(r#"{"a": 1, "b": [1, 2], "c": "x, y: z"}"#).unwrap();
-        assert_eq!(to_spaced_json(&v), r#"{"a": 1, "b": [1, 2], "c": "x, y: z"}"#);
+        let v: Value = serde_json::from_str(r#"{"a": 1, "b": [1, 2], "c": "x, y: z"}"#).unwrap();
+        assert_eq!(
+            to_spaced_json(&v),
+            r#"{"a": 1, "b": [1, 2], "c": "x, y: z"}"#
+        );
     }
 }

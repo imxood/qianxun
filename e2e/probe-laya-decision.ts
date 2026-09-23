@@ -20,8 +20,17 @@ import os from 'node:os';
 import fs from 'node:fs';
 
 const CDP_PORT = 10222;
-const TAURI_BIN = path.resolve(import.meta.dirname, '..', 'src-tauri', 'target', 'debug', 'qianxun.exe');
-const TIMES = Number(process.argv.includes('--times') ? process.argv[process.argv.indexOf('--times') + 1] : 10);
+const TAURI_BIN = path.resolve(
+  import.meta.dirname,
+  '..',
+  'src-tauri',
+  'target',
+  'debug',
+  'qianxun.exe',
+);
+const TIMES = Number(
+  process.argv.includes('--times') ? process.argv[process.argv.indexOf('--times') + 1] : 10,
+);
 
 function log(msg: string): void {
   console.log(`[laya-e2e] ${msg}`);
@@ -59,16 +68,56 @@ async function qx<T>(page: Page, cmd: string, args: Record<string, unknown> = {}
 
 /** 10 个中文验证用例:state + 期望 department 选择 */
 const CASES: Array<{ name: string; state: unknown; expectChoice: string }> = [
-  { name: '重复扣款退款', state: { ticket: '发票被重复扣款了,请立刻退款,否则投诉', channel: 'email' }, expectChoice: 'billing' },
-  { name: '登录 500', state: { ticket: '系统登录一直报 500 错误,所有人都用不了', channel: 'web' }, expectChoice: 'technical' },
-  { name: '企业版报价', state: { ticket: '想了解企业版的报价和合同签订流程', channel: 'phone' }, expectChoice: 'sales' },
-  { name: '余额发票', state: { ticket: '上个月的发票还没开给我,麻烦补开发票', channel: 'email' }, expectChoice: 'billing' },
-  { name: '接口报错', state: { ticket: '调用导出接口报 502,业务停摆,急需处理', channel: 'web' }, expectChoice: 'technical' },
-  { name: '购买意向', state: { ticket: '我们公司想采购 200 个账号,给我一份报价单', channel: 'phone' }, expectChoice: 'sales' },
-  { name: '重复扣款电话', state: { ticket: '你们是不是多扣了我一笔钱?要求退回', channel: 'phone' }, expectChoice: 'billing' },
-  { name: '白屏故障', state: { ticket: '打开就白屏,缓存清了也没用,生产环境受阻', channel: 'web' }, expectChoice: 'technical' },
-  { name: '续费折扣', state: { ticket: '准备续费,问问有没有折扣和合同方案', channel: 'email' }, expectChoice: 'sales' },
-  { name: '退款到账', state: { ticket: '之前申请的退款到现在还没到账,帮我查一下', channel: 'email' }, expectChoice: 'billing' },
+  {
+    name: '重复扣款退款',
+    state: { ticket: '发票被重复扣款了,请立刻退款,否则投诉', channel: 'email' },
+    expectChoice: 'billing',
+  },
+  {
+    name: '登录 500',
+    state: { ticket: '系统登录一直报 500 错误,所有人都用不了', channel: 'web' },
+    expectChoice: 'technical',
+  },
+  {
+    name: '企业版报价',
+    state: { ticket: '想了解企业版的报价和合同签订流程', channel: 'phone' },
+    expectChoice: 'sales',
+  },
+  {
+    name: '余额发票',
+    state: { ticket: '上个月的发票还没开给我,麻烦补开发票', channel: 'email' },
+    expectChoice: 'billing',
+  },
+  {
+    name: '接口报错',
+    state: { ticket: '调用导出接口报 502,业务停摆,急需处理', channel: 'web' },
+    expectChoice: 'technical',
+  },
+  {
+    name: '购买意向',
+    state: { ticket: '我们公司想采购 200 个账号,给我一份报价单', channel: 'phone' },
+    expectChoice: 'sales',
+  },
+  {
+    name: '重复扣款电话',
+    state: { ticket: '你们是不是多扣了我一笔钱?要求退回', channel: 'phone' },
+    expectChoice: 'billing',
+  },
+  {
+    name: '白屏故障',
+    state: { ticket: '打开就白屏,缓存清了也没用,生产环境受阻', channel: 'web' },
+    expectChoice: 'technical',
+  },
+  {
+    name: '续费折扣',
+    state: { ticket: '准备续费,问问有没有折扣和合同方案', channel: 'email' },
+    expectChoice: 'sales',
+  },
+  {
+    name: '退款到账',
+    state: { ticket: '之前申请的退款到现在还没到账,帮我查一下', channel: 'email' },
+    expectChoice: 'billing',
+  },
 ];
 
 const QUESTIONS_JSON = JSON.stringify({
@@ -92,26 +141,12 @@ function promptFor(c: { name: string; state: unknown }): string {
   ].join('\n');
 }
 
-async function findChatFrame(page: Page): Promise<Frame | undefined> {
-  for (let i = 0; i < 40; i += 1) {
-    for (const frame of page.frames()) {
-      const has = await frame
-        .evaluate(() => {
-          const q = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-          return Boolean(q);
-        })
-        .catch(() => false);
-      if (has) return frame;
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  return undefined;
-}
-
 async function dumpNav(page: Page): Promise<void> {
   const texts = await page
     .evaluate(() => {
-      const els = Array.from(document.querySelectorAll('button, a, [role="tab"], [role="button"], [role="menuitem"]'));
+      const els = Array.from(
+        document.querySelectorAll('button, a, [role="tab"], [role="button"], [role="menuitem"]'),
+      );
       return els
         .map((e) => (e.textContent ?? '').trim().replace(/\s+/g, ' '))
         .filter((t) => t.length > 0 && t.length < 24)
@@ -123,7 +158,9 @@ async function dumpNav(page: Page): Promise<void> {
 
 async function main(): Promise<void> {
   if (!fs.existsSync(TAURI_BIN)) fail(`找不到 debug 构建:${TAURI_BIN}`);
-  const userDataDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'qx-laya-e2e-')));
+  const userDataDir = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qx-laya-e2e-')),
+  );
 
   // debug 二进制的 UI 来自 vite dev server(5190);不在 pnpm dev 下运行时需自带
   let viteProc: ChildProcess | undefined;
@@ -199,20 +236,29 @@ async function main(): Promise<void> {
     const browser: Browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     const context = browser.contexts()[0];
     if (!context) fail('无 CDP context');
-    const main = context.pages().find((p) => !p.url().includes('#/standalone')) ?? context.pages()[0];
+    const main =
+      context.pages().find((p) => !p.url().includes('#/standalone')) ?? context.pages()[0];
     if (!main) fail('无 page');
-    await main.waitForFunction(() => Boolean((window as unknown as { __qx?: unknown }).__qx), undefined, {
-      timeout: 30_000,
-    });
+    await main.waitForFunction(
+      () => Boolean((window as unknown as { __qx?: unknown }).__qx),
+      undefined,
+      {
+        timeout: 30_000,
+      },
+    );
 
     // DSH 启动
-    let status = (await qx<Record<string, unknown>>(main, 'harness_status', {})) as { phase?: string };
+    let status = (await qx<Record<string, unknown>>(main, 'harness_status', {})) as {
+      phase?: string;
+    };
     if (status.phase !== 'running' && status.phase !== 'ready' && status.phase !== 'healthy') {
       const origin = await qx<string>(main, 'harness_start', {});
       log(`harness_start → ${origin}`);
     }
     for (let i = 0; i < 60; i += 1) {
-      status = (await qx<Record<string, unknown>>(main, 'harness_status', {})) as { phase?: string };
+      status = (await qx<Record<string, unknown>>(main, 'harness_status', {})) as {
+        phase?: string;
+      };
       if (['running', 'ready', 'healthy'].includes(status.phase ?? '')) break;
       await new Promise((r) => setTimeout(r, 2000));
     }
@@ -231,13 +277,17 @@ async function main(): Promise<void> {
     }
 
     // DSH origin:优先 harness_proxy_url,退而在 frames 中找非 5190 的 http 源
-    let dshOrigin = await qx<string | null>(main, 'harness_proxy_url', {}).catch(() => null);
+    const dshOrigin = await qx<string | null>(main, 'harness_proxy_url', {}).catch(() => null);
     log(`harness_proxy_url = ${dshOrigin ?? '(null)'}`);
 
     // 进入 DSH 视图:优先点击含 DSH/对话 文案的导航
     await dumpNav(main);
     for (const label of ['DSH', 'dsh', '对话', '会话', 'Chat']) {
-      const btn = main.locator(`button:has-text("${label}"), a:has-text("${label}"), [role="tab"]:has-text("${label}")`).first();
+      const btn = main
+        .locator(
+          `button:has-text("${label}"), a:has-text("${label}"), [role="tab"]:has-text("${label}")`,
+        )
+        .first();
       if ((await btn.count().catch(() => 0)) > 0) {
         await btn.click({ timeout: 3000 }).catch(() => {});
         log(`clicked nav "${label}"`);
@@ -267,7 +317,9 @@ async function main(): Promise<void> {
       for (const f of candidates) {
         const probeInfo = await f
           .evaluate(() => ({
-            hasBox: Boolean(document.querySelector('textarea, [contenteditable="true"], [role="textbox"]')),
+            hasBox: Boolean(
+              document.querySelector('textarea, [contenteditable="true"], [role="textbox"]'),
+            ),
             title: document.title.slice(0, 40),
             text: document.body.innerText.slice(0, 80).replace(/\s+/g, ' '),
           }))
@@ -334,9 +386,7 @@ async function main(): Promise<void> {
           .catch(() => []);
         log(`menu dump: ${JSON.stringify(menuDump)}`);
         // 二级菜单:先点第一层里的"模型: MiniMax-M3"行,展开模型列表
-        const modelRow = chat
-          .locator('[class*="menu" i] >> text=MiniMax-M3')
-          .first();
+        const modelRow = chat.locator('[class*="menu" i] >> text=MiniMax-M3').first();
         await modelRow.click({ timeout: 5000 });
         await new Promise((r) => setTimeout(r, 1000));
         // 模型列表里选 GLM-5.3-Flash(portal 渲染在 body 尾部,用 last 兜底)
@@ -345,9 +395,14 @@ async function main(): Promise<void> {
           await item.click({ timeout: 5000 });
           log('switched model → GLM-5.3-Flash');
         } else {
-          const tail = (await chat.evaluate(() => document.body.innerText)).slice(-500).replace(/\s+/g, ' ');
+          const tail = (await chat.evaluate(() => document.body.innerText))
+            .slice(-500)
+            .replace(/\s+/g, ' ');
           log(`[dump] 模型菜单未找到 GLM-5.3-Flash,页面尾部: ${tail}`);
-          await chat.locator('body').press('Escape').catch(() => {});
+          await chat
+            .locator('body')
+            .press('Escape')
+            .catch(() => {});
         }
         await new Promise((r) => setTimeout(r, 800));
       } else {
@@ -362,11 +417,19 @@ async function main(): Promise<void> {
       const all = chat!.locator('textarea, [contenteditable="true"], [role="textbox"]');
       const n = await all.count();
       for (let k = 0; k < n; k += 1) {
-        const ph = (await all.nth(k).getAttribute('placeholder').catch(() => '')) ?? '';
+        const ph =
+          (await all
+            .nth(k)
+            .getAttribute('placeholder')
+            .catch(() => '')) ?? '';
         if (/调用指令|描述你想要|文件或对话/.test(ph)) return all.nth(k);
       }
       for (let k = 0; k < n; k += 1) {
-        const ph = (await all.nth(k).getAttribute('placeholder').catch(() => '')) ?? '';
+        const ph =
+          (await all
+            .nth(k)
+            .getAttribute('placeholder')
+            .catch(() => '')) ?? '';
         if (/输入|消息|message|ask|send/i.test(ph)) return all.nth(k);
       }
       return all.nth(Math.max(0, n - 1));
@@ -378,9 +441,6 @@ async function main(): Promise<void> {
     for (let i = 0; i < TIMES; i += 1) {
       const c = CASES[i % CASES.length];
       const prompt = promptFor(c);
-      const beforeCount = await chat
-        .evaluate(() => (document.body.innerText.match(/laya_decide/g) ?? []).length)
-        .catch(() => 0);
       const editor = await pickEditor();
       await editor.fill(prompt);
       // 校验 fill 是否进入 composer(读值)
@@ -421,7 +481,11 @@ async function main(): Promise<void> {
       let ok = false;
       for (let t = 0; t < 90; t += 1) {
         const body = await chat.evaluate(() => document.body.innerText).catch(() => '');
-        if (body.includes('laya_decide') && successRe.test(body) && !body.includes('本轮运行失败')) {
+        if (
+          body.includes('laya_decide') &&
+          successRe.test(body) &&
+          !body.includes('本轮运行失败')
+        ) {
           ok = true;
           break;
         }
@@ -445,7 +509,9 @@ async function main(): Promise<void> {
           const flags = ['laya_decide', '处理失败', 'RATE_LIMIT', '429', '部门', '置信度']
             .map((k) => `${k}=${body.includes(k) ? 1 : 0}`)
             .join(' ');
-          log(`[dump] ${c.name} flags: ${flags} | after: ${after.slice(0, 400).replace(/\s+/g, ' ')}`);
+          log(
+            `[dump] ${c.name} flags: ${flags} | after: ${after.slice(0, 400).replace(/\s+/g, ' ')}`,
+          );
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
