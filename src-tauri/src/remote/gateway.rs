@@ -29,7 +29,7 @@ use axum::{
 use tokio::sync::watch;
 
 use crate::dsh_upstream::{self, plain, query_param, Upstream};
-use crate::remote::{MobileUi, RemoteDevice};
+use crate::remote::{text_response, MobileUi, RemoteDevice};
 
 /// LAN 绑定失败后的重试周期。EasyTier 这类虚拟网卡晚于千寻启动、中途
 /// 掉线都是常态：周期重试即可自愈，无需用户干预。
@@ -148,6 +148,8 @@ pub async fn start(
         .route("/qx-mobile/custom.css", any(super::mobile_ui::custom_css))
         .route("/qx-mobile/custom.js", any(super::mobile_ui::custom_js))
         .route("/qx-mobile/{*rest}", any(super::mobile_ui::unknown))
+        // 桌面外壳层：注入 DSH 页的外链拦截脚本（仅回环入口可取）。
+        .route("/qx-shell/links.js", any(shell_links))
         .route("/{*rest}", any(handler))
         .route("/", any(handler))
         .with_state(state.clone());
@@ -297,7 +299,12 @@ async fn handler(State(state): State<GatewayState>, request: Request<Body>) -> R
             crate::logging::log("warn", &format!("[http] 拒绝非本机外壳来源请求：{path}"));
             return plain(StatusCode::FORBIDDEN, "非本机外壳来源，拒绝访问");
         }
-        return dsh_upstream::forward(&state.upstream, request).await;
+        // 桌面外壳层注入：DSH 页内的外链点击由拦截脚本转发给千寻外壳
+        // （WebView2 吞掉一切弹窗请求，链接点不开——见 window.rs 的
+        // window_open_external 注释）。非 HTML/SSE 一律原样透传。
+        let method = request.method().clone();
+        let response = dsh_upstream::forward(&state.upstream, request).await;
+        return inject_layer_into(method, response, inject_desktop_layer).await;
     }
 
     // 局域网入口：配对 → 鉴权 → 转发（含 SSE 流响应）。
@@ -314,10 +321,11 @@ async fn handler(State(state): State<GatewayState>, request: Request<Body>) -> R
             "未配对设备：请用千寻生成的配对链接打开 /qx-gate?token=…",
         );
     }
-    // 手机端经网关拿到的 DSH 页面在此注入移动定制层（回环桌面页保持纯净）。
+    // 手机端经网关拿到的 DSH 页面在此注入移动定制层（回环桌面页走
+    // 桌面外壳层注入，见 handler 的回环分支）。
     let method = request.method().clone();
     let response = dsh_upstream::forward(&state.upstream, request).await;
-    inject_mobile_layer_into(method, response).await
+    inject_layer_into(method, response, inject_mobile_layer).await
 }
 
 /// WS 下行桥入口：按 Host 头分发鉴权。两条入口都升级为 WS 双向桥。
@@ -418,13 +426,34 @@ const HTML_INJECT_LIMIT: usize = 2 * 1024 * 1024;
 /// 注入移动定制层的引导标签（外链同源资源，CSP `self` 放行；defer 不阻塞首屏）。
 const MOBILE_LAYER_SNIPPET: &str = "<link rel=\"stylesheet\" href=\"/qx-mobile/custom.css\" /><script src=\"/qx-mobile/bootstrap.js\" defer></script>";
 
+/// 注入桌面外壳层的引导标签：外链拦截脚本（千寻外壳 iframe 专用，
+/// 与外壳握手后才接管点击，普通浏览器直开网关页时零行为）。
+const DESKTOP_LAYER_SNIPPET: &str = "<script src=\"/qx-shell/links.js\" defer></script>";
+
+/// 桌面外壳层拦截脚本（内嵌二进制，随千寻发布，no-cache 下发）。
+const DESKTOP_LINKS_JS: &str = include_str!("assets/qx-shell-links.js");
+
+/// `/qx-shell/links.js`：仅回环入口可取（桌面外壳 iframe 专用；
+/// 局域网设备走移动层，不给内部脚本面）。
+async fn shell_links(State(state): State<GatewayState>, headers: HeaderMap) -> Response<Body> {
+    if !state.is_loopback(&headers) {
+        return plain(StatusCode::UNAUTHORIZED, "仅本机外壳可获取桌面外壳层");
+    }
+    text_response(
+        DESKTOP_LINKS_JS,
+        "text/javascript; charset=utf-8",
+        "no-cache",
+    )
+}
+
 /// 满足「GET + 200 + text/html + 含 </head>」时，把定制层标签插到 </head> 前。
 /// 纯函数便于测试；任何不满足都返回 None（原样透传，绝不阻断/破坏页面）。
-fn inject_mobile_layer(
+fn inject_layer(
     method: &axum::http::Method,
     status: u16,
     content_type: &str,
     html: &str,
+    snippet: &str,
 ) -> Option<String> {
     if *method != axum::http::Method::GET || status != 200 {
         return None;
@@ -434,18 +463,40 @@ fn inject_mobile_layer(
     }
     let head_end = html.to_ascii_lowercase().find("</head>")?;
     Some(format!(
-        "{}{MOBILE_LAYER_SNIPPET}{}",
+        "{}{snippet}{}",
         &html[..head_end],
         &html[head_end..]
     ))
 }
 
-/// 局域网回包的移动层注入：命中「200 + text/html」才缓冲改写（≤2MiB），
+/// 移动定制层注入（LAN 入口）。
+fn inject_mobile_layer(
+    method: &axum::http::Method,
+    status: u16,
+    content_type: &str,
+    html: &str,
+) -> Option<String> {
+    inject_layer(method, status, content_type, html, MOBILE_LAYER_SNIPPET)
+}
+
+/// 桌面外壳层注入（回环入口）。
+fn inject_desktop_layer(
+    method: &axum::http::Method,
+    status: u16,
+    content_type: &str,
+    html: &str,
+) -> Option<String> {
+    inject_layer(method, status, content_type, html, DESKTOP_LAYER_SNIPPET)
+}
+
+/// 回包的定制层注入：命中「200 + text/html」才缓冲改写（≤2MiB），
 /// 其余一律原样透传（SSE/流式响应不受影响）。无 content-length 且超限的
 /// 罕见分块页在缓冲阶段失败——此时响应体已消费，按上游中断降级并落日志。
-async fn inject_mobile_layer_into(
+/// `inject` 是纯注入函数（移动层/桌面外壳层各一），生产与测试共用同一实现。
+async fn inject_layer_into(
     method: axum::http::Method,
     response: Response<Body>,
+    inject: fn(&axum::http::Method, u16, &str, &str) -> Option<String>,
 ) -> Response<Body> {
     let headers = response.headers().clone();
     let Some(content_type) = headers
@@ -479,7 +530,7 @@ async fn inject_mobile_layer_into(
         Err(cause) => {
             crate::logging::log(
                 "warn",
-                &format!("移动层注入放弃（HTML 超限/响应中断）：{cause}"),
+                &format!("定制层注入放弃（HTML 超限/响应中断）：{cause}"),
             );
             return plain(StatusCode::BAD_GATEWAY, "DSH 页面超限，注入失败");
         }
@@ -503,8 +554,7 @@ async fn inject_mobile_layer_into(
     };
     // 注入后内容已改写：etag/last-modified 一律丢弃，禁止旧实体复用；
     // cache-control 保留。注入失败（无 </head>）则原文透传。
-    let injected =
-        inject_mobile_layer(&method, parts.status.as_u16(), &content_type, &text).unwrap_or(text);
+    let injected = inject(&method, parts.status.as_u16(), &content_type, &text).unwrap_or(text);
     let mut builder = Response::builder()
         .status(parts.status)
         .header(axum::http::header::CONTENT_TYPE, content_type);
@@ -619,6 +669,27 @@ mod tests {
     }
 
     #[test]
+    fn 桌面外壳层_在head结束标签前插入拦截脚本() {
+        let html = "<html><head><title>t</title></head><body></body></html>";
+        let injected = super::inject_desktop_layer(&GET, 200, "text/html", html).expect("应注入");
+        assert!(injected.contains(super::DESKTOP_LAYER_SNIPPET));
+        assert!(injected.contains("qx-shell/links.js"));
+        assert!(!injected.contains("qx-mobile"));
+        let position = injected.find(super::DESKTOP_LAYER_SNIPPET).unwrap();
+        assert!(injected[..position].contains("</title>"));
+        assert!(injected[position + super::DESKTOP_LAYER_SNIPPET.len()..].starts_with("</head>"));
+    }
+
+    #[test]
+    fn 桌面外壳层_条件不满足不注入() {
+        let html = "<html><head></head><body></body></html>";
+        // 非 GET / 非 200 / 非 HTML 一律原样（None = 调用侧透传）。
+        assert!(super::inject_desktop_layer(&Method::POST, 200, "text/html", html).is_none());
+        assert!(super::inject_desktop_layer(&GET, 302, "text/html", html).is_none());
+        assert!(super::inject_desktop_layer(&GET, 200, "text/css", html).is_none());
+    }
+
+    #[test]
     fn host必须是回环名带端口() {
         assert!(loopback_authority("127.0.0.1:17400"));
         assert!(loopback_authority("localhost:17400"));
@@ -665,5 +736,101 @@ mod tests {
         ])));
         // 无 Host（构造残缺请求）→ 拒。
         assert!(!access_allowed(&headers(&[])));
+    }
+
+    /// 端到端（mock 上游替身 DSH）：回环入口的 HTML 页被注入桌面外壳层；
+    /// `/qx-shell/links.js` 仅回环 Host 可取（LAN Host 视作未配对设备 401）；
+    /// 非 HTML 响应原样透传。真实 axum 服务 + 真实 HTTP 客户端。
+    #[tokio::test]
+    async fn 回环入口注入桌面外壳层且脚本仅回环可取() {
+        use axum::response::Html;
+        use axum::{routing::get, Router};
+
+        // 占个回环端口拿到空闲端口号再让网关去绑（先绑后放的窗口极小）。
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        // mock 上游：替身 DSH 的首页（HTML）与一个纯文本端点。
+        let upstream = Router::new()
+            .route(
+                "/",
+                get(|| async {
+                    Html("<html><head><title>dsh</title></head><body>hi</body></html>")
+                }),
+            )
+            .route("/api/data", get(|| async { "plain-ok" }))
+            .into_make_service();
+        let up_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = up_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(up_listener, upstream).await.unwrap();
+        });
+
+        let handle = start(
+            "",
+            port,
+            upstream_addr.to_string(),
+            None,
+            Vec::new(),
+            0,
+            std::env::temp_dir().join("qianxun-gateway-desktop-layer-test"),
+        )
+        .await
+        .expect("网关应启动");
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", handle.loopback_addr.port());
+
+        // 1) 回环 GET 首页：注入桌面外壳层标签（移动层不出现）。
+        let html = client
+            .get(&base)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(html.contains(r#"<script src="/qx-shell/links.js" defer></script>"#));
+        assert!(!html.contains("qx-mobile"));
+
+        // 2) 拦截脚本本尊：回环可取，内容是外壳链接桥。
+        let script = client
+            .get(format!("{base}/qx-shell/links.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(script.status(), 200);
+        assert!(script.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript"));
+        assert!(script.text().await.unwrap().contains("__qxShell"));
+
+        // 3) 同一路由换 LAN Host：is_loopback 不成立 → 未配对 401（不漏脚本）。
+        let denied = client
+            .get(format!("{base}/qx-shell/links.js"))
+            .header(
+                "host",
+                format!("192.168.1.10:{}", handle.loopback_addr.port()),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 401);
+
+        // 4) 非 HTML 响应原样透传，绝无注入痕迹。
+        let plain = client
+            .get(format!("{base}/api/data"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(plain, "plain-ok");
+
+        let _ = handle.shutdown.send(true);
+        upstream_task.abort();
     }
 }

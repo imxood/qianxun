@@ -1,5 +1,6 @@
 //! 窗口域：前置窗口查找、显示/聚焦、几何记忆（恢复与持久化），
-//! 以及「独立窗口」的生命周期（终端 / DSH 页分离到独立 OS 窗口）。
+//! 以及「独立窗口」的生命周期（终端 / DSH 页分离到独立 OS 窗口），
+//! 外加内置浏览器窗（DSH 页外链分流：单例复用 + 多开级联）。
 //!
 //! 几何记忆采用「关闭/退出时一次性快照」而非每次移动都写盘：
 //! 设置文件不值得为窗口拖动承受成倍的写入（架构 §4.1 的原子写代价）。
@@ -406,6 +407,109 @@ pub async fn window_spawn_view(app: AppHandle, view: String) -> crate::error::Re
         .map_err(|cause| crate::error::Error::Window(format!("创建独立窗口失败：{cause}")))?;
     #[cfg(windows)]
     apply_webview_preferences(&spawned);
+    Ok(label)
+}
+
+// ---- 内置浏览器窗（DSH 页外链分流）----
+
+/// 内置浏览器单例窗 label：普通点击复用此窗换址，不在任何 capability 里。
+pub const BROWSER_LABEL: &str = "browser";
+
+/// 多开窗口计数（`browser-{n}`，中键/Shift+点击新开，级联错位）。
+static NEXT_BROWSER: AtomicU64 = AtomicU64::new(2);
+
+/// 内置浏览器窗：以系统 WebView2（Edge 内核）直载目标 URL——千寻即浏览器。
+/// 由 DSH 页注入脚本（gateway 的 /qx-shell/links.js）经外壳转发的外链在此分流：
+/// - 普通点击：复用单例窗 navigate 换址并前置（远程页没有外壳前端，事件线
+///   不可用；navigate 走 WebView2 导航，比 eval 更正式）；
+/// - 中键/Shift+点击（`new_window`）：新开窗口且不抢焦点，级联错位。
+///
+/// 安全：`browser*` label 不在任何 capability —— 远程页面零 IPC 权限，
+/// Tauri 调用一律默认拒绝；入参仅放行 http/https。
+/// 必须 async：sync 命令在主线程同步 build 窗口会与 WebView2 异步初始化
+/// 互等消息泵而死锁（同 window_spawn_view 注释）。
+#[tauri::command]
+pub async fn window_open_external(
+    app: AppHandle,
+    url: String,
+    new_window: bool,
+) -> crate::error::Result<String> {
+    let parsed = tauri::Url::parse(&url)
+        .map_err(|cause| crate::error::Error::Window(format!("链接不合法（{url}）：{cause}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(crate::error::Error::Window(format!(
+            "内置浏览器仅支持 http/https，拒绝：{url}"
+        )));
+    }
+
+    // 单例复用：窗还活着就换址 + 前置，不弹新窗。
+    if !new_window {
+        if let Some(existing) = app.get_webview_window(BROWSER_LABEL) {
+            existing.navigate(parsed.clone()).map_err(|cause| {
+                crate::error::Error::Window(format!("内置浏览器换址失败：{cause}"))
+            })?;
+            let _ = existing.show();
+            let _ = existing.unminimize();
+            let _ = existing.set_focus();
+            return Ok(BROWSER_LABEL.to_owned());
+        }
+    }
+
+    let n = NEXT_BROWSER.fetch_add(1, Ordering::AcqRel);
+    let label = if new_window {
+        format!("{BROWSER_LABEL}-{n}")
+    } else {
+        BROWSER_LABEL.to_owned()
+    };
+    let title = format!("浏览 · {}", parsed.host_str().unwrap_or("页面"));
+
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+        .title(title)
+        .inner_size(1120.0, 760.0)
+        .min_inner_size(420.0, 320.0)
+        .focused(!new_window) // 后台窗（中键/Shift）不抢焦点
+        .visible(false); // 首个页面开始加载即亮窗（on_page_load），避免白闪
+
+    // 级联定位：以主窗为锚，每次错开 32 逻辑像素（8 个一循环）。
+    if let Some(main) = front(&app) {
+        if let (Ok(position), Ok(scale)) = (main.outer_position(), main.scale_factor()) {
+            let offset = ((n - 1) % 8) as f64 * 32.0;
+            builder = builder.position(
+                position.x as f64 / scale + offset,
+                position.y as f64 / scale + offset,
+            );
+        }
+    }
+
+    // Started 即亮窗：错误页也会走 load 事件，不会永远隐身；后台窗只亮不抢焦。
+    let focus_on_show = !new_window;
+    builder = builder.on_page_load(move |window, event| {
+        if matches!(event.event(), tauri::webview::PageLoadEvent::Started) {
+            let _ = window.show();
+            if focus_on_show {
+                let _ = window.set_focus();
+            }
+        }
+    });
+
+    let spawned = builder
+        .build()
+        .map_err(|cause| crate::error::Error::Window(format!("创建内置浏览器窗失败：{cause}")))?;
+    #[cfg(windows)]
+    apply_webview_preferences(&spawned);
+
+    // 兜底亮窗：万一目标站连 load 事件都不发（极端网络黑洞），8 秒后强制
+    // 亮出，宁可白屏也不让窗口「隐身」（同主窗 20s 兜底的思路）。
+    let handle = app.clone();
+    let fallback_label = label.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        if let Some(window) = handle.get_webview_window(&fallback_label) {
+            if !window.is_visible().unwrap_or(true) {
+                let _ = window.show();
+            }
+        }
+    });
     Ok(label)
 }
 

@@ -217,7 +217,8 @@ fn json_response(value: &serde_json::Value) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
-fn text_response(text: &str, content_type: &str, cache: &str) -> Response<Body> {
+/// 文本小响应（ETag = sha256）：桌面外壳层（gateway::shell_links）复用。
+pub(crate) fn text_response(text: &str, content_type: &str, cache: &str) -> Response<Body> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)

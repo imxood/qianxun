@@ -53,6 +53,7 @@ export const IPC_COMMANDS = [
   'shots_close_overlays',
   'shots_open_pin',
   'window_spawn_view',
+  'window_open_external',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -518,6 +519,21 @@ export interface FrozenMonitor {
 export interface WindowSpawnViewArgs {
   view: 'dsh';
 }
+
+/**
+ * window_open_external 的入参：内置浏览器窗打开外链。
+ * - `newWindow=false`：复用单例窗 `browser` 换址聚焦（默认点击）；
+ * - `newWindow=true`：新开 `browser-{n}` 后台窗，不抢焦点（中键/Shift）。
+ * 返回窗口 label。仅放行 http/https；`browser*` label 不在任何 capability，
+ * 远程页面零 IPC 权限。
+ */
+export interface WindowOpenExternalArgs {
+  url: string;
+  newWindow: boolean;
+}
+
+/** window_open_external 返回：窗口 label（`browser` / `browser-{n}`）。 */
+export type WindowOpenExternalResult = string;
 
 /** window://closed 事件负载：主窗据此恢复侧栏项。 */
 export interface StandaloneClosedEvent {

@@ -2,12 +2,58 @@
   import { onMount } from 'svelte';
   import { harness } from '../../stores/harness.svelte';
   import { nav } from '../../stores/nav.svelte';
+  import { isShellReady, openShellLink, parseShellLink } from '../../lib/external-links';
 
   /** 独立窗口模式：站内跳转（环境页）不可用（主窗布局不在本窗口）。 */
   let { standalone = false }: { standalone?: boolean } = $props();
 
   onMount(() => {
     void harness.wire();
+  });
+
+  // ---- 外链桥（DSH 页 → 外壳分流）----
+  // WebView2 吞掉一切弹窗请求（wry 未注册 NewWindowRequested 回调），
+  // 聊天里 target="_blank" 的链接点了毫无反应。回环网关给 DSH 页注入
+  // 拦截脚本（/qx-shell/links.js），外链点击 postMessage 到这里：
+  // 双重校验来源（event.origin=网关 origin + event.source=本 iframe），
+  // 再按修饰键分流（内置浏览器窗 / 系统浏览器，见 external-links.ts）。
+
+  let frame: HTMLIFrameElement | undefined = $state();
+
+  /** 回环网关 origin（DSH iframe 的 src 来源）；未就绪为 null。 */
+  function gatewayOrigin(): string | null {
+    if (!harness.proxyUrl) return null;
+    try {
+      return new URL(harness.proxyUrl).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 下发 arm 握手：注入脚本收到后才接管外链点击（未握手时零行为）。 */
+  function armShell(): void {
+    const origin = gatewayOrigin();
+    if (frame?.contentWindow && origin) {
+      frame.contentWindow.postMessage({ __qxShell: '__qxShell', kind: 'arm' }, origin);
+    }
+  }
+
+  $effect(() => {
+    const onMessage = (event: MessageEvent): void => {
+      if (!frame || event.source !== frame.contentWindow) return;
+      const origin = gatewayOrigin();
+      const link = parseShellLink(event.origin, event.data, origin);
+      if (link) {
+        void openShellLink(link).catch(() => {});
+        return;
+      }
+      // 注入脚本宣告就绪（或 iframe 每次文档加载完成时兜底补发 arm）。
+      if (origin && event.origin === origin && isShellReady(event.data)) {
+        armShell();
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
   });
 
   // 状态就绪即加载 iframe；重启/断线由 reload 钩子自动恢复。
@@ -59,7 +105,12 @@
       class="h-full w-full border-0"
       src={dshUrl}
       sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups"
-      onload={() => (frameLoaded = true)}
+      bind:this={frame}
+      onload={() => {
+        frameLoaded = true;
+        // 文档每次加载完成都补发 arm（注入脚本随文档重载重建，armed 归零）。
+        armShell();
+      }}
     ></iframe>
     {#if !frameLoaded}
       <div class="absolute inset-0 z-10 flex items-center justify-center bg-bg">

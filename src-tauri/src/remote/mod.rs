@@ -16,6 +16,9 @@ pub mod mobile_ui;
 
 pub use mobile_ui::MobileUi;
 
+/// 网关内共用的小响应构造器（移动层与桌面外壳层都从这里拿）。
+pub(crate) use mobile_ui::text_response;
+
 /// 已配对设备（settings.json remote 域持久化）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
