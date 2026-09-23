@@ -136,7 +136,8 @@
         </div>
       {/if}
       {#if nav.visited.games}
-        <div class="absolute inset-0 overflow-y-auto p-6 {show('games')}">
+        <!-- 游戏页自管内边距与高度(满幅无滚动),容器不提供滚动 -->
+        <div class="absolute inset-0 overflow-hidden {show('games')}">
           <GamesPage />
         </div>
       {/if}

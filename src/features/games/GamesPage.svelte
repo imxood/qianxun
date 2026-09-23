@@ -21,9 +21,9 @@
 </script>
 
 {#if active === null}
-  <div class="flex h-full flex-col gap-4">
+  <div class="flex h-full flex-col gap-4 overflow-y-auto p-6">
     <div>
-      <h1 class="qx-page-title text-base font-semibold">游戏</h1>
+      <h1 class="text-base font-semibold">游戏</h1>
       <p class="text-sm text-muted">
         Laya 决策引擎的游乐场 — 每个游戏都是一次 System 1 能力的实机验证。
       </p>

@@ -81,24 +81,45 @@ export function planTarget(snap: Snapshot): PlanTarget | null {
   };
 }
 
-/** 生成 laya-server 的 questions(动作选择 + 局面危险度)。 */
-export function buildQuestions(): Record<string, unknown> {
+/** 动作语义表(reflex 下动态 criteria 复用)。 */
+export const ACTION_HINTS: Record<Action, string> = {
+  shift_left: 'Move the falling piece one column left; use when target column is to the left',
+  shift_right: 'Move the falling piece one column right; use when target column is to the right',
+  rotate: 'Rotate clockwise; use when target rotation is ahead of current rotation',
+  rotate_ccw:
+    'Rotate counter-clockwise; use when a single counter-clockwise step reaches target rotation',
+  soft_drop: 'Move the piece down one row; use when close to the target row',
+  hard_drop: 'Lock instantly; use only when current position already matches the target',
+  wait: 'Do nothing this tick; use when nothing useful can be done',
+};
+
+/**
+ * 约束解码:reflex 模式下只给「朝目标合法的下一步动作」。
+ * 未蒸馏的 Laya 在 7 动作全集上接近噪声(偏爱 hard_drop → 原地锁死),
+ * 约束到 2~3 个都朝目标推进的选项后,选哪个都不会变坏。
+ */
+export function candidateActions(snap: Snapshot, plan: PlanTarget): Action[] {
+  const d = shortestRotation(snap.pieceRot, plan.placement.rot);
+  const dx = plan.placement.x - snap.pieceX;
+  const acts: Action[] = [];
+  if (d > 0) acts.push('rotate');
+  if (d < 0) acts.push('rotate_ccw');
+  if (dx > 0) acts.push('shift_right');
+  if (dx < 0) acts.push('shift_left');
+  if (acts.length === 0) return ['hard_drop'];
+  return acts;
+}
+
+/** 生成 laya-server 的 questions(候选动作 choice + danger score)。 */
+export function buildQuestions(candidates: readonly Action[]): Record<string, unknown> {
+  const criteria: Record<string, string> = {};
+  for (const a of candidates) criteria[a] = ACTION_HINTS[a];
   return {
     action: {
       type: 'choice',
       instructions:
         'Tetris reflex step. The board is shown top row first, "." empty "#" filled. The falling piece, the plan target (when present) and board pressure are given. Choose exactly one next action.',
-      criteria: {
-        shift_left: 'Move the falling piece one column left; use when target column is to the left',
-        shift_right:
-          'Move the falling piece one column right; use when target column is to the right',
-        rotate: 'Rotate clockwise; use when target rotation is ahead of current rotation',
-        rotate_ccw:
-          'Rotate counter-clockwise; use when a single counter-clockwise step reaches target rotation',
-        soft_drop: 'Move the piece down one row; use when close to the target row',
-        hard_drop: 'Lock instantly; use only when current position already matches the target',
-        wait: 'Do nothing this tick; use when nothing useful can be done',
-      },
+      criteria,
     },
     danger: {
       type: 'score',
@@ -224,15 +245,16 @@ export class LayaBrain {
     }
 
     const plan = this.mode === 'reflex' ? planTarget(snap) : null;
+    const candidates = plan ? candidateActions(snap, plan) : ACTIONS;
     const started = performance.now();
-    const first = await this.ask(snap, plan, signal);
-    let best: Decision = this.toDecision(first, snap, plan, 1);
+    const first = await this.ask(snap, plan, candidates, signal);
+    let best: Decision = this.toDecision(first, snap, plan, candidates, 1);
     best.latencyMs = performance.now() - started;
 
     if (best.gate === 'RE_SENSE' && this.reSensed + 1 < MAX_RE_SENSE) {
       this.reSensed += 1;
-      const again = await this.ask(snap, plan, signal);
-      best = this.toDecision(again, snap, plan, 2);
+      const again = await this.ask(snap, plan, candidates, signal);
+      best = this.toDecision(again, snap, plan, candidates, 2);
       best.latencyMs = performance.now() - started;
     }
     if (best.gate !== 'ESCALATE') this.reSensed = 0;
@@ -243,13 +265,25 @@ export class LayaBrain {
     raw: PredictAnswer,
     snap: Snapshot,
     plan: PlanTarget | null,
+    candidates: readonly Action[],
     sensed: number,
   ): Decision {
     const actionAns = raw.answers?.action ?? {};
     const dangerAns = raw.answers?.danger ?? {};
-    const action = (ACTIONS as readonly string[]).includes(actionAns.choice ?? '')
-      ? (actionAns.choice as Action)
-      : 'wait';
+    const inSet = (a: string | undefined): a is Action =>
+      a !== undefined && (candidates as readonly string[]).includes(a);
+    // 候选集过滤:Laya 选到集外(或没选)时,按其在候选上的概率回退。
+    let action: Action = inSet(actionAns.choice) ? actionAns.choice : candidates[0]!;
+    if (!inSet(actionAns.choice)) {
+      let bestP = -1;
+      for (const c of candidates) {
+        const p = Number(actionAns.probabilities?.[c]) || 0;
+        if (p > bestP) {
+          bestP = p;
+          action = c;
+        }
+      }
+    }
     const conf = Number(actionAns.confidence ?? 0);
     const gate: Gate =
       conf >= this.gateExecute ? 'EXECUTE' : conf >= this.gateEscalate ? 'RE_SENSE' : 'ESCALATE';
@@ -276,6 +310,7 @@ export class LayaBrain {
   private async ask(
     snap: Snapshot,
     plan: PlanTarget | null,
+    candidates: readonly Action[],
     signal?: AbortSignal,
   ): Promise<PredictAnswer> {
     const res = await fetch(`${this.endpoint}/predict`, {
@@ -283,7 +318,7 @@ export class LayaBrain {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         state: buildState(snap, plan, this.mode),
-        questions: buildQuestions(),
+        questions: buildQuestions(candidates),
       }),
       signal,
     });

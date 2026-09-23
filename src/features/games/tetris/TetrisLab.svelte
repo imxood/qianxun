@@ -6,6 +6,9 @@
    * ACT(游戏循环执行)。System 2 = Dellacherie 枚举求解器,在
    * reflex 模式给出目标放置、在 Laya 低置信度时接管(ESCALATE)。
    * 驱动模式:reflex(默认)/ pure(无规划,纯反射)/ solver(对照)/ human(键盘)。
+   *
+   * 布局约束:整页铺满可视区,无滚动条——canvas 按容器实测高度自适应格子尺寸,
+   * 控件全部收进底部横排控制条。
    */
 
   import { onMount } from 'svelte';
@@ -80,7 +83,6 @@
     6: '#3b82f6',
     7: '#f97316',
   };
-  const CELL = 26;
 
   function snapshot(): Snapshot {
     return {
@@ -249,9 +251,7 @@
           `EXEC ${acted} conf=${d.conf.toFixed(2)} (${d.latencyMs.toFixed(1)}ms)`,
           d.gate === 'EXECUTE' ? 'text-emerald-400' : 'text-amber-400',
         );
-        if (d.sensed > 1) {
-          stats.reSense += 1;
-        }
+        if (d.sensed > 1) stats.reSense += 1;
       }
 
       stats.decisions += 1;
@@ -362,23 +362,41 @@
     };
   });
 
-  // ---- 渲染(canvas,状态变化即重绘) ----
+  // ---- 渲染:格子尺寸随容器实测自适应(满幅、无滚动) ----
+  let boardWrap = $state<HTMLDivElement>();
+  let cell = $state(24);
+
+  $effect(() => {
+    const el = boardWrap;
+    if (!el) return;
+    const update = () => {
+      const byH = Math.floor((el.clientHeight - 6) / ROWS);
+      const byW = Math.floor((el.clientWidth - 6) / COLS);
+      cell = Math.max(12, Math.min(30, Math.min(byH, byW)));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
   let boardCanvas = $state<HTMLCanvasElement>();
   let nextCanvas = $state<HTMLCanvasElement>();
+  const NEXT_CELL = 16;
 
   function drawBoard(ctx: CanvasRenderingContext2D): void {
-    ctx.clearRect(0, 0, COLS * CELL, ROWS * CELL);
+    ctx.clearRect(0, 0, COLS * cell, ROWS * cell);
     ctx.strokeStyle = 'rgba(128,128,128,0.18)';
     for (let x = 0; x <= COLS; x += 1) {
       ctx.beginPath();
-      ctx.moveTo(x * CELL, 0);
-      ctx.lineTo(x * CELL, ROWS * CELL);
+      ctx.moveTo(x * cell, 0);
+      ctx.lineTo(x * cell, ROWS * cell);
       ctx.stroke();
     }
     for (let y = 0; y <= ROWS; y += 1) {
       ctx.beginPath();
-      ctx.moveTo(0, y * CELL);
-      ctx.lineTo(COLS * CELL, y * CELL);
+      ctx.moveTo(0, y * cell);
+      ctx.lineTo(COLS * cell, y * cell);
       ctx.stroke();
     }
     for (let y = 0; y < ROWS; y += 1) {
@@ -386,14 +404,14 @@
         const v = board[y * COLS + x] ?? 0;
         if (v !== 0) {
           ctx.fillStyle = COLORS[v] ?? '#888';
-          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+          ctx.fillRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
         }
       }
     }
     if (current) {
       ctx.fillStyle = COLORS[current.id] ?? '#888';
       for (const [dx, dy] of cellsOf(current.id, current.rot)) {
-        ctx.fillRect((current.x + dx) * CELL + 1, (current.y + dy) * CELL + 1, CELL - 2, CELL - 2);
+        ctx.fillRect((current.x + dx) * cell + 1, (current.y + dy) * cell + 1, cell - 2, cell - 2);
       }
       // 规划目标虚线(reflex 模式,对应 JEV Lab 的 magenta 意图框)
       if (
@@ -405,7 +423,7 @@
         ctx.strokeStyle = '#e879f9';
         ctx.setLineDash([4, 3]);
         for (const [dx, dy] of cellsOf(current.id, p.rot)) {
-          ctx.strokeRect((p.x + dx) * CELL + 2, (p.y + dy) * CELL + 2, CELL - 4, CELL - 4);
+          ctx.strokeRect((p.x + dx) * cell + 2, (p.y + dy) * cell + 2, cell - 4, cell - 4);
         }
         ctx.setLineDash([]);
       }
@@ -413,10 +431,10 @@
   }
 
   function drawNext(ctx: CanvasRenderingContext2D): void {
-    ctx.clearRect(0, 0, 4 * CELL, 3 * CELL);
+    ctx.clearRect(0, 0, 4 * NEXT_CELL, 3 * NEXT_CELL);
     ctx.fillStyle = COLORS[nextPiece] ?? '#888';
     for (const [dx, dy] of cellsOf(nextPiece, 0)) {
-      ctx.fillRect(dx * CELL + 6, dy * CELL + 4, CELL - 8, CELL - 8);
+      ctx.fillRect(dx * NEXT_CELL + 4, dy * NEXT_CELL + 3, NEXT_CELL - 5, NEXT_CELL - 5);
     }
   }
 
@@ -426,6 +444,7 @@
     void driveMode;
     void currentPlan;
     void pieces;
+    void cell;
     const ctx = boardCanvas?.getContext('2d');
     if (ctx) drawBoard(ctx);
   });
@@ -439,15 +458,16 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="flex h-full flex-col gap-4">
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="qx-page-title text-base font-semibold">游戏 · Laya Reflex 俄罗斯方块</h1>
-      <p class="text-sm text-muted">
+<div class="flex h-full min-h-0 flex-col gap-3">
+  <!-- 标题 + 控制 -->
+  <div class="flex items-start justify-between gap-4">
+    <div class="min-w-0">
+      <h1 class="text-base font-semibold">游戏 · Laya Reflex 俄罗斯方块</h1>
+      <p class="truncate text-sm text-muted">
         System 1 反射(Laya)× System 2 规划(Dellacherie 求解器)— State → Choice → Confidence
       </p>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex shrink-0 items-center gap-2">
       <button
         class="rounded-lg bg-emerald-500/90 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
         onclick={start}
@@ -478,9 +498,12 @@
     </div>
   {/if}
 
-  <div class="grid min-h-0 flex-1 grid-cols-12 gap-4">
+  <!-- 三栏:SENSE | DECIDE | ACT -->
+  <div class="grid min-h-0 flex-1 grid-cols-12 gap-3">
     <!-- 01 SENSE -->
-    <section class="col-span-3 rounded-xl border border-line bg-surface p-4">
+    <section
+      class="col-span-3 min-h-0 overflow-y-auto rounded-xl border border-line bg-surface p-4"
+    >
       <h2 class="mb-3 text-xs font-semibold tracking-wider text-muted">01 SENSE → STATE</h2>
       <dl class="space-y-2 text-sm">
         <div class="flex justify-between">
@@ -526,15 +549,15 @@
     </section>
 
     <!-- 02 DECIDE -->
-    <section class="col-span-5 flex min-h-0 flex-col gap-4">
+    <section class="col-span-5 flex min-h-0 flex-col gap-3">
       <div class="rounded-xl border border-line bg-surface p-4">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-2 flex items-center justify-between">
           <h2 class="text-xs font-semibold tracking-wider text-muted">02 DECIDE → LAYA REFLEX</h2>
-          <span class="text-xs text-muted">{stats.qps} QPS 决策/秒</span>
+          <span class="text-xs text-muted">{stats.qps} QPS</span>
         </div>
         <div class="flex items-center gap-4">
-          <div class="font-mono text-5xl font-bold text-emerald-400">
-            {lastDecision ? (lastDecision.conf * 100).toFixed(1) : '--'}<span class="text-lg"
+          <div class="font-mono text-4xl font-bold text-emerald-400">
+            {lastDecision ? (lastDecision.conf * 100).toFixed(1) : '--'}<span class="text-base"
               >%</span
             >
           </div>
@@ -559,33 +582,32 @@
           </div>
         </div>
         {#if lastDecision && Object.keys(lastDecision.probs).length > 0}
-          <div class="mt-3 space-y-1">
+          <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-0.5">
             {#each Object.entries(lastDecision.probs) as [action, p] (action)}
               <div class="flex items-center gap-2 text-xs">
-                <span class="w-24 shrink-0 font-mono text-muted">{action}</span>
-                <div class="h-2 flex-1 overflow-hidden rounded bg-line">
+                <span class="w-20 shrink-0 font-mono text-muted">{action}</span>
+                <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded bg-line">
                   <div
                     class="h-full bg-emerald-500"
                     style={`width:${Math.min(100, (Number(p) || 0) * 100)}%`}
                   ></div>
                 </div>
-                <span class="w-10 text-right font-mono">{Number(p).toFixed(2)}</span>
+                <span class="w-9 text-right font-mono">{Number(p).toFixed(2)}</span>
               </div>
             {/each}
           </div>
         {/if}
-        <p class="mt-3 text-xs text-muted">
-          conf ≥ {brain.gateExecute.toFixed(2)} EXECUTE · {brain.gateEscalate.toFixed(
-            2,
-          )}~{brain.gateExecute.toFixed(2)}
-          RE_SENSE(再感知)· &lt; {brain.gateEscalate.toFixed(2)} ESCALATE(System 2 重规划)
+        <p class="mt-2 text-xs text-muted">
+          conf ≥ {brain.gateExecute.toFixed(2)} EXECUTE ·
+          {brain.gateEscalate.toFixed(2)}~{brain.gateExecute.toFixed(2)} RE_SENSE · &lt;
+          {brain.gateEscalate.toFixed(2)} ESCALATE(System 2)
         </p>
       </div>
 
-      <div class="grid grid-cols-3 gap-3">
-        {#each [['AVG CONF', stats.avgConf.toFixed(2)], ['AVG LAT ms', stats.avgLat.toFixed(1)], ['ESCALATE', String(stats.escalate)], ['RE-SENSE', String(stats.reSense)], ['S2 PLANS', String(stats.s2)], ['决策数', String(stats.decisions)]] as [label, value] (label)}
-          <div class="rounded-xl border border-line bg-surface p-3">
-            <div class="font-mono text-lg font-semibold">{value}</div>
+      <div class="grid grid-cols-3 gap-2">
+        {#each [['AVG CONF', stats.avgConf.toFixed(2)], ['AVG LAT', `${stats.avgLat.toFixed(0)}ms`], ['ESCALATE', String(stats.escalate)], ['RE-SENSE', String(stats.reSense)], ['S2 PLANS', String(stats.s2)], ['决策数', String(stats.decisions)]] as [label, value] (label)}
+          <div class="rounded-lg border border-line bg-surface px-3 py-2">
+            <div class="font-mono text-base font-semibold">{value}</div>
             <div class="text-xs text-muted">{label}</div>
           </div>
         {/each}
@@ -607,119 +629,118 @@
     </section>
 
     <!-- 03 ACT -->
-    <section class="relative col-span-4 rounded-xl border border-line bg-surface p-4">
+    <section class="col-span-4 flex min-h-0 flex-col rounded-xl border border-line bg-surface p-4">
       <h2 class="mb-3 text-xs font-semibold tracking-wider text-muted">03 ACT → GAME LOOP</h2>
-      <div class="flex gap-4">
-        <canvas
-          bind:this={boardCanvas}
-          width={COLS * CELL}
-          height={ROWS * CELL}
-          class="rounded-lg border border-line bg-black/40"
-        ></canvas>
-        <div class="flex flex-1 flex-col gap-3">
-          <div class="rounded-lg border border-line p-3">
-            <div class="font-mono text-2xl font-bold text-emerald-400">{score}</div>
+      <div class="flex min-h-0 flex-1 gap-3">
+        <div bind:this={boardWrap} class="flex min-h-0 min-w-0 flex-1 items-start justify-center">
+          <canvas
+            bind:this={boardCanvas}
+            width={COLS * cell}
+            height={ROWS * cell}
+            class="rounded-lg border border-line bg-black/40"
+          ></canvas>
+        </div>
+        <div class="flex w-28 shrink-0 flex-col gap-2">
+          <div class="rounded-lg border border-line p-2 text-center">
+            <div class="font-mono text-xl font-bold text-emerald-400">{score}</div>
             <div class="text-xs text-muted">SCORE</div>
           </div>
-          <div class="rounded-lg border border-line p-3">
-            <div class="font-mono text-2xl font-bold">{lines}</div>
+          <div class="rounded-lg border border-line p-2 text-center">
+            <div class="font-mono text-xl font-bold">{lines}</div>
             <div class="text-xs text-muted">LINES · LV {level}</div>
           </div>
-          <div class="rounded-lg border border-line p-3">
-            <canvas bind:this={nextCanvas} width={4 * CELL} height={3 * CELL} class="mx-auto"
+          <div class="rounded-lg border border-line p-2">
+            <canvas
+              bind:this={nextCanvas}
+              width={4 * NEXT_CELL}
+              height={3 * NEXT_CELL}
+              class="mx-auto"
             ></canvas>
             <div class="text-center text-xs text-muted">NEXT</div>
           </div>
         </div>
       </div>
-
-      <div class="mt-4 space-y-3 text-sm">
-        <div>
-          <div class="mb-1 text-xs text-muted">驱动模式</div>
-          <div class="flex gap-1">
-            {#each [['reflex', 'Laya 反射'], ['pure', '纯反射'], ['solver', 'System 2'], ['human', '人玩']] as [m, label] (m)}
-              <button
-                class="flex-1 rounded-lg border px-2 py-1.5 text-xs {driveMode === m
-                  ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
-                  : 'border-line text-muted hover:bg-accent-soft/50'}"
-                onclick={() => {
-                  driveMode = m as DriveMode;
-                  onModeChange();
-                }}
-              >
-                {label}
-              </button>
-            {/each}
-          </div>
-        </div>
-        <label class="block">
-          <span class="text-xs text-muted"
-            >决策频率 · {intervalMs}ms(~{(1000 / intervalMs).toFixed(1)}Hz)</span
-          >
-          <input
-            type="range"
-            min="80"
-            max="500"
-            step="10"
-            bind:value={intervalMs}
-            class="w-full accent-emerald-500"
-            onchange={onModeChange}
-          />
-        </label>
-        <label class="block">
-          <span class="text-xs text-muted">重力速度 · {gravityMs}ms</span>
-          <input
-            type="range"
-            min="300"
-            max="1500"
-            step="50"
-            bind:value={gravityMs}
-            class="w-full accent-emerald-500"
-          />
-        </label>
-        <label class="block">
-          <span class="text-xs text-muted">
-            EXECUTE 门控 ≥ {brain.gateExecute.toFixed(2)}(游戏 OOD 域 conf≈0.17,工单域≈0.9)
-          </span>
-          <input
-            type="range"
-            min="0.05"
-            max="0.9"
-            step="0.01"
-            bind:value={brain.gateExecute}
-            class="w-full accent-emerald-500"
-          />
-        </label>
-        <label class="block">
-          <span class="text-xs text-muted">ESCALATE 门控 &lt; {brain.gateEscalate.toFixed(2)}</span>
-          <input
-            type="range"
-            min="0.01"
-            max="0.5"
-            step="0.01"
-            bind:value={brain.gateEscalate}
-            class="w-full accent-emerald-500"
-          />
-        </label>
-        <p class="text-xs text-muted">
-          {driveMode === 'human'
-            ? '人玩:←→ 移动,↑ 旋转,↓ 软降,空格 硬降'
-            : driveMode === 'solver'
-              ? 'System 2 求解器直控(对照基线,不经 Laya)'
-              : driveMode === 'pure'
-                ? '纯反射:不给规划目标,检验 System 1 真实水平'
-                : 'Laya 反射:System 2 目标写入 state,Laya 逐步逼近'}
-        </p>
-      </div>
-
       {#if phase === 'over'}
-        <div class="absolute inset-0 flex items-center justify-center rounded-xl bg-black/60">
-          <div class="text-center">
-            <div class="text-lg font-semibold text-red-400">GAME OVER</div>
-            <div class="font-mono text-muted">score {score} · lines {lines}</div>
-          </div>
+        <div class="mt-2 rounded-lg bg-red-500/15 py-2 text-center">
+          <span class="font-semibold text-red-400">GAME OVER</span>
+          <span class="ml-2 font-mono text-muted">score {score} · lines {lines}</span>
         </div>
       {/if}
     </section>
+  </div>
+
+  <!-- 底部控制条(横跨,不挤占棋盘高度) -->
+  <div
+    class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-line bg-surface px-4 py-2.5"
+  >
+    <div class="flex items-center gap-1">
+      {#each [['reflex', 'Laya 反射'], ['pure', '纯反射'], ['solver', 'System 2'], ['human', '人玩']] as [m, label] (m)}
+        <button
+          class="rounded-lg border px-2.5 py-1 text-xs {driveMode === m
+            ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
+            : 'border-line text-muted hover:bg-accent-soft/50'}"
+          onclick={() => {
+            driveMode = m as DriveMode;
+            onModeChange();
+          }}
+        >
+          {label}
+        </button>
+      {/each}
+    </div>
+    <label class="flex items-center gap-2 text-xs text-muted">
+      决策 {intervalMs}ms
+      <input
+        type="range"
+        min="80"
+        max="500"
+        step="10"
+        bind:value={intervalMs}
+        class="w-28 accent-emerald-500"
+        onchange={onModeChange}
+      />
+    </label>
+    <label class="flex items-center gap-2 text-xs text-muted">
+      重力 {gravityMs}ms
+      <input
+        type="range"
+        min="300"
+        max="2000"
+        step="50"
+        bind:value={gravityMs}
+        class="w-28 accent-emerald-500"
+      />
+    </label>
+    <label class="flex items-center gap-2 text-xs text-muted">
+      EXEC ≥ {brain.gateExecute.toFixed(2)}
+      <input
+        type="range"
+        min="0.05"
+        max="0.9"
+        step="0.01"
+        bind:value={brain.gateExecute}
+        class="w-28 accent-emerald-500"
+      />
+    </label>
+    <label class="flex items-center gap-2 text-xs text-muted">
+      ESCALATE &lt; {brain.gateEscalate.toFixed(2)}
+      <input
+        type="range"
+        min="0.01"
+        max="0.5"
+        step="0.01"
+        bind:value={brain.gateEscalate}
+        class="w-24 accent-emerald-500"
+      />
+    </label>
+    <span class="ml-auto text-xs text-muted">
+      {driveMode === 'human'
+        ? '人玩:←→ 移动 · ↑ 旋转 · ↓ 软降 · 空格 硬降'
+        : driveMode === 'solver'
+          ? 'System 2 求解器直控(对照基线)'
+          : driveMode === 'pure'
+            ? '纯反射:无规划目标,7 动作自由选择'
+            : '反射:约束解码——Laya 在朝向 S2 目标的合法动作集中选择'}
+    </span>
   </div>
 </div>
