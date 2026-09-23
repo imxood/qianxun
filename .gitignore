@@ -16,8 +16,13 @@ playwright-report/
 .tmp/
 .tmp/**
 
-# Laya 决策引擎的重资产：模型 bundle 与 onnxruntime DLL（见 docs/08）
-models/
+# Laya 决策引擎的重资产：模型权重与 onnxruntime DLL（见 docs/08）。
+# 权重本体不入库；每个 bundle 的 manifest.json（sha256+来源）必须入库，
+# 供 scripts/verify-laya-models.ps1 校验/恢复。
+models/laya-multilingual-onnx/**
+!models/laya-multilingual-onnx/manifest.json
+models/laya-onnx/**
+!models/laya-onnx/manifest.json
 vendor/
 *.onnx
 *.onnx.data

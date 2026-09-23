@@ -143,6 +143,35 @@ models/laya-multilingual-onnx/
 自行导出(本文档写作时正在执行)。`laya_config.json` 的 `max_len/head_max_len/温度`
 由导出脚本自动从 `rl_agent_config.json` 提取,engine 侧零改动兼容。
 
+### 5.1 模型资产的 git 管理策略
+
+原则:**权重不入库,manifest 入库,脚本管校验**。三层划分:
+
+| 层 | 内容 | 做法 |
+|---|---|---|
+| ① git 直管 | 源码、几 KB 配置、**manifest.json**(逐文件 sha256+大小+来源)、校验脚本 | 常规提交 |
+| ② ignore+manifest+脚本 | `*.onnx`/`*.onnx.data`(共 2.81GB)、onnxruntime DLL、一切构建产物(moli.exe 等) | `.gitignore` + manifest 保障可验证/可恢复 |
+| ③ Git LFS | ——(暂不采用) | 单人开发;GitHub 免费 10GB 存储/带宽,1.2GB 权重每次 clone 全量耗带宽,超量付费 |
+
+为什么不直接进 git:历史不可逆(commit 过即永久膨胀);GitHub 单文件 100MB 硬限
+直接拒推;二进制 diff 无效,每改一版全量存储。
+
+操作:
+```powershell
+# 校验全部 bundle(大小+sha256 逐文件比对)
+powershell -File scripts/verify-laya-models.ps1
+# 只校验一个
+powershell -File scripts/verify-laya-models.ps1 -Bundle laya-onnx
+```
+
+- `models/*/manifest.json` 由生成时一次性产出并入库;`source` 字段记录恢复途径
+  (`local-export`=按 §2 管线重新导出;将来微调 checkpoint 上传 HF 后变为 `hf:<repo>`,
+  届时补 fetch 脚本)。
+- `.gitignore` 采用「`models/<bundle>/**` + `!manifest.json`」白名单写法——注意
+  不能写 `models/`(排除目录本身后内部无法 re-include)。
+- 新增二进制资产(如独立 moli.exe 分发)默认进第②层:ignore + 在对应 manifest
+  登记 + 校验脚本覆盖;只有"文本且 <100KB"才考虑第①层。
+
 ## 6. 测试与验证体系
 
 | 层 | 内容 | 状态 |
