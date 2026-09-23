@@ -63,6 +63,8 @@ fn main() {
         let started = Instant::now();
 
         let (status, body) = match (method.as_str(), url.as_str()) {
+            // 浏览器跨源预检(webview origin → 127.0.0.1):直接放行。
+            ("OPTIONS", _) => (200, "{}".to_string()),
             ("GET", "/health") => (
                 200,
                 serde_json::json!({
@@ -92,6 +94,26 @@ fn main() {
             .with_header(
                 tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                     .unwrap(),
+            )
+            // 千寻 webview(dev vite / tauri.localhost)跨源调用:允许任意本机
+            // 来源读取(服务只绑 127.0.0.1,不出回环,公网不可达)。
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..])
+                    .unwrap(),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(
+                    &b"Access-Control-Allow-Methods"[..],
+                    &b"GET, POST, OPTIONS"[..],
+                )
+                .unwrap(),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(
+                    &b"Access-Control-Allow-Headers"[..],
+                    &b"Content-Type"[..],
+                )
+                .unwrap(),
             )
             .with_header(
                 tiny_http::Header::from_bytes(&b"X-Latency-Ms"[..], format!("{latency_ms:.1}").as_bytes())
