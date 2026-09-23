@@ -575,7 +575,10 @@
           </div>
         {/if}
         <p class="mt-3 text-xs text-muted">
-          conf ≥ 0.85 EXECUTE · 0.5~0.85 RE_SENSE(再感知)· &lt; 0.5 ESCALATE(System 2 重规划)
+          conf ≥ {brain.gateExecute.toFixed(2)} EXECUTE · {brain.gateEscalate.toFixed(
+            2,
+          )}~{brain.gateExecute.toFixed(2)}
+          RE_SENSE(再感知)· &lt; {brain.gateEscalate.toFixed(2)} ESCALATE(System 2 重规划)
         </p>
       </div>
 
@@ -671,6 +674,30 @@
             max="1500"
             step="50"
             bind:value={gravityMs}
+            class="w-full accent-emerald-500"
+          />
+        </label>
+        <label class="block">
+          <span class="text-xs text-muted">
+            EXECUTE 门控 ≥ {brain.gateExecute.toFixed(2)}(游戏 OOD 域 conf≈0.17,工单域≈0.9)
+          </span>
+          <input
+            type="range"
+            min="0.05"
+            max="0.9"
+            step="0.01"
+            bind:value={brain.gateExecute}
+            class="w-full accent-emerald-500"
+          />
+        </label>
+        <label class="block">
+          <span class="text-xs text-muted">ESCALATE 门控 &lt; {brain.gateEscalate.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0.01"
+            max="0.5"
+            step="0.01"
+            bind:value={brain.gateEscalate}
             class="w-full accent-emerald-500"
           />
         </label>

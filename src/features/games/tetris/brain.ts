@@ -61,9 +61,11 @@ export type Decision = {
 
 const ENDPOINT_DEFAULT = 'http://127.0.0.1:10230';
 
-/** 置信度阈值(与 JEV Lab 同款三分支)。 */
-export const GATE_EXECUTE = 0.85;
-export const GATE_ESCALATE = 0.5;
+/** 置信度阈值(与 JEV Lab 同款三分支)。
+ * 注意:工单域 Laya conf 普遍 0.9+,而游戏棋盘文本是 OOD 域(实测空板
+ * T 块 conf≈0.169),默认阈值按实测校准,并暴露到 UI 实时可调。 */
+export const GATE_EXECUTE = 0.16;
+export const GATE_ESCALATE = 0.12;
 /** 连续 RE_SENSE 上限:第二次无论高低都执行,避免在边缘置信度上死循环。 */
 const MAX_RE_SENSE = 2;
 
@@ -180,18 +182,25 @@ type PredictAnswer = {
 export type BrainOptions = {
   endpoint?: string;
   mode: DriveMode;
+  gateExecute?: number;
+  gateEscalate?: number;
 };
 
-/** 反射脑:无状态类,decide() 一次 = 一轮感知(含门控)。 */
+/** 反射脑:decide() 一次 = 一轮感知(含门控)。 */
 export class LayaBrain {
   private endpoint: string;
   mode: DriveMode;
+  /** 门控阈值(UI 实时可调;默认按游戏 OOD 域实测校准)。 */
+  gateExecute: number;
+  gateEscalate: number;
   /** RE_SENSE 连续计数(执行任意动作后归零)。 */
   private reSensed = 0;
 
   constructor(opts: BrainOptions) {
     this.endpoint = opts.endpoint ?? ENDPOINT_DEFAULT;
     this.mode = opts.mode;
+    this.gateExecute = opts.gateExecute ?? GATE_EXECUTE;
+    this.gateEscalate = opts.gateEscalate ?? GATE_ESCALATE;
   }
 
   reset(): void {
@@ -243,7 +252,7 @@ export class LayaBrain {
       : 'wait';
     const conf = Number(actionAns.confidence ?? 0);
     const gate: Gate =
-      conf >= GATE_EXECUTE ? 'EXECUTE' : conf >= GATE_ESCALATE ? 'RE_SENSE' : 'ESCALATE';
+      conf >= this.gateExecute ? 'EXECUTE' : conf >= this.gateEscalate ? 'RE_SENSE' : 'ESCALATE';
     const decision: Decision = {
       action,
       conf,
