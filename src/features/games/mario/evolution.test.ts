@@ -7,8 +7,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   COOLDOWN_ITERS,
+  INSIGHTS_MAX_CHARS,
   applyCooldowns,
   appendHistory,
+  appendInsight,
   auditLine,
   deathSignature,
   diffPatch,
@@ -17,6 +19,7 @@ import {
   judgeCandidate,
   limitPatch,
   median,
+  obsSnapshotOf,
   parseAuditLines,
   parseEvoState,
   parseHistory,
@@ -94,7 +97,7 @@ describe('policy 信封', () => {
   });
 });
 
-describe('Qwen 触发器(新信息才调)', () => {
+describe('Qwen 触发器(每死必析,docs/14 §2)', () => {
   it('通关必调', () => {
     const t = shouldInvokeQwen(
       initialEvoState(),
@@ -105,26 +108,44 @@ describe('Qwen 触发器(新信息才调)', () => {
     expect(t.reason).toContain('win');
   });
 
-  it('同一 runId 幂等:已分析过不再调', () => {
+  it('同一 runId 幂等:已分析过不再调(唯一去重)', () => {
     const state = { ...initialEvoState(), analyzedRunIds: ['r1'] };
     const t = shouldInvokeQwen(state, report({ outcome: 'win' }), 'r1');
     expect(t.invoke).toBe(false);
     expect(t.reason).toContain('幂等');
   });
 
-  it('新死因签名触发;同签名重复失败去重', () => {
+  it('有死亡必调:新签名 death(签名),重复签名 death-repeat 标注而非去重', () => {
     const state = initialEvoState();
     const r = report();
     const t1 = shouldInvokeQwen(state, r, 'r1');
     expect(t1.invoke).toBe(true);
-    expect(t1.reason).toContain('new-death');
+    expect(t1.reason).toContain('death(goomba@goomba-pair)');
     expect(deathSignature(r)).toBe('goomba@goomba-pair');
-    // 分析后签名入簿记
+    // 签名滚动入簿记
     const s2 = recordRun(state, r, 'r1', true);
     expect(s2.lastDeathSignature).toBe('goomba@goomba-pair');
+    // 同签名再次失败:仍调用,标注 repeat —— 反复失败是下局必须优化的信号
     const t2 = shouldInvokeQwen(s2, report(), 'r2');
-    expect(t2.invoke).toBe(false);
-    expect(t2.reason).toContain('repeat-failure');
+    expect(t2.invoke).toBe(true);
+    expect(t2.reason).toContain('death-repeat');
+    // 换一个签名 → 回到 death(新签名)
+    const t3 = shouldInvokeQwen(
+      s2,
+      report({
+        deaths: [{ cause: 'pit', col: 70, landmark: 'gap-1' }],
+        deathCauses: [{ cause: 'pit', count: 1 }],
+      }),
+      'r3',
+    );
+    expect(t3.invoke).toBe(true);
+    expect(t3.reason).toContain('death(pit@gap-1)');
+  });
+
+  it('无死亡无通关:plateau 未达窗口不调(no-signal)', () => {
+    const t = shouldInvokeQwen(initialEvoState(), report({ deathCauses: [], deaths: [] }), 'r1');
+    expect(t.invoke).toBe(false);
+    expect(t.reason).toContain('no-signal');
   });
 
   it('plateau:连续无进展达到窗口才触发;有进展重置', () => {
@@ -263,5 +284,56 @@ describe('审计与历史', () => {
     expect(state.iteration).toBe(7);
     expect(state.championScore).toBe(42);
     expect(state.cooldowns).toEqual({});
+  });
+});
+
+describe('经验沉淀 insights.md(docs/14 §6)', () => {
+  it('追加成单行条目并带观测标记;空文本不追加', () => {
+    const obs = obsSnapshotOf(DEFAULT_POLICY);
+    let doc = appendInsight('', 3, '低空 gap 要 jump_run_right 而不是 jump_right', obs);
+    expect(doc).toBe(
+      '- [iter 3] 低空 gap 要 jump_run_right 而不是 jump_right (obs 16列/176px/pose:on/sub:on)',
+    );
+    doc = appendInsight(doc, 4, '  多行\n压一行  ', obs);
+    expect(doc).toContain('- [iter 4] 多行 压一行');
+    expect(appendInsight(doc, 5, '   ')).toBe(doc);
+  });
+
+  it('滚动到上限:最旧条目先丢;人保段标记对永不丢', () => {
+    let doc = '';
+    for (let i = 1; i <= 40; i += 1) {
+      doc = appendInsight(doc, i, `经验 ${i} `.padEnd(80, 'x'));
+    }
+    expect(doc.length).toBeLessThanOrEqual(INSIGHTS_MAX_CHARS + 100);
+    expect(doc).not.toContain('- [iter 1]');
+    expect(doc).toContain('- [iter 40]');
+    // 人保段
+    const withHuman = appendInsight(
+      `<!-- HUMAN -->\n人手写的经验,永远保留\n<!-- /HUMAN -->`,
+      1,
+      '机器经验',
+    );
+    let rolled = withHuman;
+    for (let i = 2; i <= 40; i += 1) {
+      rolled = appendInsight(rolled, i, `经验 ${i} `.padEnd(80, 'x'));
+    }
+    expect(rolled).toContain('人手写的经验,永远保留');
+    expect(rolled).not.toContain('机器经验');
+  });
+
+  it('obsSnapshotOf 反映当前策略;审计行带 obs 快照可往返', () => {
+    const obs = obsSnapshotOf({ ...DEFAULT_POLICY, obsProfileCols: 24, obsIncludePose: false });
+    expect(obs).toEqual({ profileCols: 24, threatsLookPx: 176, pose: false, subgoal: true });
+    const line = auditLine({
+      v: 1,
+      ts: '2026-01-01T00:00:00Z',
+      iter: 3,
+      runId: 'r1',
+      actor: 'qwen',
+      action: 'propose',
+      reason: 'death(pit@gap-1)',
+      obs,
+    });
+    expect(parseAuditLines(line)[0]?.obs).toEqual(obs);
   });
 });

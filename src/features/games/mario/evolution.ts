@@ -19,6 +19,7 @@ export const PLAYBOOK_FILE = 'playbook.md';
 export const HISTORY_FILE = 'history.json';
 export const STATE_FILE = 'state.json';
 export const EVOLUTION_FILE = 'evolution.jsonl';
+export const INSIGHTS_FILE = 'insights.md';
 
 // ---- 协议常数(docs/13 §4,可调) ----
 export const EVAL_RUNS_DEFAULT = 3; // 候选试跑局数(取中位数)
@@ -158,7 +159,7 @@ export function parseEvoState(raw: string | null): { state: EvoState; issues: st
   }
 }
 
-// ================= Qwen 触发器(docs/13 §3.1:有新信息才调) =================
+// ================= Qwen 触发器(docs/14 §2:每死必析,取代 docs/13 §3.1 去重) =================
 
 export type QwenTrigger = { invoke: boolean; reason: string };
 
@@ -170,6 +171,11 @@ export function deathSignature(report: PostmortemReport): string | null {
   return `${top.cause}@${first?.landmark ?? '?'}`;
 }
 
+/**
+ * docs/14 §2:每一局死亡都触发全量分析——重复失败恰是重点分析对象,
+ * 不再按签名去重,只降级为 reason 标注(death-repeat),让 Qwen 聚焦
+ * "为什么上一轮优化没生效"。幂等键仍是 runId;无死亡无通关时才回落 plateau。
+ */
 export function shouldInvokeQwen(
   state: EvoState,
   report: PostmortemReport,
@@ -180,16 +186,16 @@ export function shouldInvokeQwen(
   }
   if (report.outcome === 'win') return { invoke: true, reason: 'win(沉淀成功经验)' };
   const sig = deathSignature(report);
-  if (sig !== null && sig !== state.lastDeathSignature) {
-    return { invoke: true, reason: `new-death(${sig})` };
+  if (sig !== null) {
+    return {
+      invoke: true,
+      reason: sig === state.lastDeathSignature ? `death-repeat(${sig})` : `death(${sig})`,
+    };
   }
   if (state.plateauStreak >= PLATEAU_WINDOW) {
     return { invoke: true, reason: `plateau(连续 ${state.plateauStreak} 局无进展)` };
   }
-  return {
-    invoke: false,
-    reason: sig === null ? 'no-signal(无死亡无通关)' : 'repeat-failure(同签名去重)',
-  };
+  return { invoke: false, reason: 'no-signal(无死亡无通关)' };
 }
 
 /** 每局结束后更新簿记(无论是否调了 Qwen)。返回新状态,不原地改。 */
@@ -206,7 +212,8 @@ export function recordRun(
     iteration: state.iteration + 1,
     bestMaxXCol: progressed ? report.maxXCol : state.bestMaxXCol,
     plateauStreak: progressed ? 0 : state.plateauStreak + 1,
-    lastDeathSignature: analyzed && sig !== null ? sig : state.lastDeathSignature,
+    // 签名按局滚动(docs/14):相邻两局同签名 = 重复死亡,标注 death-repeat
+    lastDeathSignature: sig !== null ? sig : state.lastDeathSignature,
     analyzedRunIds: analyzed
       ? [...state.analyzedRunIds, runId].slice(-ANALYZED_CAP)
       : state.analyzedRunIds,
@@ -387,8 +394,27 @@ export type AuditEntry = {
   reason: string;
   patch?: Record<string, { from: unknown; to: unknown }>;
   score?: { champion: number | null; candidate: number | null };
+  /** 观测模式快照(docs/14 §4.3):消融可追溯,回放任意局还原观测配置。 */
+  obs?: ObsSnapshot;
   issues?: string[];
 };
+
+/** 观测模式快照:policy 中 obs* 四个字段的取值。 */
+export type ObsSnapshot = {
+  profileCols: number;
+  threatsLookPx: number;
+  pose: boolean;
+  subgoal: boolean;
+};
+
+export function obsSnapshotOf(p: PolicyProfile): ObsSnapshot {
+  return {
+    profileCols: p.obsProfileCols,
+    threatsLookPx: p.obsThreatsLookPx,
+    pose: p.obsIncludePose,
+    subgoal: p.obsIncludeSubgoal,
+  };
+}
 
 export function auditLine(e: AuditEntry): string {
   return JSON.stringify(e);
@@ -408,6 +434,53 @@ export function parseAuditLines(raw: string | null): AuditEntry[] {
     }
   }
   return out;
+}
+
+// ================= 经验沉淀(insights.md,docs/14 §6) =================
+
+export const INSIGHTS_MAX_CHARS = 2400;
+const HUMAN_OPEN = '<!-- HUMAN -->';
+const HUMAN_CLOSE = '<!-- /HUMAN -->';
+
+/** 拆出人保段(标记对之间原样保留)与可滚动正文。 */
+function splitHuman(doc: string): { humans: string[]; body: string } {
+  const humans: string[] = [];
+  const bodyParts: string[] = [];
+  let rest = doc;
+  for (;;) {
+    const a = rest.indexOf(HUMAN_OPEN);
+    const b = a < 0 ? -1 : rest.indexOf(HUMAN_CLOSE, a);
+    if (a < 0 || b < 0) {
+      bodyParts.push(rest);
+      break;
+    }
+    bodyParts.push(rest.slice(0, a));
+    humans.push(rest.slice(a, b + HUMAN_CLOSE.length));
+    rest = rest.slice(b + HUMAN_CLOSE.length);
+  }
+  return { humans, body: bodyParts.join('\n') };
+}
+
+/**
+ * 追加一条 Laya 使用经验并滚动到上限(docs/14 §6):
+ * 人保段(`<!-- HUMAN -->` 标记对)永不丢,其余按行 FIFO 丢弃最旧。
+ * insight 正文压成单行(≤200 字在 qwen.parseRefine 已钳制)。
+ */
+export function appendInsight(doc: string, iter: number, text: string, obs?: ObsSnapshot): string {
+  const clean = text.trim().replace(/\s+/g, ' ');
+  if (clean === '') return doc;
+  const { humans, body } = splitHuman(doc);
+  const lines = body.split('\n').filter((l) => l.trim() !== '');
+  const obsTag = obs
+    ? ` (obs ${obs.profileCols}列/${obs.threatsLookPx}px/pose:${obs.pose ? 'on' : 'off'}/sub:${obs.subgoal ? 'on' : 'off'})`
+    : '';
+  lines.push(`- [iter ${iter}] ${clean}${obsTag}`);
+  let out = lines.join('\n');
+  while (out.length > INSIGHTS_MAX_CHARS && lines.length > 1) {
+    lines.shift();
+    out = lines.join('\n');
+  }
+  return [...humans, out].filter((p) => p.trim() !== '').join('\n\n');
 }
 
 // ================= 历史(history.json) =================
