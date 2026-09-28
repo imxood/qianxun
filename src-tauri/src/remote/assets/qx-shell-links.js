@@ -50,8 +50,13 @@
       data.kind === 'arm' &&
       PARENT_ORIGINS.indexOf(event.origin) !== -1
     ) {
-      armed = true;
-      announce();
+      // 只在未武装时回宣告：外壳每次收到 ready 都会补发 arm，若这里
+      // 无条件 announce，两边就 ready→arm→ready 无限乒乓（实测把
+      // 合成器与双 renderer 空转到整机 10% CPU 的根因）。
+      if (!armed) {
+        armed = true;
+        announce();
+      }
     }
   });
 

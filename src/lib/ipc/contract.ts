@@ -44,6 +44,7 @@ export const IPC_COMMANDS = [
   'search_wait_ready',
   'search_list_drives',
   'shots_capture',
+  'shots_window_at',
   'shots_overlay_ready',
   'shots_set_hotkey',
   'shots_clear_hotkey',
@@ -571,6 +572,16 @@ export interface FrozenMonitor {
   scale: number;
   /** 底图 PNG 路径（convertFileSrc 引用）。 */
   image: string;
+}
+
+/** shots_window_at 命中：虚拟屏幕物理像素矩形（微信式窗口感知）。 */
+export interface WindowHit {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** 窗口标题（悬停提示备用）。 */
+  title: string;
 }
 
 /** window_spawn_view 的入参：分离某页到独立窗口。 */

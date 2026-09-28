@@ -38,6 +38,18 @@ pub struct FrozenMonitor {
     pub image: String,
 }
 
+/// 微信式窗口感知命中：虚拟屏幕物理像素矩形（覆盖窗据此换算屏内坐标）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowHit {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// 窗口标题（调试/悬停提示备用；截屏逻辑不依赖）。
+    pub title: String,
+}
+
 #[derive(Default)]
 pub struct ShotsState {
     /// 当前注册中的热键（换绑时先注销旧的）。
@@ -92,6 +104,113 @@ fn capture_all(app: &AppHandle) -> Result<Vec<FrozenMonitor>> {
         });
     }
     Ok(frozen)
+}
+
+/// 微信式窗口感知：虚拟屏幕物理坐标 (x, y) 处的最顶层可用窗口矩形。
+/// 排除不可见/最小化/UWP 幽灵（cloaked）窗，以及千寻自己的覆盖窗与
+/// 贴图窗（它们盖在一切之上，命中会把感知钉死在遮罩上）；主窗不排除
+/// ——截千寻自己也是合法需求。非 Windows 恒 None（前端静默无感知）。
+#[tauri::command]
+pub fn shots_window_at(app: AppHandle, x: f64, y: f64) -> Option<WindowHit> {
+    // 排除集合：label 前缀 = 覆盖窗 / 贴图窗（含历史遗留 pin-N）。
+    let excluded = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| {
+            label.starts_with(OVERLAY_LABEL_PREFIX) || label.starts_with(PIN_LABEL_PREFIX)
+        })
+        .filter_map(|(_, window)| window.hwnd().ok())
+        .map(|hwnd| hwnd.0 as isize)
+        .collect::<Vec<_>>();
+    window_at_impl(x, y, &excluded)
+}
+
+/// 贴图窗 label 前缀（shots_open_pin 的 `pin-`；感知排除用）。
+const PIN_LABEL_PREFIX: &str = "pin-";
+
+#[cfg(windows)]
+fn window_at_impl(x: f64, y: f64, excluded: &[isize]) -> Option<WindowHit> {
+    use std::mem;
+
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible,
+    };
+
+    struct Scan {
+        point: (i32, i32),
+        excluded: Vec<isize>,
+        hit: Option<(RECT, String)>,
+    }
+
+    // EnumWindows 按 Z 序自顶向下遍历顶层窗口；第一个可见、未最小化、
+    // 未 cloaked、不含排除句柄且矩形包含探点的窗口即命中（返回 0 停止）。
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: isize) -> i32 {
+        let scan = unsafe { &mut *(lparam as *mut Scan) };
+        unsafe {
+            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                return 1;
+            }
+            if scan.excluded.contains(&(hwnd as isize)) {
+                return 1;
+            }
+            // UWP 幽灵窗（应用挂起后被 cloaked）：肉眼不可见但 GetWindowRect 命中。
+            let mut cloaked: u32 = 0;
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED as u32,
+                &mut cloaked as *mut u32 as *mut _,
+                mem::size_of::<u32>() as u32,
+            ) == 0
+                && cloaked != 0
+            {
+                return 1;
+            }
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if GetWindowRect(hwnd, &mut rect) == 0 {
+                return 1;
+            }
+            if rect.left >= rect.right || rect.top >= rect.bottom {
+                return 1;
+            }
+            let (px, py) = scan.point;
+            if px >= rect.left && px < rect.right && py >= rect.top && py < rect.bottom {
+                let mut title = [0u16; 128];
+                let len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+                let title = String::from_utf16_lossy(&title[..len.max(0) as usize]);
+                scan.hit = Some((rect, title));
+                return 0;
+            }
+            1
+        }
+    }
+
+    let mut scan = Scan {
+        point: (x as i32, y as i32),
+        excluded: excluded.to_vec(),
+        hit: None,
+    };
+    unsafe {
+        EnumWindows(Some(enum_proc), &mut scan as *mut Scan as isize);
+    }
+    scan.hit.map(|(rect, title)| WindowHit {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+        title,
+    })
+}
+
+#[cfg(not(windows))]
+fn window_at_impl(_x: f64, _y: f64, _excluded: &[isize]) -> Option<WindowHit> {
+    None
 }
 
 /// xcap 0.9 的几何访问都返回 Result；统一解包成 (x, y, w, h)。
@@ -264,9 +383,11 @@ fn open_overlays_impl(app: &AppHandle) -> Result<()> {
             let _ = existing.close();
         }
         let url = format!(
-            "index.html#/overlay?monitor={}&path={}",
+            "index.html#/overlay?monitor={}&path={}&x={}&y={}",
             monitor.index,
-            urlencode(&monitor.image)
+            urlencode(&monitor.image),
+            monitor.x,
+            monitor.y
         );
         // builder 的 position/inner_size 是逻辑单位；物理坐标除以 DPI 缩放。
         WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
@@ -492,5 +613,20 @@ mod tests {
             assert!(size > 10_000, "截图过小：{size}");
             let _ = std::fs::remove_file(out);
         }
+    }
+
+    /// 真实窗口感知（桌面会话内手跑）：屏幕内探点必命中某窗口，屏幕外必空。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "真实桌面会话，验收时手跑"]
+    fn 真实窗口感知命中与屏外为空() {
+        let hit = window_at_impl(100.0, 100.0, &[]);
+        let hit = hit.expect("屏内探点应命中窗口");
+        assert!(hit.width > 0 && hit.height > 0);
+        // 命中矩形必须包含探点。
+        assert!(hit.x <= 100 && 100 < hit.x + hit.width);
+        assert!(hit.y <= 100 && 100 < hit.y + hit.height);
+        // 远超虚拟屏幕右界的探点不应命中任何窗口。
+        assert!(window_at_impl(2_000_000.0, 2_000_000.0, &[]).is_none());
     }
 }

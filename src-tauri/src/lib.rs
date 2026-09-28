@@ -288,6 +288,7 @@ pub fn run() {
             search::commands::search_wait_ready,
             search::commands::search_list_drives,
             shots::commands::shots_capture,
+            shots::commands::shots_window_at,
             shots::commands::shots_overlay_ready,
             shots::commands::shots_set_hotkey,
             shots::commands::shots_clear_hotkey,

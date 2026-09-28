@@ -13,6 +13,9 @@
   // ---- URL 参数 ----
   const params = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
   const imagePath = params.get('path') ?? '';
+  /** 本屏原点（虚拟屏幕物理像素）：窗口感知的 IPC 探点换算用。 */
+  const monitorX = Number(params.get('x') ?? '0');
+  const monitorY = Number(params.get('y') ?? '0');
 
   // ---- DOM ----
   let canvas: HTMLCanvasElement | null = $state(null);
@@ -23,6 +26,7 @@
 
   type Tool = 'none' | 'rect' | 'ellipse' | 'arrow' | 'pen' | 'mosaic' | 'text';
   type Rect = { x1: number; y1: number; x2: number; y2: number };
+  type WindowHit = { x: number; y: number; width: number; height: number; title: string };
 
   type Shape =
     | { type: 'rect'; rect: Rect; color: string; width: number }
@@ -41,6 +45,11 @@
   // ---- 会话状态 ----
   let phase = $state<'idle' | 'selecting' | 'selected'>('idle');
   let selection = $state<Rect>({ x1: 0, y1: 0, x2: 0, y2: 0 });
+  /** 微信式窗口感知：悬停命中的窗口矩形（屏内物理像素；idle 态才生效）。 */
+  let hoverRect = $state<Rect | null>(null);
+  /** 感知节流：上一次 IPC 探测时刻与探点（鼠标高频移动时压调用频次）。 */
+  let hoverProbeAt = 0;
+  let hoverProbePoint: Pt = { x: -1, y: -1 };
   let tool = $state<Tool>('none');
   let color = $state('#E53935');
   let strokeWidth = $state(4);
@@ -61,6 +70,8 @@
     | { kind: 'shape-resize'; index: number; handle: number; origin: Shape; start: Pt };
   let drag: Drag | null = null;
   let liveShape: Shape | null = null;
+  /** mousedown 瞬间的感知命中：原地松开（≈未拖动）= 接受窗口选区。 */
+  let pressHover: Rect | null = null;
   let textDraft = $state<{ x: number; y: number; value: string } | null>(null);
 
   // 'none' = 默认空态（可拖选区/编辑标注），不再是按钮；再点激活的工具可切回。
@@ -196,16 +207,27 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(baseImage, 0, 0);
 
-    // 暗化遮罩：选区外（未选区时全屏）。
+    // 暗化遮罩：选区外（未选区时全屏）；idle 态有窗口感知时改为窗口外。
     const hasSelection = phase !== 'idle';
     const sel = hasSelection ? norm(selection) : null;
+    const hover = phase === 'idle' && hoverRect ? norm(hoverRect) : null;
     ctx.save();
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.beginPath();
     ctx.rect(0, 0, canvas.width, canvas.height);
     if (sel) ctx.rect(sel.x1, sel.y1, sel.x2 - sel.x1, sel.y2 - sel.y1);
+    else if (hover) ctx.rect(hover.x1, hover.y1, hover.x2 - hover.x1, hover.y2 - hover.y1);
     ctx.fill('evenodd');
     ctx.restore();
+
+    // 感知高亮：天蓝描边（微信语义），窗口边界一目了然。
+    if (hover) {
+      ctx.save();
+      ctx.lineWidth = 2 * dpr;
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)';
+      ctx.strokeRect(hover.x1, hover.y1, hover.x2 - hover.x1, hover.y2 - hover.y1);
+      ctx.restore();
+    }
 
     if (sel) {
       // 选区边框（白色 + 内衬深色，任何底色可见）。
@@ -368,10 +390,13 @@
     const point = toPhysical(event);
 
     if (phase === 'idle') {
-      // 开新选区。
+      // 开新选区。悬停命中先记下：原地松开（未拖动）= 点击接受窗口选区。
+      pressHover = hoverRect ? { ...norm(hoverRect) } : null;
+      hoverRect = null;
       phase = 'selecting';
       selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
       drag = { kind: 'new', origin: { ...selection }, start: point };
+      render();
       return;
     }
 
@@ -402,6 +427,8 @@
       shapes = [];
       redoStack = [];
       selected = null;
+      hoverRect = null;
+      pressHover = null;
       return;
     }
 
@@ -513,6 +540,11 @@
     const point = toPhysical(event);
     if (!drag && !liveShape) {
       updateCursor(point);
+      if (phase === 'idle') scheduleHoverProbe(point);
+      else if (hoverRect) {
+        hoverRect = null;
+        render();
+      }
       return;
     }
     if (drag?.kind === 'new' || (drag?.kind === 'resize' && phase === 'selecting')) {
@@ -551,6 +583,46 @@
       }
     }
     render();
+  }
+
+  /** 微信式窗口感知：节流探测（60ms + 位移 ≥3 物理像素），命中换算屏内坐标。 */
+  function scheduleHoverProbe(point: Pt): void {
+    const now = performance.now();
+    const moved =
+      Math.abs(point.x - hoverProbePoint.x) + Math.abs(point.y - hoverProbePoint.y) >= 3;
+    if (!moved && hoverRect !== null) return;
+    if (moved && now - hoverProbeAt < 60) return;
+    hoverProbeAt = now;
+    hoverProbePoint = { ...point };
+    const virtualX = monitorX + point.x;
+    const virtualY = monitorY + point.y;
+    void call<WindowHit | null>('shots_window_at', { x: virtualX, y: virtualY })
+      .then((hit) => {
+        // 探测是异步的：回来时可能已进入选区态（按下开拖），丢弃过期结果。
+        if (phase !== 'idle' || drag || !canvas) return;
+        const next = hit
+          ? {
+              x1: hit.x - monitorX,
+              y1: hit.y - monitorY,
+              x2: hit.x - monitorX + hit.width,
+              y2: hit.y - monitorY + hit.height,
+            }
+          : null;
+        const changed =
+          (next === null) !== (hoverRect === null) ||
+          (next &&
+            hoverRect &&
+            (next.x1 !== hoverRect.x1 ||
+              next.y1 !== hoverRect.y1 ||
+              next.x2 !== hoverRect.x2 ||
+              next.y2 !== hoverRect.y2));
+        if (!changed) return;
+        hoverRect = next;
+        render();
+      })
+      .catch(() => {
+        // 感知失败静默：自由框选始终可用。
+      });
   }
 
   function resizeTo(origin: Rect, handle: number, point: { x: number; y: number }): Rect {
@@ -713,12 +785,19 @@
       const sel = norm(selection);
       const tooSmall = sel.x2 - sel.x1 < 8 || sel.y2 - sel.y1 < 8;
       if (drag.kind === 'new' && tooSmall) {
-        phase = 'idle';
-        selection = { x1: 0, y1: 0, x2: 0, y2: 0 };
+        if (pressHover) {
+          // 原地点击（未拖动）+ 悬停命中 → 微信行为：接受窗口选区。
+          phase = 'selected';
+          selection = pressHover;
+        } else {
+          phase = 'idle';
+          selection = { x1: 0, y1: 0, x2: 0, y2: 0 };
+        }
       } else {
         phase = 'selected';
         selection = sel;
       }
+      pressHover = null;
       drag = null;
     }
     if (liveShape) {

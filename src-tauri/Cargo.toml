@@ -112,6 +112,8 @@ windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
 ] }
 # 窗口域：WebView2 COM 偏好（浏览器加速键开关、首选配色跟随 OS 应用模式）。
 webview2-com = "0.38"
