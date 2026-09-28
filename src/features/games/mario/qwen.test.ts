@@ -82,27 +82,51 @@ describe('qwen 提示词', () => {
 describe('qwen 输出解析', () => {
   const fb = { playbook: '旧手册', policy: DEFAULT_POLICY };
 
-  it('三输出齐全:playbook 截断 / patch sanitize / insight ≤200 字', () => {
-    const content = `前导废话 {"playbook":"新手册","policy_patch":{"gateExecute":0.9,"obsProfileCols":24},"insight":"${'经'.repeat(300)}"} 尾巴`;
-    const r = parseRefine(content, fb);
+  it('v3 输出:playbook 截断 / patch sanitize / 可证伪 insight / 未知键可观测', () => {
+    const content = `前导 {"playbook":"新手册","policy_patch":{"gateExecute":0.9,"obsProfileCols":24},"insight":{"kind":"claim","claim":"${'经'.repeat(300)}","metric":"avgConf","direction":"up","evidenceIter":[1,2]},"rogue":{"x":1}} 尾巴`;
+    const r = parseRefine(content, fb, { validDeathKeys: ['r1#1'] });
     expect(r.playbook).toBe('新手册');
     // gateExecute 0.9 越界 → 钳回 ≤0.5
     expect(r.policy.gateExecute).toBeLessThanOrEqual(0.5);
     expect(r.policy.obsProfileCols).toBe(24);
-    expect(r.insight.length).toBe(INSIGHT_MAX_CHARS);
+    expect(r.insight?.claim.length).toBe(INSIGHT_MAX_CHARS);
+    expect(r.insight?.metric).toBe('avgConf');
+    expect(r.issues.some((x) => x.includes('越权顶层键 rogue'))).toBe(true);
   });
 
-  it('非 JSON 输出:保留原手册与策略,insight 为空,记 issue', () => {
-    const r = parseRefine('完全不是 JSON', fb);
-    expect(r.playbook).toBe('旧手册');
-    expect(r.policy).toEqual(DEFAULT_POLICY);
-    expect(r.insight).toBe('');
-    expect(r.issues).toEqual(['输出不含 JSON,保留原状']);
+  it('death_diagnosis:deathKey 幻觉被拒;合法键与 maintain insight 通过', () => {
+    const content = JSON.stringify({
+      playbook: 'p',
+      policy_patch: {},
+      insight: { kind: 'maintain', claim: '维持:胜率持平' },
+      death_diagnosis: [
+        { deathKey: 'r1#1', rootCause: '晚跳', responsibleTick: 120, fix: '提前 8px' },
+        { deathKey: '幻觉#9', rootCause: 'x', responsibleTick: 0, fix: 'y' },
+      ],
+    });
+    const r = parseRefine(content, fb, { validDeathKeys: ['r1#1'] });
+    expect(r.diagnosis).toHaveLength(1);
+    expect(r.diagnosis[0]?.deathKey).toBe('r1#1');
+    expect(r.issues.some((x) => x.includes('幻觉'))).toBe(true);
+    expect(r.insight?.kind).toBe('maintain');
   });
 
-  it('缺 insight 字段 → 空字符串;playbook 超长按 1600 截断', () => {
+  it('非 JSON:保留原状;insight 缺可证伪字段视同空', () => {
+    const bad = parseRefine('完全不是 JSON', fb);
+    expect(bad.playbook).toBe('旧手册');
+    expect(bad.policy).toEqual(DEFAULT_POLICY);
+    expect(bad.insight).toBeNull();
+    expect(bad.issues).toEqual(['输出不含 JSON,保留原状']);
+    const noMetric = parseRefine(
+      JSON.stringify({ playbook: 'p', policy_patch: {}, insight: '纯文本经验' }),
+      fb,
+    );
+    expect(noMetric.insight).toBeNull();
+    expect(noMetric.insightIssue).toContain('可证伪');
+  });
+
+  it('playbook 超长按 1600 截断', () => {
     const r = parseRefine(JSON.stringify({ playbook: 'x'.repeat(2000), policy_patch: {} }), fb);
     expect(r.playbook.length).toBe(PLAYBOOK_MAX_CHARS);
-    expect(r.insight).toBe('');
   });
 });
