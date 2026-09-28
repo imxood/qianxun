@@ -230,6 +230,16 @@ export interface QwenStatus {
   detail: string | null;
 }
 
+/** `env://log` 事件负载：Laya/QWen 侧车子进程的一行输出（tools/mod.rs 同名结构）。 */
+export interface EnvProcLogLine {
+  /** 侧车标识。 */
+  tool: 'laya' | 'qwen';
+  /** 输出流。 */
+  stream: 'stdout' | 'stderr';
+  /** 单行文本（已去行尾换行；非 UTF-8 字节按 lossy 转换）。 */
+  line: string;
+}
+
 /** 工具管理设置（R001）。 */
 export interface ToolsSettings {
   moli: MoliSettings;

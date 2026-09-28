@@ -231,7 +231,7 @@ fn laya_start_blocking(app: &AppHandle, state: &State<'_, LayaProcState>) -> Res
         .unwrap_or_else(|| PathBuf::from("logs"));
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| Error::Spawn(format!("日志目录创建失败：{error}")))?;
-    let (stdout, stderr) = {
+    let (stdout_path, stderr_path) = {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -241,8 +241,13 @@ fn laya_start_blocking(app: &AppHandle, state: &State<'_, LayaProcState>) -> Res
             log_dir.join(format!("laya-server-{stamp}.err.log")),
         )
     };
+    let stdout_file = std::fs::File::create(&stdout_path)
+        .map_err(|error| Error::Spawn(format!("日志文件创建失败：{error}")))?;
+    let stderr_file = std::fs::File::create(&stderr_path)
+        .map_err(|error| Error::Spawn(format!("日志文件创建失败：{error}")))?;
 
-    let child = std::process::Command::new(&exe)
+    let mut command = std::process::Command::new(&exe);
+    command
         .arg("--model-dir")
         .arg(&model_dir)
         .arg("--port")
@@ -251,16 +256,19 @@ fn laya_start_blocking(app: &AppHandle, state: &State<'_, LayaProcState>) -> Res
         .arg(settings.tools.laya.threads.to_string())
         .arg("--log-dir")
         .arg(log_dir.join("laya-sessions"))
-        .stdout(
-            std::fs::File::create(&stdout)
-                .map_err(|error| Error::Spawn(format!("日志文件创建失败：{error}")))?,
-        )
-        .stderr(
-            std::fs::File::create(&stderr)
-                .map_err(|error| Error::Spawn(format!("日志文件创建失败：{error}")))?,
-        )
+        // 输出走管道：中继线程逐行落文件 + 推 `env://log`（环境页实时日志）。
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    super::suppress_console_window(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| Error::Spawn(format!("侧车启动失败：{error}")))?;
+    if let Some(pipe) = child.stdout.take() {
+        super::relay_child_output(app, "laya", "stdout", pipe, stdout_file);
+    }
+    if let Some(pipe) = child.stderr.take() {
+        super::relay_child_output(app, "laya", "stderr", pipe, stderr_file);
+    }
     *state
         .child
         .lock()

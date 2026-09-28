@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { call } from '../../lib/ipc';
   import { harness } from '../../stores/harness.svelte';
   import {
     formatHarnessStatus,
+    type EnvProcLogLine,
     type LayaSettings,
     type LayaStatus,
     type MoliStatus,
@@ -20,7 +22,18 @@
     void harness.backfillLogs();
     void harness.refreshRecovery();
     void refreshServices();
+    // Laya/QWen 侧车进程输出实时进右侧日志（Rust 侧 tools::relay_child_output 推送）。
+    void listen<EnvProcLogLine>('env://log', (event) => {
+      const { tool, stream, line } = event.payload;
+      procLogs.push(`[${tool}.${stream}] ${line}`);
+      if (procLogs.length > PROC_LOG_LIMIT) {
+        procLogs.splice(0, procLogs.length - PROC_LOG_LIMIT);
+      }
+    }).then((unlisten) => (unlistenProcLog = unlisten));
   });
+
+  let unlistenProcLog: UnlistenFn | null = null;
+  onDestroy(() => unlistenProcLog?.());
 
   let actionError = $state('');
   let nodeError = $state('');
@@ -219,11 +232,16 @@
   });
 
   // ---- 日志 ----
+  /** 侧车进程输出上限：超过丢弃最旧的（与 harness 的 LOG_LIMIT 同量级）。 */
+  const PROC_LOG_LIMIT = 2000;
+  let procLogs = $state<string[]>([]);
+  /** DSH 托管日志 + 侧车进程输出合并展示（侧车行自带 [tool.stream] 前缀）。 */
+  const displayLogs = $derived([...harness.logs, ...procLogs]);
   let logBox = $state<HTMLDivElement | null>(null);
   let pinnedToBottom = true;
 
   $effect(() => {
-    void harness.logs.length;
+    void displayLogs.length;
     if (logBox && pinnedToBottom) logBox.scrollTop = logBox.scrollHeight;
   });
 
@@ -703,7 +721,7 @@
         class="flex h-8 shrink-0 items-center justify-between border-b border-line/70 px-3 text-xs"
       >
         <span class="font-medium text-muted">日志</span>
-        <span class="font-mono tabular-nums text-muted/70">{harness.logs.length}</span>
+        <span class="font-mono tabular-nums text-muted/70">{displayLogs.length}</span>
       </div>
       <div
         bind:this={logBox}
@@ -713,10 +731,12 @@
           pinnedToBottom = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 24;
         }}
       >
-        {#if harness.logs.length === 0}
+        {#if displayLogs.length === 0}
           <p class="text-muted/70">暂无日志</p>
         {:else}
-          {#each harness.logs as line, index (index)}
+          <!-- 只渲染尾部 150 行：store 保留 2000 行，DSH 启动刷屏时每条
+               IPC 都触发 keep-alive 页的列表 diff，全量渲染是卡顿源之一。 -->
+          {#each displayLogs.slice(-150) as line, index (index)}
             <div class="whitespace-pre-wrap break-all">{line}</div>
           {/each}
         {/if}

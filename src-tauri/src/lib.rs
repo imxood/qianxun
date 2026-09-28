@@ -38,19 +38,13 @@ use settings::Settings;
 
 /// 全局可变状态。设置的唯一持有者（IPC 读写都经过它），
 /// 加上托管域自己的 supervisor/安装状态与搜索域索引。
-/// 截屏域的 ShotsState 独立 manage（commands 直接按类型取）。
+/// 截屏域的 ShotsState 与侧车进程句柄（Laya/QWen）独立 manage
+/// （commands 直接按类型取，见 tools/laya.rs、tools/qwen.rs）。
 struct AppState {
     settings: Mutex<Settings>,
     harness: Arc<harness::commands::HarnessState>,
     search: Arc<search::SearchState>,
     remote: Arc<remote::commands::RemoteState>,
-    /// Laya 侧车自有子进程（仅记录千寻启动的实例，退出统一收割）。
-    /// 经 Manager::state 借用访问，编译器认作未读；是侧车生命周期锚点。
-    #[allow(dead_code)]
-    laya_proc: tools::laya::LayaProcState,
-    /// QWen 推理服务自有子进程（同上）。
-    #[allow(dead_code)]
-    qwen_proc: tools::qwen::QwenProcState,
 }
 
 /// 读设置快照：托管的启动/安装计划都以它为准。
@@ -184,9 +178,12 @@ pub fn run() {
                 ))),
                 search: Arc::new(search::SearchState::new()),
                 remote: Arc::new(remote::commands::RemoteState::default()),
-                laya_proc: tools::laya::LayaProcState::default(),
-                qwen_proc: tools::qwen::QwenProcState::default(),
             });
+            // 侧车进程句柄必须按自有类型独立 manage：laya.rs/qwen.rs 的
+            // 命令用 app.state::<LayaProcState>() 按类型键查找，塞在
+            // AppState 字段里查不到——点「启动」即 panic（实测踩坑）。
+            app.manage(tools::laya::LayaProcState::default());
+            app.manage(tools::qwen::QwenProcState::default());
             app.manage(shots::commands::ShotsState::default());
             app.manage(disk::DiskScanManager::default());
             forward_events(handle, &supervisor);
