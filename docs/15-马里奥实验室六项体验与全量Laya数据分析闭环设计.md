@@ -138,13 +138,19 @@ UI(单局判定/无基线人工处置)与 e2e(K 局中位/无基线直转)是两
 ```text
 enqueue:同 deathKey 合并(merged++);queue cap6 → 溢出写 state.pendingAnalyses 落盘 backlog,不丢
 优先级:first-death > 新签名 > repeat > win > plateau
-runLoop(局间串行槽,绝不阻塞仿真):
+runLoop(局间串行槽;局内帧不中断):
   先清 backlog 再收新任务;audit(analyze,start)
   refineViaQwen({signal: AbortSignal.timeout(60s)}),内部重试 1 次(attempts≤2)
   ok: 占幂等键 + counters + audit(analyze,ok,latencyMs)
   fail: attempts≤2 重入队;超限 audit(analyze,fail,errClass);连续 3 失败 → 熔断暂停(探活成功自动复位)
 入队即深拷贝不可变快照(deathKey+report+policy+消息设计+champion updatedAt)——修"引用活对象/归因错位"
 ```
+
+**分析硬门(产品决策,修订"异步不阻塞"旧口径)**:一局结束(3 死或通关)后,
+**分析没出结果,下一局不得开始**——UI 的 开始/重开 按钮 await 队列排空
+(按钮转圈禁用 + 日志"等待 Qwen 分析完成");Qwen 不可达时任务重试上限后
+放弃,门有界自动放行(不卡死)。e2e 天然串行,天然满足。局内(第 1/2 死)
+帧循环不受影响,分析仍只在局末触发。
 
 - 补丁落盘**快照-rebase**:完成时 champion 若已变(用户/另一进程),对当前值重算 sanitize+limit+cooldown,diff 为空 → 审计 `propose-stale`;写 policy.json 前再比对 updatedAt(修 R11/R12;跨进程并发以"UI 与 e2e 不得同时跑"红线 + updatedAt 兜底)。
 - **提案 cadence = run 级**:同 run 多次死亡分析合并为**一个**提案(originSigs 多值)——候选单槽 `pending` 下 3 死 3 提案互相覆盖是 v3 致命缺口(analysis-15-2 G2);K 局评估在途时新提案只审计不入队。
@@ -271,7 +277,7 @@ policy 新增 5 字段(确切文案全表见 analysis-15-3;OBS_ENUMS/OBS_EXTRA �
 
 ## §10 已拍板与开放问题
 
-**已拍板**:跨进程并发=红线约定+updatedAt 兜底(不上文件锁);无基线直转收紧 iteration=0;backlog 重试=局间槽先清;core 抽取放 v3 验证后(v3 兼容写);insights 4800/history 200;checklist 默认关;文案两层不互渗。
+**已拍板**:跨进程并发=红线约定+updatedAt 兜底(不上文件锁);无基线直转收紧 iteration=0;backlog 重试=局间槽先清;core 抽取放 v3 验证后(v3 兼容写);insights 4800/history 200;checklist 默认关;文案两层不互渗;**分析硬门**(用户决策,推翻"异步不阻塞"旧口径):失败/通关的分析没出结果,下一局不得开始——UI 开始/重开 await 队列排空,Qwen 不可达时重试上限后有界放行;e2e 天然串行。
 
 **开放(实施中按需回签)**:
 

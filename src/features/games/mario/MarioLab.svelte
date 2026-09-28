@@ -134,6 +134,10 @@
   let lastAnalysisMs = $state<number | null>(null);
   /** 单步模式挂起:提案已生成,等「下一步 ▸」放行装填。 */
   let stepGated = $state(false);
+  /** 分析硬门(docs/15 §6.2 修订):上一局的分析没完成,下一局不得开始。 */
+  let analysisGate: Promise<void> | null = null;
+  let analysisPending = $state(false);
+  let starting = false;
   /** 分析队列内存态(串行;溢出落 evo.pendingAnalyses)。 */
   let taskQueue: SchedTask[] = [];
   let taskBacklog: SchedTask[] = [];
@@ -441,8 +445,21 @@
       gateEscalate: settings.gateEscalate,
     });
   }
-  function start(): void {
+  async function start(): Promise<void> {
+    if (starting) return;
     if (phase === 'running' || !canStart) return;
+    // 分析硬门(docs/15 §6.2):上一局失败/通关的分析没出结果,不开下一局。
+    // Qwen 不可达时任务重试上限后放弃,门有界自动放行(不卡死)。
+    if (analysisGate !== null) {
+      pushLog('text-sky-400', '等待 Qwen 分析完成…', 'evolve');
+      starting = true;
+      try {
+        await analysisGate;
+      } finally {
+        starting = false;
+      }
+      if ((phase as Phase) === 'running') return; // 等待期间已被其它路径开局
+    }
     if (phase === 'idle' || s.phase === 'won') {
       s = createGameState(world);
       deaths = [];
@@ -631,7 +648,15 @@
     }
     queueDepth = taskQueue.length + taskBacklog.length;
     if (tasks.length > 0 && qwenOk) {
-      void runAnalysisQueue(report, session, sent, driver.runId);
+      // 分析硬门:挂起 promise,start()/restart() 必须等它 resolve 才能开下一局
+      analysisPending = true;
+      const run = runAnalysisQueue(report, session, sent, driver.runId).finally(() => {
+        analysisGate = null;
+        analysisPending = false;
+        queueDepth = taskQueue.length + taskBacklog.length;
+      });
+      analysisGate = run;
+      void run;
     } else {
       if (tasks.length > 0) {
         for (const t of tasks) taskQueue = [...taskQueue, t];
@@ -865,11 +890,15 @@
     }
     void allOk;
   }
-  function restart(): void {
+  async function restart(): Promise<void> {
+    if (analysisGate !== null) {
+      pushLog('text-sky-400', '等待 Qwen 分析完成…', 'evolve');
+      await analysisGate;
+    }
     phase = 'idle';
     s = createGameState(world);
     deaths = [];
-    start();
+    await start();
   }
   function setMode(m: DriveMode): void {
     mode = m;
@@ -979,13 +1008,27 @@
       <button
         class="rounded-lg bg-emerald-600 p-1.5 text-white transition-colors hover:bg-emerald-500 disabled:opacity-40"
         onclick={start}
-        disabled={!canStart}
+        disabled={!canStart || analysisPending}
+        title={analysisPending ? 'Qwen 分析中,完成后可开始' : '开始'}
         data-testid="btn-start"
-        aria-label="开始"
+        aria-label={analysisPending ? '分析中' : '开始'}
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"
-          ><path d="M8 5v14l11-7z" /></svg
-        >
+        {#if analysisPending}
+          <svg
+            class="animate-spin"
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6" /></svg
+          >
+        {:else}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"
+            ><path d="M8 5v14l11-7z" /></svg
+          >
+        {/if}
       </button>
       <button
         class="rounded-lg p-1.5 text-muted hover:bg-accent-soft/50 hover:text-white disabled:opacity-40"
