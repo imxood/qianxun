@@ -12,6 +12,11 @@ import { createGameState } from './engine';
 import { getPolicy, setPolicy } from './policy';
 import { WORLD_1_1, TILE } from './world1-1';
 
+/** RLE profile 展开总列数:`13*12 9 13*3` → 16。 */
+function rleExpand(s: string): number {
+  return s.split(' ').reduce((n, p) => n + (p.includes('*') ? Number(p.split('*')[1]) : 1), 0);
+}
+
 type FetchMock = (url: string) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
 
 function brainWith(
@@ -45,7 +50,7 @@ describe('mario brain', () => {
     expect(applyGate(0.05, GATE_EXECUTE, GATE_ESCALATE)).toBe('ESCALATE');
   });
 
-  it('编码:v2-obs 模板 + profile(列数随策略)+ subgoal(reflex 有/pure 无)', () => {
+  it('编码:v2-obs 模板 + profile(RLE 压缩,列数随策略)+ subgoal(reflex 有/pure 无)', () => {
     const s = createGameState();
     const reflex = encodeState(
       s,
@@ -57,8 +62,8 @@ describe('mario brain', () => {
     expect(String(reflex.subgoal)).toContain('clear');
     const pure = encodeState(s, WORLD_1_1, null, 'pure');
     expect(String(pure.subgoal)).toContain('pure reflex');
-    // 默认策略 16 列
-    expect((reflex.profile as string).split(' ')).toHaveLength(16);
+    // RLE 展开 = 16 列(docs/15 §6.3 profile 压缩)
+    expect(rleExpand(reflex.profile as string)).toBe(16);
   });
 
   it('编码:观测沙盒消融(docs/14 §4)——列数/位姿/subgoal 随 policy 裁剪', () => {
@@ -77,7 +82,7 @@ describe('mario brain', () => {
         { type: 'clear', hazard: null, candidates: ['run_right'], note: 'clear' },
         'reflex',
       );
-      expect((st.profile as string).split(' ')).toHaveLength(24);
+      expect(rleExpand(st.profile as string)).toBe(24);
       expect(st.mario).toBeUndefined();
       expect(String(st.subgoal)).toContain('pure reflex'); // subgoal 关闭 → 退化纯反射
     } finally {

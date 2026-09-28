@@ -10,7 +10,7 @@
  */
 
 import type { GameState } from './engine';
-import { getPolicy } from './policy';
+import { getPolicy, type ObsExtraKey } from './policy';
 import {
   ACTIONS,
   ACTION_HINTS,
@@ -19,7 +19,7 @@ import {
   type Action,
   type Intent,
 } from './planner';
-import { COLS, ROWS, TILE, SOLID, type World } from './world1-1';
+import { COLS, GROUND_ROW, ROWS, TILE, SOLID, type World } from './world1-1';
 
 export type DriveMode = 'human' | 'reflex' | 'pure' | 'autopilot';
 export type Gate = 'EXECUTE' | 'RE_SENSE' | 'ESCALATE';
@@ -55,7 +55,7 @@ export function profile16(s: GameState, cols = 16): number[] {
   return out;
 }
 
-/** 命名威胁清单(文本化直接给结论线索,docs/11 §6)。 */
+/** 威胁清单,named 格式:名+距离(现行文案)。 */
 export function threatText(s: GameState, world: World, lookPx = 176): string {
   const parts: string[] = [];
   const hazards = nextHazards(s, world, lookPx);
@@ -73,11 +73,52 @@ export function threatText(s: GameState, world: World, lookPx = 176): string {
   return parts.length > 0 ? parts.join(' | ') : 'none';
 }
 
+/** 威胁清单,rows 格式(docs/15 §6.4):瓦距+行号,补同行纵向关系(veto 同排判据)。 */
+export function threatRows(s: GameState, world: World, lookPx = 176): string {
+  const parts: string[] = [];
+  const hazards = nextHazards(s, world, lookPx);
+  const front = s.mario.x + 14;
+  for (const h of hazards) {
+    const d = Math.ceil((h.startX - front) / TILE);
+    if (h.kind === 'gap') {
+      const w = Math.round((h.endX - h.startX) / TILE);
+      parts.push(`gap d${d} w${w} r${GROUND_ROW}`);
+    } else if (h.kind === 'pipe') {
+      const hgt = Number(/h=(\d+)/.exec(h.label)?.[1] ?? 2);
+      parts.push(`pipe d${d} h${hgt} r${GROUND_ROW - hgt}`);
+    } else if (h.kind === 'goomba') {
+      const g = (h as unknown as { ref?: { y?: number } }).ref;
+      const row = g?.y !== undefined ? Math.floor(g.y / TILE) : GROUND_ROW;
+      parts.push(`goomba d${d} r${row}`);
+    } else parts.push(`step d${d} r${GROUND_ROW}`);
+    if (parts.length >= 3) break;
+  }
+  return parts.length > 0 ? parts.join(' | ') : 'none';
+}
+
+/** 位姿压缩文案:`+2.5/0 g1 R r12`(含自身行号,与 rows 威胁行号同一坐标系)。 */
 function pose(s: GameState): string {
   const m = s.mario;
-  const v = `${m.vx >= 0 ? '+' : ''}${m.vx.toFixed(1)}/${m.vy >= 0 ? '+' : ''}${m.vy.toFixed(1)}`;
-  return `vx/vy=${v} on_ground=${m.onGround ? 1 : 0} face=${m.face === 1 ? 'R' : 'L'}`;
+  const v = `${m.vx >= 0 ? '+' : ''}${m.vx.toFixed(1)}/${m.vy >= 0 ? '' : '+'}${m.vy.toFixed(1)}`;
+  return `${v} g${m.onGround ? 1 : 0} ${m.face === 1 ? 'R' : 'L'} r${Math.floor(m.y / TILE)}`;
 }
+
+/** profile 数字串 RLE:`13*12 9*2 5`(游程 ≥2 折叠,计数无损)。 */
+export function rleProfile(nums: number[]): string {
+  const parts: string[] = [];
+  let i = 0;
+  while (i < nums.length) {
+    let j = i;
+    while (j < nums.length && nums[j] === nums[i]) j += 1;
+    const run = j - i;
+    parts.push(run >= 2 ? `${nums[i]}*${run}` : String(nums[i]));
+    i = j;
+  }
+  return parts.join(' ');
+}
+
+/** 附加状态字段(brain 无历史,由 driver 传入,docs/15 §6.3)。 */
+export type ObsExtra = Partial<Record<ObsExtraKey, string | number>>;
 
 /** 把状态文本化为 laya-server 的 state(编码模板版本号随数据落盘,便于消融)。 */
 export function encodeState(
@@ -85,17 +126,35 @@ export function encodeState(
   world: World,
   intent: Intent | null,
   mode: DriveMode,
+  extra?: ObsExtra,
 ): Record<string, unknown> {
-  // 观测件按策略沙盒裁剪(docs/14 §4):agent 可消融任何观测,纪律层评审效果
+  // 观测件按策略沙盒裁剪(docs/14 §4 + docs/15 §6.4):agent 可消融任何观测与文案变体
   const P = getPolicy();
   const pct = Math.round((s.maxX / world.worldWidthPx) * 100);
-  const state: Record<string, unknown> = {
-    encoding: 'v2-obs',
-    progress: `x=${Math.round(s.mario.x)}/${world.worldWidthPx} ${pct}% coins=${s.coinCount} time=${s.timeUnits} attempt=${s.attempts}`,
-    profile: profile16(s, P.obsProfileCols).join(' '),
-    threats: threatText(s, world, P.obsThreatsLookPx),
-  };
+  const state: Record<string, unknown> = { encoding: 'v2-obs' };
+  if (P.obsProgressStyle === 'full') {
+    state.progress = `x=${Math.round(s.mario.x)}/${world.worldWidthPx} ${pct}% coins=${s.coinCount} time=${s.timeUnits} attempt=${s.attempts}`;
+  } else if (P.obsProgressStyle === 'pct') {
+    state.progress = `${pct}% coins=${s.coinCount} time=${s.timeUnits} att=${s.attempts}`;
+  }
+  state.profile = rleProfile(profile16(s, P.obsProfileCols));
+  if (P.obsThreatFormat === 'named') state.threats = threatText(s, world, P.obsThreatsLookPx);
+  else if (P.obsThreatFormat === 'rows') state.threats = threatRows(s, world, P.obsThreatsLookPx);
   if (P.obsIncludePose) state.mario = pose(s);
+  if (extra && P.obsStateExtra.length > 0) {
+    const label: Record<ObsExtraKey, string> = {
+      lastAction: 'last',
+      heldTicks: 'held',
+      stallTicks: 'stall',
+    };
+    const parts: string[] = [];
+    for (const key of P.obsStateExtra) {
+      const v = extra[key];
+      if (v === undefined) continue;
+      parts.push(`${label[key]}=${v}`);
+    }
+    if (parts.length > 0) state.ctx = parts.join(' ');
+  }
   state.subgoal =
     mode === 'reflex' && intent && P.obsIncludeSubgoal
       ? `${intent.type} ${intent.note} -> candidates [${intent.candidates.join(', ')}]`
@@ -103,19 +162,52 @@ export function encodeState(
   return state;
 }
 
-/** questions:仅候选动作单题(控延迟,docs/11 §6;第二题 threat 默认关闭)。 */
+/** terse 提示文案(代码注册变体,≤4 词)。 */
+const TERSE_HINTS: Record<Action, string> = {
+  idle: 'wait',
+  left: 'walk left',
+  right: 'walk right',
+  run_left: 'run left',
+  run_right: 'run right (default)',
+  jump: 'jump up',
+  jump_left: 'short jump left',
+  jump_right: 'short jump right',
+  jump_run_right: 'run-jump right (wide gaps, tall pipes)',
+  jump_run_left: 'run-jump left (wide gaps, tall pipes)',
+};
+
+/** 指令模板变体(代码注册;{n} 插 obsProfileCols,防 concise 在小列数时说谎)。 */
+const INSTRUCTIONS: Record<string, (n: number) => string> = {
+  default: (n) =>
+    `Mario reflex step. profile = first solid tile row of the ${n} tiles ahead ` +
+    '(13 = ground level, 15 = open pit, 9 = floating block row). Threats list ' +
+    'hazards with distance and row. Choose exactly one next action.',
+  concise: (n) =>
+    `Pick one action. profile = first solid row ahead, ${n} tiles (13 ground, 15 pit, 9 block).`,
+  checklist: (n) =>
+    'Choose one action.\n' +
+    '1. hazard <=2 tiles & same row -> jump over\n' +
+    '2. gap ahead -> jump_run_right\n' +
+    '3. clear -> run_right\n' +
+    `profile = ${n} tiles ahead: 13 ground, 15 pit, 9 block.`,
+};
+
+/** questions:仅候选动作单题;提示/指令文案随消息设计策略选型(docs/15 §6.4)。 */
 export function buildQuestions(candidates: readonly Action[]): Record<string, unknown> {
+  const P = getPolicy();
   const criteria: Record<string, string> = {};
-  for (const a of candidates) criteria[a] = ACTION_HINTS[a];
+  for (const a of candidates) {
+    criteria[a] =
+      P.obsHintStyle === 'full'
+        ? ACTION_HINTS[a]
+        : P.obsHintStyle === 'terse'
+          ? TERSE_HINTS[a]
+          : '';
+  }
+  const n = P.obsProfileCols;
+  const make = INSTRUCTIONS[P.obsInstructionVariant] ?? INSTRUCTIONS.default!;
   return {
-    action: {
-      type: 'choice',
-      instructions:
-        'Mario reflex step. profile16 = first solid tile row of the 16 tiles ahead ' +
-        '(13 = ground level, 15 = open pit, 9 = floating block row). Threats list named ' +
-        'hazards with distance. Choose exactly one next action.',
-      criteria,
-    },
+    action: { type: 'choice', instructions: make(n), criteria },
   };
 }
 
@@ -135,8 +227,10 @@ export type Decision = {
   sensed: number;
   candidates: Action[];
   note: string;
-  /** 编码后的 state(遥测/UI STATE 预览用)。 */
+  /** 编码后的 state(遥测/UI STATE 预览/分析载荷③用,docs/15 §6.3)。 */
   stateJson: string;
+  /** 编码后的 questions(收发明细用;RE_SENSE 重发同一份)。 */
+  questionsJson: string;
   escalateManeuver: boolean;
 };
 
@@ -172,13 +266,14 @@ export class MarioBrain {
   }
 
   /** 一轮决策:reflex 用规划器候选集,pure 用全集;RE_SENSE 一次防抖。 */
-  async decide(s: GameState, world: World): Promise<Decision> {
+  async decide(s: GameState, world: World, extra?: ObsExtra): Promise<Decision> {
     const intent = this.mode === 'reflex' ? nextIntent(s, world) : null;
     const candidates = intent ? intent.candidates : [...ACTIONS];
-    const state = encodeState(s, world, intent, this.mode);
+    const state = encodeState(s, world, intent, this.mode, extra);
+    const questions = buildQuestions(candidates); // RE_SENSE 重发同一份,循环外构造一次
 
     const started = performance.now();
-    let answer = await this.ask(state, candidates);
+    let answer = await this.ask(state, questions);
     let sensed = 1;
     let conf = Number(answer.answers?.action?.confidence ?? 0);
     while (
@@ -186,7 +281,7 @@ export class MarioBrain {
       sensed < MAX_RE_SENSE
     ) {
       sensed += 1;
-      answer = await this.ask(state, candidates);
+      answer = await this.ask(state, questions);
       conf = Number(answer.answers?.action?.confidence ?? 0);
     }
     const latencyMs = performance.now() - started;
@@ -224,18 +319,19 @@ export class MarioBrain {
       candidates,
       note: intent ? `${intent.type} ${intent.note}` : 'pure',
       stateJson: JSON.stringify(state),
+      questionsJson: JSON.stringify(questions),
       escalateManeuver: gate === 'ESCALATE',
     };
   }
 
   private async ask(
     state: Record<string, unknown>,
-    candidates: readonly Action[],
+    questions: Record<string, unknown>,
   ): Promise<PredictAnswer> {
     const res = await this.fetchImpl(`${this.endpoint}/predict`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state, questions: buildQuestions(candidates) }),
+      body: JSON.stringify({ state, questions }),
     });
     if (!res.ok) throw new Error(`laya-server ${res.status}`);
     return (await res.json()) as PredictAnswer;
