@@ -441,6 +441,17 @@ export class MarioDriver {
   }
 
   event(row: Record<string, unknown>): void {
+    // 死亡事件自动附「死前最近 8 条决策」(docs/14 §3.1):直接掉崖/撞兵时
+    // 前两拍打出的动作与门控,是复盘"为什么会死"的直接证据链。
+    if ((row as { event?: string }).event === 'death') {
+      row.context = this.record.decisions.slice(-8).map((d) => ({
+        action: d.action,
+        conf: d.conf,
+        gate: d.gate,
+        col: d.col,
+        note: d.note,
+      }));
+    }
     this.session.push({ type: 'event', ...row });
     // 本地记录:type 归一为事件种类(death/stall/win/veto/respawn)
     this.record.events.push({

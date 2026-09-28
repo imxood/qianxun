@@ -21,6 +21,15 @@ export type PmDecisionRow = {
   note?: string;
 };
 
+/** 死亡上下文行:死前一条决策的快照(docs/14 §3.1)。 */
+export type PmContextRow = {
+  action?: string;
+  conf?: number;
+  gate?: string;
+  col?: number;
+  note?: string;
+};
+
 export type PmEventRow = {
   type: string;
   cause?: string;
@@ -29,6 +38,8 @@ export type PmEventRow = {
   tick?: number;
   attempt?: number;
   score?: number;
+  /** 死亡事件的死前决策序列(driver 自动附加,最近 8 条)。 */
+  context?: PmContextRow[];
 };
 
 export type PmSampleRow = { tick?: number; maxX?: number };
@@ -59,9 +70,21 @@ export type PostmortemReport = {
   staleRate: number;
   avgConf: number;
   p50LatencyMs: number;
-  deaths: Array<{ cause: string; col: number; landmark: string }>;
+  deaths: Array<{
+    cause: string;
+    col: number;
+    landmark: string;
+    tick?: number;
+    context?: PmContextRow[];
+  }>;
   deathCauses: Array<{ cause: string; count: number }>;
   stallSites: Array<{ landmark: string; count: number; maxXCol: number }>;
+  /** 门控抖动热区(docs/14 §3.2):同 col(±2)内 EXECUTE↔ESCALATE 往返 ≥3 次。 */
+  thrashSites: Array<{ col: number; count: number }>;
+  /** 原地空转热区:同 col 连续 ≥4 拍相同动作(决策层面的停滞,与 stallSites 互补)。 */
+  churnSites: Array<{ col: number; action: string; count: number }>;
+  /** 首次死亡的 tick;<120(2s)= "直接掉崖/撞兵"模式。无死亡为 null。 */
+  firstDeathTick: number | null;
   actionMix: Array<{ action: string; count: number; avgConf: number; execCount: number }>;
   vetoes: number;
   timeline: Array<{ sec: number; maxXCol: number }>;
@@ -120,14 +143,18 @@ export function buildPostmortem(input: SessionInput): PostmortemReport {
   const latencies = applied.map((d) => d.latencyMs ?? 0).sort((a, b) => a - b);
   const avgConf = confs.reduce((a, b) => a + b, 0) / Math.max(1, confs.length);
 
-  // 死亡:cause × 地标
+  // 死亡:cause × 地标(附死前决策上下文,docs/14 §3.1)
   const deaths = input.events
     .filter((e) => e.type === 'death')
     .map((e) => ({
       cause: e.cause ?? '?',
       col: px2col(e.x),
       landmark: siteOf(e.x),
+      tick: e.tick,
+      context: e.context ?? [],
     }));
+  const deathTicks = deaths.map((d) => d.tick).filter((t): t is number => typeof t === 'number');
+  const firstDeathTick = deathTicks.length > 0 ? Math.min(...deathTicks) : null;
   const causeMap = new Map<string, number>();
   for (const d of deaths) causeMap.set(d.cause, (causeMap.get(d.cause) ?? 0) + 1);
   const deathCauses = [...causeMap.entries()]
@@ -146,6 +173,51 @@ export function buildPostmortem(input: SessionInput): PostmortemReport {
   const stallSites = [...stallMap.entries()]
     .map(([landmark, v]) => ({ landmark, count: v.count, maxXCol: v.maxXCol }))
     .sort((a, b) => b.count - a.count);
+
+  // 过程异常(docs/14 §3.2):只看已落地决策,排除兜底拍(其 ESCALATE 是规划器非门控)
+  const seq = input.decisions.filter((d) => d.applied !== false && d.note !== 'stall-guard');
+  // 门控抖动:同 col 桶(±2 列)内 EXECUTE↔ESCALATE 往返计数
+  const thrashMap = new Map<number, number>();
+  let prev: { bucket: number; gate: string } | null = null;
+  for (const d of seq) {
+    if (d.col === undefined || !d.gate) continue;
+    const bucket = Math.round(d.col / 2);
+    const flip =
+      (prev?.gate === 'EXECUTE' && d.gate === 'ESCALATE') ||
+      (prev?.gate === 'ESCALATE' && d.gate === 'EXECUTE');
+    if (prev && prev.bucket === bucket && flip) {
+      thrashMap.set(bucket, (thrashMap.get(bucket) ?? 0) + 1);
+    }
+    prev = { bucket, gate: d.gate };
+  }
+  const thrashSites = [...thrashMap.entries()]
+    .filter(([, count]) => count >= 3)
+    .map(([bucket, count]) => ({ col: bucket * 2, count }))
+    .sort((a, b) => b.count - a.count);
+  // 原地空转:同 col 桶内同一动作的最长连续拍数
+  const churnMap = new Map<string, { col: number; action: string; count: number }>();
+  let run: { bucket: number; action: string; count: number } | null = null;
+  const flushRun = (): void => {
+    if (!run || run.count < 4) return;
+    const key = `${run.bucket}:${run.action}`;
+    const cur = churnMap.get(key);
+    if (!cur || run.count > cur.count) {
+      churnMap.set(key, { col: run.bucket * 2, action: run.action, count: run.count });
+    }
+  };
+  for (const d of seq) {
+    if (d.col === undefined) continue;
+    const bucket = Math.round(d.col / 2);
+    const action = d.action ?? '?';
+    if (run && run.bucket === bucket && run.action === action) {
+      run.count += 1;
+    } else {
+      flushRun();
+      run = { bucket, action, count: 1 };
+    }
+  }
+  flushRun();
+  const churnSites = [...churnMap.values()].sort((a, b) => b.count - a.count);
 
   // 动作混合:action × 次数 × 均置信
   const actMap = new Map<string, { count: number; confSum: number; execCount: number }>();
@@ -192,6 +264,9 @@ export function buildPostmortem(input: SessionInput): PostmortemReport {
     deaths,
     deathCauses,
     stallSites,
+    thrashSites,
+    churnSites,
+    firstDeathTick,
     actionMix,
     vetoes: input.vetoes ?? 0,
     timeline,
@@ -266,6 +341,33 @@ function attachRules(r: PostmortemReport): void {
     );
     s.push('回退目标:先以自驾对照确认关卡可通过,再蒸馏;不要在噪声上调门控。');
   }
+  // docs/14 §3.2 过程异常规则
+  if (r.firstDeathTick !== null && r.firstDeathTick < 120) {
+    h.push(
+      `首死 @ tick ${r.firstDeathTick}(开局 ${(r.firstDeathTick / 60).toFixed(1)}s)——"直接掉崖/撞兵"模式:起步几拍的决策在威胁生效前已错。`,
+    );
+    s.push(
+      '核对死前上下文(veto 是否该触发未触发、首拍动作是否盲目右冲);开局 1-2 拍可强制规划器接管后再交还 Laya。',
+    );
+  }
+  const topThrash = r.thrashSites[0];
+  if (topThrash) {
+    h.push(
+      `门控抖动 @ col ${topThrash.col}(往返 ${topThrash.count} 次)——置信度在门控线附近震荡,决策拍大量空转。`,
+    );
+    s.push(
+      '拉大门控间隔(gateExecute 与 gateEscalate 差值 ≥0.08),或对抖动 col 段的帧蒸馏加权以推高置信度分辨力。',
+    );
+  }
+  const topChurn = r.churnSites[0];
+  if (topChurn) {
+    h.push(
+      `原地空转 @ col ${topChurn.col}(${topChurn.action} ×${topChurn.count} 拍)——同一动作反复无效,意图层未切换。`,
+    );
+    s.push(
+      '检查该 col 的威胁/意图切换条件(窗口边界是否把危险挡在视野外);必要时调大 obsThreatsLookPx 提前看见。',
+    );
+  }
   if (h.length === 0) {
     h.push('规则未命中显著模式——查看原始统计与时间线人工研判。');
   }
@@ -292,8 +394,37 @@ export function renderMarkdown(r: PostmortemReport): string {
     lines.push(`- 停滞 ${st.landmark} ×${st.count}(maxX col ${st.maxXCol})`);
   lines.push('');
   lines.push('## 死亡明细');
-  for (const d of r.deaths.slice(0, 12)) lines.push(`- col ${d.col}(${d.landmark})${d.cause}`);
+  for (const d of r.deaths.slice(0, 12)) {
+    lines.push(
+      `- col ${d.col}(${d.landmark})${d.cause}${d.tick !== undefined ? ` @tick ${d.tick}` : ''}`,
+    );
+    // 死前决策上下文(docs/14 §3.1):最后 4 拍
+    const ctx = (d.context ?? []).slice(-4);
+    for (const c of ctx) {
+      lines.push(
+        `  · ${c.action ?? '?'} @col ${c.col ?? '?'}(conf ${(c.conf ?? 0).toFixed(2)} ${c.gate ?? '?'}${c.note ? ` ${c.note}` : ''})`,
+      );
+    }
+  }
   if (r.deaths.length === 0) lines.push('- 无');
+  lines.push('');
+  lines.push('## 过程异常(规则判定)');
+  if (r.firstDeathTick !== null && r.firstDeathTick < 120) {
+    lines.push(`- ⚠ 首死 @ tick ${r.firstDeathTick}(<2s)——直接掉崖/撞兵模式`);
+  }
+  for (const t of r.thrashSites.slice(0, 5)) {
+    lines.push(`- 门控抖动 col ${t.col}(往返 ${t.count} 次)`);
+  }
+  for (const c of r.churnSites.slice(0, 5)) {
+    lines.push(`- 原地空转 col ${c.col}(${c.action} ×${c.count} 拍)`);
+  }
+  if (
+    !(r.firstDeathTick !== null && r.firstDeathTick < 120) &&
+    r.thrashSites.length === 0 &&
+    r.churnSites.length === 0
+  ) {
+    lines.push('- 无显著过程异常');
+  }
   lines.push('');
   lines.push('## 动作混合 Top5');
   for (const a of r.actionMix.slice(0, 5)) {
@@ -318,4 +449,44 @@ export function renderMarkdown(r: PostmortemReport): string {
   lines.push(JSON.stringify({ ...r, hypotheses: undefined, suggestions: undefined }));
   lines.push('```');
   return lines.join('\n');
+}
+
+/**
+ * 过程 digest(docs/14 §3.3):全量复盘压成 ≤1.5k token 的紧凑摘要喂给 Qwen。
+ * 含死亡+死前上下文、停滞、门控抖动、原地空转、门控分布——"完整过程"的
+ * 可分析形态;原始 JSONL 仍在会话文件中供离线批扫。
+ */
+export function processDigest(r: PostmortemReport): Record<string, unknown> {
+  return {
+    结果: r.outcome,
+    最远列: r.maxXCol,
+    局时s: Math.round(r.durationTicks / 60),
+    首死tick: r.firstDeathTick,
+    死亡: r.deaths.slice(-3).map((d) => ({
+      死因: d.cause,
+      地标: d.landmark,
+      tick: d.tick,
+      死前: (d.context ?? [])
+        .slice(-4)
+        .map(
+          (c) =>
+            `${c.action ?? '?'}@col${c.col ?? '?'}(${(c.conf ?? 0).toFixed(2)}/${
+              c.gate === 'EXECUTE' ? '执行' : c.gate === 'ESCALATE' ? '升级' : (c.gate ?? '?')
+            }${c.note ? `/${c.note}` : ''})`,
+        ),
+    })),
+    停滞站点: (r.stallSites ?? []).slice(0, 3),
+    门控抖动: (r.thrashSites ?? []).slice(0, 3),
+    原地空转: (r.churnSites ?? []).slice(0, 3),
+    门控: {
+      EXEC率: r.execRate,
+      ESC率: r.escalateRate,
+      stale率: r.staleRate,
+      兜底拍: r.gates.guard,
+      veto: r.vetoes,
+    },
+    avgConf: r.avgConf,
+    p50ms: r.p50LatencyMs,
+    时间线: r.timeline.slice(-6),
+  };
 }

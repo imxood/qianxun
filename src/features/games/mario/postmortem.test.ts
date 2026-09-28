@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildPostmortem, landmarkOf, renderMarkdown, type SessionInput } from './postmortem';
+import {
+  buildPostmortem,
+  landmarkOf,
+  processDigest,
+  renderMarkdown,
+  type SessionInput,
+} from './postmortem';
 import { TILE } from './world1-1';
 
 function session(over: Partial<SessionInput> = {}): SessionInput {
@@ -109,5 +115,104 @@ describe('postmortem 复盘引擎', () => {
     const jsonLine = md.split('```json')[1]!.split('```')[0]!.trim();
     const parsed = JSON.parse(jsonLine) as { decisions: number };
     expect(parsed.decisions).toBe(3);
+  });
+
+  it('首死 tick + 死前上下文:<120 tick 触发"直接掉崖/撞兵"假设(docs/14 §3.1)', () => {
+    const ctx = [
+      { action: 'run_right', conf: 0.4, gate: 'EXECUTE', col: 20 },
+      { action: 'run_right', conf: 0.3, gate: 'EXECUTE', col: 21 },
+    ];
+    const r = buildPostmortem(
+      session({
+        events: [
+          { type: 'death', cause: 'goomba', x: 22 * TILE, attempt: 1, tick: 90, context: ctx },
+        ],
+      }),
+    );
+    expect(r.firstDeathTick).toBe(90);
+    expect(r.deaths[0]?.tick).toBe(90);
+    expect(r.deaths[0]?.context).toEqual(ctx);
+    expect(r.hypotheses.some((x) => x.includes('直接掉崖/撞兵'))).toBe(true);
+    const md = renderMarkdown(r);
+    expect(md).toContain('过程异常');
+    expect(md).toContain('首死 @ tick 90');
+  });
+
+  it('门控抖动:同 col 桶 EXECUTE↔ESCALATE 往返 ≥3 记为热区(docs/14 §3.2)', () => {
+    // col 40 桶(±2):4 次往返;col 80 桶只 1 次 → 不上榜
+    const seq = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        action: 'run_right',
+        conf: 0.3,
+        gate: i % 2 === 0 ? 'EXECUTE' : 'ESCALATE',
+        latencyMs: 200,
+        applied: true,
+        col: 40,
+      })),
+      { action: 'run_right', conf: 0.5, gate: 'EXECUTE', latencyMs: 200, applied: true, col: 80 },
+      { action: 'run_right', conf: 0.05, gate: 'ESCALATE', latencyMs: 200, applied: true, col: 80 },
+    ];
+    const r = buildPostmortem(session({ decisions: seq, events: [] }));
+    expect(r.thrashSites).toEqual([{ col: 40, count: 8 }]);
+    // 兜底拍(stall-guard)的 ESCALATE 不算抖动
+    const guarded = buildPostmortem(
+      session({
+        decisions: seq.map((d) => ({ ...d, note: 'stall-guard' })),
+        events: [],
+      }),
+    );
+    expect(guarded.thrashSites).toEqual([]);
+  });
+
+  it('原地空转:同 col 桶同动作连续 ≥4 拍记为热区', () => {
+    const seq = [
+      ...Array.from({ length: 5 }, () => ({
+        action: 'jump_right',
+        conf: 0.5,
+        gate: 'EXECUTE',
+        latencyMs: 200,
+        applied: true,
+        col: 28,
+      })),
+      { action: 'run_right', conf: 0.5, gate: 'EXECUTE', latencyMs: 200, applied: true, col: 28 },
+      ...Array.from({ length: 3 }, () => ({
+        action: 'idle',
+        conf: 0.5,
+        gate: 'EXECUTE',
+        latencyMs: 200,
+        applied: true,
+        col: 30,
+      })),
+    ];
+    const r = buildPostmortem(session({ decisions: seq, events: [] }));
+    expect(r.churnSites).toEqual([{ col: 28, action: 'jump_right', count: 5 }]);
+  });
+
+  it('processDigest:紧凑过程摘要含死亡上下文/异常热区/门控分布', () => {
+    const r = buildPostmortem(
+      session({
+        events: [
+          {
+            type: 'death',
+            cause: 'pit',
+            x: 69 * TILE,
+            attempt: 1,
+            tick: 300,
+            context: [{ action: 'run_right', conf: 0.2, gate: 'EXECUTE', col: 68 }],
+          },
+        ],
+      }),
+    );
+    const d = processDigest(r) as {
+      结果: string;
+      首死tick: number;
+      死亡: Array<{ 死因: string; 死前: string[] }>;
+      门控: { EXEC率: number };
+    };
+    expect(d.结果).toBe('incomplete');
+    expect(d.首死tick).toBe(300);
+    expect(d.死亡[0]?.死因).toBe('pit');
+    expect(d.死亡[0]?.死前[0]).toContain('run_right@col68');
+    expect(d.门控.EXEC率).toBeGreaterThan(0);
   });
 });
