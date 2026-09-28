@@ -27,3 +27,9 @@ vendor/
 *.onnx
 *.onnx.data
 
+# Playwright MCP 运行产物（浏览器会话元数据、截图等）
+.playwright-mcp/
+
+# 马里奥实验室旧本地状态（已迁至 ~/.qianxun_dev/mario，见 docs/13）
+var/
+

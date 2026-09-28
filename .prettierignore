@@ -12,3 +12,4 @@ mobile/android/capacitor-cordova-android-plugins/build
 mobile/android/local.properties
 mobile/android/app/src/main/assets
 test-results
+var
