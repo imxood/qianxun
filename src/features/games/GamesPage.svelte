@@ -5,8 +5,9 @@
    */
 
   import TetrisLab from './tetris/TetrisLab.svelte';
+  import MarioLab from './mario/MarioLab.svelte';
 
-  type GameId = 'laya-tetris';
+  type GameId = 'laya-tetris' | 'laya-mario';
 
   const GAMES: Array<{ id: GameId; name: string; tag: string; desc: string }> = [
     {
@@ -14,6 +15,12 @@
       name: 'Laya Reflex · 俄罗斯方块',
       tag: 'System 1 × System 2',
       desc: '完全由 Laya 驱动的俄罗斯方块实验室:反射模型选动作、置信度门控三分支(EXECUTE / RE-SENSE / ESCALATE),Dellacherie 求解器兜底。需要 laya-server(127.0.0.1:10230)。',
+    },
+    {
+      id: 'laya-mario',
+      name: 'Laya Jump · 超级马里奥 1-1',
+      tag: '实时控制 × 双脑',
+      desc: '剧场式舞台上的确定性平台跳跃引擎:60Hz 固定步长、动作量子输入保持、规划器 BFS 兜底、Laya 反射决策(reflex/pure)+ 自动驾驶对照。人玩/双脑全支持,见 docs/11、docs/12。',
     },
   ];
 
@@ -61,5 +68,10 @@
     <div class="min-h-0 flex-1">
       <TetrisLab />
     </div>
+  </div>
+{:else if active === 'laya-mario'}
+  <!-- 马里奥为剧场式全出血布局:返回内置于顶栏(docs/11 §7) -->
+  <div class="h-full min-h-0">
+    <MarioLab onBack={() => (active = null)} />
   </div>
 {/if}

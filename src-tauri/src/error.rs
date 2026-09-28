@@ -44,6 +44,9 @@ pub enum Error {
     #[error("笔记失败：{0}")]
     Notes(String),
 
+    #[error("马里奥实验室状态失败：{0}")]
+    Mario(String),
+
     #[error("桥失败：{0}")]
     Bridge(String),
 

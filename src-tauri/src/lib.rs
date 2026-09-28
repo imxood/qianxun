@@ -12,6 +12,7 @@ mod dsh_upstream;
 mod error;
 mod harness;
 mod logging;
+mod mario;
 mod market;
 mod notes;
 mod paths;
@@ -312,6 +313,10 @@ pub fn run() {
             notes::commands::notes_create,
             notes::commands::notes_delete,
             notes::commands::notes_init,
+            mario::commands::mario_state_append,
+            mario::commands::mario_state_list,
+            mario::commands::mario_state_read,
+            mario::commands::mario_state_write,
             bridge::commands::bridge_deploy,
             bridge::commands::bridge_status,
             bridge::commands::plugins_list,

@@ -7,6 +7,7 @@ export default defineConfig({
     environment: 'node',
     include: [
       'src/**/*.test.ts',
+      'e2e/**/*.test.ts',
       'src-tauri/src/bridge/assets/**/*.test.js',
       'src-tauri/src/bridge/assets/**/*.test.ts',
     ],
