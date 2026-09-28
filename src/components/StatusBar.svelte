@@ -9,6 +9,13 @@
   let meta: AppMetaResult | null = $state(null);
   let metaError: string | null = $state(null);
 
+  /** 底部版本徽标：千寻版本 + 已装 DSH 版本（未装/未探测到则只显示千寻）。 */
+  const versionLabel = $derived.by(() => {
+    const qianxun = meta ? `千寻 v${meta.version}` : metaError ? '版本获取失败' : '千寻';
+    const dsh = harness.environment?.dshVersion;
+    return dsh ? `${qianxun} · DSH v${dsh}` : qianxun;
+  });
+
   const themeCycle: ThemePreference[] = ['system', 'light', 'dark'];
   const themeLabel: Record<ThemePreference, string> = {
     system: '跟随系统',
@@ -46,6 +53,9 @@
         metaError = error instanceof Error ? error.message : String(error);
       }
     })();
+    // DSH 版本号随千寻版本一起展示：环境探测较重（spawn 若干 node --version），
+    // 复用共享 store 只拉一次；DSH 页打开时用的是同一份缓存。
+    if (!harness.environment) void harness.refreshEnvironment();
     void harness.wire();
   });
 
@@ -61,17 +71,17 @@
 <footer
   class="flex h-7 shrink-0 items-center justify-between border-t border-line bg-surface pr-2 pl-3 text-xs text-muted"
 >
-  <span class="tabular-nums"
-    >{meta ? `千寻 v${meta.version}` : metaError ? '版本获取失败' : '千寻'}</span
-  >
+  <span class="tabular-nums">{versionLabel}</span>
   <div class="flex items-center gap-4">
     <span class="flex items-center gap-1.5 {statusTone[harness.status.phase] ?? 'text-muted'}">
+      <!-- ready 是长期稳态:静态点亮(光晕保留,静态不触发重绘)。
+           animate-pulse 在 WebView2 里驱动整条渲染管线每帧重绘(带光晕
+           时实测 browser 合成器 ~120% + 双 renderer),只允许在
+           starting/restarting 这类秒级瞬态使用。 -->
       <span
         class="size-1.5 rounded-full bg-current {harness.status.phase === 'ready'
           ? 'shadow-[0_0_8px_currentColor]'
-          : ''} {harness.status.phase === 'ready' ||
-        harness.status.phase === 'starting' ||
-        harness.status.phase === 'restarting'
+          : ''} {harness.status.phase === 'starting' || harness.status.phase === 'restarting'
           ? 'animate-pulse'
           : ''}"
         aria-hidden="true"

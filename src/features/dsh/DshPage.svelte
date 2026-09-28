@@ -31,9 +31,12 @@
   }
 
   /** 下发 arm 握手：注入脚本收到后才接管外链点击（未握手时零行为）。 */
+  let shellArmed = $state(false);
+
   function armShell(): void {
     const origin = gatewayOrigin();
     if (frame?.contentWindow && origin) {
+      shellArmed = true;
       frame.contentWindow.postMessage({ __qxShell: '__qxShell', kind: 'arm' }, origin);
     }
   }
@@ -47,9 +50,14 @@
         void openShellLink(link).catch(() => {});
         return;
       }
-      // 注入脚本宣告就绪（或 iframe 每次文档加载完成时兜底补发 arm）。
+      // 注入脚本宣告就绪 → 补发 arm。同一文档只补一次：脚本侧收到 arm
+      // 也会回宣告，若这里无条件再 arm，就是 ready→arm→ready 无限乒乓
+      // （实测空转整机 10% CPU 的根因）。iframe 每次文档重载（load 事件）
+      // 重置 shellArmed，新文档的 ready 会重新触发恰好一次握手。
       if (origin && event.origin === origin && isShellReady(event.data)) {
-        armShell();
+        if (!shellArmed) {
+          armShell();
+        }
       }
     };
     window.addEventListener('message', onMessage);
@@ -109,6 +117,8 @@
       onload={() => {
         frameLoaded = true;
         // 文档每次加载完成都补发 arm（注入脚本随文档重载重建，armed 归零）。
+        // 重置 shellArmed 让新文档的 ready 能重新触发恰好一次握手。
+        shellArmed = false;
         armShell();
       }}
     ></iframe>

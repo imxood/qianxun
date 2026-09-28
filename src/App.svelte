@@ -92,7 +92,11 @@
 
   // 页面容器显隐：visibility（而非 display）保布局——滚动位置、
   // iframe 文档全部原样保留；invisible 元素不接收指针事件、不进 Tab 焦点序。
-  const show = (page: PageId): string => (nav.page === page ? '' : 'invisible');
+  // 非激活页 display:none（而非 visibility:hidden）：display:none 的 iframe
+  // 完全脱离渲染树，合成器零成本——DSH IDE 这类重渲染页切走后不再空烧
+  // 渲染进程（visibility:hidden 只是"看不见"，照样每帧合成，实测是
+  // 「启动 DSH 后 CPU 居高不下」的主因）。切回时一次 reflow，可接受。
+  const show = (page: PageId): string => (nav.page === page ? '' : 'hidden');
 </script>
 
 <svelte:window onkeydown={toggleDevtools} />
