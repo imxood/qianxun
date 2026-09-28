@@ -17,17 +17,23 @@ export type PmDecisionRow = {
   gate?: string;
   latencyMs?: number;
   col?: number;
+  /** 发射时刻 tick(docs/15 §6.3;旧会话无此字段)。 */
+  tick?: number;
+  attempt?: number;
   applied?: boolean;
   note?: string;
 };
 
-/** 死亡上下文行:死前一条决策的快照(docs/14 §3.1)。 */
+/** 死亡上下文行:死前一条决策的快照(docs/14 §3.1 + docs/15 §6.3 state 回填)。 */
 export type PmContextRow = {
   action?: string;
   conf?: number;
   gate?: string;
   col?: number;
   note?: string;
+  tick?: number;
+  /** 收发明细回填的 state 文本(仅关键拍携带,省预算)。 */
+  state?: string;
 };
 
 export type PmEventRow = {
@@ -57,6 +63,7 @@ export type SessionInput = {
 
 export type PostmortemReport = {
   id: string;
+  mode?: string;
   outcome: 'win' | 'incomplete';
   attempts: number;
   score: number;
@@ -75,6 +82,7 @@ export type PostmortemReport = {
     col: number;
     landmark: string;
     tick?: number;
+    attempt?: number;
     context?: PmContextRow[];
   }>;
   deathCauses: Array<{ cause: string; count: number }>;
@@ -151,6 +159,7 @@ export function buildPostmortem(input: SessionInput): PostmortemReport {
       col: px2col(e.x),
       landmark: siteOf(e.x),
       tick: e.tick,
+      attempt: e.attempt,
       context: e.context ?? [],
     }));
   const deathTicks = deaths.map((d) => d.tick).filter((t): t is number => typeof t === 'number');
@@ -247,6 +256,7 @@ export function buildPostmortem(input: SessionInput): PostmortemReport {
   const maxX = input.final?.maxX ?? 0;
   const report: PostmortemReport = {
     id: input.id,
+    mode: input.mode,
     outcome: win ? 'win' : 'incomplete',
     attempts: input.final?.attempts ?? 1,
     score: input.final?.score ?? 0,
@@ -489,4 +499,50 @@ export function processDigest(r: PostmortemReport): Record<string, unknown> {
     p50ms: r.p50LatencyMs,
     时间线: r.timeline.slice(-6),
   };
+}
+
+// ================= 轨迹导出(docs/15 §6.3 分析载荷②④) =================
+
+/** 异常拍:stale/非 EXECUTE 门控/低置信/带注记——载荷④与裁剪保底对象。 */
+export function isAnomalyRow(r: PmDecisionRow): boolean {
+  return (
+    r.applied === false ||
+    (r.gate !== undefined && r.gate !== 'EXECUTE') ||
+    (r.conf ?? 1) < 0.15 ||
+    !!r.note
+  );
+}
+
+/**
+ * 确定性轨迹裁剪(docs/15 §6.3 D5):同输入必同输出。
+ * 保首 8 拍 + 全部异常拍(可击穿 cap),其余按固定步长均匀采样。
+ */
+export function trimTrace(rows: PmDecisionRow[], cap = 120): PmDecisionRow[] {
+  if (rows.length <= cap) return rows;
+  const anomaly = rows.filter(isAnomalyRow);
+  const head = rows.slice(0, 8).filter((r) => !anomaly.includes(r));
+  const rest = rows
+    .filter((r) => !anomaly.includes(r) && !head.includes(r))
+    .sort((a, b) => (a.tick ?? 0) - (b.tick ?? 0));
+  const slots = Math.max(12, cap - anomaly.length - head.length);
+  const step = Math.ceil(rest.length / slots);
+  const picked = rest.filter((_, i) => i % step === 0);
+  return [...head, ...picked, ...anomaly].sort((a, b) => (a.tick ?? 0) - (b.tick ?? 0));
+}
+
+/** 轨迹 CSV 行:tick,col,action,conf,gate,applied,note。 */
+export function traceCsv(rows: PmDecisionRow[]): string[] {
+  return rows.map(
+    (r) =>
+      `${r.tick ?? '?'},${r.col ?? '?'},${r.action ?? '?'},${(r.conf ?? 0).toFixed(2)},${
+        r.gate ?? '?'
+      },${r.applied === false ? 0 : 1},${r.note ?? ''}`,
+  );
+}
+
+/** 按生命(a)切出决策行;无 attempt 标注的旧会话视为单命。 */
+export function attemptRows(input: SessionInput, attempt: number): PmDecisionRow[] {
+  const tagged = input.decisions.filter((d) => d.attempt !== undefined);
+  if (tagged.length === 0) return attempt <= 1 ? [...input.decisions] : [];
+  return input.decisions.filter((d) => d.attempt === attempt);
 }

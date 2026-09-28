@@ -52,6 +52,16 @@ export type DriverStats = {
 
 export type LogRow = { t: string; cls: string; text: string };
 
+/** Laya 收发明细(docs/15 §6.3):一拍决策实际发给 laya-server 的 state/questions。 */
+export type SentRow = {
+  row: PmDecisionRow;
+  state: string;
+  questions: string;
+  /** 发射时刻的 tick(attempt 守卫后 s 不可信,必须在发射时捕获)。 */
+  tick: number;
+  attempt: number;
+};
+
 export type SessionLogger = {
   start: (meta: Record<string, unknown>) => Promise<string | null>;
   push: (row: Record<string, unknown>) => void;
@@ -145,7 +155,10 @@ export class MarioDriver {
     samples: PmSampleRow[];
     final: SessionInput['final'];
     vetoes: number;
-  } = { id: null, decisions: [], events: [], samples: [], final: undefined, vetoes: 0 };
+    sent: SentRow[];
+  } = { id: null, decisions: [], events: [], samples: [], final: undefined, vetoes: 0, sent: [] };
+  /** 当前输入量子已持有 tick 数(obsStateExtra=heldTicks 用)。 */
+  private heldTicks = 0;
   private lastSampleTick = 0;
   private lastVetoTick = -999;
   /**
@@ -205,7 +218,9 @@ export class MarioDriver {
       samples: [],
       final: undefined,
       vetoes: 0,
+      sent: [],
     };
+    this.heldTicks = 0;
     this.lastSampleTick = 0;
     this.stats = {
       ...this.stats,
@@ -253,6 +268,7 @@ export class MarioDriver {
    */
   inputFor(s: GameState, world: World): Input {
     if (this.mode !== 'reflex' && this.mode !== 'pure') return IDLE_INPUT;
+    const prevHeld = this.held;
     let held = this.held;
     if (this.lastJump && s.mario.vy < 0) held = { ...held, jump: true };
     if (s.phase === 'running') {
@@ -299,6 +315,14 @@ export class MarioDriver {
       }
       this.held = held;
       this.lastJump = held.jump;
+      // heldTicks:输入量子持有计数(消息设计 obsStateExtra 用,换量子归零)
+      this.heldTicks =
+        prevHeld.left === held.left &&
+        prevHeld.right === held.right &&
+        prevHeld.run === held.run &&
+        prevHeld.jump === held.jump
+          ? this.heldTicks + 1
+          : 0;
       // 采样(复盘时间线)
       if (s.tick - this.lastSampleTick >= 300) {
         this.lastSampleTick = s.tick;
@@ -350,6 +374,8 @@ export class MarioDriver {
         conf: 0,
         gate: 'ESCALATE',
         col: Math.round((s.mario.x / TILE) * 10) / 10,
+        tick: s.tick,
+        attempt: s.attempts,
         applied: true,
         note: 'stall-guard',
       });
@@ -362,8 +388,29 @@ export class MarioDriver {
     this.inFlight = true;
     this.lastFire = nowMs;
     const attempt = s.attempts;
+    const fireTick = s.tick; // 发射时捕获(attempt 守卫后 s 不可信)
     try {
-      const d = await this.brain.decide(s, world);
+      const d = await this.brain.decide(s, world, {
+        lastAction: this.lastDecision?.action,
+        heldTicks: this.heldTicks,
+        stallTicks: this.stallTicks,
+      });
+      // 收发明细入环(docs/15 §6.3):stale 拍的消息也已发出,必须入环;cap 24
+      this.record.sent.push({
+        row: {
+          action: d.action,
+          conf: d.conf,
+          gate: d.gate,
+          latencyMs: Math.round(d.latencyMs),
+          tick: fireTick,
+          attempt,
+        },
+        state: d.stateJson,
+        questions: d.questionsJson,
+        tick: fireTick,
+        attempt,
+      });
+      if (this.record.sent.length > 24) this.record.sent.shift();
       if (s.attempts !== attempt || s.phase !== 'running') {
         this.stats.stale += 1;
         this.log('text-slate-500', `stale 决策丢弃 attempt=${attempt}`);
@@ -372,12 +419,15 @@ export class MarioDriver {
           conf: d.conf,
           gate: d.gate,
           latencyMs: Math.round(d.latencyMs),
+          tick: fireTick,
+          attempt,
           applied: false,
           note: 'stale',
         });
         this.session.push({
           type: 'decision',
           attempt,
+          tick: fireTick,
           mode: this.mode,
           action: d.action,
           conf: d.conf,
@@ -407,11 +457,14 @@ export class MarioDriver {
         gate: d.gate,
         latencyMs: Math.round(d.latencyMs),
         col: Math.round((s.mario.x / TILE) * 10) / 10,
+        tick: fireTick,
+        attempt,
         applied: true,
       });
       this.session.push({
         type: 'decision',
         attempt,
+        tick: fireTick,
         mode: this.mode,
         action: d.action,
         conf: d.conf,
@@ -441,15 +494,18 @@ export class MarioDriver {
   }
 
   event(row: Record<string, unknown>): void {
-    // 死亡事件自动附「死前最近 8 条决策」(docs/14 §3.1):直接掉崖/撞兵时
-    // 前两拍打出的动作与门控,是复盘"为什么会死"的直接证据链。
+    // 死亡事件自动附「死前最近 12 条决策」(docs/15 §6.3):直接掉崖/撞兵时
+    // 前几拍打出的动作与门控,是复盘"为什么会死"的直接证据链;state 文本
+    // 从收发明细环按 tick 回填(④ 异常块/死因归因用)。
     if ((row as { event?: string }).event === 'death') {
-      row.context = this.record.decisions.slice(-8).map((d) => ({
+      row.context = this.record.decisions.slice(-12).map((d) => ({
         action: d.action,
         conf: d.conf,
         gate: d.gate,
         col: d.col,
         note: d.note,
+        tick: d.tick,
+        state: this.record.sent.find((t) => t.tick === d.tick)?.state,
       }));
     }
     this.session.push({ type: 'event', ...row });
@@ -462,17 +518,26 @@ export class MarioDriver {
 
   /** 生成复盘(规则判定,无 LLM):结构化报告 + 固定格式 Markdown。 */
   buildPostmortem(): { report: PostmortemReport; markdown: string } {
-    const input: SessionInput = {
+    const report = buildPostmortem(this.sessionSnapshot());
+    return { report, markdown: renderMarkdown(report) };
+  }
+
+  /** 分析载荷原料(docs/15 §6.3):会话快照(浅拷贝,防队列任务引用活对象)。 */
+  sessionSnapshot(): SessionInput {
+    return {
       id: this.record.id ?? `${this.mode}-${this.startedAt}`,
       mode: this.mode,
-      decisions: this.record.decisions,
-      events: this.record.events,
-      samples: this.record.samples,
-      final: this.record.final,
+      decisions: this.record.decisions.map((d) => ({ ...d })),
+      events: this.record.events.map((e) => ({ ...e })),
+      samples: this.record.samples.map((x) => ({ ...x })),
+      final: this.record.final ? { ...this.record.final } : undefined,
       vetoes: this.record.vetoes,
     };
-    const report = buildPostmortem(input);
-    return { report, markdown: renderMarkdown(report) };
+  }
+
+  /** Laya 收发明细(只读;载荷③死前明细的数据源)。 */
+  get sentLog(): readonly SentRow[] {
+    return this.record.sent;
   }
 
   /** 复盘文档落入会话 JSONL(单行转义),供离线批扫与 Qwen/编码代理消费。 */
