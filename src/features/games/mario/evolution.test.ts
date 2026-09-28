@@ -12,25 +12,37 @@ import {
   appendHistory,
   appendInsight,
   auditLine,
-  deathSignature,
   diffPatch,
+  detectRegression,
   evalMedian,
   initialEvoState,
   judgeCandidate,
   limitPatch,
+  markAnalyzed,
   median,
   obsSnapshotOf,
   parseAuditLines,
   parseEvoState,
   parseHistory,
   parsePolicyFile,
+  planAnalyses,
+  reasonShort,
   recordRun,
+  recordVersion,
+  restoreVersion,
   runScore,
-  shouldInvokeQwen,
   startCooldowns,
   wrapPolicy,
 } from './evolution';
-import { DEFAULT_POLICY } from './policy';
+import {
+  nextTask,
+  scheduleTask,
+  taskFailed,
+  transition,
+  type LoopState,
+  type SchedTask,
+} from './machine';
+import { DEFAULT_POLICY, sanitizePolicy } from './policy';
 import type { PostmortemReport } from './postmortem';
 
 function report(over: Partial<PostmortemReport> = {}): PostmortemReport {
@@ -43,9 +55,9 @@ function report(over: Partial<PostmortemReport> = {}): PostmortemReport {
     execRate: 0.8,
     decisions: 13,
     deaths: [
-      { cause: 'goomba', col: 28, landmark: 'goomba-pair' },
-      { cause: 'goomba', col: 28, landmark: 'goomba-pair' },
-      { cause: 'pit', col: 70, landmark: 'gap-1' },
+      { cause: 'goomba', col: 28, landmark: 'goomba-pair', attempt: 1 },
+      { cause: 'goomba', col: 28, landmark: 'goomba-pair', attempt: 2 },
+      { cause: 'pit', col: 70, landmark: 'gap-1', attempt: 3 },
     ],
     deathCauses: [
       { cause: 'goomba', count: 2 },
@@ -97,73 +109,90 @@ describe('policy 信封', () => {
   });
 });
 
-describe('Qwen 触发器(每死必析,docs/14 §2)', () => {
-  it('通关必调', () => {
-    const t = shouldInvokeQwen(
+describe('Qwen 触发器(死亡级分析清单,docs/15 §6.1)', () => {
+  it('通关必调(run 级)', () => {
+    const t = planAnalyses(
       initialEvoState(),
       report({ outcome: 'win', deathCauses: [], deaths: [] }),
       'r1',
     );
-    expect(t.invoke).toBe(true);
-    expect(t.reason).toContain('win');
+    expect(t).toHaveLength(1);
+    expect(t[0]?.kind).toBe('win');
+    expect(t[0]?.reason).toContain('win');
   });
 
-  it('同一 runId 幂等:已分析过不再调(唯一去重)', () => {
-    const state = { ...initialEvoState(), analyzedRunIds: ['r1'] };
-    const t = shouldInvokeQwen(state, report({ outcome: 'win' }), 'r1');
-    expect(t.invoke).toBe(false);
-    expect(t.reason).toContain('幂等');
+  it('runId 幂等:win 分析过不再调', () => {
+    const s0 = initialEvoState();
+    const win = report({ outcome: 'win', deathCauses: [], deaths: [] });
+    const task = planAnalyses(s0, win, 'r1')[0]!;
+    const s1 = markAnalyzed(s0, task);
+    expect(planAnalyses(s1, win, 'r1')).toHaveLength(0);
   });
 
-  it('有死亡必调:新签名 death(签名),重复签名 death-repeat 标注而非去重', () => {
-    const state = initialEvoState();
-    const r = report();
-    const t1 = shouldInvokeQwen(state, r, 'r1');
-    expect(t1.invoke).toBe(true);
-    expect(t1.reason).toContain('death(goomba@goomba-pair)');
-    expect(deathSignature(r)).toBe('goomba@goomba-pair');
-    // 签名滚动入簿记
-    const s2 = recordRun(state, r, 'r1', true);
-    expect(s2.lastDeathSignature).toBe('goomba@goomba-pair');
-    // 同签名再次失败:仍调用,标注 repeat —— 反复失败是下局必须优化的信号
-    const t2 = shouldInvokeQwen(s2, report(), 'r2');
-    expect(t2.invoke).toBe(true);
-    expect(t2.reason).toContain('death-repeat');
-    // 换一个签名 → 回到 death(新签名)
-    const t3 = shouldInvokeQwen(
-      s2,
-      report({
-        deaths: [{ cause: 'pit', col: 70, landmark: 'gap-1' }],
-        deathCauses: [{ cause: 'pit', count: 1 }],
-      }),
-      'r3',
-    );
-    expect(t3.invoke).toBe(true);
-    expect(t3.reason).toContain('death(pit@gap-1)');
+  it('每死一个任务:deathKey=runId#attempt;重复签名标注 death-repeat', () => {
+    const s0 = initialEvoState();
+    const r = report(); // 2×goomba@28(a1,a2)+1×pit(a3)
+    const t1 = planAnalyses(s0, r, 'r1');
+    expect(t1.map((x) => x.key)).toEqual(['r1#1', 'r1#2', 'r1#3']);
+    expect(t1[0]?.sig).toBe('goomba@goomba-pair');
+    expect(t1[0]?.reason).toBe('death(goomba@goomba-pair)');
+    // 死亡入统计后,第二次同签名 → repeat
+    const s1 = noteDeathSigsPublic(s0, r);
+    const t2 = planAnalyses(s1, r, 'r2');
+    expect(t2[0]?.reason).toContain('death-repeat');
+    // 成功后才占幂等键(docs/15 R6):同 runId 下,已析的 attempt 不再出任务
+    const s2 = markAnalyzed(s1, t2[0]!);
+    const t3 = planAnalyses(s2, r, 'r2');
+    expect(t3.map((x) => x.key)).not.toContain('r2#1');
+    expect(t3.map((x) => x.key)).toContain('r2#2');
   });
 
-  it('无死亡无通关:plateau 未达窗口不调(no-signal)', () => {
-    const t = shouldInvokeQwen(initialEvoState(), report({ deathCauses: [], deaths: [] }), 'r1');
-    expect(t.invoke).toBe(false);
-    expect(t.reason).toContain('no-signal');
+  it('无死亡无通关:plateau 达窗才出 run 级任务,否则无任务', () => {
+    const s = initialEvoState();
+    expect(planAnalyses(s, report({ deathCauses: [], deaths: [] }), 'r1')).toHaveLength(0);
+    const s2 = { ...s, plateauStreak: 3 };
+    const t = planAnalyses(s2, report({ deathCauses: [], deaths: [] }), 'r2');
+    expect(t).toHaveLength(1);
+    expect(t[0]?.kind).toBe('plateau');
   });
 
   it('plateau:连续无进展达到窗口才触发;有进展重置', () => {
     let s = initialEvoState();
-    // bestMaxXCol 起始 0;第一局 maxXCol=60 → 有进展
     s = recordRun(s, report({ deathCauses: [], deaths: [] }), 'r1', false);
     expect(s.plateauStreak).toBe(0);
     expect(s.bestMaxXCol).toBe(60);
-    // 连续 3 局无进展(且无死亡签名) → 第 4 局触发 plateau
     for (const id of ['r2', 'r3', 'r4']) {
       s = recordRun(s, report({ deathCauses: [], deaths: [], maxXCol: 50 }), id, false);
     }
     expect(s.plateauStreak).toBe(3);
-    const t = shouldInvokeQwen(s, report({ deathCauses: [], deaths: [], maxXCol: 50 }), 'r5');
-    expect(t.invoke).toBe(true);
-    expect(t.reason).toContain('plateau');
+    const t = planAnalyses(s, report({ deathCauses: [], deaths: [], maxXCol: 50 }), 'r5');
+    expect(t[0]?.kind).toBe('plateau');
+  });
+
+  it('recordRun 计数器:局数/胜场/死亡分布/模式', () => {
+    let s = initialEvoState();
+    s = recordRun(
+      s,
+      report({ outcome: 'win', deathCauses: [], deaths: [] }),
+      'r1',
+      false,
+      'reflex',
+    );
+    s = recordRun(s, report(), 'r2', false, 'reflex');
+    expect(s.counters.runs).toBe(2);
+    expect(s.counters.wins).toBe(1);
+    expect(s.counters.deaths).toBe(3);
+    expect(s.counters.deathsByCause['goomba']).toBe(2);
+    expect(s.counters.deathsByLandmark['goomba-pair']).toBe(2);
+    expect(s.counters.perMode['reflex']).toEqual({ runs: 2, wins: 1 });
+    expect(s.sigStats['goomba@goomba-pair']?.deaths).toBe(2);
   });
 });
+
+/** 测试助手:走公开 API 累积签名统计。 */
+function noteDeathSigsPublic(s: ReturnType<typeof initialEvoState>, r: PostmortemReport) {
+  return recordRun(s, { ...r, outcome: r.outcome, maxXCol: r.maxXCol }, 'tmp', false);
+}
 
 describe('评估判定(中位数 + ε + 滞回)', () => {
   it('通关 ≫ 未通关;更快通关分更高', () => {
@@ -267,15 +296,15 @@ describe('审计与历史', () => {
     expect(parseAuditLines(null)).toEqual([]);
   });
 
-  it('history 解析容错 + 滚动截断', () => {
+  it('history 解析容错 + 滚动截断(cap 200,docs/15 §7)', () => {
     expect(parseHistory('{bad')).toEqual([]);
     expect(parseHistory(null)).toEqual([]);
     let h = parseHistory(null);
-    for (let i = 1; i <= 60; i += 1) {
+    for (let i = 1; i <= 220; i += 1) {
       h = appendHistory(h, { iteration: i, won: false, maxXCol: i, ticks: i });
     }
-    expect(h).toHaveLength(50);
-    expect(h[0]?.iteration).toBe(11);
+    expect(h).toHaveLength(200);
+    expect(h[0]?.iteration).toBe(21);
   });
 
   it('state.json 解析容错', () => {
@@ -301,12 +330,12 @@ describe('经验沉淀 insights.md(docs/14 §6)', () => {
 
   it('滚动到上限:最旧条目先丢;人保段标记对永不丢', () => {
     let doc = '';
-    for (let i = 1; i <= 40; i += 1) {
+    for (let i = 1; i <= 60; i += 1) {
       doc = appendInsight(doc, i, `经验 ${i} `.padEnd(80, 'x'));
     }
     expect(doc.length).toBeLessThanOrEqual(INSIGHTS_MAX_CHARS + 100);
     expect(doc).not.toContain('- [iter 1]');
-    expect(doc).toContain('- [iter 40]');
+    expect(doc).toContain('- [iter 60]');
     // 人保段
     const withHuman = appendInsight(
       `<!-- HUMAN -->\n人手写的经验,永远保留\n<!-- /HUMAN -->`,
@@ -314,16 +343,32 @@ describe('经验沉淀 insights.md(docs/14 §6)', () => {
       '机器经验',
     );
     let rolled = withHuman;
-    for (let i = 2; i <= 40; i += 1) {
+    for (let i = 2; i <= 60; i += 1) {
       rolled = appendInsight(rolled, i, `经验 ${i} `.padEnd(80, 'x'));
     }
     expect(rolled).toContain('人手写的经验,永远保留');
     expect(rolled).not.toContain('机器经验');
   });
 
-  it('obsSnapshotOf 反映当前策略;审计行带 obs 快照可往返', () => {
-    const obs = obsSnapshotOf({ ...DEFAULT_POLICY, obsProfileCols: 24, obsIncludePose: false });
-    expect(obs).toEqual({ profileCols: 24, threatsLookPx: 176, pose: false, subgoal: true });
+  it('obsSnapshotOf 反映当前策略(含消息设计);审计行带 obs 快照可往返', () => {
+    const obs = obsSnapshotOf({
+      ...DEFAULT_POLICY,
+      obsProfileCols: 24,
+      obsIncludePose: false,
+      obsThreatFormat: 'rows',
+      obsStateExtra: ['stallTicks'],
+    });
+    expect(obs).toEqual({
+      profileCols: 24,
+      threatsLookPx: 176,
+      pose: false,
+      subgoal: true,
+      threatFormat: 'rows',
+      progressStyle: 'full',
+      hintStyle: 'full',
+      instructionVariant: 'default',
+      stateExtra: 'stallTicks',
+    });
     const line = auditLine({
       v: 1,
       ts: '2026-01-01T00:00:00Z',
@@ -335,5 +380,141 @@ describe('经验沉淀 insights.md(docs/14 §6)', () => {
       obs,
     });
     expect(parseAuditLines(line)[0]?.obs).toEqual(obs);
+  });
+});
+
+describe('消息设计沙箱(docs/15 §6.4)', () => {
+  it('枚举校验:表外值回默认 + issue;obsStateExtra 白名单/去重/≤2', () => {
+    const r = sanitizePolicy({
+      obsThreatFormat: 'diagonal',
+      obsHintStyle: 42,
+      obsStateExtra: ['stallTicks', 'stallTicks', 'hacker', 'lastAction', 'heldTicks'],
+    });
+    expect(r.policy.obsThreatFormat).toBe('named');
+    expect(r.policy.obsHintStyle).toBe('full');
+    expect(r.policy.obsStateExtra).toEqual(['stallTicks', 'lastAction']);
+    expect(r.issues.length).toBe(3);
+    const ok = sanitizePolicy({ obsThreatFormat: 'rows', obsInstructionVariant: 'concise' });
+    expect(ok.policy.obsThreatFormat).toBe('rows');
+    expect(ok.policy.obsInstructionVariant).toBe('concise');
+    expect(ok.issues).toEqual([]);
+  });
+
+  it('limitPatch 单维度:数值与消息设计混车 → 保留多数维度,余丢弃 + kind', () => {
+    const mixed = {
+      ...DEFAULT_POLICY,
+      gateExecute: 0.2,
+      obsThreatFormat: 'rows' as const,
+      obsHintStyle: 'terse' as const,
+    };
+    const r = limitPatch(mixed, DEFAULT_POLICY);
+    expect(r.kind).toBe('design'); // 设计 2 字段 > 数值 1 字段
+    expect(r.policy.obsThreatFormat).toBe('rows');
+    expect(r.policy.gateExecute).toBe(DEFAULT_POLICY.gateExecute);
+    expect(r.issues.some((x) => x.includes('混车'))).toBe(true);
+    const numericOnly = limitPatch({ ...DEFAULT_POLICY, gateExecute: 0.2 }, DEFAULT_POLICY);
+    expect(numericOnly.kind).toBe('numeric');
+    const none = limitPatch(DEFAULT_POLICY, DEFAULT_POLICY);
+    expect(none.kind).toBe('none');
+  });
+
+  it('枚举补丁进入 diffPatch 与冷却(零改动覆盖)', () => {
+    const target = { ...DEFAULT_POLICY, obsThreatFormat: 'rows' as const };
+    const patch = diffPatch(DEFAULT_POLICY, target);
+    expect(patch['obsThreatFormat']).toEqual({ from: 'named', to: 'rows' });
+    const cds = startCooldowns({}, ['obsThreatFormat'], 3);
+    const { dropped } = applyCooldowns(target, DEFAULT_POLICY, cds, 4);
+    expect(dropped).toEqual(['obsThreatFormat']);
+  });
+});
+
+describe('分析调度器与状态机(docs/15 §3.1/§6.2)', () => {
+  const t = (key: string, priority: number): SchedTask => ({
+    key,
+    kind: 'death',
+    attempt: 1,
+    sig: null,
+    reason: `death(${key})`,
+    priority,
+  });
+
+  it('scheduleTask:同 key 合并;cap 溢出弹最低优先级', () => {
+    let q: SchedTask[] = [];
+    q = scheduleTask(q, t('a', 1)).queue;
+    const m = scheduleTask(q, t('a', 2));
+    expect(m.merged).toBe(true);
+    expect(m.queue).toHaveLength(1);
+    expect(m.queue[0]?.priority).toBe(2); // 留最新
+    let q2: SchedTask[] = [];
+    for (let i = 0; i < 6; i += 1) q2 = scheduleTask(q2, t(`k${i}`, i)).queue;
+    const over = scheduleTask(q2, t('low', 99));
+    expect(over.overflow?.key).toBe('low');
+    expect(over.queue).toHaveLength(6);
+  });
+
+  it('nextTask:backlog 优先于队列;按优先级;taskFailed 2 次后放弃', () => {
+    const backlog = [t('b1', 5)];
+    const queue = [t('q1', 1)];
+    expect(nextTask(backlog, queue)?.key).toBe('b1');
+    expect(nextTask([], queue)?.key).toBe('q1');
+    expect(nextTask([], [])).toBeNull();
+    const r1 = taskFailed(t('x', 1));
+    expect(r1?.attempts).toBe(1);
+    const r2 = taskFailed(r1!);
+    expect(r2?.attempts).toBe(2);
+    expect(taskFailed(r2!)).toBeNull();
+  });
+
+  it('transition:主链 + pause/resume 记原相;非法迁移保持原相', () => {
+    let st: LoopState = { phase: 'IDLE' };
+    st = transition(st, 'start');
+    expect(st.phase).toBe('TRAINING');
+    st = transition(st, 'runEnd');
+    st = transition(st, 'plan');
+    st = transition(st, 'enqueue');
+    st = transition(st, 'dequeue');
+    expect(st.phase).toBe('ANALYZING');
+    st = transition(st, 'propose');
+    st = transition(st, 'verdict');
+    st = transition(st, 'beginRun');
+    expect(st.phase).toBe('TRAINING');
+    const p = transition(st, 'pause');
+    expect(p.phase).toBe('PAUSED');
+    expect(transition(p, 'resume').phase).toBe('TRAINING');
+    expect(transition(st, 'verdict').phase).toBe('TRAINING'); // 非法迁移不生效
+  });
+
+  it('reasonShort:两层文案不互渗', () => {
+    expect(reasonShort('already-analyzed(同一 runId 幂等)')).toBe('已析过');
+    expect(reasonShort('death(pit@gap-1)')).toBe('死亡:pit@gap-1');
+    expect(reasonShort('death-repeat(goomba@goomba-pair)')).toBe('重复死亡:goomba@goomba-pair');
+    expect(reasonShort('win(沉淀成功经验)')).toBe('通关沉淀');
+    expect(reasonShort('plateau(连续 3 局无进展)')).toBe('平台期3局');
+  });
+
+  it('版本账本与回归守卫:recordVersion/restoreVersion/detectRegression', () => {
+    let s = initialEvoState();
+    s = recordVersion(s, {
+      policy: { ...DEFAULT_POLICY, vetoDistPx: 20 },
+      patch: {},
+      originSigs: [],
+      verdict: 'commit',
+      score: 100,
+    });
+    expect(s.championVid).toBe(1);
+    const r = restoreVersion(s, 1);
+    expect(r?.policy.vetoDistPx).toBe(20);
+    expect(r?.state.championScore).toBeNull(); // 强制重测
+    expect(restoreVersion(s, 99)).toBeNull();
+    // 回归:20 局,前 10 局 80% 胜率,近 10 局 20% → 触发
+    const h = Array.from({ length: 20 }, (_, i) => ({
+      iteration: i + 1,
+      won: i < 8 || i >= 18,
+      maxXCol: 50,
+      ticks: 1000,
+    }));
+    const reg = detectRegression(h);
+    expect(reg).not.toBeNull();
+    expect(reg?.current).toBeLessThan(0.5);
   });
 });
