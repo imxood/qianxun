@@ -15,6 +15,7 @@
     "all:check": "pnpm check && pnpm rust:check",
     "build:websearch": "pnpm --dir packages/websearch install --silent && pnpm --dir packages/websearch build",
     "sync:websearch": "pnpm build:websearch && node packages/websearch/scripts/sync-assets.mjs",
+    "sync:pwc": "node scripts/sync-playwright-core.mjs",
     "e2e:build": "tauri build --debug --no-bundle --config e2e/tauri.e2e.conf.json",
     "e2e": "playwright test",
     "e2e:doctor": "npx tsx e2e/doctor.ts",
@@ -40,6 +41,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/mcp": "^0.0.82",
     "@playwright/test": "^1.62.1",
     "@sveltejs/vite-plugin-svelte": "^6.2.0",
     "@tailwindcss/vite": "^4.2.1",
@@ -49,6 +51,7 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-svelte": "^3.8.0",
     "globals": "^17.12.0",
+    "playwright": "1.64.0-alpha-1789764292000",
     "playwright-core": "^1.63.0",
     "prettier": "^3.8.3",
     "prettier-plugin-svelte": "^3.4.0",

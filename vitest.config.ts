@@ -10,6 +10,7 @@ export default defineConfig({
       'e2e/**/*.test.ts',
       'src-tauri/src/bridge/assets/**/*.test.js',
       'src-tauri/src/bridge/assets/**/*.test.ts',
+      'src-tauri/src/playwright/assets/**/*.test.ts',
     ],
   },
 });

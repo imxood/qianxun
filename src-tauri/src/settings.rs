@@ -408,9 +408,6 @@ pub struct ToolsSettings {
     pub laya: LayaSettings,
     /// QWen 本地推理服务（环境页手动启停）。
     pub qwen: QwenSettings,
-    /// playwright-core 的加载路径（R001 browser_* 工具）；空 = 桥内
-    /// 按 tools/playwright-core/ 约定位置与 require 链自动探测。
-    pub playwright_core_path: String,
 }
 
 impl Default for Settings {

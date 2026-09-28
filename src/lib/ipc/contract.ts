@@ -69,6 +69,8 @@ export const IPC_COMMANDS = [
   'bridge_status',
   'websearch_deploy',
   'websearch_status',
+  'playwright_deploy',
+  'playwright_status',
   'moli_status',
   'laya_status',
   'laya_start',
@@ -249,8 +251,6 @@ export interface ToolsSettings {
   moli: MoliSettings;
   laya: LayaSettings;
   qwen: QwenSettings;
-  /** playwright-core 加载路径；空 = 桥按约定位置自动探测。 */
-  playwrightCorePath: string;
 }
 
 export interface Settings {
@@ -286,7 +286,6 @@ export interface SettingsPatch {
     moli?: Partial<MoliSettings>;
     laya?: Partial<LayaSettings>;
     qwen?: Partial<QwenSettings>;
-    playwrightCorePath?: string;
   };
   hotkeys?: Partial<HotkeysSettings>;
   notes?: Partial<NotesSettings>;
@@ -473,6 +472,24 @@ export interface WebsearchStatus {
   deployed: boolean;
   /** cordis.patch.yml 已含本包的 web 覆盖行。 */
   patchEntry: boolean;
+  pluginDir: string;
+  /** DSH 进程当前是否在跑（跑着则需重启才加载）。 */
+  dshRunning: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// playwright_deploy / playwright_status（内置 playwright 工具，MCP 版）
+// ---------------------------------------------------------------------------
+
+/** playwright 状态：部署事实 + 浏览器选择 + DSH 运行态。 */
+export interface PlaywrightStatus {
+  /** vendor 三件套已在 profile node_modules 就位。 */
+  deployed: boolean;
+  /** cordis.patch.yml 已含 qx-playwright 条目。 */
+  patchEntry: boolean;
+  /** 当前浏览器选择：moli / msedge / none。 */
+  browser: 'moli' | 'msedge' | 'none';
+  /** 三件套所在 profile node_modules 目录。 */
   pluginDir: string;
   /** DSH 进程当前是否在跑（跑着则需重启才加载）。 */
   dshRunning: boolean;

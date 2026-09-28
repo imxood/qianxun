@@ -4,9 +4,9 @@
   "version": "0.6.2",
   "identifier": "com.qianxun.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev:web",
+    "beforeDevCommand": "pnpm sync:pwc && pnpm dev:web",
     "devUrl": "http://localhost:5190",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm sync:pwc && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -36,6 +36,9 @@
     "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "千寻 —— 管理DSH的个人工作台",
+    "resources": {
+      "vendor/playwright-mcp/": "playwright-mcp/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

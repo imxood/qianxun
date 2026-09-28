@@ -16,6 +16,7 @@ mod mario;
 mod market;
 mod notes;
 mod paths;
+mod playwright;
 mod remote;
 mod search;
 mod settings;
@@ -211,6 +212,10 @@ pub fn run() {
             // 内置联网搜索：安装包自带能力，启动时幂等确保部署（文件 + patch）。
             websearch::commands::ensure(handle);
 
+            // 内置 playwright 工具（MCP 版 browser use）：vendor 三件套 +
+            // dsh-mcp-client patch 条目，浏览器选择随环境页 moli 设置对齐。
+            playwright::commands::ensure(handle);
+
             // 关闭 WebView2 浏览器加速键：Ctrl+Shift+C 不再误开 devtools
             // 元素选择器、Ctrl+Shift+V 不再触发「原样粘贴」（双重粘贴的
             // 元凶）。同时把主题色方案设为 AUTO（prefers-color-scheme
@@ -322,6 +327,8 @@ pub fn run() {
             bridge::commands::plugins_list,
             websearch::commands::websearch_deploy,
             websearch::commands::websearch_status,
+            playwright::commands::playwright_deploy,
+            playwright::commands::playwright_status,
             tools::moli::moli_status,
             tools::laya::laya_status,
             tools::laya::laya_start,

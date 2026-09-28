@@ -318,7 +318,8 @@ V0.5.1 仅同锚点内的 alpha 递增（`0.1.6-alpha.1` → `0.1.6-alpha.2`）�
 - [ ] 千寻版本号 `0.5.2` → `0.6.0` ✅（包元数据：root / tauri / mobile / Cargo.lock / mobile lockfile / iOS MARKETING_VERSION / Android versionName）
 - [ ] `PINNED_VERSION` `0.1.7-alpha.1` → `0.1.7-alpha.2` ✅（0.6.1 修订，代码侧；配套：内置搜索 fetch provider 接入 moli（web_fetch 真实状态码/JS 渲染/降噪）+ 设置卡 register API 适配守卫）
 - [ ] `PINNED_VERSION` `0.1.7-alpha.2` → `0.1.7-rc.1` ✅（0.6.2 修订，代码侧；配套：千寻版本号 0.6.1 → 0.6.2 全量包元数据同步）
-- [ ] DSH `0.1.7-alpha.2` 真机验收（应用内升级运行时后过一遍启动/搜索/抓取）
+- [ ] `PINNED_VERSION` `0.1.7-rc.1` → `0.1.7-rc.2` ✅（代码侧；配套：内置 playwright 工具改 launcher + `moli serve --layout` + `--cdp-endpoint`（moli 非 Chromium 壳，executablePath 直拉必败）+ 截图微信式窗口感知 `shots_window_at`）
+- [ ] DSH `0.1.7-rc.2` 真机验收（应用内升级运行时后过一遍启动/搜索/抓取）
 - [ ] iOS MARKETING_VERSION / Android versionName 漂移修正 ✅（0.5.1 / 0.5.2 两次修订漏同步原生壳，停在 0.5.0，本次一并归位）
 - [ ] install / market 单元测试通过（兼容判定对 rc/alpha 钉版「原样 + 去预发布」双形态宽松语义不变）
 - [ ] DSH 0.1.7 真机验收（按 V0.2.1 纪律：readiness 行格式 / 鉴权契约 / iframe 链路 / 网关代持）

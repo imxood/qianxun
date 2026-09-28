@@ -10,7 +10,6 @@ use crate::settings::Settings;
 const PLUGIN_ID: &str = "qx-bridge";
 const PLUGIN_INDEX: &str = include_str!("assets/index.js");
 const PLUGIN_WEBSEARCH: &str = include_str!("assets/websearch.js");
-const PLUGIN_BROWSERSESSION: &str = include_str!("assets/browsersession.js");
 const PLUGIN_PACKAGE_JSON: &str = include_str!("assets/package.json");
 const PATCH_MARK: &str = "id: qx-bridge";
 
@@ -44,7 +43,6 @@ pub fn bridge_deploy(app: AppHandle) -> Result<BridgeStatus> {
         .map_err(|cause| Error::Bridge(format!("建插件目录失败：{cause}")))?;
     std::fs::write(plugin_dir.join("index.js"), PLUGIN_INDEX)
         .and_then(|_| std::fs::write(plugin_dir.join("websearch.js"), PLUGIN_WEBSEARCH))
-        .and_then(|_| std::fs::write(plugin_dir.join("browsersession.js"), PLUGIN_BROWSERSESSION))
         .and_then(|_| std::fs::write(plugin_dir.join("package.json"), PLUGIN_PACKAGE_JSON))
         .map_err(|cause| Error::Bridge(format!("写插件文件失败：{cause}")))?;
 
@@ -53,8 +51,7 @@ pub fn bridge_deploy(app: AppHandle) -> Result<BridgeStatus> {
     update_patch(
         &patch_path,
         &vault,
-        &moli_path_of(&settings),
-        &playwright_core_path_of(&settings),
+        &moli_path_of(&app, &settings),
         &proxy_of(&settings),
     )?;
 
@@ -173,7 +170,6 @@ fn plugin_stale(plugin_dir: &std::path::Path) -> bool {
     [
         ("index.js", PLUGIN_INDEX),
         ("websearch.js", PLUGIN_WEBSEARCH),
-        ("browsersession.js", PLUGIN_BROWSERSESSION),
         ("package.json", PLUGIN_PACKAGE_JSON),
     ]
     .iter()
@@ -184,14 +180,13 @@ fn plugin_stale(plugin_dir: &std::path::Path) -> bool {
     })
 }
 
-/// moli 自备路径（可为空 = 桥走降级）；空值也写入，保证 patch 与设置一致。
-fn moli_path_of(settings: &Settings) -> String {
-    settings.tools.moli.binary_path.trim().to_owned()
-}
-
-/// playwright-core 加载路径（可为空 = 桥内自动探测）。
-fn playwright_core_path_of(settings: &Settings) -> String {
-    settings.tools.playwright_core_path.trim().to_owned()
+/// moli 解析路径（开箱即用浏览器选择的关键）：自备 binaryPath → 受管安装
+/// → 系统 PATH 三源命中才写入 patch；全未命中写空 = 桥侧落到 Edge 直启
+/// 兜底。三源解析不做进程探测（deploy 保持瞬时）。
+fn moli_path_of(app: &AppHandle, settings: &Settings) -> String {
+    crate::tools::moli::resolve_binary(app, settings)
+        .map(|(path, _)| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// moli 抓取代理（R001-TUN）：空 = 直连；"off" = 显式直连；其它传
@@ -239,32 +234,21 @@ fn patch_path(app: &AppHandle, settings: &Settings) -> Result<std::path::PathBuf
 /// patch 文本级维护（三态）：
 /// `[]` → 写完整模板；已有条目 → 只替换 vault 行；其余 → 文末追加 insert 块。
 /// 个人工具的确定性维护，不引 YAML 依赖；任何形态下 `id: qx-bridge` 恒定可寻。
-fn update_patch(
-    patch: &std::path::Path,
-    vault: &str,
-    moli_path: &str,
-    playwright_core_path: &str,
-    proxy: &str,
-) -> Result<()> {
+fn update_patch(patch: &std::path::Path, vault: &str, moli_path: &str, proxy: &str) -> Result<()> {
     // YAML 双引号串里反斜杠是转义符：统一正斜杠（Node/Windows 均接受）。
     let vault_yaml = format!("\"{}\"", vault.replace('\\', "/").replace('"', ""));
     let moli_yaml = format!("\"{}\"", moli_path.replace('\\', "/").replace('"', ""));
-    let pw_yaml = format!(
-        "\"{}\"",
-        playwright_core_path.replace('\\', "/").replace('"', "")
-    );
     let proxy_yaml = format!("\"{}\"", proxy.replace('\\', "/").replace('"', ""));
     let entry_yaml = format!(
-        "- insert:\n    - id: {PLUGIN_ID}\n      name: {PLUGIN_ID}\n      config:\n        vault: {vault_yaml}\n        moliPath: {moli_yaml}\n        playwrightCorePath: {pw_yaml}\n        proxy: {proxy_yaml}\n"
+        "- insert:\n    - id: {PLUGIN_ID}\n      name: {PLUGIN_ID}\n      config:\n        vault: {vault_yaml}\n        moliPath: {moli_yaml}\n        proxy: {proxy_yaml}\n"
     );
     let text = std::fs::read_to_string(patch).unwrap_or_default();
     let new_text = if text.trim() == "[]" {
         format!("# qx-bridge（千寻笔记桥）：由千寻写入，请勿手工编辑\n{entry_yaml}")
     } else if text.contains(PATCH_MARK) {
-        // 条目已存在：整块替换 config 各行（vault / moliPath / playwrightCorePath / proxy）。
+        // 条目已存在：整块替换 config 各行（vault / moliPath / proxy）。
         let mut replaced_vault = false;
         let mut replaced_moli = false;
-        let mut replaced_pw = false;
         let mut replaced_proxy = false;
         let mut lines: Vec<String> = text
             .lines()
@@ -276,8 +260,8 @@ fn update_patch(
                     replaced_moli = true;
                     format!("        moliPath: {moli_yaml}")
                 } else if line.trim_start().starts_with("playwrightCorePath:") {
-                    replaced_pw = true;
-                    format!("        playwrightCorePath: {pw_yaml}")
+                    // 旧版残留键（playwright 浏览器工具已移交 MCP 侧）：删除。
+                    String::new()
                 } else if line.trim_start().starts_with("proxy:") {
                     replaced_proxy = true;
                     format!("        proxy: {proxy_yaml}")
@@ -303,16 +287,11 @@ fn update_patch(
             }
         }
         if !replaced_proxy {
-            // 旧版 patch 无 proxy（R001-TUN 前）：在 playwrightCorePath 行后补插。
-            let anchor = lines
+            // 旧版 patch 无 proxy（R001-TUN 前）：在 moliPath 行后补插。
+            if let Some(index) = lines
                 .iter()
-                .position(|line| line.trim_start().starts_with("playwrightCorePath:"))
-                .or_else(|| {
-                    lines
-                        .iter()
-                        .position(|line| line.trim_start().starts_with("moliPath:"))
-                });
-            if let Some(index) = anchor {
+                .position(|line| line.trim_start().starts_with("moliPath:"))
+            {
                 lines.insert(index + 1, format!("        proxy: {proxy_yaml}"));
             }
         }
@@ -391,20 +370,22 @@ mod tests {
 
         // 空模板 → 完整条目（含 moliPath 与 proxy，R001/R001-TUN）。
         std::fs::write(&patch, "[]\n").unwrap();
-        update_patch(&patch, r"D:\docs\千寻笔记", "", "", "").unwrap();
+        update_patch(&patch, r"D:\docs\千寻笔记", "", "").unwrap();
         let text = std::fs::read_to_string(&patch).unwrap();
         assert!(text.contains("id: qx-bridge"));
         assert!(text.contains(r#"vault: "D:/docs/千寻笔记""#));
         assert!(text.contains(r#"moliPath: """#));
-        assert!(text.contains(r#"playwrightCorePath: """#));
         assert!(text.contains(r#"proxy: """#));
+        assert!(
+            !text.contains("playwrightCorePath"),
+            "旧键不得再写入：{text}"
+        );
 
         // 已有条目 → 只换 vault / moliPath / proxy，条目不重复。
         update_patch(
             &patch,
             r"D:\other\vault",
             "D:/tools/moli.exe",
-            "",
             "socks5://127.0.0.1:1080",
         )
         .unwrap();
@@ -414,22 +395,31 @@ mod tests {
         assert!(text.contains(r#"proxy: "socks5://127.0.0.1:1080""#));
         assert_eq!(text.matches("id: qx-bridge").count(), 1);
         assert_eq!(text.matches("moliPath:").count(), 1);
-        assert_eq!(text.matches("playwrightCorePath:").count(), 1);
         assert_eq!(text.matches("proxy:").count(), 1);
 
         // 旧版条目无 proxy 行 → 补插一行，不重复、不破坏既有行。
         let legacy = "# qx-bridge（千寻笔记桥）：由千寻写入，请勿手工编辑\n- insert:\n    - id: qx-bridge\n      name: qx-bridge\n      config:\n        vault: \"D:/v\"\n        moliPath: \"\"\n";
         std::fs::write(&patch, legacy).unwrap();
-        update_patch(&patch, r"D:\v", "", "", "off").unwrap();
+        update_patch(&patch, r"D:\v", "", "off").unwrap();
         let text = std::fs::read_to_string(&patch).unwrap();
         assert!(text.contains(r#"proxy: "off""#));
         assert_eq!(text.matches("proxy:").count(), 1);
         assert!(text.contains(r#"vault: "D:/v""#));
         assert!(text.contains(r#"moliPath: """#));
 
+        // 旧版条目带 playwrightCorePath 残留键 → 对齐时删除。
+        let legacy_pw = "# qx-bridge（千寻笔记桥）：由千寻写入，请勿手工编辑\n- insert:\n    - id: qx-bridge\n      name: qx-bridge\n      config:\n        vault: \"D:/v\"\n        moliPath: \"\"\n        playwrightCorePath: \"D:/old/pw\"\n        proxy: \"\"\n";
+        std::fs::write(&patch, legacy_pw).unwrap();
+        update_patch(&patch, r"D:\v", "", "").unwrap();
+        let text = std::fs::read_to_string(&patch).unwrap();
+        assert!(
+            !text.contains("playwrightCorePath"),
+            "残留键应被清理：{text}"
+        );
+
         // 用户已有其他条目 → 文末追加。
         std::fs::write(&patch, "- insert:\n    - id: my-thing\n      name: foo\n").unwrap();
-        update_patch(&patch, r"D:\docs\v", "", "", "").unwrap();
+        update_patch(&patch, r"D:\docs\v", "", "").unwrap();
         let text = std::fs::read_to_string(&patch).unwrap();
         assert!(text.contains("id: my-thing"));
         assert!(text.contains("id: qx-bridge"));
@@ -440,7 +430,7 @@ mod tests {
             "# Your patch layer for this dsh profile, applied after every bundle layer:\n# a top-level YAML array of loader patch entries.\n[]\n",
         )
         .unwrap();
-        update_patch(&patch, r"D:\docs\v2", "", "", "").unwrap();
+        update_patch(&patch, r"D:\docs\v2", "", "").unwrap();
         let text = std::fs::read_to_string(&patch).unwrap();
         assert!(!text.contains("[]"), "[] 残留会产出非法 YAML：{text}");
         assert!(text.contains("id: qx-bridge"));
@@ -460,7 +450,6 @@ mod tests {
         // 全部写入当前内置内容 → 新鲜。
         std::fs::write(dir.join("index.js"), PLUGIN_INDEX).unwrap();
         std::fs::write(dir.join("websearch.js"), PLUGIN_WEBSEARCH).unwrap();
-        std::fs::write(dir.join("browsersession.js"), PLUGIN_BROWSERSESSION).unwrap();
         std::fs::write(dir.join("package.json"), PLUGIN_PACKAGE_JSON).unwrap();
         assert!(!plugin_stale(&dir));
 

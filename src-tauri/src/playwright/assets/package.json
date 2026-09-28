@@ -1,0 +1,7 @@
+{
+  "name": "qx-playwright",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "launcher.js"
+}

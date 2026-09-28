@@ -54,7 +54,7 @@ function makeInnerCtx() {
 }
 
 function makeVaultConfig() {
-  return { vault: mkdtempSync(join(tmpdir(), "qx-apply-")), moliPath: "", playwrightCorePath: "" };
+  return { vault: mkdtempSync(join(tmpdir(), "qx-apply-")), moliPath: "", proxy: "" };
 }
 
 /** 模拟 node:http 的 req/res（够 handler 用）。rawBody 非空时按原样发送。 */
@@ -110,7 +110,8 @@ describe("apply HTTP 通道装配", () => {
     const names = tools.map((tool) => tool.name);
     expect(names).toContain("web_search");
     expect(names).toContain("web_read");
-    expect(names).toContain("browser_open");
+    // 浏览器自动化已移交 qx-playwright（MCP 版 @playwright/mcp）。
+    expect(names).not.toContain("browser_open");
   });
 
   it("内层装载挂三条路由：/qx/web/search、/qx/web/read、/qx/notes/organize", () => {

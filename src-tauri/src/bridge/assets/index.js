@@ -9,11 +9,8 @@
  *   服务端组装上下文并经 `llm` 服务流式生成「AI 整理」结果。
  */
 import { execFile } from "node:child_process";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { buildFetchArgs, buildSearchUrl, itemsToMarkdown, parseBingRss, parseSearchMarkdown, parseSearxngJson } from "./websearch.js";
-import { createRequire } from "node:module";
-import { createBrowserAutomation } from "./browsersession.js";
 import { readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join, dirname, resolve as resolvePath } from "node:path";
 
@@ -131,73 +128,6 @@ function makeWeb(config) {
     },
   };
 }
-
-/** 加载 playwright-core：优先用户配置路径，其次桥所在解析链（开发环境）。 */
-/** CJS/ESM interop 归一：拿到底层 chromium 命名空间。 */
-function pickChromium(mod) {
-  return mod?.chromium ?? mod?.default?.chromium ?? mod;
-}
-
-function loadChromium(preferredPath) {
-  return async () => {
-    const require = createRequire(import.meta.url);
-    if (preferredPath) {
-      try {
-        return pickChromium(require(preferredPath));
-      } catch {
-        // 路径失效 → 落到裸解析再试一次。
-      }
-    }
-    try {
-      return pickChromium(require("playwright-core"));
-    } catch {
-      throw new Error(
-        "未找到 playwright-core：请在设置页配置其安装路径（npm 包 playwright-core，零依赖，解压即用）",
-      );
-    }
-  };
-}
-
-/** 拉起 moli serve --layout（CDP 端口临时分配），等待 /json/version 就绪。 */
-function startMoliServe(moliPath) {
-  return async () => {
-    if (!moliPath) throw new Error("moli 未配置，浏览器自动化不可用");
-    const { spawn } = await import("node:child_process");
-    const port = 19290 + Math.floor(Math.random() * 100);
-    const child = spawn(moliPath, ["serve", "--layout", "--port", String(port)], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    const endpoint = `http://127.0.0.1:${port}`;
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null) {
-        throw new Error(`moli serve 提前退出（code ${child.exitCode}）`);
-      }
-      try {
-        const response = await fetch(`${endpoint}/json/version`);
-        if (response.ok) {
-          return { endpoint, stop: () => child.kill() };
-        }
-      } catch {
-        // 端口未就绪，继续等。
-      }
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-    child.kill();
-    throw new Error("moli serve 15s 未就绪");
-  };
-}
-
-/** 浏览器自动化（playwright-core + moli serve --layout，R001 D11）。 */
-function makeAutomation(config) {
-  const moliPath = String(config.moliPath ?? "").trim();
-  return createBrowserAutomation({
-    loadChromium: loadChromium(String(config.playwrightCorePath ?? "").trim()),
-    startServer: startMoliServe(moliPath),
-  });
-}
-
 // ---- frontmatter（与千寻 Rust notes::commands 语义一致） ----
 
 function parseFrontmatter(text) {
@@ -466,93 +396,6 @@ export function apply(ctx, config) {
     }),
   );
 
-  // ---- browser_*（playwright-core + moli serve --layout） ----
-  const automation = makeAutomation(config);
-
-  ctx.systemPrompt.section({
-    name: "tool:browser_*",
-    order: 90,
-    text: "浏览器自动化：browser_open 打开页面后可用 browser_snapshot 查看可交互元素（选择器线索），browser_click / browser_fill 操作，browser_screenshot 截图（返回文件路径），browser_close 关闭。全部经 Moli 无头浏览器执行。",
-  });
-  const browserTools = [
-    {
-      name: "browser_open",
-      description: "打开网页（Moli 无头浏览器，JS 渲染）。返回页面标题。",
-      parameters: {
-        type: "object",
-        properties: { url: { type: "string", description: "http(s) 网页地址" } },
-        required: ["url"],
-      },
-      run: (args) => automation.open(String(args.url ?? "")),
-    },
-    {
-      name: "browser_snapshot",
-      description: "列出当前页可交互元素（tag#id 文本），供 click/fill 定位。",
-      parameters: { type: "object", properties: {} },
-      run: () => automation.snapshot(),
-    },
-    {
-      name: "browser_click",
-      description: "点击当前页元素（CSS 选择器，来自 browser_snapshot）。",
-      parameters: {
-        type: "object",
-        properties: { selector: { type: "string", description: "CSS 选择器" } },
-        required: ["selector"],
-      },
-      run: (args) => automation.click(String(args.selector ?? "")),
-    },
-    {
-      name: "browser_fill",
-      description: "填充当前页输入框（CSS 选择器 + 文本）。",
-      parameters: {
-        type: "object",
-        properties: {
-          selector: { type: "string", description: "CSS 选择器" },
-          text: { type: "string", description: "要填入的文本" },
-        },
-        required: ["selector", "text"],
-      },
-      run: (args) => automation.fill(String(args.selector ?? ""), String(args.text ?? "")),
-    },
-    {
-      name: "browser_screenshot",
-      description: "视口截图（PNG 落盘），返回文件路径。",
-      parameters: { type: "object", properties: {} },
-      run: async () =>
-        "截图已保存：" +
-        String(
-          await automation.screenshot(
-            `${tmpdir()}\\qx-bridge-shot-${Date.now()}.png`,
-          ),
-        ),
-    },
-  ];
-  for (const tool of browserTools) {
-    ctx.tools.register(
-      defineSimpleTool({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        output: { schema: stringOut, render: (_args, value) => textEnvelope(tool.name, value.result) },
-        isConcurrencySafe: () => false,
-        async execute(args) {
-          return { result: String(await tool.run(args)) };
-        },
-      }),
-    );
-  }
-  ctx.tools.register(
-    defineSimpleTool({
-      name: "browser_close",
-      description: "关闭浏览器会话与 Moli serve 进程。",
-      parameters: { type: "object", properties: {} },
-      output: { schema: stringOut, render: (_args, value) => textEnvelope("browser_close", value.result) },
-      isConcurrencySafe: () => false,
-      async execute() {
-        return { result: await automation.close() };
-      },
-    }),
-  );
 
   // ---- HTTP 通道（可选服务：webServer / llm）----
   // 声明式依赖（ctx.inject）：webServer/llm 未 ACTIVE 时内层插件保持
