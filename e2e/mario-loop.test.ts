@@ -40,7 +40,7 @@ describe('自主进化闭环(本地)', () => {
     expect(state.evo.iteration).toBe(2);
   }, 60_000);
 
-  it('refineWithQwen:Qwen 的越界补丁被沙箱钳制,手册限长', async () => {
+  it('refineWithQwen:越界补丁钳制 + 未知顶层键可观测 + insight 可证伪', async () => {
     const fake = (async () => ({
       ok: true,
       json: async () => ({
@@ -48,7 +48,7 @@ describe('自主进化闭环(本地)', () => {
           {
             message: {
               content:
-                '{"playbook":"pipe46 必须满速助跑;gap1 提前 8px 起跳。","policy_patch":{"intervalMs":9999,"goombaWindow":[-99,88],"gateExecute":0.3}}',
+                '{"playbook":"pipe46 必须满速助跑;gap1 提前 8px 起跳。","policy_patch":{"intervalMs":9999,"goombaWindow":[-99,88],"gateExecute":0.3},"per_tick":{"tick":1,"action":"jump"},"insight":{"kind":"claim","claim":"前扫288px 低置信减半","metric":"avgConf","direction":"up","evidenceIter":[3]}}',
             },
           },
         ],
@@ -74,6 +74,9 @@ describe('自主进化闭环(本地)', () => {
         deaths: [],
         deathCauses: [{ cause: 'goomba', count: 3 }],
         stallSites: [{ landmark: 'pipe@46(h4)', count: 2, maxXCol: 45.8 }],
+        thrashSites: [],
+        churnSites: [],
+        firstDeathTick: null,
         actionMix: [],
         vetoes: 4,
         timeline: [],
@@ -89,5 +92,10 @@ describe('自主进化闭环(本地)', () => {
     expect(r.policy.intervalMs).toBe(600); // 钳制
     expect(r.policy.goombaWindow).toEqual([-20, 60]); // 钳制
     expect(r.policy.gateExecute).toBe(0.3); // 合法值直接生效
+    // 越权顶层键可观测(docs/15 §6.6 硬化①)
+    expect(r.issues.some((x) => x.includes('越权顶层键 per_tick'))).toBe(true);
+    // 可证伪 insight 解析(docs/15 §6.5)
+    expect(r.insight?.metric).toBe('avgConf');
+    expect(r.insight?.direction).toBe('up');
   });
 });
