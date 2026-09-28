@@ -2,9 +2,9 @@
  * 自主进化闭环(docs/13,本地侧;全程不经云端)。
  *
  *   训练局(champion,Laya 反射)
- *     → 规则复盘(postmortem.ts)
- *     → 触发器(新死因/通关/平台期才调 Qwen,同签名去重,runId 幂等)
- *     → Qwen 提案(新版手册 + 沙箱内策略补丁)
+ *     → 规则复盘(postmortem.ts,含过程异常:首死/空转/门控抖动)
+ *     → 触发器(docs/14 §2:每死必析,签名重复只标注 death-repeat;runId 幂等)
+ *     → Qwen 提案(新版手册 + 沙箱内策略补丁 + Laya 经验 insight → insights.md)
  *     → sanitize → 限幅(≤3 字段、±20%/±8px)→ 冷却期过滤 → **候选**
  *   候选须经 K 局试跑中位数对比 champion:过 +ε 才转正(commit),
  *   否则回滚 + 被否决字段冷却 M 局。审计 evolution.jsonl 只追加。
@@ -27,16 +27,19 @@ import {
   EVAL_RUNS_DEFAULT,
   EVOLUTION_FILE,
   HISTORY_FILE,
+  INSIGHTS_FILE,
   PLAYBOOK_FILE,
   POLICY_FILE,
   STATE_FILE,
   applyCooldowns,
   appendHistory,
+  appendInsight,
   auditLine,
   diffPatch,
   evalMedian,
   judgeCandidate,
   limitPatch,
+  obsSnapshotOf,
   parseEvoState,
   parseHistory,
   parsePolicyFile,
@@ -86,6 +89,8 @@ export type IterationResult = {
 export type LoopState = {
   envelope: PolicyEnvelope;
   playbook: string;
+  /** Laya 使用经验沉淀(docs/14 §6,insights.md)。 */
+  insights: string;
   history: HistoryRow[];
   evo: EvoState;
 };
@@ -130,12 +135,13 @@ function readText(dir: string, name: string): string | null {
 export function loadState(dir: string): LoopState {
   const { envelope } = parsePolicyFile(readText(dir, POLICY_FILE));
   const playbook = readText(dir, PLAYBOOK_FILE) ?? '';
+  const insights = readText(dir, INSIGHTS_FILE) ?? '';
   // 历史:history.json 优先;旧 evolution.json 兼容读
   let history = parseHistory(readText(dir, HISTORY_FILE));
   if (history.length === 0) history = parseHistory(readText(dir, 'evolution.json'));
   const { state: evo } = parseEvoState(readText(dir, STATE_FILE));
   setPolicy(envelope.policy);
-  return { envelope, playbook, history, evo };
+  return { envelope, playbook, insights, history, evo };
 }
 
 export function saveState(dir: string, state: LoopState): void {
@@ -143,6 +149,7 @@ export function saveState(dir: string, state: LoopState): void {
   const envelope: PolicyEnvelope = { ...state.envelope, updatedAt: new Date().toISOString() };
   fs.writeFileSync(path.join(dir, POLICY_FILE), JSON.stringify(envelope, null, 2));
   fs.writeFileSync(path.join(dir, PLAYBOOK_FILE), state.playbook.slice(0, PLAYBOOK_MAX_CHARS));
+  fs.writeFileSync(path.join(dir, INSIGHTS_FILE), state.insights);
   fs.writeFileSync(path.join(dir, HISTORY_FILE), JSON.stringify(state.history, null, 2));
   fs.writeFileSync(path.join(dir, STATE_FILE), JSON.stringify(state.evo, null, 2));
 }
@@ -203,6 +210,7 @@ export async function runHeadlessSession(opts: {
             event: 'death',
             cause: e.cause,
             x: Math.round(s.mario.x),
+            tick: s.tick,
             attempt: s.attempts,
           });
         } else if (e.type === 'win') {
@@ -231,9 +239,10 @@ export async function refineWithQwen(input: {
   report: PostmortemReport;
   policy: PolicyProfile;
   history: HistoryRow[];
+  reason?: string;
   endpoint?: string;
   fetchImpl?: typeof fetch;
-}): Promise<{ playbook: string; policy: PolicyProfile; issues: string[] }> {
+}): Promise<{ playbook: string; policy: PolicyProfile; insight: string; issues: string[] }> {
   return refineViaQwen(input);
 }
 
@@ -343,7 +352,7 @@ export async function runLoop(opts: {
         ticks: run.ticks,
       });
 
-      // ③ 触发器:有新信息才调 Qwen
+      // ③ 触发器:每死必析(docs/14 §2,签名重复只标注不去重)
       if (opts.mode === 'reflex') {
         const trigger = shouldInvokeQwen(state.evo, run.report, run.runId);
         triggerReason = trigger.reason;
@@ -354,8 +363,20 @@ export async function runLoop(opts: {
             report: run.report,
             policy: champion,
             history: state.history,
+            reason: trigger.reason,
           });
           state.playbook = refined.playbook; // 手册立即沉淀(教训不回滚)
+          const obs = obsSnapshotOf(champion);
+          if (refined.insight !== '') {
+            // insight 立即沉淀(docs/14 §6):与手册同属"教训",不回滚
+            state.insights = appendInsight(
+              state.insights,
+              state.evo.iteration + 1,
+              refined.insight,
+              obs,
+            );
+            log(`[局 ${i}] Laya 经验 +1:${refined.insight.slice(0, 60)}`);
+          }
           const limited = limitPatch(refined.policy, champion);
           const cooled = applyCooldowns(
             limited.policy,
@@ -381,6 +402,7 @@ export async function runLoop(opts: {
               action: 'propose',
               reason: trigger.reason,
               patch,
+              obs,
               issues: policyIssues,
             });
             log(
@@ -396,6 +418,7 @@ export async function runLoop(opts: {
               actor: 'qwen',
               action: 'skip',
               reason: '补丁为空或与 champion 无差异',
+              obs,
               issues: policyIssues,
             });
             log(`[局 ${i}] Qwen 补丁无有效变更,丢弃(手册仍更新)`);

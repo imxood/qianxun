@@ -18,16 +18,19 @@
   import {
     EVOLUTION_FILE,
     HISTORY_FILE,
+    INSIGHTS_FILE,
     PLAYBOOK_FILE,
     POLICY_FILE,
     STATE_FILE,
     applyCooldowns,
     appendHistory,
+    appendInsight,
     auditLine,
     diffPatch,
     initialEvoState,
     judgeCandidate,
     limitPatch,
+    obsSnapshotOf,
     parseAuditLines,
     parseEvoState,
     parseHistory,
@@ -94,6 +97,8 @@
   let rippleTick: number | null = null;
   /** Qwen 策略手册(滚动上下文,持久于 mario 数据根 playbook.md)。 */
   let playbook = $state('');
+  /** Laya 使用经验沉淀(docs/14 §6,持久于 insights.md)。 */
+  let insights = $state('');
   let qwenRefining = $state(false);
   let runHistory = $state<HistoryRow[]>([]);
 
@@ -144,6 +149,11 @@
   function persistPlaybook(): void {
     void getMarioStore()
       .write(PLAYBOOK_FILE, playbook)
+      .catch(() => {});
+  }
+  function persistInsights(): void {
+    void getMarioStore()
+      .write(INSIGHTS_FILE, insights)
       .catch(() => {});
   }
   function persistHistory(): void {
@@ -353,6 +363,7 @@
               event: 'death',
               cause: e.cause,
               x: Math.round(s.mario.x),
+              tick: s.tick,
               attempt: s.attempts,
             });
             // 第 3 次死亡自动出复盘(失败密度过高 = 该局必须被检讨)
@@ -431,7 +442,7 @@
     });
     phase = 'running';
     void driver.startSession({
-      encoding: 'v1-profile',
+      encoding: 'v2-obs',
       intervalMs: runPolicy.intervalMs,
       gateExecute: runPolicy.gateExecute,
       gateEscalate: runPolicy.gateEscalate,
@@ -495,7 +506,7 @@
       }
     }
 
-    // ② Qwen 触发器(docs/13 §3):有新信息才调;runId 幂等;同死因签名去重
+    // ② Qwen 触发器(docs/14 §2):每死必析,签名重复只标注不去重;runId 幂等
     const trigger = shouldInvokeQwen(evo, report, driver.runId);
     if (qwenOk && trigger.invoke) {
       evo = recordRun(evo, report, driver.runId, true);
@@ -508,9 +519,10 @@
   }
 
   /**
-   * 局后分析(docs/13 §3.2):触发器放行后调用本地 Qwen(:17230)。
+   * 局后分析(docs/14):每局死亡/通关都调用本地 Qwen(:17230)。
    * ①新版手册(≤1600 字)立即沉淀持久;②策略补丁经 sanitize → 限幅 → 冷却
-   * 过滤后成为**候选**,绝不热生效——由用户 试用/采纳/丢弃 处置。
+   * 过滤后成为**候选**,绝不热生效——由用户 试用/采纳/丢弃 处置;
+   * ③insight(可泛化 Laya 经验,≤200 字)追加进 insights.md。
    * 失败静默降级——规则复盘已在手,游戏照常。
    */
   async function qwenRefineAfterRun(report: PostmortemReport, reason: string): Promise<void> {
@@ -518,9 +530,24 @@
     qwenRefining = true;
     try {
       const champion = getPolicy();
-      const r = await refineViaQwen({ report, playbook, policy: champion, history: runHistory });
+      const obs = obsSnapshotOf(champion);
+      const r = await refineViaQwen({
+        report,
+        playbook,
+        policy: champion,
+        history: runHistory,
+        reason,
+      });
       playbook = r.playbook;
       persistPlaybook();
+      if (r.insight !== '') {
+        insights = appendInsight(insights, evo.iteration, r.insight, obs);
+        persistInsights();
+        pushLog(
+          'text-violet-400',
+          `Laya 经验 +1:${r.insight.slice(0, 60)}${r.insight.length > 60 ? '…' : ''}`,
+        );
+      }
       const limited = limitPatch(r.policy, champion);
       const cooled = applyCooldowns(limited.policy, champion, evo.cooldowns, evo.iteration);
       const patch = diffPatch(champion, cooled.policy);
@@ -534,6 +561,7 @@
           actor: 'qwen',
           action: 'skip',
           reason: '补丁为空或与 champion 无差异',
+          obs,
           issues,
         });
         pushLog('text-slate-400', `Qwen 分析完成:手册 ${playbook.length} 字 · 补丁无有效变更`);
@@ -549,6 +577,7 @@
         action: 'propose',
         reason,
         patch,
+        obs,
         issues,
       });
       pushLog(
@@ -591,6 +620,7 @@
       syncSettingsFromPolicy(envelope.policy);
       playbook =
         (await store.read(PLAYBOOK_FILE)) ?? localStorage.getItem('qx-mario-playbook') ?? '';
+      insights = (await store.read(INSIGHTS_FILE)) ?? '';
       runHistory = parseHistory(await store.read(HISTORY_FILE));
       if (runHistory.length === 0) {
         try {
@@ -1124,6 +1154,24 @@
               class="mt-1 max-h-[24vh] overflow-auto rounded-lg bg-[#0d0f14] p-2 font-mono text-[10px] leading-relaxed text-slate-300">{playbook}</pre>
           </details>
         {/if}
+
+        <!-- 观测配置 + Laya 经验沉淀(docs/14) -->
+        <div class="mb-3">
+          <div class="font-mono text-[10px] text-muted">
+            观测 v2:{getPolicy().obsProfileCols} 列 / 前扫 {getPolicy().obsThreatsLookPx}px / pose
+            {getPolicy().obsIncludePose ? 'on' : 'off'} / subgoal
+            {getPolicy().obsIncludeSubgoal ? 'on' : 'off'}
+          </div>
+          {#if insights}
+            <details class="mt-1">
+              <summary class="cursor-pointer text-[11px] text-muted hover:text-white">
+                Laya 使用经验({insights.split('\n').filter((l) => l.startsWith('- ')).length} 条 · insights.md)
+              </summary>
+              <pre
+                class="mt-1 max-h-[24vh] overflow-auto rounded-lg bg-[#0d0f14] p-2 font-mono text-[10px] leading-relaxed text-violet-200/80">{insights}</pre>
+            </details>
+          {/if}
+        </div>
 
         <!-- 审计尾 -->
         <div class="text-[10px] uppercase tracking-[0.08em] text-muted">
