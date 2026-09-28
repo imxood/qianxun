@@ -12,9 +12,27 @@ use crate::window;
 /// 状态变化时更新 tooltip 的入口（持有托盘句柄）。
 static TRAY: std::sync::OnceLock<TrayIcon> = std::sync::OnceLock::new();
 
+/// 「退出 UI」菜单句柄：轻量模式下置灰（UI 已不在，无可退出）。
+static EXIT_UI: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+
+/// 轻量模式切换 → 菜单可用态。失败静默：菜单态不是关键路径。
+pub fn reflect_light_mode(light: bool) {
+    if let Some(item) = EXIT_UI.get() {
+        let _ = item.set_enabled(!light);
+    }
+}
+
 pub fn build(app: &AppHandle) -> Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示千寻", true, None::<&str>)
+    // 「进入 UI」双重语义：常态 = 显示/聚焦已有主窗；轻量模式 = 重建
+    // webview 回到 UI（rebuild_main 对「无旧窗」有直建分支）。
+    let show = MenuItem::with_id(app, "enter-ui", "进入 UI", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
+    // 退出 UI（轻量模式）：销毁主窗 webview，进程只留核心——托盘、
+    // DSH supervisor、网关、截屏与侧车管理全部照常。是 UI 异常/资源
+    // 紧张时的逃生门（对齐 clash-verge-rev 的轻量模式）。
+    let exit_ui = MenuItem::with_id(app, "exit-ui", "退出 UI", true, None::<&str>)
+        .map_err(|error| Error::Tray(error.to_string()))?;
+    let _ = EXIT_UI.set(exit_ui.clone());
     // 重建界面: webview 白屏/显示异常时销毁主窗的 WebView2 实例并整窗
     // 重建（新 controller + 渲染进程；supervisor 与后端零扰动）。页面级
     // reload 修不了 WebView2 层的挂死——reload 是 fire-and-forget，往
@@ -35,6 +53,7 @@ pub fn build(app: &AppHandle) -> Result<()> {
         app,
         &[
             &show,
+            &exit_ui,
             &rebuild_ui,
             &snip,
             &separator,
@@ -56,9 +75,23 @@ pub fn build(app: &AppHandle) -> Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => {
-                if let Some(front) = window::front(app) {
+            "enter-ui" => {
+                if window::is_light_mode() {
+                    // 轻量模式：重建 webview 回到 UI（异步全过程，
+                    // 成败落日志，同「重建界面」路径）。
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(failure) = window::exit_light_mode(&handle).await {
+                            crate::logging::log("warn", &format!("托盘进入 UI 失败：{failure}"));
+                        }
+                    });
+                } else if let Some(front) = window::front(app) {
                     window::reveal(&front);
+                }
+            }
+            "exit-ui" => {
+                if let Err(failure) = window::enter_light_mode(app) {
+                    crate::logging::log("warn", &format!("托盘退出 UI 失败：{failure}"));
                 }
             }
             "rebuild-ui" => {
@@ -109,7 +142,16 @@ pub fn build(app: &AppHandle) -> Result<()> {
                 ..
             } = event
             {
-                if let Some(front) = window::front(tray.app_handle()) {
+                let app = tray.app_handle();
+                if window::is_light_mode() {
+                    // 左键在轻量模式下同样是「进入 UI」。
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(failure) = window::exit_light_mode(&handle).await {
+                            crate::logging::log("warn", &format!("托盘进入 UI 失败：{failure}"));
+                        }
+                    });
+                } else if let Some(front) = window::front(app) {
                     window::reveal(&front);
                 }
             }
@@ -125,18 +167,23 @@ pub fn reflect_status(status: &Status) {
     let Some(tray) = TRAY.get() else {
         return;
     };
+    let light = if crate::window::is_light_mode() {
+        "（轻量）"
+    } else {
+        ""
+    };
     let text: String = match status {
-        Status::Stopped => "千寻 · DSH 未运行".to_owned(),
-        Status::Starting => "千寻 · DSH 启动中…".to_owned(),
+        Status::Stopped => format!("千寻{light} · DSH 未运行"),
+        Status::Starting => format!("千寻{light} · DSH 启动中…"),
         Status::Ready { origin, .. } => {
             // origin 形如 http://127.0.0.1:17300；tooltip 里只留端口更可读。
             let port = origin.rsplit(':').next().unwrap_or("?");
-            format!("千寻 · DSH 运行于 :{port}")
+            format!("千寻{light} · DSH 运行于 :{port}")
         }
         Status::Restarting { attempt, .. } => {
-            format!("千寻 · DSH 重启中（第 {attempt} 次）")
+            format!("千寻{light} · DSH 重启中（第 {attempt} 次）")
         }
-        Status::Failed { .. } => "千寻 · DSH 启动失败".to_owned(),
+        Status::Failed { .. } => format!("千寻{light} · DSH 启动失败"),
     };
     let _ = tray.set_tooltip(Some(&text));
 }

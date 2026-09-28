@@ -37,6 +37,46 @@ pub fn is_rebuilding() -> bool {
     REBUILDING.load(Ordering::Acquire)
 }
 
+/// 轻量模式（对齐 clash-verge-rev）：主窗 webview 已销毁，进程只保留
+/// 核心——托盘、DSH supervisor、回环/局域网网关、截屏与侧车管理。
+/// WebView2 的 renderer/browser 进程随主窗一并终结，是 UI 异常时的
+/// 资源逃生门（实测 UI 存续时渲染进程群常驻两位数百分比 CPU）。
+static LIGHT_MODE: AtomicBool = AtomicBool::new(false);
+
+/// 轻量模式读取口（lib.rs 的 run 回调与托盘菜单用）。
+pub fn is_light_mode() -> bool {
+    LIGHT_MODE.load(Ordering::Acquire)
+}
+
+/// 进入轻量模式：几何快照后销毁主窗（destroy 绕过「关到托盘」拦截，
+/// 真正终结 WebView2）。Zero-window 的 ExitRequested 由 lib.rs 按本
+/// 标志 prevent_exit，进程留在托盘。
+pub fn enter_light_mode(app: &AppHandle) -> crate::error::Result<()> {
+    LIGHT_MODE.store(true, Ordering::Release);
+    persist_geometry(app);
+    let destroyed = match front(app) {
+        Some(front) => front
+            .destroy()
+            .map_err(|cause| crate::error::Error::Window(format!("销毁主窗失败：{cause}"))),
+        None => Ok(()),
+    };
+    crate::tray::reflect_light_mode(true);
+    logging::log("info", "已进入轻量模式（UI 已退出，核心服务继续运行）");
+    destroyed
+}
+
+/// 退出轻量模式：重建主窗（rebuild_main 对「无旧窗」有直建分支，
+/// 恰好覆盖本路径），前端就绪后自行亮窗。
+pub async fn exit_light_mode(app: &AppHandle) -> crate::error::Result<()> {
+    LIGHT_MODE.store(false, Ordering::Release);
+    crate::tray::reflect_light_mode(false);
+    let result = rebuild_main(app).await;
+    if result.is_ok() {
+        logging::log("info", "已退出轻量模式（UI 已重建）");
+    }
+    result
+}
+
 /// 独立窗口支持的视图。
 fn standalone_view_meta(view: &str) -> Option<(&'static str, f64, f64)> {
     match view {
