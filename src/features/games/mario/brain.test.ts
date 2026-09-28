@@ -9,6 +9,7 @@ import {
   GATE_ESCALATE,
 } from './brain';
 import { createGameState } from './engine';
+import { getPolicy, setPolicy } from './policy';
 import { WORLD_1_1, TILE } from './world1-1';
 
 type FetchMock = (url: string) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
@@ -44,7 +45,7 @@ describe('mario brain', () => {
     expect(applyGate(0.05, GATE_EXECUTE, GATE_ESCALATE)).toBe('ESCALATE');
   });
 
-  it('编码:模板版本 + profile16 + subgoal(reflex 有/pure 无)', () => {
+  it('编码:v2-obs 模板 + profile(列数随策略)+ subgoal(reflex 有/pure 无)', () => {
     const s = createGameState();
     const reflex = encodeState(
       s,
@@ -52,11 +53,36 @@ describe('mario brain', () => {
       { type: 'clear', hazard: null, candidates: ['run_right'], note: 'clear' },
       'reflex',
     );
-    expect(reflex.encoding).toBe('v1-profile');
+    expect(reflex.encoding).toBe('v2-obs');
     expect(String(reflex.subgoal)).toContain('clear');
     const pure = encodeState(s, WORLD_1_1, null, 'pure');
     expect(String(pure.subgoal)).toContain('pure reflex');
-    expect((reflex.profile16 as string).split(' ')).toHaveLength(16);
+    // 默认策略 16 列
+    expect((reflex.profile as string).split(' ')).toHaveLength(16);
+  });
+
+  it('编码:观测沙盒消融(docs/14 §4)——列数/位姿/subgoal 随 policy 裁剪', () => {
+    const backup = getPolicy();
+    try {
+      setPolicy({
+        ...backup,
+        obsProfileCols: 24,
+        obsIncludePose: false,
+        obsIncludeSubgoal: false,
+      });
+      const s = createGameState();
+      const st = encodeState(
+        s,
+        WORLD_1_1,
+        { type: 'clear', hazard: null, candidates: ['run_right'], note: 'clear' },
+        'reflex',
+      );
+      expect((st.profile as string).split(' ')).toHaveLength(24);
+      expect(st.mario).toBeUndefined();
+      expect(String(st.subgoal)).toContain('pure reflex'); // subgoal 关闭 → 退化纯反射
+    } finally {
+      setPolicy(backup);
+    }
   });
 
   it('decide:集外 choice 概率回退到候选;EXECUTE 直接采用', async () => {

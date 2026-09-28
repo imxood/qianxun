@@ -53,4 +53,20 @@ describe('policy 策略沙箱', () => {
     setPolicy(DEFAULT_POLICY);
     expect(getPolicy().vetoDistPx).toBe(14);
   });
+
+  it('观测沙箱字段(docs/14 §4):值域钳制 + 取整 + bool 透传', () => {
+    const { policy, issues } = sanitizePolicy({
+      obsProfileCols: 99.6,
+      obsThreatsLookPx: 10,
+      obsIncludePose: false,
+      obsIncludeSubgoal: 'yes',
+    });
+    expect(policy.obsProfileCols).toBe(24); // 钳上限且取整
+    expect(policy.obsThreatsLookPx).toBe(96); // 钳下限
+    expect(policy.obsIncludePose).toBe(false); // bool 透传
+    expect(policy.obsIncludeSubgoal).toBe(true); // 非 bool → 默认 true
+    expect(issues.length).toBe(2);
+    // 默认策略带观测字段
+    expect(DEFAULT_POLICY.obsProfileCols).toBe(16);
+  });
 });

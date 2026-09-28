@@ -29,6 +29,14 @@ export type PolicyProfile = {
   stairWindow: Window;
   /** 贴墙后撤时长 tick(10-60)。 */
   backoffTicks: number;
+  /** 观测模式(docs/14 §4):profile 前瞻列数(8-24)。 */
+  obsProfileCols: number;
+  /** 观测模式:威胁清单前扫距离 px(96-288)。 */
+  obsThreatsLookPx: number;
+  /** 观测模式:是否携带 mario 位姿(vx/vy/onGround/face)。 */
+  obsIncludePose: boolean;
+  /** 观测模式:reflex 是否携带 subgoal 与候选集。 */
+  obsIncludeSubgoal: boolean;
 };
 
 export const DEFAULT_POLICY: PolicyProfile = {
@@ -42,6 +50,10 @@ export const DEFAULT_POLICY: PolicyProfile = {
   goombaWindow: [-8, 34],
   stairWindow: [-2, 10],
   backoffTicks: 26,
+  obsProfileCols: 16,
+  obsThreatsLookPx: 176,
+  obsIncludePose: true,
+  obsIncludeSubgoal: true,
 };
 
 const BOUNDS = {
@@ -50,6 +62,8 @@ const BOUNDS = {
   gateEscalate: [0.02, 0.3],
   vetoDistPx: [6, 40],
   backoffTicks: [10, 60],
+  obsProfileCols: [8, 24],
+  obsThreatsLookPx: [96, 288],
 } as const;
 
 const WINDOW_BOUNDS: Record<string, [number, number]> = {
@@ -102,7 +116,14 @@ export function sanitizePolicy(raw: unknown): {
   num('gateEscalate');
   num('vetoDistPx');
   num('backoffTicks');
+  num('obsProfileCols');
+  num('obsThreatsLookPx');
   if (typeof src.vetoEnabled === 'boolean') out.vetoEnabled = src.vetoEnabled;
+  if (typeof src.obsIncludePose === 'boolean') out.obsIncludePose = src.obsIncludePose;
+  if (typeof src.obsIncludeSubgoal === 'boolean') out.obsIncludeSubgoal = src.obsIncludeSubgoal;
+  // 观测几何量必须是整数(列数/像素)
+  out.obsProfileCols = Math.round(out.obsProfileCols);
+  out.obsThreatsLookPx = Math.round(out.obsThreatsLookPx);
   for (const [key, [lo, hi]] of Object.entries(WINDOW_BOUNDS)) {
     const v = src[key];
     if (!Array.isArray(v) || v.length !== 2) continue;

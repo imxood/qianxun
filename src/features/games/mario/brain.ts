@@ -2,12 +2,15 @@
  * Laya 决策端(docs/11 §6):把马里奥状态编码成 laya-server 的
  * {state, questions},再做置信度门控三分支(EXECUTE / RE_SENSE / ESCALATE)。
  *
- * 编码 v1-profile:进度 + 马里奥位姿 + **前方 16 列首个实心行**(profile16,
- * 坑=15,地面=13,管道顶=11)+ 命名威胁清单 + subgoal(reflex 才有)。
+ * 编码 v2-obs:进度 + 马里奥位姿 + 前方 N 列首个实心行(profile,列数由
+ * policy.obsProfileCols 控制,坑=15,地面=13,管道顶=11)+ 命名威胁清单
+ * (前扫 policy.obsThreatsLookPx)+ subgoal(reflex 才有)。观测件全部可按
+ * 策略沙盒消融(docs/14 §4),让 Qwen 演化"喂什么数据给 Laya"。
  * 目标 ≤300 token,贴实测 240ms 档(docs/12 §3.6)。
  */
 
 import type { GameState } from './engine';
+import { getPolicy } from './policy';
 import {
   ACTIONS,
   ACTION_HINTS,
@@ -32,11 +35,11 @@ export function applyGate(conf: number, gateExecute: number, gateEscalate: numbe
   return conf >= gateExecute ? 'EXECUTE' : conf >= gateEscalate ? 'RE_SENSE' : 'ESCALATE';
 }
 
-/** 前方 16 列的首个实心行(0..14;无实心 = 15)。地面=13,管顶 h2=11,砖行=9。 */
-export function profile16(s: GameState): number[] {
+/** 前方 cols 列的首个实心行(0..14;无实心 = 15)。地面=13,管顶 h2=11,砖行=9。 */
+export function profile16(s: GameState, cols = 16): number[] {
   const base = Math.floor(s.mario.x / TILE) + 1;
   const out: number[] = [];
-  for (let i = 0; i < 16; i += 1) {
+  for (let i = 0; i < cols; i += 1) {
     const c = base + i;
     let top = ROWS;
     if (c >= 0 && c < COLS) {
@@ -53,9 +56,9 @@ export function profile16(s: GameState): number[] {
 }
 
 /** 命名威胁清单(文本化直接给结论线索,docs/11 §6)。 */
-export function threatText(s: GameState, world: World): string {
+export function threatText(s: GameState, world: World, lookPx = 176): string {
   const parts: string[] = [];
-  const hazards = nextHazards(s, world, 176);
+  const hazards = nextHazards(s, world, lookPx);
   const front = s.mario.x + 14;
   for (const h of hazards) {
     const dx = Math.round(h.startX - front);
@@ -83,16 +86,18 @@ export function encodeState(
   intent: Intent | null,
   mode: DriveMode,
 ): Record<string, unknown> {
+  // 观测件按策略沙盒裁剪(docs/14 §4):agent 可消融任何观测,纪律层评审效果
+  const P = getPolicy();
   const pct = Math.round((s.maxX / world.worldWidthPx) * 100);
   const state: Record<string, unknown> = {
-    encoding: 'v1-profile',
+    encoding: 'v2-obs',
     progress: `x=${Math.round(s.mario.x)}/${world.worldWidthPx} ${pct}% coins=${s.coinCount} time=${s.timeUnits} attempt=${s.attempts}`,
-    mario: pose(s),
-    profile16: profile16(s).join(' '),
-    threats: threatText(s, world),
+    profile: profile16(s, P.obsProfileCols).join(' '),
+    threats: threatText(s, world, P.obsThreatsLookPx),
   };
+  if (P.obsIncludePose) state.mario = pose(s);
   state.subgoal =
-    mode === 'reflex' && intent
+    mode === 'reflex' && intent && P.obsIncludeSubgoal
       ? `${intent.type} ${intent.note} -> candidates [${intent.candidates.join(', ')}]`
       : '(none - pure reflex, judge the frame yourself)';
   return state;
