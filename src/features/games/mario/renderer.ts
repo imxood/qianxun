@@ -122,6 +122,8 @@ export type FrameOverlays = {
   heldInput: Input;
   /** 距上次决策的 tick 数(涟漪用);null = 无涟漪。 */
   rippleAge: number | null;
+  /** HUD 画进 canvas(无头截图对照用);UI 走 DOM 覆盖层(docs/15 §1)。 */
+  hudInCanvas?: boolean;
 };
 
 function chipText(input: Input): string {
@@ -222,17 +224,19 @@ export function drawFrame(
     ctx.fillText(`IN ${label}`, viewW - 52, 12);
   }
 
-  // ---- HUD(游戏内,像素风) ----
-  ctx.font = 'bold 8px monospace';
-  const shadow = (text: string, x: number, y: number): void => {
-    ctx.fillStyle = 'rgba(0,0,0,.55)';
-    ctx.fillText(text, x + 1, y + 1);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(text, x, y);
-  };
-  shadow(`SCORE ${String(s.score).padStart(6, '0')}`, 8, 12);
-  shadow(`COINS x${String(s.coinCount).padStart(2, '0')}`, 70, 12);
-  shadow('WORLD 1-1', 128, 12);
-  shadow(`TIME ${String(Math.max(0, s.timeUnits)).padStart(3, '0')}`, viewW - 44, 12);
+  // ---- HUD(默认走 DOM 覆盖层;hudInCanvas 供无头截图/回归对照) ----
+  if (o.hudInCanvas === true) {
+    ctx.font = 'bold 8px monospace';
+    const shadow = (text: string, x: number, y: number): void => {
+      ctx.fillStyle = 'rgba(0,0,0,.55)';
+      ctx.fillText(text, x + 1, y + 1);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, x, y);
+    };
+    shadow(`SCORE ${String(s.score).padStart(6, '0')}`, 8, 12);
+    shadow(`COINS x${String(s.coinCount).padStart(2, '0')}`, 70, 12);
+    shadow('WORLD 1-1', 128, 12);
+    shadow(`TIME ${String(Math.max(0, s.timeUnits)).padStart(3, '0')}`, viewW - 44, 12);
+  }
   void world;
 }
