@@ -13,17 +13,30 @@
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
   import FloatingPanel from '../../../lib/ui/FloatingPanel.svelte';
-  import type { PostmortemReport, SessionInput } from './postmortem';
+  import EvolutionChat from './EvolutionChat.svelte';
+  import { landmarkOf, type PostmortemReport, type SessionInput } from './postmortem';
   import { DEFAULT_POLICY, getPolicy, setPolicy, type PolicyProfile } from './policy';
   import {
     buildDeathPayload,
+    buildDeathPayloadFromSent,
     refineViaQwen,
     type DeathDiagnosis,
     type HistoryRow,
     type LayaInsight,
   } from './qwen';
   import {
+    chatAppend,
+    chatFindAnalysis,
+    chatMsgId,
+    chatPatch,
+    parseChat,
+    rebuildFromAudit,
+    CHAT_CAP,
+    type ChatMsg,
+  } from './chat';
+  import {
     CANDIDATE_FILE,
+    CHAT_FILE,
     DESIGN_EVAL_RUNS,
     EVOLUTION_FILE,
     HISTORY_FILE,
@@ -49,7 +62,7 @@
     parseHistory,
     parsePolicyFile,
     planAnalyses,
-    reasonShort,
+    planDeathTask,
     recordRun,
     restoreVersion,
     runScore,
@@ -117,7 +130,7 @@
   let logFilter = $state<'all' | 'game' | 'evolve' | 'error'>('all');
   let deaths = $state<Array<{ x: number; cause: string }>>([]);
   /** 多窗叠开(docs/15 §5):面板 id 集合,Escape 关最顶层。 */
-  type PanelId = 'laya' | 'settings' | 'pm' | 'evo';
+  type PanelId = 'laya' | 'settings' | 'pm';
   let openPanels = $state<PanelId[]>([]);
   /** 进化干预三态(docs/15 §3.2):自动 / 单步(提案后挂起) / 暂停(只析不判)。 */
   let evolveMode = $state<'auto' | 'step' | 'pause'>('auto');
@@ -133,7 +146,7 @@
   let runHistory = $state<HistoryRow[]>([]);
   /** 分析队列状态(docs/15 §6.2):待分析 n · 在途 · 上次耗时。 */
   let queueDepth = $state(0);
-  let analyzingKey = $state<string | null>(null);
+  // 保留位:调试浮窗后续展示在途任务 key
   let lastAnalysisMs = $state<number | null>(null);
   /** 单步模式挂起:提案已生成,等「下一步 ▸」放行装填。 */
   let stepGated = $state(false);
@@ -275,6 +288,105 @@
       }
     }
     await s.append(RUNS_INDEX_FILE, JSON.stringify(index)).catch(() => {});
+  }
+
+  // ---- 进化对话台(docs/16):5 元素消息流 + 即死即析 ----
+  let chat = $state<ChatMsg[]>([]);
+  const payloadByKey = new SvelteMap<string, string>();
+  const enqueuedKeys = new SvelteSet<string>();
+  let breakerTripped = $state(false);
+  let runHadTasks = false;
+  let runAllOk = true;
+  let runRecorded = false;
+  let runTasksPlanned = 0;
+  let runTasksOk = 0;
+  let lastProposalChatId: string | null = null;
+
+  function emitChat(m: ChatMsg): void {
+    chat = chatAppend(chat, m);
+    void getMarioStore()
+      .append(CHAT_FILE, JSON.stringify(m))
+      .catch(() => {});
+  }
+  function patchChat(id: string, patch: Partial<ChatMsg>): void {
+    chat = chatPatch(chat, id, patch);
+  }
+  function emitAnalysis(
+    key: string,
+    runId: string,
+    patch: Omit<ChatMsg, 'id' | 'kind' | 'runId'>,
+  ): void {
+    const exist = chatFindAnalysis(chat, key);
+    if (exist === null) {
+      emitChat({ id: chatMsgId(runId), kind: 'analysis', runId, ...patch });
+    } else {
+      patchChat(exist.id, patch);
+    }
+  }
+
+  /** 入队(即死即析与局终补析共用):调度合并 + 计数。 */
+  function enqueueTasks(tasks: SchedTask[]): void {
+    for (const t of tasks) {
+      const r = scheduleTask([...taskBacklog, ...taskQueue], t);
+      taskQueue = r.queue.filter((x) => !taskBacklog.some((b) => b.key === x.key));
+      taskBacklog = r.queue.filter((x) => taskBacklog.some((b) => b.key === x.key));
+      if (r.overflow !== null) evo = bumpQwen(evo, 'droppedByCap');
+      if (r.merged) evo = bumpQwen(evo, 'merged');
+      runTasksPlanned += 1;
+    }
+    queueDepth = taskQueue.length + taskBacklog.length;
+  }
+
+  /** 队列没在跑且有任务 → 启动一个分析周期(硬门挂起)。 */
+  function kickQueue(
+    report: PostmortemReport | null,
+    session: SessionInput,
+    sent: SentRow[],
+    runId: string,
+  ): void {
+    if (qwenRefining || !qwenOk) return;
+    if (taskQueue.length + taskBacklog.length === 0) return;
+    analysisPending = true;
+    const run = runAnalysisQueue(report, session, sent, runId).finally(() => {
+      analysisGate = null;
+      analysisPending = false;
+      queueDepth = taskQueue.length + taskBacklog.length;
+    });
+    analysisGate = run;
+    void run;
+  }
+
+  /** 即死即析(docs/16 §3.0):死亡瞬间入队 + 聊天占位卡,不等待重生。 */
+  function onDeathAnalyze(cause: string): void {
+    if (!(mode === 'reflex' || mode === 'pure') || !qwenOk) return;
+    const col = Math.round(s.mario.x / TILE);
+    const lm = landmarkOf(col);
+    const task = planDeathTask(evo, driver.runId, s.attempts, cause, lm);
+    if (task === null) return;
+    payloadByKey.set(
+      task.key,
+      buildDeathPayloadFromSent({
+        sent: [...driver.sentLog],
+        attempt: s.attempts,
+        cause,
+        landmark: lm,
+      }),
+    );
+    enqueuedKeys.add(task.key);
+    enqueueTasks([task]);
+    emitChat({
+      id: chatMsgId(driver.runId),
+      kind: 'analysis',
+      runId: driver.runId,
+      ts: Date.now(),
+      key: task.key,
+      attempt: task.attempt ?? null,
+      reason: task.reason,
+      phase: 'queued',
+    });
+    const session: SessionInput = driver.sessionSnapshot();
+    const sent: SentRow[] = [...driver.sentLog];
+    if (!qwenRefining) kickQueue(null, session, sent, driver.runId);
   }
   function audit(entry: AuditEntry): void {
     auditTail = [entry, ...auditTail].slice(0, 10);
@@ -454,11 +566,22 @@
         for (const e of events) {
           if (e.type === 'death') {
             deaths = [...s.deaths];
+            const dcol = Math.round(s.mario.x / TILE);
             pushLog(
               'text-red-400',
-              `第${s.attempts}死 ${e.cause === 'pit' ? '掉坑' : e.cause}@${Math.round(s.mario.x / TILE)}`,
+              `第${s.attempts}死 ${e.cause === 'pit' ? '掉坑' : e.cause}@${dcol}`,
               'game',
             );
+            emitChat({
+              id: chatMsgId(driver.runId),
+              kind: 'death',
+              runId: driver.runId,
+              ts: Date.now(),
+              attempt: s.attempts,
+              cause: e.cause,
+              col: dcol,
+              pct: hud.pct,
+            });
             driver.event({
               event: 'death',
               cause: e.cause,
@@ -466,6 +589,8 @@
               tick: s.tick,
               attempt: s.attempts,
             });
+            // 即死即析(docs/16 §3.0):每死必析,聊天实时可见,重生不等待
+            onDeathAnalyze(e.cause);
             // 第 3 次死亡自动出复盘(失败密度过高 = 该局必须被检讨)
             if (s.attempts >= 3 && !postmortem) genPostmortem();
           } else if (e.type === 'win') {
@@ -552,6 +677,24 @@
       runPolicy = { ...getPolicy() };
     }
     driver.beginRun(runPolicy);
+    // 即死即析旗标复位(docs/16 §3.0)+ 局分隔符(进行中)
+    payloadByKey.clear();
+    enqueuedKeys.clear();
+    runHadTasks = false;
+    runAllOk = true;
+    runRecorded = false;
+    runTasksPlanned = 0;
+    runTasksOk = 0;
+    lastProposalChatId = null;
+    emitChat({
+      id: chatMsgId(driver.runId),
+      kind: 'sep',
+      runId: driver.runId,
+      ts: Date.now(),
+      iter: evo.iteration + 1,
+      mode,
+      result: 'live',
+    });
     driver.configure({
       mode,
       intervalMs: runPolicy.intervalMs,
@@ -614,6 +757,15 @@
         };
         pendingCandidate = null;
         persistCandidate();
+        emitChat({
+          id: chatMsgId(driver.runId),
+          kind: 'verdict',
+          runId: driver.runId,
+          ts: Date.now(),
+          ok: true,
+          text: `转正 · ${score.toFixed(0)} · 无基线`,
+        });
+        if (lastProposalChatId !== null) patchChat(lastProposalChatId, { verdict: 'commit' });
         pushLog('text-emerald-400', `候选转正 +${score.toFixed(0)}(无基线)`, 'evolve');
         audit({
           v: 1,
@@ -644,6 +796,15 @@
           };
           pendingCandidate = null;
           persistCandidate();
+          emitChat({
+            id: chatMsgId(driver.runId),
+            kind: 'verdict',
+            runId: driver.runId,
+            ts: Date.now(),
+            ok: true,
+            text: `转正 · ${score.toFixed(0)} vs ${base.toFixed(0)}`,
+          });
+          if (lastProposalChatId !== null) patchChat(lastProposalChatId, { verdict: 'commit' });
           pushLog(
             'text-emerald-400',
             `转正 ${score.toFixed(0)}(+${((score / base - 1) * 100).toFixed(0)}%)`,
@@ -668,6 +829,15 @@
             obsSnapshotOf(getPolicy()),
           );
           persistPlaybook();
+          emitChat({
+            id: chatMsgId(driver.runId),
+            kind: 'verdict',
+            runId: driver.runId,
+            ts: Date.now(),
+            ok: false,
+            text: `回滚 · ${v.reason.slice(0, 18)} · 已冷却`,
+          });
+          if (lastProposalChatId !== null) patchChat(lastProposalChatId, { verdict: 'rollback' });
           pushLog('text-amber-400', `回滚 · 冷却 5 局`, 'evolve');
         }
         persistCandidate();
@@ -708,23 +878,55 @@
             action: 'restore',
             reason: `回归,回退 v${best.vid}`,
           });
+          emitChat({
+            id: chatMsgId(driver.runId),
+            kind: 'verdict',
+            runId: driver.runId,
+            ts: Date.now(),
+            ok: true,
+            text: `回归守卫 · 回退 v${best.vid}`,
+          });
           pushLog('text-amber-400', `回归守卫:回退 v${best.vid}`, 'evolve');
         }
       }
     }
 
-    // ② 死亡级分析队列(docs/15 §6):planAnalyses → 串行异步处理,不阻塞游戏
+    // ② 局终:分隔符落定 + 补析(仅未入队的死亡)+ run 级任务;即死即析已析过的不重复
     const session: SessionInput = driver.sessionSnapshot();
     const sent: SentRow[] = [...driver.sentLog];
-    const tasks = planAnalyses(evo, report, driver.runId);
-    for (const t of tasks) {
-      const r = scheduleTask([...taskBacklog, ...taskQueue], t);
-      taskQueue = r.queue.filter((x) => !taskBacklog.some((b) => b.key === x.key));
-      taskBacklog = r.queue.filter((x) => taskBacklog.some((b) => b.key === x.key));
-      if (r.overflow !== null) evo = bumpQwen(evo, 'droppedByCap');
-      if (r.merged) evo = bumpQwen(evo, 'merged');
+    const won = s.phase === 'won';
+    const sepId = chat.find((m) => m.kind === 'sep' && m.runId === driver.runId)?.id;
+    if (sepId !== undefined) {
+      patchChat(sepId, {
+        result: won ? 'win' : 'lose',
+        deaths: report.deaths.length,
+        maxXCol: report.maxXCol,
+        score: report.score,
+      });
     }
-    queueDepth = taskQueue.length + taskBacklog.length;
+    const remaining = planAnalyses(
+      evo,
+      {
+        ...report,
+        deaths: report.deaths.filter((d) => !enqueuedKeys.has(`${driver.runId}#${d.attempt}`)),
+      },
+      driver.runId,
+    );
+    if (remaining.length > 0) {
+      enqueueTasks(remaining);
+      for (const t of remaining) {
+        emitChat({
+          id: chatMsgId(driver.runId),
+          kind: 'analysis',
+          runId: driver.runId,
+          ts: Date.now(),
+          key: t.key,
+          attempt: t.attempt ?? null,
+          reason: t.reason,
+          phase: 'queued',
+        });
+      }
+    }
     // 逐局全量快照(docs/15 §9):runs/<runId>.json + 索引行,失败不影响游戏
     void persistRunSnapshot({
       report,
@@ -732,25 +934,33 @@
       sent,
       mode,
       ticks: s.tick,
-      tasksPlanned: tasks.length,
+      tasksPlanned: runTasksPlanned,
     });
-    if (tasks.length > 0 && qwenOk) {
-      // 分析硬门:挂起 promise,start()/restart() 必须等它 resolve 才能开下一局
-      analysisPending = true;
-      const run = runAnalysisQueue(report, session, sent, driver.runId).finally(() => {
-        analysisGate = null;
-        analysisPending = false;
-        queueDepth = taskQueue.length + taskBacklog.length;
-      });
-      analysisGate = run;
-      void run;
-    } else {
-      if (tasks.length > 0) {
-        for (const t of tasks) taskQueue = [...taskQueue, t];
-      }
-      evo = recordRun(evo, report, driver.runId, false, mode);
-      persistEvo();
+    kickQueue(report, session, sent, driver.runId);
+    if (remaining.length > 0 && !qwenOk) {
+      for (const t of remaining) taskQueue = [...taskQueue, t];
     }
+    // 局末簿记(一次/局):等队列清空后落,保证 analyzed 标志完整(docs/16 §3.0)
+    const finishRun = (): void => {
+      if (runRecorded) return;
+      runRecorded = true;
+      evo = recordRun(evo, report, driver.runId, runHadTasks && runAllOk, mode);
+      persistEvo();
+      // G6 修正行:tasksOk 在快照落盘后才最终确定,追加修正供消费方合并
+      void getMarioStore()
+        .append(
+          RUNS_INDEX_FILE,
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            runId: driver.runId,
+            tasksPlanned: runTasksPlanned,
+            tasksOk: runTasksOk,
+          }),
+        )
+        .catch(() => {});
+    };
+    if (analysisGate !== null) void analysisGate.then(finishRun, finishRun);
+    else finishRun();
   }
 
   function bumpQwen(evo: EvoState, k: keyof QwenCounters, n = 1): EvoState {
@@ -769,11 +979,11 @@
   }
 
   /**
-   * 分析队列消费(docs/15 §6.2):局间串行、永不丢任务;成功才占幂等键;
-   * 死亡级带全量载荷;补丁按 run 级合并成单一候选(单维度);insight 必填。
+   * 分析队列消费(docs/15 §6.2 + docs/16 §3.0):串行、永不丢任务;成功才占
+   * 幂等键;载荷优先取死亡瞬间的 payloadByKey(即死即析);report 可空(局中)。
    */
   async function runAnalysisQueue(
-    report: PostmortemReport,
+    report: PostmortemReport | null,
     session: SessionInput,
     sent: SentRow[],
     runId: string,
@@ -783,21 +993,28 @@
     const champion = getPolicy();
     const obs = obsSnapshotOf(champion);
     const iter = evo.iteration;
-    let hadTasks = false;
-    let allOk = true;
     const accPatch: Record<string, { from: unknown; to: unknown }> = {};
     const accSigs = new SvelteSet<string>();
     const issues: string[] = [];
     try {
       for (;;) {
-        if (breaker.tripped) break;
+        if (breaker.tripped) {
+          breakerTripped = true;
+          break;
+        }
         const task = nextTask(taskBacklog, taskQueue);
         if (task === null) break;
         taskBacklog = removeTask(taskBacklog, task.key);
         taskQueue = removeTask(taskQueue, task.key);
         queueDepth = taskQueue.length + taskBacklog.length;
-        hadTasks = true;
-        analyzingKey = task.key;
+        runHadTasks = true;
+        emitAnalysis(task.key, runId, {
+          ts: Date.now(),
+          key: task.key,
+          attempt: task.attempt ?? null,
+          reason: task.reason,
+          phase: 'running',
+        });
         const tA = Date.now();
         audit({
           v: 1,
@@ -812,11 +1029,12 @@
         });
         try {
           const death =
-            task.kind === 'death'
+            task.kind === 'death' && report !== null
               ? report.deaths.find((d) => d.attempt === task.attempt)
               : undefined;
-          let payload: string | undefined;
-          if (task.kind === 'death' && death) {
+          // 即死即析:死亡瞬间已备好载荷(docs/16 §3.0);局终兜底走 report 版
+          let payload: string | undefined = payloadByKey.get(task.key);
+          if (payload === undefined && task.kind === 'death' && death && report !== null) {
             payload = buildDeathPayload({
               report,
               session,
@@ -852,8 +1070,8 @@
           });
           evo = bumpQwen(evo, task.kind === 'death' ? 'deathAnalyses' : 'runAnalyses');
           breaker.ok();
+          breakerTripped = false;
           lastAnalysisMs = Date.now() - tA;
-          analyzingKey = null;
           audit({
             v: 1,
             ts: new Date().toISOString(),
@@ -865,6 +1083,28 @@
             key: task.key,
             reason: task.reason,
             latencyMs: lastAnalysisMs,
+          });
+          // 先 emit 再落库(docs/16 §3.1):结论卡内容定格,不被后续覆盖漂移
+          const d0 = r.diagnosis[0];
+          const concl =
+            d0 !== undefined
+              ? `${d0.rootCause};${d0.fix}`
+              : (r.insight?.claim ?? '本段无新结论,手册已更新');
+          const pbDelta = r.playbook.length - playbook.length;
+          runTasksOk += 1;
+          emitAnalysis(task.key, runId, {
+            ts: Date.now(),
+            key: task.key,
+            attempt: task.attempt ?? null,
+            reason: task.reason,
+            phase: 'ok',
+            latencyMs: lastAnalysisMs,
+            text: concl.slice(0, 120),
+            meta: [
+              ...(pbDelta > 0 ? [`手册+${pbDelta}字`] : []),
+              ...(r.insight !== null ? ['经验+1'] : []),
+              `迭代#${iter}`,
+            ],
           });
           playbook = r.playbook;
           persistPlaybook();
@@ -890,12 +1130,12 @@
             patchBySig.set(task.sig, { ...accPatch });
           }
         } catch (e) {
-          analyzingKey = null;
           const msg = e instanceof Error ? e.message : String(e);
           const isTimeout = /timeout|abort/i.test(msg);
           evo = bumpQwen(evo, isTimeout ? 'timeouts' : 'failed');
           breaker.fail();
-          allOk = false;
+          breakerTripped = breaker.tripped;
+          runAllOk = false;
           const retry = taskFailed(task);
           audit({
             v: 1,
@@ -913,14 +1153,28 @@
           if (retry !== null) {
             evo = bumpQwen(evo, 'retries');
             taskQueue = [...taskQueue, retry];
+            emitAnalysis(task.key, runId, {
+              ts: Date.now(),
+              key: task.key,
+              attempt: task.attempt ?? null,
+              reason: task.reason,
+              phase: 'queued',
+            });
             pushLog('text-amber-400', `分析失败,重试 ${retry.attempts}/2`, 'error');
           } else {
+            emitAnalysis(task.key, runId, {
+              ts: Date.now(),
+              key: task.key,
+              attempt: task.attempt ?? null,
+              reason: task.reason,
+              phase: 'fail',
+              text: isTimeout ? '超时' : msg.slice(0, 40),
+            });
             pushLog('text-red-400', `分析失败 ${msg.slice(0, 30)}`, 'error');
           }
         }
       }
-      // 局末簿记(一次/局):计数器 + 签名统计 + 迭代号
-      evo = recordRun(evo, report, runId, hadTasks && allOk, mode);
+      // 局末簿记移至 finishRun(genPostmortem,docs/16 §3.0 一次/局)
       // run 级合并提案:三态干预(docs/15 §3.2)
       if (Object.keys(accPatch).length > 0 && evolveMode !== 'pause') {
         const patchPolicy = {
@@ -956,6 +1210,16 @@
             obs,
             issues,
           });
+          lastProposalChatId = chatMsgId(runId);
+          emitChat({
+            id: lastProposalChatId,
+            kind: 'proposal',
+            runId,
+            ts: Date.now(),
+            patch,
+            patchKind: kind,
+            gated: evolveMode === 'step',
+          });
           if (evolveMode === 'step') {
             stepGated = true;
             pushLog('text-sky-400', `提案${Object.keys(patch).length}项,单步挂起`, 'evolve');
@@ -976,7 +1240,6 @@
       queueDepth = taskQueue.length + taskBacklog.length;
       qwenRefining = false;
     }
-    void allOk;
   }
   async function restart(): Promise<void> {
     if (analysisGate !== null) {
@@ -1031,6 +1294,13 @@
         }
       } catch {
         /* 坏文件当无候选 */
+      }
+      // 聊天历史(docs/16 §5):chat.jsonl 优先,缺失降级审计重建
+      const chatRaw = await store.read(CHAT_FILE);
+      if (chatRaw !== null) {
+        chat = parseChat(chatRaw).slice(-CHAT_CAP);
+      } else {
+        chat = rebuildFromAudit(parseAuditLines(await store.read(EVOLUTION_FILE))).slice(-CHAT_CAP);
       }
     })();
     void driver.probe().then(() => {
@@ -1186,469 +1456,304 @@
         /></svg
       >
     </button>
-    <button
-      class="relative rounded-lg p-1.5 text-muted hover:bg-accent-soft/50 hover:text-white {openPanels.includes(
-        'evo',
-      )
-        ? 'bg-accent-soft/50 text-white'
-        : ''}"
-      onclick={() => togglePanel('evo')}
-      aria-label="进化面板"
-      data-testid="btn-evo"
-    >
-      <svg
-        width="15"
-        height="15"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.8"
-        stroke-linecap="round"
-        stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg
-      >
-      {#if queueDepth > 0}
-        <span
-          class="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-fuchsia-400 text-[8px] font-bold text-black"
-          title="待分析 {queueDepth}">{queueDepth}</span
-        >
-      {/if}
-    </button>
     <div class="flex items-center gap-2 pl-1" title="Laya :10230 · Qwen :17230(只读探活)">
       <span class="size-1.5 rounded-full {dot(layaOk)}" data-testid="dot-laya"></span>
       <span class="size-1.5 rounded-full {dot(qwenOk)}" data-testid="dot-qwen"></span>
     </div>
   </div>
 
-  <!-- 舞台(占满全部剩余高度) -->
-  <div class="relative min-h-0 flex-1 bg-[#0b0b10]" bind:this={stageEl} data-testid="mario-stage">
-    <canvas
-      bind:this={canvasEl}
-      class="block h-full w-full"
-      style="image-rendering: pixelated;"
-      data-testid="mario-canvas"
-    ></canvas>
+  <!-- 舞台行:游戏区(占满)+ 进化对话台列(docs/16 §1.1) -->
+  <div class="flex min-h-0 flex-1">
+    <!-- 舞台(占满剩余高度) -->
+    <div class="relative min-h-0 flex-1 bg-[#0b0b10]" bind:this={stageEl} data-testid="mario-stage">
+      <canvas
+        bind:this={canvasEl}
+        class="block h-full w-full"
+        style="image-rendering: pixelated;"
+        data-testid="mario-canvas"
+      ></canvas>
 
-    <!-- HUD DOM 覆盖层(docs/15 §1):任意 DPI 锐利;canvas 只留像素游戏层 -->
-    <div
-      class="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-2 font-mono text-[11px] leading-none"
-    >
-      <div class="flex gap-3 text-white [text-shadow:0_1px_2px_rgba(0,0,0,.7)]">
-        <span>SCORE {String(hud.score).padStart(6, '0')}</span>
-        <span>COINS ×{String(hud.coins).padStart(2, '0')}</span>
-        <span class="hidden sm:inline">WORLD 1-1</span>
-      </div>
-      <div class="flex items-center gap-2">
-        {#if lastDecision}
-          <span class="rounded bg-black/70 px-1.5 py-0.5 text-emerald-400"
-            >IN {lastDecision.action}</span
-          >
-          <span class="rounded px-1.5 py-0.5 font-semibold {gateBadge[lastDecision.gate]}"
-            >{lastDecision.gate} {(lastDecision.conf * 100).toFixed(0)}%</span
-          >
-        {/if}
-        <span class="text-white [text-shadow:0_1px_2px_rgba(0,0,0,.7)]"
-          >TIME {String(hud.time).padStart(3, '0')}</span
-        >
-      </div>
-    </div>
-
-    {#if phase === 'idle'}
-      <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-        <div class="rounded-xl bg-black/60 px-6 py-3 text-center text-sm backdrop-blur-sm">
-          {#if needsLaya && !layaOk}
-            需 laya-server · 去环境页启动
-          {:else}
-            ▶ 开始 · P 暂停 · Enter 重生
-          {/if}
-        </div>
-      </div>
-    {/if}
-    {#if phase === 'paused'}
-      <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-        <div class="rounded-xl bg-black/60 px-6 py-2 text-sm backdrop-blur-sm">已暂停 · P 继续</div>
-      </div>
-    {/if}
-    {#if phase === 'running' && s.phase === 'dead'}
-      <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-        <div
-          class="rounded-xl border border-line bg-surface/90 px-6 py-4 text-center shadow-xl backdrop-blur"
-        >
-          <div class="text-sm font-semibold">
-            阵亡 · {s.deaths[s.deaths.length - 1]?.cause ?? '?'}
-          </div>
-          <div class="mt-1 font-mono text-xs text-muted">
-            col {Math.round(s.mario.x / TILE)} · attempt {s.attempts} · {hud.pct}%
-          </div>
-          <div class="mt-2 text-[11px] text-muted">Enter 立即重生(自动重生倒计时中)</div>
-        </div>
-      </div>
-    {/if}
-    {#if phase === 'running' && s.phase === 'won'}
-      <div class="absolute inset-0 flex items-center justify-center">
-        <div
-          class="rounded-xl border border-line bg-surface/90 px-8 py-5 text-center shadow-xl backdrop-blur"
-        >
-          <div class="text-base font-semibold text-emerald-400">通关 · 1-1</div>
-          <div class="mt-1 font-mono text-xs text-muted">
-            score {hud.score} · coins {hud.coins} · attempt {hud.life}
-          </div>
-          <button
-            class="mt-3 rounded-lg bg-emerald-600 px-4 py-1.5 text-xs text-white hover:bg-emerald-500"
-            onclick={restart}
-          >
-            再来一次(⏎)
-          </button>
-        </div>
-      </div>
-    {/if}
-
-    <!-- LAYA 决策浮层(FloatingPanel,可拖动/折叠/置顶) -->
-    {#if openPanels.includes('laya')}
-      <FloatingPanel
-        title="Laya 决策 · 最近一拍"
-        testid="panel-laya"
-        width={380}
-        initial={{ x: 24, y: 24 }}
-        persistKey="laya"
-        onclose={() => togglePanel('laya')}
+      <!-- HUD DOM 覆盖层(docs/15 §1):任意 DPI 锐利;canvas 只留像素游戏层 -->
+      <div
+        class="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-2 font-mono text-[11px] leading-none"
       >
-        {#if lastDecision}
-          <div class="space-y-1.5">
-            {#each lastDecision.probs.slice(0, 6) as [a, p] (a)}
-              <div class="flex items-center gap-2 text-xs">
-                <span class="w-[110px] truncate font-mono text-muted">{a}</span>
-                <div class="h-1.5 flex-1 overflow-hidden rounded bg-[#1d2230]">
-                  <div
-                    class="h-full rounded bg-emerald-500"
-                    style={`width:${(p * 100).toFixed(1)}%`}
-                  ></div>
-                </div>
-                <span class="w-10 text-right font-mono">{(p * 100).toFixed(0)}%</span>
-              </div>
-            {/each}
-          </div>
-          <div class="mt-3 grid grid-cols-4 gap-2">
-            <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
-              <div class="font-mono text-sm">{(lastDecision.conf * 100).toFixed(0)}%</div>
-              <div class="text-[10px] text-muted">置信度</div>
-            </div>
-            <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
-              <div class="font-mono text-sm">{stats.exec}</div>
-              <div class="text-[10px] text-muted">EXEC</div>
-            </div>
-            <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
-              <div class="font-mono text-sm text-amber-400">{stats.reSense}</div>
-              <div class="text-[10px] text-muted">RE-SENSE</div>
-            </div>
-            <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
-              <div class="font-mono text-sm text-red-400">{stats.escalate}</div>
-              <div class="text-[10px] text-muted">ESCALATE</div>
-            </div>
-          </div>
-          <details class="mt-3">
-            <summary class="cursor-pointer text-[10px] uppercase tracking-wider text-muted"
-              >Laya 输入</summary
+        <div class="flex gap-3 text-white [text-shadow:0_1px_2px_rgba(0,0,0,.7)]">
+          <span>SCORE {String(hud.score).padStart(6, '0')}</span>
+          <span>COINS ×{String(hud.coins).padStart(2, '0')}</span>
+          <span class="hidden sm:inline">WORLD 1-1</span>
+        </div>
+        <div class="flex items-center gap-2">
+          {#if lastDecision}
+            <span class="rounded bg-black/70 px-1.5 py-0.5 text-emerald-400"
+              >IN {lastDecision.action}</span
             >
-            <pre
-              class="mt-2 max-h-40 overflow-auto rounded-lg bg-[#0d0f14] p-2 font-mono text-[10px] leading-relaxed text-slate-400">{stateJson}</pre>
-          </details>
-        {:else}
-          <div class="text-xs text-muted">尚无决策 —— 开始后生效</div>
-        {/if}
-        <!-- 日志(三档过滤,docs/15 §5.6;异常档恒显) -->
-        <div class="mt-2 flex gap-1">
-          {#each [['all', '全部'], ['game', '玩法'], ['evolve', '进化'], ['error', '异常']] as [id, label] (id)}
+            <span class="rounded px-1.5 py-0.5 font-semibold {gateBadge[lastDecision.gate]}"
+              >{lastDecision.gate} {(lastDecision.conf * 100).toFixed(0)}%</span
+            >
+          {/if}
+          <span class="text-white [text-shadow:0_1px_2px_rgba(0,0,0,.7)]"
+            >TIME {String(hud.time).padStart(3, '0')}</span
+          >
+        </div>
+      </div>
+
+      {#if phase === 'idle'}
+        <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div class="rounded-xl bg-black/60 px-6 py-3 text-center text-sm backdrop-blur-sm">
+            {#if needsLaya && !layaOk}
+              需 laya-server · 去环境页启动
+            {:else}
+              ▶ 开始 · P 暂停 · Enter 重生
+            {/if}
+          </div>
+        </div>
+      {/if}
+      {#if phase === 'paused'}
+        <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div class="rounded-xl bg-black/60 px-6 py-2 text-sm backdrop-blur-sm">
+            已暂停 · P 继续
+          </div>
+        </div>
+      {/if}
+      {#if phase === 'running' && s.phase === 'dead'}
+        <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div
+            class="rounded-xl border border-line bg-surface/90 px-6 py-4 text-center shadow-xl backdrop-blur"
+          >
+            <div class="text-sm font-semibold">
+              阵亡 · {s.deaths[s.deaths.length - 1]?.cause ?? '?'}
+            </div>
+            <div class="mt-1 font-mono text-xs text-muted">
+              col {Math.round(s.mario.x / TILE)} · attempt {s.attempts} · {hud.pct}%
+            </div>
+            <div class="mt-2 text-[11px] text-muted">Enter 立即重生(自动重生倒计时中)</div>
+          </div>
+        </div>
+      {/if}
+      {#if phase === 'running' && s.phase === 'won'}
+        <div class="absolute inset-0 flex items-center justify-center">
+          <div
+            class="rounded-xl border border-line bg-surface/90 px-8 py-5 text-center shadow-xl backdrop-blur"
+          >
+            <div class="text-base font-semibold text-emerald-400">通关 · 1-1</div>
+            <div class="mt-1 font-mono text-xs text-muted">
+              score {hud.score} · coins {hud.coins} · attempt {hud.life}
+            </div>
             <button
-              class="rounded px-1.5 py-0.5 text-[10px] {logFilter === id
-                ? 'bg-accent-soft/60 text-white'
-                : 'text-muted hover:text-white'}"
-              onclick={() => (logFilter = id as typeof logFilter)}
+              class="mt-3 rounded-lg bg-emerald-600 px-4 py-1.5 text-xs text-white hover:bg-emerald-500"
+              onclick={restart}
             >
-              {label}
+              再来一次(⏎)
             </button>
-          {/each}
+          </div>
         </div>
-        <div
-          class="mt-1 max-h-36 overflow-auto rounded-lg bg-[#0d0f14] p-2"
-          data-testid="log-stream"
+      {/if}
+
+      <!-- LAYA 决策浮层(FloatingPanel,可拖动/折叠/置顶) -->
+      {#if openPanels.includes('laya')}
+        <FloatingPanel
+          title="Laya 决策 · 最近一拍"
+          testid="panel-laya"
+          width={380}
+          initial={{ x: 24, y: 24 }}
+          persistKey="laya"
+          onclose={() => togglePanel('laya')}
         >
-          {#if log.length === 0}
-            <div class="text-[10px] text-muted">日志空</div>
-          {:else}
-            {#each log.filter((r) => logFilter === 'all' || r.level === logFilter || r.level === 'error') as row (row.t + row.text)}
-              <div class="flex gap-2 font-mono text-[10px] leading-relaxed">
-                <span class="flex-none text-slate-600">{row.t}</span>
-                <span class="truncate {row.cls}">{row.text}</span>
+          {#if lastDecision}
+            <div class="space-y-1.5">
+              {#each lastDecision.probs.slice(0, 6) as [a, p] (a)}
+                <div class="flex items-center gap-2 text-xs">
+                  <span class="w-[110px] truncate font-mono text-muted">{a}</span>
+                  <div class="h-1.5 flex-1 overflow-hidden rounded bg-[#1d2230]">
+                    <div
+                      class="h-full rounded bg-emerald-500"
+                      style={`width:${(p * 100).toFixed(1)}%`}
+                    ></div>
+                  </div>
+                  <span class="w-10 text-right font-mono">{(p * 100).toFixed(0)}%</span>
+                </div>
+              {/each}
+            </div>
+            <div class="mt-3 grid grid-cols-4 gap-2">
+              <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
+                <div class="font-mono text-sm">{(lastDecision.conf * 100).toFixed(0)}%</div>
+                <div class="text-[10px] text-muted">置信度</div>
               </div>
-            {/each}
+              <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
+                <div class="font-mono text-sm">{stats.exec}</div>
+                <div class="text-[10px] text-muted">EXEC</div>
+              </div>
+              <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
+                <div class="font-mono text-sm text-amber-400">{stats.reSense}</div>
+                <div class="text-[10px] text-muted">RE-SENSE</div>
+              </div>
+              <div class="rounded-lg border border-line bg-[#151823] px-2 py-1.5">
+                <div class="font-mono text-sm text-red-400">{stats.escalate}</div>
+                <div class="text-[10px] text-muted">ESCALATE</div>
+              </div>
+            </div>
+            <details class="mt-3">
+              <summary class="cursor-pointer text-[10px] uppercase tracking-wider text-muted"
+                >Laya 输入</summary
+              >
+              <pre
+                class="mt-2 max-h-40 overflow-auto rounded-lg bg-[#0d0f14] p-2 font-mono text-[10px] leading-relaxed text-slate-400">{stateJson}</pre>
+            </details>
+          {:else}
+            <div class="text-xs text-muted">尚无决策 —— 开始后生效</div>
           {/if}
-        </div>
-      </FloatingPanel>
-    {/if}
-
-    <!-- 参数设置浮层 -->
-    {#if openPanels.includes('settings')}
-      <FloatingPanel
-        title="参数 · 即时生效"
-        testid="panel-settings"
-        width={340}
-        initial={{ x: 48, y: 48 }}
-        persistKey="settings"
-        onclose={() => togglePanel('settings')}
-      >
-        <div class="space-y-3 text-xs">
-          <label class="block">
-            <div class="mb-1 flex justify-between">
-              <span class="text-muted">速度</span><span class="font-mono"
-                >{settings.speed.toFixed(1)}×</span
-              >
-            </div>
-            <input
-              class="w-full accent-emerald-500"
-              type="range"
-              min="0.5"
-              max="3"
-              step="0.1"
-              bind:value={settings.speed}
-            />
-          </label>
-          <label class="block">
-            <div class="mb-1 flex justify-between">
-              <span class="text-muted">决策间隔</span><span class="font-mono"
-                >{settings.intervalMs}ms</span
-              >
-            </div>
-            <input
-              class="w-full accent-emerald-500"
-              type="range"
-              min="150"
-              max="600"
-              step="25"
-              bind:value={settings.intervalMs}
-              onchange={applyDriverConfig}
-            />
-          </label>
-          <label class="block">
-            <div class="mb-1 flex justify-between">
-              <span class="text-muted">门控 EXECUTE</span><span class="font-mono"
-                >{settings.gateExecute.toFixed(2)}</span
-              >
-            </div>
-            <input
-              class="w-full accent-emerald-500"
-              type="range"
-              min="0.05"
-              max="0.5"
-              step="0.01"
-              bind:value={settings.gateExecute}
-              onchange={applyDriverConfig}
-            />
-          </label>
-          <label class="block">
-            <div class="mb-1 flex justify-between">
-              <span class="text-muted">门控 ESCALATE</span><span class="font-mono"
-                >{settings.gateEscalate.toFixed(2)}</span
-              >
-            </div>
-            <input
-              class="w-full accent-emerald-500"
-              type="range"
-              min="0.02"
-              max="0.3"
-              step="0.01"
-              bind:value={settings.gateEscalate}
-              onchange={applyDriverConfig}
-            />
-          </label>
-        </div>
-      </FloatingPanel>
-    {/if}
-
-    <!-- 复盘浮层 -->
-    {#if openPanels.includes('pm')}
-      <FloatingPanel
-        title="复盘"
-        testid="panel-pm"
-        width={520}
-        initial={{ x: 72, y: 72 }}
-        persistKey="pm"
-        onclose={() => togglePanel('pm')}
-      >
-        {#if postmortem}
-          <pre
-            class="max-h-[60vh] overflow-auto rounded-lg bg-[#0d0f14] p-3 font-mono text-[10px] leading-relaxed text-slate-300">{postmortem}</pre>
-        {:else}
-          <div class="text-xs text-muted">本局尚无复盘 —— 通关 / 第 3 次死亡自动生成</div>
-          <button
-            class="mt-2 rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:text-white"
-            onclick={genPostmortem}
-          >
-            立即生成复盘
-          </button>
-        {/if}
-      </FloatingPanel>
-    {/if}
-
-    <!-- 进化面板(docs/15 §2/§3):状态/统计/学到了什么/只读时间线 -->
-    {#if openPanels.includes('evo')}
-      <FloatingPanel
-        title="进化"
-        testid="panel-evo"
-        width={480}
-        initial={{ x: 96, y: 96 }}
-        persistKey="evo"
-        onclose={() => togglePanel('evo')}
-      >
-        <div class="mb-2 flex items-center justify-between">
-          <span class="font-mono text-[11px]">
-            #{evo.iteration} · champion
-            <b class="text-white"
-              >{evo.championScore === null ? '未测' : evo.championScore.toFixed(0)}</b
-            >
-            · 最远 {evo.bestMaxXCol} 列
-          </span>
-          <div class="flex gap-0.5 rounded-lg border border-line bg-[#0d0f14] p-0.5">
-            {#each [['auto', '自动'], ['step', '单步'], ['pause', '暂停']] as [id, label] (id)}
+          <!-- 日志(三档过滤,docs/15 §5.6;异常档恒显) -->
+          <div class="mt-2 flex gap-1">
+            {#each [['all', '全部'], ['game', '玩法'], ['evolve', '进化'], ['error', '异常']] as [id, label] (id)}
               <button
-                class="rounded px-2 py-0.5 text-[10px] {evolveMode === id
-                  ? 'bg-emerald-500/15 text-emerald-400'
+                class="rounded px-1.5 py-0.5 text-[10px] {logFilter === id
+                  ? 'bg-accent-soft/60 text-white'
                   : 'text-muted hover:text-white'}"
-                onclick={() => (evolveMode = id as typeof evolveMode)}
-                data-testid="evo-mode-{id}"
+                onclick={() => (logFilter = id as typeof logFilter)}
               >
                 {label}
               </button>
             {/each}
           </div>
-        </div>
-
-        <!-- 当前候选/消息一行摘要 -->
-        <div class="mb-2 font-mono text-[10px] text-muted">
-          {#if pendingCandidate}
-            本轮:试用 {Object.keys(pendingCandidate.patch).join(',')}
-            {#if stepGated}· 单步挂起{/if}
-          {:else}
-            本轮:无候选
-          {/if}
-          · 消息:{getPolicy().obsThreatFormat}/{getPolicy().obsProgressStyle}/{getPolicy()
-            .obsHintStyle}/
-          {getPolicy().obsInstructionVariant}
-        </div>
-
-        <!-- 统计(docs/15 §2) -->
-        <div class="mb-2 grid grid-cols-4 gap-1.5 text-center">
-          <div class="rounded-lg border border-line bg-[#151823] px-1 py-1.5">
-            <div class="font-mono text-sm">{evo.counters.deaths}</div>
-            <div class="text-[10px] text-muted">失败</div>
-          </div>
-          <div class="rounded-lg border border-line bg-[#151823] px-1 py-1.5">
-            <div class="font-mono text-sm">
-              {evo.counters.wins}/{evo.counters.runs}
-            </div>
-            <div class="text-[10px] text-muted">通关</div>
-          </div>
-          <div class="rounded-lg border border-line bg-[#151823] px-1 py-1.5">
-            <div class="font-mono text-sm">
-              {evo.counters.qwen.deathAnalyses + evo.counters.qwen.runAnalyses}
-              {#if evo.counters.qwen.emptyInsight > 0}<span class="text-amber-400"
-                  >(空{evo.counters.qwen.emptyInsight})</span
-                >{/if}
-            </div>
-            <div class="text-[10px] text-muted">分析</div>
-          </div>
-          <div class="rounded-lg border border-line bg-[#151823] px-1 py-1.5">
-            <div class="font-mono text-sm">
-              {insights.split('\n').filter((l) => l.startsWith('- ')).length}
-            </div>
-            <div class="text-[10px] text-muted">经验</div>
-          </div>
-        </div>
-        <div class="mb-2 font-mono text-[10px] text-muted">
-          漏斗 提案{evo.counters.qwen.patches} → 转正{evo.counters.qwen.commits} → 回滚{evo.counters
-            .qwen.rollbacks}
-          · 队列 {queueDepth}{#if analyzingKey}
-            · 析 {analyzingKey}{/if}{#if lastAnalysisMs !== null}
-            · 上次 {(lastAnalysisMs / 1000).toFixed(1)}s{/if}
-          {#if Object.keys(evo.cooldowns).some((k) => (evo.cooldowns[k] ?? 0) > evo.iteration)}
-            · 冷却 {Object.entries(evo.cooldowns)
-              .filter(([, until]) => until > evo.iteration)
-              .map(([k, until]) => `${k}→${until}`)
-              .join(' ')}
-          {/if}
-        </div>
-
-        <!-- 单步放行 -->
-        {#if stepGated}
-          <button
-            class="mb-2 w-full rounded-md bg-sky-600 px-2 py-1 text-[11px] text-white hover:bg-sky-500"
-            onclick={stepAdvance}
-            data-testid="btn-step-advance"
+          <div
+            class="mt-1 max-h-36 overflow-auto rounded-lg bg-[#0d0f14] p-2"
+            data-testid="log-stream"
           >
-            下一步 ▸(装填候选)
-          </button>
-        {/if}
-
-        <!-- 学到了什么:最近 3 条经验 -->
-        {#if insights}
-          <div class="mb-2">
-            <div class="text-[10px] uppercase tracking-[0.08em] text-muted">学到了什么</div>
-            {#each insights
-              .split('\n')
-              .filter((l) => l.startsWith('- '))
-              .slice(-3)
-              .reverse() as line (line)}
-              <div class="truncate font-mono text-[10px] text-violet-200/80" title={line}>
-                ✦ {line.replace(/^- \[iter \d+\] /, '')}
-              </div>
-            {/each}
+            {#if log.length === 0}
+              <div class="text-[10px] text-muted">日志空</div>
+            {:else}
+              {#each log.filter((r) => logFilter === 'all' || r.level === logFilter || r.level === 'error') as row (row.t + row.text)}
+                <div class="flex gap-2 font-mono text-[10px] leading-relaxed">
+                  <span class="flex-none text-slate-600">{row.t}</span>
+                  <span class="truncate {row.cls}">{row.text}</span>
+                </div>
+              {/each}
+            {/if}
           </div>
-        {/if}
+        </FloatingPanel>
+      {/if}
 
-        <!-- 手册折叠 -->
-        {#if playbook}
-          <details class="mb-2">
-            <summary class="cursor-pointer text-[11px] text-muted hover:text-white">
-              策略手册({playbook.length} 字)
-            </summary>
-            <pre
-              class="mt-1 max-h-[20vh] overflow-auto rounded-lg bg-[#0d0f14] p-2 font-mono text-[10px] leading-relaxed text-slate-300">{playbook}</pre>
-          </details>
-        {/if}
-
-        <!-- 时间线(只读) -->
-        <div class="text-[10px] uppercase tracking-[0.08em] text-muted">时间线</div>
-        {#if auditTail.length > 0}
-          <div class="mt-1 max-h-[18vh] overflow-auto font-mono text-[10px] leading-relaxed">
-            {#each auditTail as a (a.ts + a.action + a.key)}
-              <div class="text-slate-400">
-                <span class="text-muted">#{a.iter}</span>
-                <span
-                  class={a.action === 'commit' || a.phase === 'ok'
-                    ? 'text-emerald-400'
-                    : a.action === 'rollback' || a.phase === 'fail'
-                      ? 'text-red-400'
-                      : a.action === 'propose'
-                        ? 'text-fuchsia-300'
-                        : 'text-muted'}>{a.actor === 'qwen' ? 'Q' : '⚙'}</span
-                >
-                {a.action === 'analyze'
-                  ? `${a.phase === 'fail' ? '析失败' : '析'} ${(a.key ?? '').split('#').slice(-1)[0] ?? ''} ${reasonShort(a.reason)}${a.latencyMs ? ` ${(a.latencyMs / 1000).toFixed(1)}s` : ''}`
-                  : `${a.action === 'propose' ? `提案 ${Object.keys(a.patch ?? {}).join(',')}` : reasonShort(a.reason)}`}
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="mt-1 text-[11px] text-muted">尚无记录</div>
-        {/if}
-        <button
-          class="mt-2 rounded-md border border-line px-2 py-0.5 text-[10px] text-muted hover:text-white"
-          onclick={resetPolicy}
-          data-testid="btn-reset-policy"
+      <!-- 参数设置浮层 -->
+      {#if openPanels.includes('settings')}
+        <FloatingPanel
+          title="参数 · 即时生效"
+          testid="panel-settings"
+          width={340}
+          initial={{ x: 48, y: 48 }}
+          persistKey="settings"
+          onclose={() => togglePanel('settings')}
         >
-          重置策略
-        </button>
-      </FloatingPanel>
-    {/if}
+          <div class="space-y-3 text-xs">
+            <label class="block">
+              <div class="mb-1 flex justify-between">
+                <span class="text-muted">速度</span><span class="font-mono"
+                  >{settings.speed.toFixed(1)}×</span
+                >
+              </div>
+              <input
+                class="w-full accent-emerald-500"
+                type="range"
+                min="0.5"
+                max="3"
+                step="0.1"
+                bind:value={settings.speed}
+              />
+            </label>
+            <label class="block">
+              <div class="mb-1 flex justify-between">
+                <span class="text-muted">决策间隔</span><span class="font-mono"
+                  >{settings.intervalMs}ms</span
+                >
+              </div>
+              <input
+                class="w-full accent-emerald-500"
+                type="range"
+                min="150"
+                max="600"
+                step="25"
+                bind:value={settings.intervalMs}
+                onchange={applyDriverConfig}
+              />
+            </label>
+            <label class="block">
+              <div class="mb-1 flex justify-between">
+                <span class="text-muted">门控 EXECUTE</span><span class="font-mono"
+                  >{settings.gateExecute.toFixed(2)}</span
+                >
+              </div>
+              <input
+                class="w-full accent-emerald-500"
+                type="range"
+                min="0.05"
+                max="0.5"
+                step="0.01"
+                bind:value={settings.gateExecute}
+                onchange={applyDriverConfig}
+              />
+            </label>
+            <label class="block">
+              <div class="mb-1 flex justify-between">
+                <span class="text-muted">门控 ESCALATE</span><span class="font-mono"
+                  >{settings.gateEscalate.toFixed(2)}</span
+                >
+              </div>
+              <input
+                class="w-full accent-emerald-500"
+                type="range"
+                min="0.02"
+                max="0.3"
+                step="0.01"
+                bind:value={settings.gateEscalate}
+                onchange={applyDriverConfig}
+              />
+            </label>
+          </div>
+        </FloatingPanel>
+      {/if}
+
+      <!-- 复盘浮层 -->
+      {#if openPanels.includes('pm')}
+        <FloatingPanel
+          title="复盘"
+          testid="panel-pm"
+          width={520}
+          initial={{ x: 72, y: 72 }}
+          persistKey="pm"
+          onclose={() => togglePanel('pm')}
+        >
+          {#if postmortem}
+            <pre
+              class="max-h-[60vh] overflow-auto rounded-lg bg-[#0d0f14] p-3 font-mono text-[10px] leading-relaxed text-slate-300">{postmortem}</pre>
+          {:else}
+            <div class="text-xs text-muted">本局尚无复盘 —— 通关 / 第 3 次死亡自动生成</div>
+            <button
+              class="mt-2 rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:text-white"
+              onclick={genPostmortem}
+            >
+              立即生成复盘
+            </button>
+          {/if}
+        </FloatingPanel>
+      {/if}
+    </div>
+    <!-- 进化对话台(docs/16 §1.1):常驻主列 -->
+    <EvolutionChat
+      messages={chat}
+      status={{
+        mode,
+        layaOk,
+        qwenOk,
+        queueDepth,
+        analyzing: qwenRefining || analysisPending,
+        breaker: breakerTripped,
+        evolve: evolveMode,
+        won: evo.counters.wins,
+        runs: evo.counters.runs,
+        maxX: evo.bestMaxXCol,
+      }}
+      onstepadvance={stepAdvance}
+      onevolve={(m) => (evolveMode = m)}
+    />
   </div>
   <div class="relative h-[3px] flex-none bg-[#171a22]" data-testid="progress-strip">
     {#each deaths as d, i (`${d.x}-${i}`)}
@@ -1669,41 +1774,27 @@
     ></div>
   </div>
 
-  <!-- 遥测条:单行摘要,详情进浮层 -->
-  <div
-    class="flex h-[52px] flex-none flex-col justify-center gap-1 border-t border-line bg-surface px-3"
-  >
-    <div class="flex items-center gap-2.5 text-xs">
-      <span
-        class="flex size-[18px] flex-none items-center justify-center rounded-md bg-emerald-500/10 font-mono text-[11px] text-emerald-400"
-        >L</span
-      >
-      <span class="w-8 flex-none text-[10px] uppercase tracking-[0.08em] text-muted">laya</span>
-      {#if needsLaya && !layaOk}
-        <span class="truncate text-red-400" data-testid="telem-l"
-          >未就绪 —— 请在 release 版 · 环境页启动 laya-server(:10230)</span
+  <!-- 工具条(docs/16 §1.1):一行统计 + 最小操作;遥测详情进浮层 -->
+  <div class="flex h-8 flex-none items-center gap-2 border-t border-line bg-surface px-3">
+    <span class="truncate font-mono text-[11px] text-muted" data-testid="telem-stats">
+      决策 {stats.decisions} · EXEC {stats.exec} · RE {stats.reSense} · ESC {stats.escalate} · veto
+      <b class="text-orange-300">{stats.vetoes}</b>
+      · conf {stats.avgConf.toFixed(2)}
+      · 冠军 {evo.championScore === null ? '未测' : evo.championScore.toFixed(0)} · 最远
+      {evo.bestMaxXCol}列
+    </span>
+    <span class="ml-auto flex flex-none items-center gap-1">
+      {#if mode === 'autopilot'}
+        <span class="text-[10px] text-muted">规划器直控</span>
+      {:else if mode === 'human'}
+        <span class="text-[10px] text-muted">←→ 移动 · Z/空格 跳 · Shift 跑</span>
+      {:else if needsLaya && !layaOk}
+        <span class="text-[10px] text-red-400" data-testid="telem-l"
+          >Laya 未就绪 · 去环境页启动 :10230</span
         >
-      {:else if lastDecision}
-        <span class="truncate font-mono" data-testid="telem-l">
-          {lastDecision.action} · <b class="text-white">{(lastDecision.conf * 100).toFixed(0)}%</b>
-          ·
-          <span
-            class="rounded px-1.5 py-px text-[10px] font-semibold {gateBadge[lastDecision.gate]}"
-            >{lastDecision.gate}</span
-          >
-          · {lastDecision.latencyMs.toFixed(0)}ms · {stats.qps}Hz · x {hud.pct}%
-        </span>
-      {:else}
-        <span class="truncate text-muted" data-testid="telem-l">
-          待机 —— {mode === 'human'
-            ? '人玩模式不跑决策'
-            : mode === 'autopilot'
-              ? '自驾 = 规划器直控(不经 Laya)'
-              : `开始后每 ${settings.intervalMs}ms 一拍`}
-        </span>
       {/if}
       <button
-        class="flex-none rounded-md border border-line px-2 py-0.5 text-[11px] {postmortem
+        class="rounded-md border border-line px-2 py-0.5 text-[11px] {postmortem
           ? 'border-sky-500/40 text-sky-400'
           : 'text-muted hover:text-white'}"
         onclick={() => {
@@ -1715,32 +1806,19 @@
         复盘 {postmortem ? '●' : '▸'}
       </button>
       <button
-        class="ml-auto flex-none rounded-md border border-line px-2 py-0.5 text-[11px] text-muted hover:text-white"
+        class="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted hover:text-white"
         onclick={() => togglePanel('laya')}
+        data-testid="btn-laya"
       >
-        详情 ▸
+        详情
       </button>
-    </div>
-    <div class="flex items-center gap-2.5 text-xs">
-      <span
-        class="flex size-[18px] flex-none items-center justify-center rounded-md bg-[#1d2230] font-mono text-[11px] text-slate-400"
-        >Σ</span
+      <button
+        class="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted hover:text-red-300"
+        onclick={resetPolicy}
+        data-testid="btn-reset-policy"
       >
-      <span class="w-8 flex-none text-[10px] uppercase tracking-[0.08em] text-muted">统计</span>
-      <span class="truncate font-mono text-muted" data-testid="telem-stats">
-        决策 <b class="text-slate-200">{stats.decisions}</b> · EXEC {stats.exec} · RE {stats.reSense}
-        · ESC {stats.escalate} · stale {stats.stale} · veto
-        <b class="text-orange-300">{stats.vetoes}</b> · conf {stats.avgConf.toFixed(2)} · {stats.avgLatencyMs.toFixed(
-          0,
-        )}ms · coins {hud.coins} · 命 {hud.life} · time {hud.time}
-      </span>
-      <span class="ml-auto flex-none text-[10px] text-muted">
-        {mode === 'autopilot'
-          ? '规划器直控'
-          : mode === 'human'
-            ? '←→ 移动 · Z/空格 跳 · Shift 跑'
-            : `Laya ${layaOk ? ':10230 ✓' : '✗'}`}
-      </span>
-    </div>
+        重置
+      </button>
+    </span>
   </div>
 </div>
