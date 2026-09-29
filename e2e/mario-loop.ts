@@ -12,7 +12,7 @@
  *
  * 用法:npx tsx e2e/mario-loop.ts [局数=5] [--mode=reflex|autopilot]
  *       [--dir=<状态目录>] [--eval-runs=3]
- * 默认状态目录:~/.qianxun_dev/mario(与 UI 共享 champion);旧 var/mario 自动迁移。
+ * 默认状态目录:~/.qianxun_dev/games/mario(与 UI 共享 champion);旧根自动迁移。
  */
 
 import fs from 'node:fs';
@@ -29,6 +29,7 @@ import {
   INSIGHTS_FILE,
   PLAYBOOK_FILE,
   POLICY_FILE,
+  RUNS_INDEX_FILE,
   STATE_FILE,
   applyCooldowns,
   appendHistory,
@@ -58,6 +59,7 @@ import {
   type PersistTask,
   type PolicyEnvelope,
   type QwenCounters,
+  type RunIndexRow,
   type RunOutcome,
 } from '../src/features/games/mario/evolution';
 import type { PostmortemReport, SessionInput } from '../src/features/games/mario/postmortem';
@@ -117,9 +119,46 @@ export type LoopState = {
 
 // ---------- 状态持久化(docs/13 §5:与 UI 同一数据根、同一布局) ----------
 
-/** 默认数据根:与 Tauri debug 构建一致,UI 与闭环共享 champion。 */
+/** 默认数据根:与 Tauri debug 构建一致(games/ 命名空间),UI 与闭环共享 champion。 */
 export function defaultDataDir(): string {
-  return path.join(os.homedir(), '.qianxun_dev', 'mario');
+  return path.join(os.homedir(), '.qianxun_dev', 'games', 'mario');
+}
+
+/**
+ * 旧根一次性迁入:`~/.qianxun_dev/mario` → `games/mario`(同引擎同语义,
+ * 整体搬迁含 runs/ 归档;仅当新根还没有 policy.json 时执行)。
+ */
+export function migrateLegacyRoot(dir: string, log: (line: string) => void): void {
+  const home = os.homedir();
+  const legacy = path.join(home, '.qianxun_dev', 'mario');
+  if (
+    path.resolve(dir) === path.resolve(legacy) ||
+    fs.existsSync(path.join(dir, POLICY_FILE)) ||
+    !fs.existsSync(path.join(legacy, POLICY_FILE))
+  ) {
+    return;
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  for (const name of [
+    POLICY_FILE,
+    PLAYBOOK_FILE,
+    HISTORY_FILE,
+    STATE_FILE,
+    EVOLUTION_FILE,
+    INSIGHTS_FILE,
+  ]) {
+    const from = path.join(legacy, name);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(dir, name));
+  }
+  const legacyRuns = path.join(legacy, 'runs');
+  if (fs.existsSync(legacyRuns)) {
+    const newRuns = path.join(dir, 'runs');
+    fs.mkdirSync(newRuns, { recursive: true });
+    for (const f of fs.readdirSync(legacyRuns)) {
+      fs.copyFileSync(path.join(legacyRuns, f), path.join(newRuns, f));
+    }
+  }
+  log(`已迁移数据根 ${legacy} → ${dir}(策略/手册/历史/审计/逐局归档整体搬迁)`);
 }
 
 /**
@@ -150,6 +189,63 @@ function readText(dir: string, name: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 逐局全量快照(docs/15 §9 数据留存):runs/<runId>.json(元数据+策略/消息
+ * 设计快照+会话 digest+Laya 收发明细+复盘),索引一行进 runs/index.jsonl。
+ * 失败降级:先存明细版,超限(>~256MiB 不会发生,防异常)再存紧凑版。
+ */
+function persistRunSnapshot(
+  dir: string,
+  run: HeadlessResult,
+  policy: PolicyProfile,
+  mode: string,
+  tasksPlanned: number,
+  tasksOk: number,
+): void {
+  const runsDir = path.join(dir, 'runs');
+  fs.mkdirSync(runsDir, { recursive: true });
+  const meta = {
+    runId: run.runId,
+    ts: new Date().toISOString(),
+    mode,
+    won: run.won,
+    ticks: run.ticks,
+    maxXCol: run.report.maxXCol,
+    attempts: run.report.attempts,
+    stats: run.stats,
+    policy,
+    design: obsSnapshotOf(policy),
+  };
+  const index: RunIndexRow = {
+    ts: meta.ts,
+    runId: run.runId,
+    mode,
+    won: run.won,
+    ticks: run.ticks,
+    maxXCol: run.report.maxXCol,
+    attempts: run.report.attempts,
+    deaths: run.report.deaths.length,
+    tasksPlanned,
+    tasksOk,
+  };
+  try {
+    writeAtomic(
+      path.join(runsDir, `${run.runId}.json`),
+      JSON.stringify(
+        { ...meta, session: run.session, sent: run.sent, report: run.report },
+        null,
+        2,
+      ),
+    );
+  } catch {
+    writeAtomic(
+      path.join(runsDir, `${run.runId}.json`),
+      JSON.stringify({ ...meta, report: run.report }, null, 2),
+    );
+  }
+  fs.appendFileSync(path.join(dir, RUNS_INDEX_FILE), `${JSON.stringify(index)}\n`);
 }
 
 /** 原子写:tmp + rename(docs/15 R7——撕裂的 state 会连锁清掉基线)。 */
@@ -484,8 +580,11 @@ export async function runLoop(opts: {
       });
 
       // ③ 死亡级分析队列(docs/15 §6.1/6.2):串行、合并、落盘 backlog
+      let tasksPlanned = 0;
+      let tasksOk = 0;
       if (opts.mode === 'reflex') {
         const tasks = planAndEnqueue(state.evo, run.runId, run.report);
+        tasksPlanned = tasks.total;
         hadTasks = tasks.total > 0;
         triggerReason = tasks.enqueued.map((t) => t.reason).join(',') || 'no-signal(无死亡无通关)';
         let queue = tasks.enqueued;
@@ -563,6 +662,7 @@ export async function runLoop(opts: {
               task.kind === 'death' ? 'deathAnalyses' : 'runAnalyses',
             );
             breaker.ok();
+            tasksOk += 1;
             appendAudit(opts.dataDir, {
               v: 1,
               ts: new Date().toISOString(),
@@ -706,6 +806,9 @@ export async function runLoop(opts: {
       recorded = true;
       saveState(opts.dataDir, state);
 
+      // ④b 逐局全量快照(docs/15 §9 数据留存):runs/<runId>.json + 索引行
+      persistRunSnapshot(opts.dataDir, run, champion, opts.mode, tasksPlanned, tasksOk);
+
       // ⑤ 回归守卫(docs/15 §7):连续退化 → 自动回退最优版本
       const reg = detectRegression(state.history);
       if (reg !== null) {
@@ -816,6 +919,7 @@ async function main(): Promise<void> {
   const dataDir = path.resolve(dirArg ?? defaultDataDir());
   const evalRuns =
     Number(process.argv.find((a) => a.startsWith('--eval-runs='))?.slice(12)) || undefined;
+  migrateLegacyRoot(dataDir, (l) => console.log(l));
   migrateLegacyDir(dataDir, (l) => console.log(l));
   console.log(
     `=== 自主进化闭环 · ${iterations} 局 · ${mode} · K=${evalRuns ?? EVAL_RUNS_DEFAULT} · ${dataDir} ===`,

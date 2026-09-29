@@ -275,9 +275,42 @@ policy 新增 5 字段(确切文案全表见 analysis-15-3;OBS_ENUMS/OBS_EXTRA �
 
 ---
 
+## §9b 数据留存(逐局全量归档,用户决策)
+
+**动机**:实测分析(2026-09-28)发现历史数据太少、counter 与 history 起点错位、
+经验库有近重复且建立在反事实前提上——没有逐局原始数据就无法事后复核。
+
+**布局**(数据根 `~/.qianxun_dev/games/mario/`,旧 `mario/` 自动整体迁移;UI(Rust
+白名单 `runs/` 一层子目录)与 e2e 同构):
+
+```text
+games/mario/
+  runs/<runId>.json   逐局全量:元数据(ts/mode/won/ticks/attempts)
+                      + policy 与消息设计快照 + stats(决策/执行/否决)
+                      + session digest + sent 收发明细(全量) + report 复盘
+  runs/index.jsonl    一行一局:廉价趋势分析(胜率/最远列/ticks/死亡数/分析对账)
+  (其余 policy/playbook/history/state/evolution/insights/candidate 不变)
+```
+
+- **UI**:局末 `persistRunSnapshot`(genPostmortem 内,失败静默);超 1MiB
+  (Rust 写入上限)自动降级为去收发明细的紧凑版。
+- **e2e**:训练局后同构落盘;tasksOk 计数进索引行,与审计对账。
+- **分析器**:`npx tsx e2e/mario-run-report.ts [dataDir]` 输出概览/趋势/
+  死亡热区/门控健康/Qwen 对账/经验库健康。
+- **容量**:~100-400KB/局,1000 局 ≈ 0.3GB;暂不裁剪(用户决策:数据要多
+  不要少),裁剪钩子留给 runs/index.jsonl 消费方按需实现。
+- **经验库卫生**(配套):appendInsight 近重复检测(归一化二元组 Jaccard
+  ≥0.55 → 原行 `‖确认@iter`,不占滚动窗);claim 必须带 evidenceIter
+  (对着 runs/ 复核);sanitize 窗口钳制只在真的改动提案值时报 issue
+  (消除 champion 透传噪声);系统提示加"事实纪律":当前策略是唯一事实,
+  被否决提案不得当已生效前提;UI 回滚路径接证伪写回(原只在 e2e);
+  candidate.json 持久化(重启不丢提案)。
+
+---
+
 ## §10 已拍板与开放问题
 
-**已拍板**:跨进程并发=红线约定+updatedAt 兜底(不上文件锁);无基线直转收紧 iteration=0;backlog 重试=局间槽先清;core 抽取放 v3 验证后(v3 兼容写);insights 4800/history 200;checklist 默认关;文案两层不互渗;**分析硬门**(用户决策,推翻"异步不阻塞"旧口径):失败/通关的分析没出结果,下一局不得开始——UI 开始/重开 await 队列排空,Qwen 不可达时重试上限后有界放行;e2e 天然串行。
+**已拍板**:跨进程并发=红线约定+updatedAt 兜底(不上文件锁);无基线直转收紧 iteration=0;backlog 重试=局间槽先清;core 抽取放 v3 验证后(v3 兼容写);insights 4800/history 200;checklist 默认关;文案两层不互渗;**分析硬门**(用户决策,推翻"异步不阻塞"旧口径):失败/通关的分析没出结果,下一局不得开始——UI 开始/重开 await 队列排空,Qwen 不可达时重试上限后有界放行;e2e 天然串行;**数据根迁至 `~/.qianxun_dev/games/mario`**(为更多游戏留命名空间,Rust/e2e 双侧自动迁移);**逐局全量留存 runs/**(不裁剪,先攒数据)。
 
 **开放(实施中按需回签)**:
 

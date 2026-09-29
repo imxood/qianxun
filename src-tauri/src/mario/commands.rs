@@ -3,7 +3,7 @@
 //! 审计日志(evolution.jsonl)走只追加。
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
 
@@ -16,9 +16,40 @@ const MAX_WRITE_BYTES: usize = 1 << 20;
 const MAX_APPEND_BYTES: usize = 64 << 10;
 
 fn mario_dir(app: &AppHandle) -> Result<PathBuf> {
-    let dir = paths::data_dir(app)?.join("mario");
+    let base = paths::data_dir(app)?;
+    let dir = base.join("games").join("mario");
+    // 一次性迁移:旧 `mario/` 整体搬进 `games/mario/`(含 runs/ 归档),
+    // UI 与闭环无感;rename 失败(跨卷等)退回递归复制。
+    if !dir.exists() {
+        let legacy = base.join("mario");
+        if legacy.is_dir() {
+            if let Some(parent) = dir.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|c| Error::Mario(format!("建目录失败:{c}")))?;
+            }
+            std::fs::rename(&legacy, &dir)
+                .or_else(|_| copy_dir_recursive(&legacy, &dir))
+                .map_err(|c| Error::Mario(format!("迁移 games/mario 失败:{c}")))?;
+        }
+    }
     std::fs::create_dir_all(&dir).map_err(|c| Error::Mario(format!("建目录失败:{c}")))?;
     Ok(dir)
+}
+
+/// 递归复制目录(迁移兜底;不跟随符号链接)。
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::result::Result<(), std::io::Error> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// 合法文件段:ASCII 字母数字 + `.-_`,非空,≤128 字符。
