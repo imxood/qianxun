@@ -23,12 +23,14 @@
     type LayaInsight,
   } from './qwen';
   import {
+    CANDIDATE_FILE,
     DESIGN_EVAL_RUNS,
     EVOLUTION_FILE,
     HISTORY_FILE,
     INSIGHTS_FILE,
     PLAYBOOK_FILE,
     POLICY_FILE,
+    RUNS_INDEX_FILE,
     STATE_FILE,
     applyCooldowns,
     appendHistory,
@@ -56,6 +58,7 @@
     type AuditEntry,
     type EvoState,
     type QwenCounters,
+    type RunIndexRow,
   } from './evolution';
   import {
     CircuitBreaker,
@@ -215,6 +218,64 @@
       .write(STATE_FILE, JSON.stringify(evo, null, 2))
       .catch(() => {});
   }
+  /** 候选持久化(docs/15 §9 教训②):重启不丢提案。 */
+  function persistCandidate(): void {
+    void getMarioStore()
+      .write(CANDIDATE_FILE, JSON.stringify({ pending: pendingCandidate, trialArmed }, null, 2))
+      .catch(() => {});
+  }
+  /**
+   * 逐局全量快照(docs/15 §9 数据留存):runs/<runId>.json(收发明细+复盘+
+   * 策略快照),索引一行进 runs/index.jsonl;超 1MiB 上限则降级存紧凑版。
+   */
+  async function persistRunSnapshot(input: {
+    report: PostmortemReport;
+    session: SessionInput;
+    sent: SentRow[];
+    mode: DriveMode;
+    ticks: number;
+    tasksPlanned: number;
+  }): Promise<void> {
+    const s = getMarioStore();
+    const won = input.report.outcome === 'win';
+    const meta = {
+      runId: driver.runId,
+      ts: new Date().toISOString(),
+      mode: input.mode,
+      won,
+      ticks: input.ticks,
+      maxXCol: input.report.maxXCol,
+      attempts: input.report.attempts,
+      policy: runPolicy ?? getPolicy(),
+      design: obsSnapshotOf(runPolicy ?? getPolicy()),
+    };
+    const index: RunIndexRow = {
+      ts: meta.ts,
+      runId: meta.runId,
+      mode: meta.mode,
+      won,
+      ticks: input.ticks,
+      maxXCol: input.report.maxXCol,
+      attempts: input.report.attempts,
+      deaths: input.report.deaths.length,
+      tasksPlanned: input.tasksPlanned,
+      tasksOk: 0,
+    };
+    try {
+      await s.write(`runs/${meta.runId}.json`, JSON.stringify({ ...meta, ...input }, null, 2));
+    } catch {
+      // 超 1MiB(极长空转局):丢弃收发明细,保复盘与元数据
+      try {
+        await s.write(
+          `runs/${meta.runId}.json`,
+          JSON.stringify({ ...meta, report: input.report, session: input.session }, null, 2),
+        );
+      } catch {
+        return; // 连紧凑版都写不下:放快照留痕,不影响游戏
+      }
+    }
+    await s.append(RUNS_INDEX_FILE, JSON.stringify(index)).catch(() => {});
+  }
   function audit(entry: AuditEntry): void {
     auditTail = [entry, ...auditTail].slice(0, 10);
     void getMarioStore()
@@ -234,6 +295,7 @@
   function armTrial(): void {
     trialArmed = true;
     stepGated = false;
+    persistCandidate();
     pushLog('text-sky-400', '候选装填,下局试用', 'evolve');
   }
   /** 单步模式放行(「下一步 ▸」)。 */
@@ -246,6 +308,9 @@
     setPolicy({ ...DEFAULT_POLICY });
     syncSettingsFromPolicy(getPolicy());
     persistPolicy('user:reset');
+    pendingCandidate = null;
+    trialArmed = false;
+    persistCandidate();
     audit({
       v: 1,
       ts: new Date().toISOString(),
@@ -475,6 +540,7 @@
     if (trialArmed && pendingCandidate) {
       trialCandidate = pendingCandidate;
       trialArmed = false;
+      persistCandidate();
       runPolicy = { ...pendingCandidate.policy };
       pushLog(
         'text-sky-400',
@@ -547,6 +613,7 @@
           championVid: evo.versions.length + 1,
         };
         pendingCandidate = null;
+        persistCandidate();
         pushLog('text-emerald-400', `候选转正 +${score.toFixed(0)}(无基线)`, 'evolve');
         audit({
           v: 1,
@@ -576,6 +643,7 @@
             },
           };
           pendingCandidate = null;
+          persistCandidate();
           pushLog(
             'text-emerald-400',
             `转正 ${score.toFixed(0)}(+${((score / base - 1) * 100).toFixed(0)}%)`,
@@ -591,8 +659,18 @@
             },
           };
           pendingCandidate = null;
+          // 证伪写回(docs/15 §9 教训①):把"此路不通"写进手册,防 Qwen
+          // 基于被否决的前提继续推理
+          playbook = appendInsight(
+            playbook,
+            evo.iteration,
+            `假设已回滚勿重复:${Object.keys(c.patch).join(',')}(${v.reason})`,
+            obsSnapshotOf(getPolicy()),
+          );
+          persistPlaybook();
           pushLog('text-amber-400', `回滚 · 冷却 5 局`, 'evolve');
         }
+        persistCandidate();
         audit({
           v: 1,
           ts: new Date().toISOString(),
@@ -647,6 +725,15 @@
       if (r.merged) evo = bumpQwen(evo, 'merged');
     }
     queueDepth = taskQueue.length + taskBacklog.length;
+    // 逐局全量快照(docs/15 §9):runs/<runId>.json + 索引行,失败不影响游戏
+    void persistRunSnapshot({
+      report,
+      session,
+      sent,
+      mode,
+      ticks: s.tick,
+      tasksPlanned: tasks.length,
+    });
     if (tasks.length > 0 && qwenOk) {
       // 分析硬门:挂起 promise,start()/restart() 必须等它 resolve 才能开下一局
       analysisPending = true;
@@ -855,6 +942,7 @@
             reason: '死亡级分析合并提案',
             kind,
           };
+          persistCandidate();
           audit({
             v: 1,
             ts: new Date().toISOString(),
@@ -933,6 +1021,17 @@
       auditTail = parseAuditLines(await store.read(EVOLUTION_FILE))
         .slice(-10)
         .reverse();
+      // 候选恢复(docs/15 §9 教训②):重启不丢提案
+      try {
+        const raw = await store.read(CANDIDATE_FILE);
+        if (raw !== null) {
+          const c = JSON.parse(raw) as { pending: typeof pendingCandidate; trialArmed: boolean };
+          pendingCandidate = c.pending;
+          trialArmed = c.trialArmed === true && c.pending !== null;
+        }
+      } catch {
+        /* 坏文件当无候选 */
+      }
     })();
     void driver.probe().then(() => {
       layaOk = driver.layaReady;

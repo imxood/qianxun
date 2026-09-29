@@ -33,6 +33,7 @@ import {
   runScore,
   startCooldowns,
   wrapPolicy,
+  insightSimilarity,
 } from './evolution';
 import {
   nextTask,
@@ -329,9 +330,22 @@ describe('经验沉淀 insights.md(docs/14 §6)', () => {
   });
 
   it('滚动到上限:最旧条目先丢;人保段标记对永不丢', () => {
+    // 构造语义互异的条目(LCG 伪随机填充逐条去相关,避免近重复被合并)
+    const scene = (i: number): string => {
+      let x = Math.imul(i + 1, 2654435761) >>> 0;
+      let filler = '';
+      for (let k = 0; k < 36; k += 1) {
+        x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+        filler += String((x % 89) + 10);
+      }
+      return (
+        `场景${i}:col${i * 3}处${['管道', '深坑', '板牙', '楼梯', '悬崖'][i % 5]}` +
+        `需提前${(i % 7) + 1}拍${['起跳', '下压', '冲刺', '急停'][i % 4]}${filler}`
+      );
+    };
     let doc = '';
     for (let i = 1; i <= 60; i += 1) {
-      doc = appendInsight(doc, i, `经验 ${i} `.padEnd(80, 'x'));
+      doc = appendInsight(doc, i, scene(i));
     }
     expect(doc.length).toBeLessThanOrEqual(INSIGHTS_MAX_CHARS + 100);
     expect(doc).not.toContain('- [iter 1]');
@@ -344,7 +358,7 @@ describe('经验沉淀 insights.md(docs/14 §6)', () => {
     );
     let rolled = withHuman;
     for (let i = 2; i <= 60; i += 1) {
-      rolled = appendInsight(rolled, i, `经验 ${i} `.padEnd(80, 'x'));
+      rolled = appendInsight(rolled, i, scene(i));
     }
     expect(rolled).toContain('人手写的经验,永远保留');
     expect(rolled).not.toContain('机器经验');
@@ -425,6 +439,32 @@ describe('消息设计沙箱(docs/15 §6.4)', () => {
     const cds = startCooldowns({}, ['obsThreatFormat'], 3);
     const { dropped } = applyCooldowns(target, DEFAULT_POLICY, cds, 4);
     expect(dropped).toEqual(['obsThreatFormat']);
+  });
+
+  it('窗口透传不产噪声:champion 同值合并 → 0 issue(反事实前提教训)', () => {
+    const champion = { ...DEFAULT_POLICY, pipeWindow: [-6, 8] as [number, number] };
+    const r = sanitizePolicy(champion); // 合并体原样透传
+    expect(r.issues).toEqual([]);
+    const bad = sanitizePolicy({ ...champion, pipeWindow: [-999, 999] as [number, number] });
+    expect(bad.issues.length).toBe(1);
+  });
+});
+
+describe('经验库卫生(docs/15 §9b):近重复确认 + 相似度', () => {
+  it('近重复不再整条入库,原行追加 ‖确认@iter', () => {
+    const obs = obsSnapshotOf(DEFAULT_POLICY);
+    let doc = appendInsight('', 3, '扩大观测视野至 24 列能显著降低原地空转率', obs);
+    doc = appendInsight(doc, 5, '扩大观测视野至 24 列能显著降低原地空转率', obs); // 完全同义
+    expect(doc.match(/- \[iter /g)).toHaveLength(1);
+    expect(doc).toContain('‖确认@5');
+    // 措辞略异但归一化后高度相似 → 仍算近重复
+    doc = appendInsight(doc, 6, '扩大观测视野到24列,能显著降低 原地空转率!', obs);
+    expect(doc.match(/- \[iter /g)).toHaveLength(1);
+    expect(doc).toContain('‖确认@6');
+    // 语义不同 → 正常入库
+    doc = appendInsight(doc, 7, '楼梯区提前起跳,贴墙滑行会掉', obs);
+    expect(doc.match(/- \[iter /g)).toHaveLength(2);
+    expect(insightSimilarity('苹果很甜', '完全无关的话题内容')).toBeLessThan(0.3);
   });
 });
 

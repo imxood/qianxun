@@ -102,7 +102,8 @@ export function buildRefineMessages(input: {
     '   单维度:数值与消息设计不得同车;≤3 字段;越界会被钳制。',
     '3. death_diagnosis:数组,每项 {"deathKey","rootCause","responsibleTick","fix"}(只进复盘,不产生逐拍指令);',
     '4. insight:必填可证伪对象 {"kind":"claim","claim":"≤150字","field":"涉字段","metric":"winRate|repeatRate|execRate|staleRate|avgConf|p50ms","direction":"up|down","evidenceIter":[迭代号]}。',
-    '   确无新发现时 {"kind":"maintain","claim":"维持:<哪个指标支持维持>"}。缺 metric 的 claim 视同无效。',
+    '   确无新发现时 {"kind":"maintain","claim":"维持:<哪个指标支持维持>"}。缺 metric 或 evidenceIter 的 claim 视同无效。',
+    '事实纪律:【当前策略与消息设计】是唯一事实;手册/历史经验中与之矛盾的描述一律以它为准——被否决/未生效的旧提案不得当作已生效前提继续推理。',
     SELECTION_GUIDE,
     '输出只能是这一个 JSON 对象,不要解释。目标:通关率提高、通关耗时缩短。',
   ].join('\n');
@@ -264,6 +265,10 @@ export function validateInsight(raw: unknown): { insight: LayaInsight | null; re
   const evidenceIter = Array.isArray(o['evidenceIter'])
     ? (o['evidenceIter'] as unknown[]).filter((x): x is number => typeof x === 'number')
     : undefined;
+  // claim 必须可查证:没有 evidenceIter 就无法对着 runs/ 归档复核(docs/15 §9)
+  if (!evidenceIter || evidenceIter.length === 0) {
+    return { insight: null, reason: 'insight.evidenceIter 缺失(claim 须指向真实迭代号)' };
+  }
   return {
     insight: {
       kind: 'claim',

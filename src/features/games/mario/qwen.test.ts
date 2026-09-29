@@ -123,6 +123,17 @@ describe('qwen 输出解析', () => {
     );
     expect(noMetric.insight).toBeNull();
     expect(noMetric.insightIssue).toContain('可证伪');
+    // claim 缺 evidenceIter → 不可查证,视同无效(docs/15 §9b)
+    const noEvidence = parseRefine(
+      JSON.stringify({
+        playbook: 'p',
+        policy_patch: {},
+        insight: { kind: 'claim', claim: 'x', metric: 'winRate', direction: 'up' },
+      }),
+      fb,
+    );
+    expect(noEvidence.insight).toBeNull();
+    expect(noEvidence.insightIssue).toContain('evidenceIter');
   });
 
   it('playbook 超长按 1600 截断', () => {

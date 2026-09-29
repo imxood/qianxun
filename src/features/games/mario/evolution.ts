@@ -19,13 +19,32 @@ import {
 import type { PostmortemReport } from './postmortem';
 import type { HistoryRow } from './qwen';
 
-// ---- 状态文件名(存储布局,docs/13 §5) ----
+// ---- 状态文件名(存储布局,docs/13 §5 + docs/15 §9 数据留存) ----
 export const POLICY_FILE = 'policy.json';
 export const PLAYBOOK_FILE = 'playbook.md';
 export const HISTORY_FILE = 'history.json';
 export const STATE_FILE = 'state.json';
 export const EVOLUTION_FILE = 'evolution.jsonl';
 export const INSIGHTS_FILE = 'insights.md';
+export const CANDIDATE_FILE = 'candidate.json';
+/** 逐局全量快照目录(Rust 白名单允许 runs/ 一层子目录)。 */
+export const RUNS_DIR = 'runs';
+export const RUNS_INDEX_FILE = 'runs/index.jsonl';
+
+/** runs/index.jsonl 一行:廉价趋势分析用(明细在 runs/<runId>.json)。 */
+export type RunIndexRow = {
+  ts: string;
+  runId: string;
+  mode: string;
+  won: boolean;
+  ticks: number;
+  maxXCol: number;
+  attempts: number;
+  deaths: number;
+  /** 分析对账:计划/成功的分析任务数。 */
+  tasksPlanned: number;
+  tasksOk: number;
+};
 
 // ---- 协议常数(docs/13 §4 + docs/15,可调) ----
 export const EVAL_RUNS_DEFAULT = 3; // 候选试跑局数(取中位数)
@@ -829,10 +848,43 @@ function splitHuman(doc: string): { humans: string[]; body: string } {
   return { humans, body: bodyParts.join('\n') };
 }
 
+/** 归一化:去空白/标点,小写——近重复判定用。 */
+function normalizeForDedup(s: string): string {
+  return s.replace(/[\s,。;:、;:!?'"“”()（）\-—/【】]/g, '').toLowerCase();
+}
+
+/** 字符二元组 Jaccard 相似度(经验近重复判定,docs/15 §9 实测教训③)。 */
+export function insightSimilarity(a: string, b: string): number {
+  const na = normalizeForDedup(a);
+  const nb = normalizeForDedup(b);
+  if (na.length < 2 || nb.length < 2) return na === nb ? 1 : 0;
+  const grams = (s: string): Set<string> => {
+    const g = new Set<string>();
+    for (let i = 0; i < s.length - 1; i += 1) g.add(s.slice(i, i + 2));
+    return g;
+  };
+  const ga = grams(na);
+  const gb = grams(nb);
+  let inter = 0;
+  for (const g of ga) if (gb.has(g)) inter += 1;
+  const union = ga.size + gb.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+/** 剥掉 `- [iter N]` 前缀、obs 标签与确认后缀,取可比对的正文。 */
+function insightBody(line: string): string {
+  return line
+    .replace(/^- \[iter \d+\]\s*/, '')
+    .replace(/(‖确认@\d+)+\s*$/, '')
+    .replace(/\s*\(obs [^)]*\)\s*$/, '');
+}
+
 /**
- * 追加一条 Laya 使用经验并滚动到上限(docs/14 §6):
- * 人保段(`<!-- HUMAN -->` 标记对)永不丢,其余按行 FIFO 丢弃最旧。
- * insight 正文压成单行(≤200 字在 qwen.parseRefine 已钳制)。
+ * 追加一条 Laya 使用经验并滚动到上限(docs/14 §6 + docs/15 §9):
+ * - 人保段(`<!-- HUMAN -->` 标记对)永不丢,其余按行 FIFO 丢弃最旧;
+ * - 近重复(正文二元组 Jaccard ≥0.55)不再整条入库,原行追加 `‖确认@iter`——
+ *   "重复出现的结论"本身就是证据,但不必占用滚动窗口;
+ * - insight 正文压成单行(≤200 字在 qwen.parseRefine 已钳制)。
  */
 export function appendInsight(doc: string, iter: number, text: string, obs?: ObsSnapshot): string {
   const clean = text.trim().replace(/\s+/g, ' ');
@@ -842,7 +894,23 @@ export function appendInsight(doc: string, iter: number, text: string, obs?: Obs
   const obsTag = obs
     ? ` (obs ${obs.profileCols}列/${obs.threatsLookPx}px/pose:${obs.pose ? 'on' : 'off'}/sub:${obs.subgoal ? 'on' : 'off'})`
     : '';
-  lines.push(`- [iter ${iter}] ${clean}${obsTag}`);
+  // 近重复:找正文最相似的旧行,追加确认标记而非新行
+  let bestIdx = -1;
+  let bestSim = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i]!.startsWith('- [iter ')) continue;
+    const sim = insightSimilarity(insightBody(lines[i]!), clean);
+    if (sim > bestSim) {
+      bestSim = sim;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx >= 0 && bestSim >= 0.55) {
+    const line = lines[bestIdx]!;
+    if (!line.includes(`‖确认@${iter}`)) lines[bestIdx] = `${line}‖确认@${iter}`;
+  } else {
+    lines.push(`- [iter ${iter}] ${clean}${obsTag}`);
+  }
   let out = lines.join('\n');
   while (out.length > INSIGHTS_MAX_CHARS && lines.length > 1) {
     lines.shift();

@@ -219,8 +219,11 @@ export function sanitizePolicy(raw: unknown): {
     let b = clamp(Number(v[1]), [lo, hi]);
     if (Number.isNaN(a) || Number.isNaN(b)) continue;
     if (a > b) [a, b] = [b, a];
-    const cur = out[key as 'gapWindow'] as Window;
-    if (a !== cur[0] || b !== cur[1]) issues.push(`${key}: [${v[0]},${v[1]}] → [${a},${b}]`);
+    // 只在钳制真的改动了提案值时报 issue;champion 原样透传不产生噪声
+    // (sanitize 收到的是 {champion,patch} 合并体,与默认值比全是假阳性)
+    if (a !== Number(v[0]) || b !== Number(v[1])) {
+      issues.push(`${key}: [${v[0]},${v[1]}] → [${a},${b}]`);
+    }
     out[key as 'gapWindow'] = [a, b];
   }
   // 不变式:ESCALATE 门 ≤ EXECUTE 门(压 ESCALATE,保住用户设定的 EXECUTE)
