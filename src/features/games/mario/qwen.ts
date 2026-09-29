@@ -73,7 +73,8 @@ const SELECTION_GUIDE = [
 
 export function buildRefineMessages(input: {
   playbook: string;
-  report: PostmortemReport;
+  /** 即死即析(docs/16 §3.0)时可能还没有局终 report:有载荷则可空。 */
+  report: PostmortemReport | null;
   policy: PolicyProfile;
   history: HistoryRow[];
   /** 触发原因(docs/15 §6.1):death / death-repeat / win / plateau。 */
@@ -119,7 +120,7 @@ export function buildRefineMessages(input: {
   }
   if (input.deathPayload !== undefined) {
     user.push(`【死亡级全量载荷(归因素材,不得产出逐拍指令)】\n${input.deathPayload}`);
-  } else {
+  } else if (input.report !== null) {
     user.push(`【本局过程 digest】\n${JSON.stringify(processDigest(input.report))}`);
   }
   if (input.lastDiagnosis && input.lastDiagnosis.length > 0) {
@@ -355,7 +356,8 @@ export function parseRefine(
 
 /** 一次「局后分析」:调用本地 Qwen 并钳制其输出。失败向上抛,由调度器降级。 */
 export async function refineViaQwen(input: {
-  report: PostmortemReport;
+  /** 即死即析时可为 null(只要带 deathPayload)。 */
+  report: PostmortemReport | null;
   playbook: string;
   policy: PolicyProfile;
   history: HistoryRow[];
@@ -393,4 +395,81 @@ export async function refineViaQwen(input: {
       validDeathKeys: input.validDeathKeys,
     },
   );
+}
+
+/**
+ * 即死即析载荷(docs/16 §3.0):死亡瞬间只有收发环,没有局终 report。
+ * 组成:本命轨迹 CSV(确定性裁剪)+ 死前 12 拍收发明细(证据,保底 8 拍)+
+ * 全程异常行(环内可见部分);⑥上下文由调用方拼。
+ */
+export function buildDeathPayloadFromSent(input: {
+  sent: Array<SentRowLike>;
+  attempt: number;
+  cause: string;
+  landmark: string;
+}): string {
+  const { sent, attempt, cause, landmark } = input;
+  const mine = sent.filter((s) => s.attempt === attempt);
+  const gate = (g: string | undefined): string =>
+    g === 'EXECUTE' ? 'EX' : g === 'RE_SENSE' ? 'RS' : g === 'ESCALATE' ? 'ES' : (g ?? '?');
+  const csv = traceCsv(
+    trimTrace(
+      mine.map((s) => s.row),
+      120,
+    ),
+  );
+  const tail = mine.slice(-12);
+  const tailMin = mine.slice(-8);
+  const anomalies = mine.map((s) => s.row).filter(isAnomalyRow);
+  const sections: Array<[string, string]> = [
+    [
+      `① 本命轨迹(第${attempt}命,CSV,确定性裁剪)`,
+      csv.length > 0 ? csv.join('\n') : '(收发环尚未覆盖本命)',
+    ],
+    [
+      '② 死前收发明细(state → 决策;证据)',
+      tail
+        .map(
+          (s) =>
+            `t${s.tick} ${s.state}\n=> ${s.row.action ?? '?'} .${(s.row.conf ?? 0).toFixed(2)} ${gate(s.row.gate)} ${s.row.latencyMs ?? 0}ms`,
+        )
+        .join('\n'),
+    ],
+    [
+      '③ 死前收发(降密度 8 拍)',
+      tailMin
+        .map(
+          (s) =>
+            `t${s.tick} ${s.state}\n=> ${s.row.action ?? '?'} .${(s.row.conf ?? 0).toFixed(2)}`,
+        )
+        .join('\n'),
+    ],
+    [
+      '④ 异常拍(环内可见)',
+      anomalies.length > 0
+        ? anomalies
+            .slice(0, 8)
+            .map(
+              (r) => `${anomalyCsvRow(r)}\n  ${mine.find((x) => x.tick === r.tick)?.state ?? ''}`,
+            )
+            .join('\n')
+        : '(无)',
+    ],
+  ];
+  const head = `死亡级载荷 · 第${attempt}命 · ${cause}@${landmark}(即死即析,局未终:过程 digest 与其它命摘要暂缺)`;
+  let text = `${head}\n\n${sections.map(([t, c]) => `【${t}】\n${c}`).join('\n\n')}`;
+  // 超预算:先砍 ④,再砍 ①(证据 ②③ 保底)
+  if (text.length > PAYLOAD_CHAR_BUDGET) {
+    text = `${head}\n\n${sections
+      .filter(([t]) => !t.startsWith('④'))
+      .map(([t, c]) => `【${t}】\n${c}`)
+      .join('\n\n')}`;
+  }
+  if (text.length > PAYLOAD_CHAR_BUDGET) {
+    text = `${head}\n\n${sections
+      .filter(([t]) => t.startsWith('②') || t.startsWith('③'))
+      .map(([t, c]) => `【${t}】\n${c}`)
+      .join('\n\n')}`;
+  }
+  return text;
 }

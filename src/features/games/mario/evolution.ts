@@ -27,6 +27,8 @@ export const STATE_FILE = 'state.json';
 export const EVOLUTION_FILE = 'evolution.jsonl';
 export const INSIGHTS_FILE = 'insights.md';
 export const CANDIDATE_FILE = 'candidate.json';
+/** 聊天流归档(docs/16 §5):一行一条消息,append-only。 */
+export const CHAT_FILE = 'chat.jsonl';
 /** 逐局全量快照目录(Rust 白名单允许 runs/ 一层子目录)。 */
 export const RUNS_DIR = 'runs';
 export const RUNS_INDEX_FILE = 'runs/index.jsonl';
@@ -375,6 +377,29 @@ export function deathSignature(report: PostmortemReport): string | null {
   if (top === undefined) return null;
   const first = report.deaths.find((d) => d.cause === top.cause);
   return `${top.cause}@${first?.landmark ?? '?'}`;
+}
+
+/**
+ * 即死即析(docs/16 §3.0):单死任务,死亡瞬间调用。
+ * 语义与 planAnalyses 的 per-death 分支完全一致(幂等键/repeat/优先级),
+ * 只是不需要等局终的完整 report。
+ */
+export function planDeathTask(
+  state: EvoState,
+  runId: string,
+  attempt: number,
+  cause: string,
+  landmark: string,
+): AnalysisTask | null {
+  const key = `${runId}#${attempt}`;
+  const queued = new Set(state.pendingAnalyses.map((t) => t.key));
+  if (state.analyzedDeathKeys.includes(key) || queued.has(key)) return null;
+  const sig = `${cause}@${landmark}`;
+  const stat = state.sigStats[sig];
+  const repeat = (stat?.deaths ?? 0) >= 1;
+  const reason = repeat ? `death-repeat(${sig})` : `death(${sig})`;
+  const priority = attempt === 1 ? 0 : repeat ? 2 : 1;
+  return { key, kind: 'death', attempt, sig, reason, priority };
 }
 
 /**
