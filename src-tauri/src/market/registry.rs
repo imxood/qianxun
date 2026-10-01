@@ -110,7 +110,7 @@ fn detail_from_manifest(name: &str, manifest: &serde_json::Value) -> Detail {
     }
 }
 
-/// 兼容判定（宽松）：rc 钉版的生态现实是包声明 `^0.1.x` 这类宽范围——
+/// 兼容判定（宽松）：rc 钉版的生态现实是包声明 `^0.2.x` 这类宽范围——
 /// 直接按 semver 预发布规则比对会大量误杀，所以对当前版本同时试
 /// 原样与去预发布两种形态，任一命中即放行；未声明、解析不了都放行——
 /// 门槛只拦确凿的不兼容。
@@ -221,17 +221,23 @@ mod tests {
     fn 兼容判定对rc钉版宽松() {
         // 宽范围与显式 rc 声明都放行；只拦确凿的不兼容。
         let compatible = compatibility(&serde_json::json!({
-            "peerDependencies": { "@deepseek-ai/dsh": "^0.1.2" }
+            "peerDependencies": { "@deepseek-ai/dsh": "^0.2.0" }
         }));
         assert!(matches!(compatible, Compatibility::Pass));
 
         let declared_rc = compatibility(&serde_json::json!({
-            "peerDependencies": { "@deepseek-ai/dsh": "^0.1.5-rc.1" }
+            "peerDependencies": { "@deepseek-ai/dsh": "^0.2.0-rc.1" }
         }));
         assert!(matches!(declared_rc, Compatibility::Pass));
 
         let undeclared = compatibility(&serde_json::json!({ "name": "x" }));
         assert!(matches!(undeclared, Compatibility::Pass));
+
+        // 旧锚点范围（^0.1.x）对新钉的 0.2.0 确凿不兼容：门槛要拦。
+        let old_anchor = compatibility(&serde_json::json!({
+            "peerDependencies": { "@deepseek-ai/dsh": "^0.1.2" }
+        }));
+        assert!(matches!(old_anchor, Compatibility::Block { .. }));
 
         let incompatible = compatibility(&serde_json::json!({
             "peerDependencies": { "@deepseek-ai/dsh": "^9.0.0" }
