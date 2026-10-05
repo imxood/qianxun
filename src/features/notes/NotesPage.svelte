@@ -16,6 +16,7 @@
   import ConfirmDialog from '../../components/ConfirmDialog.svelte';
   import PromptDialog from '../../components/PromptDialog.svelte';
   import NoteEditor from './NoteEditor.svelte';
+  import { AUTOSAVE_DEBOUNCE_MS, autosaveDecision, needsUnloadPrompt } from './autosave';
 
   let notes = $state<NoteMeta[]>([]);
   let filter = $state('');
@@ -142,7 +143,7 @@
     // 组件销毁（Svelte keep-alive 之外的路径）里 IPC 仍可用，直接 save。
     // 关窗路径无法可靠 await，故另用 beforeunload 提示用户。
     const onBeforeUnload = (event: BeforeUnloadEvent): void => {
-      if (dirty && !saving) {
+      if (needsUnloadPrompt({ dirty, saving, hasActive: activeNote !== null })) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -173,14 +174,31 @@
     if (saveTimer !== null) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      if (!dirty) return;
-      if (saving) {
-        // 保存进行中：稍后重试，绝不静默丢弃这一轮编辑。
+      void tickAutosave();
+    }, AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * 防抖到期后的真实执行点（docs/18 S8 + B3）。
+   * 决策逻辑在 ./autosave（纯函数，有单测覆盖），这里只做副作用。
+   */
+  async function tickAutosave(): Promise<void> {
+    const decision = autosaveDecision({
+      dirty,
+      saving,
+      hasActive: activeNote !== null,
+    });
+    switch (decision.kind) {
+      case 'save':
+        await save();
+        return;
+      case 'retry':
+        // 保存正在飞行：重排一轮，绝不静默丢弃这次编辑。
         scheduleSave();
         return;
-      }
-      void save();
-    }, 1500);
+      case 'idle':
+        return;
+    }
   }
 
   async function initVault(): Promise<void> {

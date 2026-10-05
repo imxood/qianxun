@@ -6,9 +6,14 @@
 //!   HttpOnly cookie 并 302 到 `/`；
 //! - 其余全部路径要求 cookie/query 命中未吊销 token，否则 401；
 //! - `/api/*`（含 SSE 流响应）与静态页流式转发到 DSH 回环 origin；
-//! - `/api/events.mux` / `/api/events.host` 两条 WS 下行做双向桥。
+//! - `/api/remote.mux` 一条 WS 下行做双向桥（带 10 分钟空闲超时，
+//!   防手机息屏导致的半开连接泄漏）。
 //!
-//! `remote.enabled=false`（默认）时零监听：网关任务根本不启动。
+//! `remote.enabled=false`（默认）时**不绑 LAN**：网关任务照常启动，但只听
+//! 回环 `127.0.0.1:port`（DSH 页 iframe 与回环 fetch 依赖它），并按周期
+//! 重试绑 EasyTier 网卡。纠偏记录见 docs/18 B5——此前这里与 docs/04 都写
+//! 「零监听 / 任务根本不启动」，与 `commands::sync` 的无条件启动矛盾，
+//! 导致 docs/04 的验收项「关闭开关后端口扫描无监听」在回环侧必然失败。
 
 pub mod commands;
 pub mod gateway;

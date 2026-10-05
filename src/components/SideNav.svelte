@@ -67,6 +67,8 @@
 
   /** 分离中（spawn 未返回）的视图，防止重复右键连点开两个窗。 */
   let detaching: PageId | null = null;
+  /** 键盘导航的焦点下标（跟随 nav.page，落在 visibleItems 坐标系里）。 */
+  let focusIndex = $state(0);
 
   /**
    * 分离到独立窗口：spawn 成功才让位（失败保持原状）。
@@ -98,14 +100,109 @@
       },
     ]);
   }
+
+  /** 侧栏上「当前真实存在」的入口（未分离的项 + settings），键盘导航的操作对象。 */
+  const visibleItems = $derived([
+    ...items.filter((item) => !nav.detached[item.id]),
+    { id: 'settings' as PageId, label: '设置', icon: '', detachable: false },
+  ]);
+
+  /**
+   * 键盘导航（docs/18 C4）：10 个入口此前只能用鼠标点。
+   * - ↑/↓ 或 k/j：上下移动并**立即跳转**（跟随式，不需要二次回车）
+   * - Home/End：首/末项
+   * - 数字键 1-9：直接跳到第 n 项（10 个入口里最后一个是 settings，只用 1-9）
+   * 焦点始终跟随跳转目标，屏幕阅读器能读到 aria-current。
+   */
+  function moveFocus(delta: number): void {
+    const list = visibleItems;
+    if (list.length === 0) return;
+    const current = list.findIndex((item) => item.id === nav.page);
+    // 当前页不在列表里（刚被分离）时，从头开始。
+    const base = current === -1 ? (delta > 0 ? -1 : 0) : current;
+    const next = (base + delta + list.length) % list.length;
+    focusIndex = next;
+    nav.go(list[next]!.id);
+  }
+
+  function focusEdge(edge: 'first' | 'last'): void {
+    const list = visibleItems;
+    if (list.length === 0) return;
+    focusIndex = edge === 'first' ? 0 : list.length - 1;
+    nav.go(list[focusIndex]!.id);
+  }
+
+  function jumpToNumber(digit: number): void {
+    // 1-9 对应前 9 个工具项；settings 是第 10 个，不占数字键。
+    const target = visibleItems[digit - 1];
+    if (!target) return;
+    focusIndex = digit - 1;
+    nav.go(target.id);
+  }
+
+  function onNavKeydown(event: KeyboardEvent): void {
+    // 输入框/编辑器里打字时不抢键。
+    const target = event.target as HTMLElement | null;
+    if (target) {
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+        return;
+      }
+    }
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
+    switch (event.key) {
+      case 'ArrowDown':
+      case 'j':
+        event.preventDefault();
+        moveFocus(1);
+        return;
+      case 'ArrowUp':
+      case 'k':
+        event.preventDefault();
+        moveFocus(-1);
+        return;
+      case 'Home':
+        event.preventDefault();
+        focusEdge('first');
+        return;
+      case 'End':
+        event.preventDefault();
+        focusEdge('last');
+        return;
+      default:
+        break;
+    }
+    if (/^[1-9]$/.test(event.key)) {
+      event.preventDefault();
+      jumpToNumber(Number(event.key));
+    }
+  }
+
+  /** 让当前项的按钮拿到焦点（与 visibleItems 同步，避免分离后焦点悬空）。 */
+  $effect(() => {
+    const list = visibleItems;
+    if (focusIndex < 0 || focusIndex >= list.length) focusIndex = Math.max(0, list.length - 1);
+  });
 </script>
 
 <!--
   纯图标窄栏（48px）：位置感由左缘指示条 + 图标同色承担，文字收敛为
   tooltip / aria-label。比文字纵排窄 16px，视觉也更静。
 -->
-<nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-surface py-2">
-  {#each items.filter((item) => !nav.detached[item.id]) as item (item.id)}
+<!--
+  svelte-ignore a11y_no_noninteractive_element_interactions
+  键盘导航（docs/18 C4）挂在 nav 上：10 个入口此前只能用鼠标点。
+  `<nav>` 是导航 landmark，给它绑 keydown 属于 roving-tabindex 的标准做法
+  （方向键在按钮组间移动、数字键直达），告警规则不区分这一类。
+  实际焦点通过每个按钮的 tabindex=0/-1 落在真按钮上，键盘用户拿到的仍是
+  按钮语义与 aria-current。
+-->
+<nav
+  class="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-surface py-2"
+  aria-label="主导航"
+  onkeydown={onNavKeydown}
+>
+  {#each items.filter((item) => !nav.detached[item.id]) as item, index (item.id)}
     {@const active = nav.page === item.id}
     <button
       class="group relative flex size-9 items-center justify-center rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/50 {active
@@ -113,8 +210,12 @@
         : 'text-muted hover:bg-accent-soft/50 hover:text-fg'}"
       aria-label={item.label}
       aria-current={active ? 'page' : undefined}
+      tabindex={index === focusIndex ? 0 : -1}
       data-testid="nav-{item.id}"
-      onclick={() => nav.go(item.id)}
+      onclick={() => {
+        focusIndex = index;
+        nav.go(item.id);
+      }}
       oncontextmenu={(event) => navItemMenu(event, item)}
       title={item.detachable ? `${item.label} · 右键分离到独立窗口` : item.label}
     >
@@ -135,6 +236,7 @@
 
   {#if !nav.detached.settings}
     <!-- 设置沉底：与工具项分组，栏内层级一眼可辨。 -->
+    {@const settingsIndex = visibleItems.length - 1}
     <div class="mt-auto flex w-full justify-center border-t border-line/60 pt-1.5">
       <button
         class="group relative flex size-9 items-center justify-center rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/50 {nav.page ===
@@ -143,8 +245,12 @@
           : 'text-muted hover:bg-accent-soft/50 hover:text-fg'}"
         aria-label="设置"
         aria-current={nav.page === 'settings' ? 'page' : undefined}
+        tabindex={settingsIndex === focusIndex ? 0 : -1}
         data-testid="nav-settings"
-        onclick={() => nav.go('settings')}
+        onclick={() => {
+          focusIndex = settingsIndex;
+          nav.go('settings');
+        }}
         title="设置"
       >
         <svg

@@ -3,7 +3,7 @@
 > 千山万水，寻路而至。 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程。
 
 千寻是一个基于 Tauri 2 + Svelte 5 的原生桌面应用，用于管理 DeepSeek Harness（DSH）的运行环境，
-并承载终端、截屏、搜索、笔记等日常开发工具。它与 DSH 的关系是**承载而非替代**。
+并承载环境、截屏、搜索、笔记等日常开发工具。它与 DSH 的关系是**承载而非替代**。
 
 v0.1 版本参考了 [dsh-studio](https://github.com/Moresyl/dsh-studio) 的实现。
 
@@ -20,7 +20,7 @@ v0.1 版本参考了 [dsh-studio](https://github.com/Moresyl/dsh-studio) 的实�
 ## 一页速览
 
 - **技术栈**：Tauri 2 · Svelte 5（runes）· Vite · Tailwind 4 · Rust · xterm 6
-- **核心能力**：DSH 环境检测/安装/启停托管 · 多标签专业终端 · 固定可配置端口
+- **核心能力**：DSH 环境检测/安装/启停托管 · Laya/Qwen/Moli 侧车服务卡 · 固定可配置端口
 - **工具箱（规划）**：截屏标注 · 文件名/内容搜索 · Markdown 笔记 + AI 整理
 - **远程（规划）**：EasyTier 虚拟局域网网关 + 手机浏览器访问 + Capacitor 壳
 - **同步（远期）**：个人数据与 DSH 配置的文件级同步

@@ -89,6 +89,13 @@ describe('IPC 合同比对', () => {
  *   转换），所以 TS 端按 camelCase 提取。
  */
 
+/**
+ * 进入字段级门禁的类型。
+ *
+ * 覆盖原则：**凡是跨 IPC 边界传递的结构体都应该在此登记**。漏登记的类型
+ * 改名/加字段时不会有任何门禁失败——这正是 docs/18 B4 要补的盲区
+ * （此前 `Settings` 这个全应用最核心的类型都不在名单里）。
+ */
 const RESPONSE_TYPES = [
   'SearchOpen',
   'SearchStatus',
@@ -100,7 +107,45 @@ const RESPONSE_TYPES = [
   'GrepOptions',
   'DriveInfo',
   'MoliStatus',
+  // 情报域
+  'IntelTopicStatus',
+  'FeedItem',
+  'Article',
+  'DigestProgress',
+  // TopicDay 的 `items: null` 是「未抓 vs 抓了但空」的唯一载体，必须守住
+  'IntelTopicDay',
+  // 设置域：全应用最核心的类型，此前完全无字段级保护
+  'Settings',
+  'SettingsPatch',
+  // 插件市场域
+  'MarketInstalled',
+  'SyncItemResult',
+  // 磁盘扫描域：rename_all_fields 历史事故恰好发生在这个域
+  'DiskEntry',
+  'DiskHome',
 ] as const;
+
+/**
+ * 两侧命名不一致的映射：TS interface 名 → Rust struct 名。
+ * 登记在此的类型同样受门禁保护，只是比对时用 Rust 侧的真名。
+ */
+const RUST_NAME_ALIASES: Record<string, string> = {
+  // TS 侧带域前缀（Intel*），Rust 侧 struct 省略前缀
+  // Rust: struct TopicDay（intel/commands.rs），TS: IntelTopicDay
+  IntelTopicDay: 'TopicDay',
+  // Rust: struct InstalledBundle（market/mod.rs），TS: MarketInstalled
+  MarketInstalled: 'InstalledBundle',
+};
+
+/**
+ * Rust 侧没有同名 struct、但 TS 侧仍需声明的类型。
+ *
+ * `SettingsPatch` 是**纯前端形状**：Rust 的 settings_update 收
+ * `serde_json::Value` 再用 `merge()` 递归深合并（settings.rs:749），
+ * 不存在对应的具名 struct，因此无法做字段级比对。它能做的门禁是
+ * 「顶层键名必须是 Settings 的子集」——见下方子集校验。
+ */
+const TS_ONLY_TYPES = new Set(['SettingsPatch']);
 
 type StructInfo = { name: string; fields: Set<string>; block: string };
 
@@ -140,7 +185,10 @@ function parseTsInterfaces(source: string): Map<string, Set<string>> {
     const body = match[2];
     if (!name || body === undefined) continue;
     const fields = new Set<string>();
-    for (const fieldMatch of body.matchAll(/^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*[:?]/gm)) {
+    // 只取**顶层**字段：interface 体里成员固定缩进 2 空格，嵌套对象
+    // （如 `tools?: { moli?: … }` 的内层）缩进更深。不做这一层过滤时，
+    // 嵌套键会被误当成顶层字段，让 SettingsPatch 的子集校验假报。
+    for (const fieldMatch of body.matchAll(/^ {2}([a-zA-Z_][a-zA-Z0-9_]*)\s*[:?]/gm)) {
       const fieldName = fieldMatch[1];
       if (fieldName) fields.add(fieldName);
     }
@@ -157,14 +205,31 @@ describe('IPC 字段级合同比对', () => {
 
   for (const typeName of RESPONSE_TYPES) {
     it(`${typeName}: Rust 与 TS 字段名集合一致`, () => {
-      const rs = rustStructs.find((s) => s.name === typeName);
+      // 纯 TS 形状（Rust 收 Value 无具名 struct）：退化为子集校验。
+      if (TS_ONLY_TYPES.has(typeName)) {
+        const ts = tsInterfaces.get(typeName);
+        const settings = tsInterfaces.get('Settings');
+        expect(ts, `contract.ts 应声明 interface ${typeName}`).toBeDefined();
+        expect(settings, '子集校验需要 Settings 作为基准').toBeDefined();
+        // patch 的每个顶层键都必须是 Settings 的真实字段：
+        // 写错键名会被 Rust 的 merge 静默忽略，前端以为改了其实没改。
+        const unknown = [...(ts ?? [])].filter((field) => !settings!.has(field));
+        expect(
+          unknown,
+          `${typeName} 含 Settings 上不存在的键（会被 Rust 静默忽略）：${JSON.stringify(unknown)}`,
+        ).toEqual([]);
+        return;
+      }
+      // 两侧命名不一致时按别名查 Rust struct（见 RUST_NAME_ALIASES）。
+      const rustName = RUST_NAME_ALIASES[typeName] ?? typeName;
+      const rs = rustStructs.find((s) => s.name === rustName);
       const ts = tsInterfaces.get(typeName);
       // Rust 侧没找到 → 不阻断（可能 struct 不在 src-tauri/src 而是 crates/fff-core）
       // 但 TS 侧必须有；若都没有则跳过。
       if (!rs && !ts) return;
       if (!rs) {
         throw new Error(
-          `Rust 找不到 #[derive(Serialize)] struct ${typeName}；TS 端仍声明 ${JSON.stringify([...(ts ?? [])])}`,
+          `Rust 找不到 #[derive(Serialize)] struct ${rustName}；TS 端仍声明 ${JSON.stringify([...(ts ?? [])])}`,
         );
       }
       if (!ts) {

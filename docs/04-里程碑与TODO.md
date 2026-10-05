@@ -136,11 +136,17 @@
 - [x] 配对：设备记录（id + 256bit token）+ URL 二维码（设置页）+ 吊销
       （token 失效 + 网关重建即全断）
 - [x] 安全模型：`/qx-gate` 唯一免鉴权入口发 HttpOnly cookie；其余路径
-      cookie/query 鉴权；DSH 始终回环；`enabled=false` 零监听（任务不启动）
-- [x] 流量面：HTTP/SSE 流式转发 + events.mux/host WS 帧级双向桥
+      cookie/query 鉴权；DSH 始终回环；`enabled=false` 时**不绑 LAN**
+      （网关仍启动并只听回环，DSH 页 iframe 依赖它）
+- [x] 流量面：HTTP/SSE 流式转发 + `/api/remote.mux` WS 帧级双向桥
+      （10 分钟空闲超时，防半开连接）
 - [x] 生命周期：设置更新 / DSH 就绪-停止事件幂等 sync
+- [x] 配对凭据：URL 只带**一次性 5 分钟 code**（docs/18 A4），长期 token
+      只落在兑换后的 cookie；token 比较为常量时间
 - [ ] 真机验收（需 EasyTier 实网 + 手机）：扫码配对 → 手机开 DSH 全功能
-      界面；吊销即时断连；关闭开关后端口扫描无监听
+      界面；吊销即时断连；**关闭开关后 LAN 侧端口扫描无监听**
+      （回环侧仍应监听——纠偏记录见 docs/18 B5，原文「端口扫描无监听」
+      未区分两侧，与实现矛盾）
 
 ## R2 · Capacitor Android（v0.1 骨架 → v0.2 出包）
 

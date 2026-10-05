@@ -1,17 +1,14 @@
 <script module lang="ts">
+  import type { DiskTrailItem as TrailItem } from './scanner.svelte';
+
   /**
    * 扫描树的一条面包屑：完整树根 + 扫描时间 + 可信度标注。
    * partial 非空 = 数字只是已扫描部分（被停止/出错）；skipped = 权限跳过数。
-   * （两个 script 共享一个作用域：契约类型在实例 script 里统一导入。）
+   *
+   * 类型本体已移入 ./scanner（docs/18 B2，与其算法同处一处、有单测覆盖），
+   * 此处只做转发，避免同一形状在两个文件各写一遍。
    */
-  interface DiskTrailItem {
-    entry: DiskEntry;
-    /** 扫描完成时间（epoch ms）；0 = 占位视图还在扫描中。 */
-    at: number;
-    partial: { files: number; dirs: number } | null;
-    skipped: number;
-    largest: DiskLargeFile[];
-  }
+  export type DiskTrailItem = TrailItem;
 
   /**
    * 会话级缓存（模块常驻）：切页/重进秒开上次扫描树，后台刷新兜底。
@@ -50,11 +47,14 @@
     DiskEntry,
     DiskHome,
     DiskLargeFile,
-    DiskPartialChild,
     DiskScanEvent,
     DiskScanProgress,
     DriveInfo,
   } from '../../../lib/ipc/contract';
+  // 纯算法层（docs/18 B2）：normPath / pathTail / isManaged /
+  // provisionalItem / applyLiveGrow 都住在这里且有单测覆盖。
+  // DiskTrailItem 由上面的 module script 转发，不在此重复导入。
+  import { applyLiveGrow, isManaged, normPath, pathTail, provisionalItem } from './scanner.svelte';
   import { formatBytes } from '../format';
   import { squarify, type Rect } from './treemap';
 
@@ -127,17 +127,13 @@
   const expandedHere = $derived(current !== null && expanded.includes(current.entry.path));
 
   // ---- 工具 --------------------------------------------------------------
-  function normPath(path: string): string {
-    return path.replace(/[\\/]+$/, '').toLowerCase();
-  }
+  // normPath / pathTail / isManaged / provisionalItem / liveGrow 的算法都
+  // 来自 ./scanner（docs/18 B2）。此前本文件另写了一份完全相同的实现，
+  // 导致 scanner.svelte.ts 沦为「只被自己测试导入」的死模块——202 行测试
+  // 守的是生产未用的代码。改为直接复用后，那批测试重新变得有效。
 
   function label(entry: DiskEntry): string {
     return home?.labels[entry.name] ?? entry.name;
-  }
-
-  function pathTail(path: string): string {
-    const trimmed = path.replace(/[\\/]+$/, '');
-    return trimmed.split(/[\\/]/).pop() ?? trimmed;
   }
 
   function agoText(at: number): string {
@@ -166,70 +162,22 @@
   }
 
   /** 受管目录：数据根直接子项里被千寻起过友好名的（清理会破坏功能）。 */
-  function isManaged(entry: DiskEntry): boolean {
-    if (!home) return false;
-    const trimmed = entry.path.replace(/[\\/]+$/, '');
-    const parent = trimmed.replace(/[\\/][^\\/]*$/, '');
-    return (
-      parent.length > 0 && normPath(parent) === normPath(home.root) && entry.name in home.labels
-    );
-  }
+  // isManaged 的实现在 ./scanner（见本文件顶部「工具」段注释）。
 
   // ---- 流式扫描（代际防竞态 + 边扫边长）------------------------------------
   let seq = 0;
   type ScanMode = 'reset' | 'push' | 'refresh';
   let lastLive = 0;
 
-  function provisionalItem(path: string): DiskTrailItem {
-    return {
-      entry: { name: pathTail(path) || path, path, size: 0, dir: true, children: [] },
-      at: 0,
-      partial: null,
-      skipped: 0,
-      largest: [],
-    };
-  }
-
-  function toEntry(child: DiskPartialChild): DiskEntry {
-    return { name: child.name, path: child.path, size: child.size, dir: child.dir, children: [] };
-  }
-
   /**
    * 边扫边长：进度帧的「根直接子项部分占用」按 path 合并进当前层。
-   * 已有 path 的 entry 复用 + 更新 size；新出现的 path 追加到末尾。
-   * 浅层模型下 children 始终为空数组，因此每帧主要是"size 增长"和
-   * "新子项浮出"。
-   *
-   * 实现要点：**整组替换 trail 末项**（而不是原地 mutate）——Svelte 5
-   * $derived 对替换的响应最稳，对深层 mutate 有时不可见。Entry 对象仍
-   * 复用，size 直接改而不重建，避免每帧 200 个新对象进入 GC 通道。
-   * 仅前台扫描生效（后台刷新保持旧快照稳定，Done 时整体换新）。
+   * 算法与 Array.isArray 契约防御都在 ./scanner.applyLiveGrow（docs/18 B2），
+   * 那里有单测覆盖；本函数只负责把结果写回组件 state。
    */
   function liveGrow(frame: DiskScanProgress): void {
-    const top = trail[trail.length - 1];
-    if (!top || normPath(top.entry.path) !== normPath(frame.root)) return;
-    const stamp = Date.now();
-    if (stamp - lastLive < 100) return; // 与后端 tick 节奏对齐：10fps 配 200ms 过渡
-    lastLive = stamp;
-    // 契约防御：topChildren 缺失（后端字段漂移）时只放弃本帧的子项合并，
-    // 绝不抛错——onmessage 里的异常会中断 Channel 消息泵，Done 帧从此
-    // 无法派发，UI 将永久卡在「扫描中」（2026-09 排障实录）。
-    if (!Array.isArray(frame.topChildren)) return;
-    // 复用旧 entry 对象：原位改 size 不会触发深 proxy 失效，但
-    // 替换整组 trail 末项会——这条路径是确定触发 $derived 重算的关键。
-    const existing: Record<string, DiskEntry> = {};
-    for (const child of top.entry.children) existing[child.path] = child;
-    for (const partial of frame.topChildren) {
-      const prev = existing[partial.path];
-      if (prev) prev.size = partial.size;
-    }
-    // 即便 backend 给的 topChildren 与上一帧同序同 size 也要换数组引用，
-    // 否则 $derived 看不到引用变化、settled 之后界面就会冻在旧状态。
-    const nextChildren = frame.topChildren.map(
-      (partial) => existing[partial.path] ?? toEntry(partial),
-    );
-    const nextEntry: DiskEntry = { ...top.entry, children: nextChildren, size: frame.bytes };
-    trail = [...trail.slice(0, -1), { ...top, entry: nextEntry }];
+    const result = applyLiveGrow(frame, trail, lastLive);
+    lastLive = result.nextLastLive;
+    if (result.changed) trail = result.nextTrail;
   }
 
   /**
@@ -562,7 +510,7 @@
   );
 
   /** 批量清理里的受管目录（确认弹窗给保护警告）。 */
-  const managedTargets = $derived(cleanTargets.filter((entry) => isManaged(entry)));
+  const managedTargets = $derived(cleanTargets.filter((entry) => isManaged(entry, home)));
 
   // ---- treemap 布局 ---------------------------------------------------------
   let box = $state<HTMLDivElement | null>(null);
