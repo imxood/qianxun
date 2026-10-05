@@ -4,6 +4,7 @@ import '../../../data/dsh/dsh_client.dart';
 import '../../../data/dsh/dsh_connection.dart';
 import '../../../data/dsh/rpc_envelope.dart';
 import '../../../data/models/session.dart';
+import '../../../data/store/connection_store.dart';
 import '../../connections/application/connections_controller.dart';
 import 'dart:async';
 
@@ -16,23 +17,39 @@ class SessionListLoading extends SessionListState {
   const SessionListLoading();
 }
 
+/// 会话列表「出不去」的原因。
+///
+/// **刻意做成单一判别式，而不是几个布尔量。** 早先这里是
+/// `needsPairing` + `needsMachineChoice` 两个 bool，能组成 4 种组合，
+/// 其中「既要重新配对、又要选机器」是自相矛盾的，而控制器完全可能
+/// 产出它 —— 于是 UI 落到 `else` 分支，显示「连不上这台电脑」。
+/// 一个枚举字段从结构上消掉了这类不可能状态。
+enum ListBlockReason {
+  /// 首次使用：一台电脑都没配。下一步是**配对**。
+  noMachines,
+
+  /// 配过，但 token 失效 / 被撤销。下一步是**重新配对**。
+  needsRepair,
+
+  /// 存了多台，还没选哪一台。下一步是**选**。
+  needsMachineChoice,
+
+  /// 选好了也连不上。下一步是**重试**。
+  unreachable,
+}
+
 class SessionListError extends SessionListState {
-  const SessionListError(
-    this.message, {
-    this.needsPairing = false,
-    this.needsMachineChoice = false,
-  });
+  const SessionListError(this.message, {required this.reason});
 
   final String message;
-  final bool needsPairing;
+  final ListBlockReason reason;
 
-  /// 保存了多台电脑、但**还没选哪一台**。
-  ///
-  /// ⚠️ 这与「连不上」是**两件事**，曾经混在一起，于是多机用户每次冷启动
-  /// 都看到「连不上这台电脑」加一个「重试」按钮 —— 什么都没有坏，
-  /// 重试一万次也没用。App 只是不肯替他挑一台（05 §5.2：多台时不自动选，
-  /// 那是他要做的决定）。把两者分开，这里就该引导他去**选**，不是去**重试**。
-  final bool needsMachineChoice;
+  /// 兼容旧调用点。⚠️ 新的代码请用 [reason] —— 这个 getter 只为
+  /// 过渡期保留，它**无法**区分 noMachines 与 needsRepair，
+  /// 而两者的文案不同（「还没有电脑」vs「需要重新配对」）。
+  @Deprecated('用 reason —— 这个 getter 分不清「没配过」和「要重配」')
+  bool get needsPairing =>
+      reason == ListBlockReason.needsRepair || reason == ListBlockReason.noMachines;
 }
 
 class SessionListReady extends SessionListState {
@@ -74,6 +91,14 @@ class SessionListReady extends SessionListState {
 /// `session_presentation.dart`。
 class SessionListController extends StateNotifier<SessionListState> {
   SessionListController(this._ref) : super(const SessionListLoading()) {
+    // ⚠️ 必须监听「选中哪台机器」，变化时**重新绑定**。
+    //
+    // 曾经只在构造里 `_bind()` 一次，于是冷启动（还没配对）时状态被定成
+    // `noMachines` 错误态；用户配好对、选中那台机器之后，没有任何东西
+    // 重新求值，界面就一直停在「还没有电脑 / 去配对」——
+    // 而实际上机器已经选好了、链路也已经就绪。实测在模拟器上：连接是通的，
+    // 列表页却还在喊「没有电脑」，点「去配对」会把用户送回他已经做完的事。
+    _ref.listen<Connection?>(selectedConnectionProvider, (_, __) => _bind());
     _bind();
   }
 
@@ -86,13 +111,29 @@ class SessionListController extends StateNotifier<SessionListState> {
     _sub?.cancel();
     final conn = _ref.read(selectedConnectionProvider);
     if (conn == null) {
-      // 「还没选机器」≠「连不上」。见 [SessionListError.needsMachineChoice]。
+      // ⚠️ 这里必须分**四种**，不是两种。
+      //
+      // 曾经只分「多台 / 其余」，于是**全新安装、一台电脑都没配**的用户
+      // 看到的是「连不上这台电脑」+「重试」—— 什么都没坏，一台机器都
+      // 还没有，重试一万次也没用。首次体验是最不能搞砸的一屏。
+      //
+      // 四者的下一步完全不同：配对 / 选 / 重试。
       final saved = _ref.read(connectionsControllerProvider);
-      final many = saved is ConnectionsReady ? saved.list.length > 1 : false;
-      state = SessionListError(
-        many ? '选一台电脑，就能看到它的会话了。' : '还没有选择电脑。',
-        needsMachineChoice: many,
-      );
+      final n = saved is ConnectionsReady ? saved.list.length : 0;
+      state = switch (n) {
+        0 => const SessionListError(
+            '还没有电脑。先在这台手机上配对一次，之后就能看到它的会话了。',
+            reason: ListBlockReason.noMachines,
+          ),
+        1 => const SessionListError(
+            '还没有选择电脑。',
+            reason: ListBlockReason.unreachable,
+          ),
+        _ => const SessionListError(
+            '选一台电脑，就能看到它的会话了。',
+            reason: ListBlockReason.needsMachineChoice,
+          ),
+      };
       return;
     }
     // ⚠️ 必须是 `watch` 而不是 `read`：`dshConnectionProvider` 是
@@ -104,7 +145,7 @@ class SessionListController extends StateNotifier<SessionListState> {
         case LinkReady():
           unawaited(load());
         case LinkNeedsPairing(:final message):
-          state = SessionListError(message, needsPairing: true);
+          state = SessionListError(message, reason: ListBlockReason.needsRepair);
         case LinkConnecting():
           if (state is! SessionListReady) state = const SessionListLoading();
         case LinkReconnecting():
@@ -142,7 +183,12 @@ class SessionListController extends StateNotifier<SessionListState> {
       (list) => SessionListReady(list) as SessionListState,
       (err) => current is SessionListReady
           ? current.copyWith(loading: false, error: err.message)
-          : SessionListError(err.message, needsPairing: err.needsRepairing),
+          : SessionListError(
+              err.message,
+              reason: err.needsRepairing
+                  ? ListBlockReason.needsRepair
+                  : ListBlockReason.unreachable,
+            ),
     );
   }
 

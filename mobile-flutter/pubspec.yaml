@@ -1,7 +1,7 @@
 name: qianxun_mobile
 description: 千寻 DSH 远程客户端 —— 原生 Flutter 实现的 AI Agent 工作台。
 publish_to: "none"
-version: 0.2.0+1
+version: 0.3.0+1
 
 environment:
   sdk: ">=3.5.0 <4.0.0"

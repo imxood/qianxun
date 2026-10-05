@@ -8,6 +8,26 @@ import 'dart:convert';
 /// 存储键沿用 RN 客户端的 `qx.connections.v1`，schema 一致——不是为了兼容
 /// 旧客户端（两个 App 不共享沙箱），而是为了让 schema 本身有明确出处、
 /// 便于人工核对。
+///
+/// ## 必须有值相等性
+///
+/// `dshConnectionProvider` 是 `Provider.family<DshConnection, Connection?>`，
+/// family 用 `==` 定位条目。**没有 `==` 时它用的是对象身份**，而每次从
+/// SharedPreferences 重新加载都会造出全新的 `Connection` 实例 —— 于是
+/// family 每次都是「新条目」，`DshConnection` 被反复重建、WebSocket 被
+/// 反复拆掉重连。
+///
+/// 实测症状（**只有真机/模拟器上才看得见**，widget 测试碰不到）：App 日志
+/// 里连续出现多个 `link 发起连接 #N` 与 `★ 就绪 #N`，clientId 各不相同，
+/// 而界面永远停在「正在连接电脑…」，会话列表永远拿不到数据。
+///
+/// 所以这里比的是**影响连接的那几个字段**：
+/// - `id`：换机器
+/// - `url`：改了地址
+/// - `qxToken`：**同一台机器重新配对**（`copyWith` 保留 id，所以只有把
+///   token 算进去，重新配对后才会重建连接用上新凭据）
+///
+/// `name` / `lastUsedAt` / `hostname` 只是展示信息，变了不该重建 socket。
 class Connection {
   const Connection({
     required this.id,
@@ -19,6 +39,16 @@ class Connection {
     this.hostname,
     this.appVersion,
   });
+
+  @override
+  bool operator ==(Object other) =>
+      other is Connection &&
+      other.id == id &&
+      other.url == url &&
+      other.qxToken == qxToken;
+
+  @override
+  int get hashCode => Object.hash(id, url, qxToken);
 
   final String id;
   final String name;

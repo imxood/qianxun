@@ -44,7 +44,23 @@ final interactionControllerProvider =
 
 ### 0.2 已验证的事实（探针实测，视为既定）
 
-我用 `scripts/probe_rpc.py` 直接打了线上网关，下列事实**已确认**：
+#### 0.2.1 协议与 Flutter 平台（真机/模拟器实测）
+
+| 事实 | 证据 | 意义 |
+|---|---|---|
+| **`Semantics(identifier:)` 会在 Android 上变成 `resource-id`** | `adb shell uiautomator dump` 的 XML 里出现 `resource-id="qx_sessions_list"` | Flutter 也能被 uiautomator2 定位，**不需要** Appium 的 flutter-driver |
+| **Flutter 的文字全部落在 `content-desc` 上，`text` 恒为 0** | 同一个 dump：7 个 content-desc、0 个 text | 定位器用 `description`，**用 `text=` 一个都找不到且不报错** |
+| **release 构建不往 logcat 写任何东西** | logcat 里 `grep qianxun` 零命中 | 排查只能走 App 内建「运行日志」页 |
+| 网关的 WS 与 HTTP 都走明文，`192.168.x.x` 可达 | 模拟器 ping 0.9ms / 0% 丢包；WS 升级 101 | Android 的 cleartext 白名单见下方警告 |
+
+> ⚠️ **`network_security_config.xml` 的 `<domain>` 不支持 CIDR。** 那里列了
+> `192.168.0.0` / `10.0.0.0` 之类的「网段」，但 Android 是**精确主机名
+> 匹配**（可带 `includeSubdomains`），所以 `192.168.20.2` 匹配不上
+> `192.168.0.0`。由于网关地址是用户配对时自己填的，**无法穷举**，这份
+> 白名单实际是「安全剧场」：看着在管安全，实际要么全不通、要么被整体放开。
+> 后续要么整体放开并写明理由，要么明确列入已知缺口 —— 不能留着假装在管。
+
+#### 0.2.2 协议（探针实测）
 
 | 事实 | 证据 | 意义 |
 |---|---|---|
@@ -52,7 +68,7 @@ final interactionControllerProvider =
 | `userQuestions: {active, settled}` **逐会话下发** | `session/list` 每项都有 | **服务端直接告诉你哪条会话在等你**，不必推断 |
 | `permissions.currentValue` 逐会话下发 | `"danger-full-access"` | 输入栏可显示权限档位 |
 | `turnOutline: [{turn, seq, prompt, response}]` | 每轮都有 | 列表第二行的素材 |
-| `agentAvailable: bool` | 子 agent 结束后变 `false` | 「已断开」状态的数据源 |
+| `agentAvailable: bool` | ⚠️ **实测 392/393 为 false**，含 142 条正常顶级会话 | **不可用作状态判据**，详见 §2 |
 | **`session/search` 在本部署被禁用** | `openAt "never"` | **搜索框是死功能，必须砍掉** |
 | RPC 参数信封 `{"args":{"request":{…}}}` | `session/list` 例外用 `_request` | 已落地，见 README §2.2.1 |
 
@@ -98,9 +114,40 @@ final interactionControllerProvider =
 |---|---|---|---|
 | **运行中** | `running == true` | 绿 | 轨上流光 + 活动行 |
 | **等你** | `userQuestions.active` 非空 **或** 本地有未答 waterfall | 琥珀 | 轨为虚线 + 行置顶 + 全大写中文标签 |
-| **已完成** | `running == false` 且 `agentAvailable != false` | 蓝 | 轨 1dp 细线 |
-| **已断开** | `agentAvailable == false`（子 agent 父会话结束） | 中性灰 | 轨为**虚线段** |
-| **失败** | 最后一次 turn 以 `error` / `aborted` 结束 | 赤 | 轨为实心 + 三角缺口 |
+| **已完成** | `running == false` 且不是下面两态 | 蓝 | 轨 1dp 细线 |
+| **已断开** | **是子会话 且 父会话不在当前列表里** | 中性灰 | 轨为**虚线段** |
+| **失败** | 不进列表（见下） | 赤 | 轨为实心 + 三角缺口 |
+
+> ⚠️ **「已断开」的判据换过：不要用 `agentAvailable == false`。**
+> 本表原来写的是 `agentAvailable == false`，那是在没有探针的情况下写的。
+> 真机接上后实测 393 条会话：
+>
+> ```
+> agentAvailable 分布        392 × False  /  1 × True
+> 其中非子会话却有 False 的    142 条
+> 子会话且父会话真不在列表里的   0 条
+> ```
+>
+> 也就是说 `agentAvailable` 在本部署上**几乎恒为 false**，它复述的其实是
+> 「现在没在跑」，不携带「父会话结束了」这个信息。直接拿它当判据，会把
+> **142 条完全能打开的顶级会话**标成「已断开」—— 界面对着能进的会话说
+> 「进不去」，还把它们排到所有健康会话之下。实测 App 上 13 条里 12 条显示
+> 「已断开」，就是这个 bug。
+>
+> 改成「是子会话 ∧ 父会话不在列表里」之后：判据**可从数据算出**，语义与
+> 原意一致（父会话结束 → 子会话进不去），且当前数据下命中 0 条 ——
+> **没有孤儿就是没有孤儿，不该硬凑一个出来显示**。实现见
+> `SessionSummary.isDetachedGiven()`。
+
+> ⚠️ **「失败」不进列表，它没有数据源。** `05 §11` 已把 `failed` 列为
+> 「明确不做 · 无数据源，砍掉」。真实数据源是 `turn/end` 事件的
+> `reason.kind`，而那是**事件流**里的东西，`session/list` 的快照里没有
+> 轮次事件。曾经有人用「agent 回复的开头是不是 `error:`」来判，那是在猜：
+> 一次正常完成的轮次，agent 完全可以回
+> `Error: ECONNREFUSED 127.0.0.1:5432`（它在告诉你数据库连不上），
+> 于是那条会话被标红并排到所有健康会话之上。
+> 要让列表也显示失败，需要服务端在 `session/list` 里带「上一轮结果」投影，
+> 那是一次协议变更，得先探针确认。
 
 > ⚠️ **绝不靠颜色单独表意。** 每态都配一个**可见中文标签**（运行中 / 等你 / 已完成 /
 > 已断开 / 失败）出现在元信息行首。色觉障碍用户与灰度截图下都必须可读。

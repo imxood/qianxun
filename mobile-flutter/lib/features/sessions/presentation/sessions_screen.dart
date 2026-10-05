@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/theme/qx_test_ids.dart';
+import '../../../app/theme/qx_theme.dart';
 import '../../../app/theme/qx_tokens.dart';
 import '../../../app/theme/qx_type.dart';
 import '../../../shared/widgets/primitives.dart';
@@ -90,18 +92,30 @@ class SessionsScreen extends ConsumerWidget {
           const SizedBox(width: QxSpace.xs),
         ],
       ),
-      body: Column(
-        children: [
-          LinkStatusBar(link: link, onRetry: () => link?.retryNow()),
-          Expanded(child: _body(context, ref, state, rows)),
-          const PendingInteractionBar(),
-        ],
+      // 列表本身的锚点：自动化脚本用它区分「列表页」与其它页。
+      backgroundColor: theme.colorScheme.surface,
+      body: Semantics(
+        identifier: QxTestIds.sessionsList,
+        container: true,
+        explicitChildNodes: true,
+        child: Column(
+          children: [
+            LinkStatusBar(link: link, onRetry: () => link?.retryNow()),
+            Expanded(child: _body(context, ref, state, rows)),
+            const PendingInteractionBar(),
+          ],
+        ),
       ),
       floatingActionButton: state is SessionListReady
           ? FloatingActionButton.extended(
               onPressed: () => _createSession(context, ref),
+              backgroundColor: theme.qx.accent,
+              foregroundColor: theme.qx.onAccent,
               icon: const Icon(Icons.add_comment_outlined, size: 20),
-              label: const Text('新会话'),
+              label: Semantics(
+                identifier: QxTestIds.newSessionButton,
+                child: const Text('新会话'),
+              ),
             )
           : null,
     );
@@ -121,39 +135,8 @@ class SessionsScreen extends ConsumerWidget {
             child: CircularProgressIndicator(strokeWidth: 2),
           ),
         ),
-      SessionListError(
-        :final message,
-        :final needsPairing,
-        :final needsMachineChoice,
-      ) =>
-        EmptyHero(
-          // ⚠️ 三种空态各有各的下一步，混起来就是在骗用户：
-          //   需要重新配对 → 去重新扫码
-          //   还没选机器   → 去**选**（重试没用，什么都没坏）
-          //   连不上       → 去**重试**
-          title: switch ((needsPairing, needsMachineChoice)) {
-            (true, _) => '需要重新配对',
-            (_, true) => '选一台电脑',
-            _ => '连不上这台电脑',
-          },
-          hint: message,
-          icon: needsPairing
-              ? Icons.link_off
-              : needsMachineChoice
-                  ? Icons.dns_outlined
-                  : Icons.cloud_off_outlined,
-          action: (needsPairing || needsMachineChoice)
-              ? OutlinedButton.icon(
-                  onPressed: () => context.push('/connections'),
-                  icon: const Icon(Icons.dns_outlined, size: 18),
-                  label: Text(needsPairing ? '去配对' : '去选择'),
-                )
-              : OutlinedButton.icon(
-                  onPressed: () => ref.read(sessionListControllerProvider.notifier).load(),
-                  icon: const Icon(Icons.refresh, size: 18),
-                  label: const Text('重试'),
-                ),
-        ),
+      SessionListError(:final message, :final reason) =>
+        _BlockedBody(reason: reason, message: message),
       SessionListReady(:final error) => rows.isEmpty
           ? const EmptyHero(
               title: '还没有会话',
@@ -203,6 +186,68 @@ class SessionsScreen extends ConsumerWidget {
         messenger.showSnackBar(SnackBar(content: Text(error.message)));
         return '';
       },
+    );
+  }
+}
+
+/// 「出不去」的四种空态。
+///
+/// ⚠️ 四种各有各的**下一步**，配错了就是在骗用户：
+///
+/// | 原因               | 下一步 | 错配的后果                                |
+/// |--------------------|--------|-------------------------------------------|
+/// | `noMachines`       | 去配对 | 说「连不上」→ 反复点重试，永远出不去      |
+/// | `needsRepair`      | 重新配对 | 同上                                     |
+/// | `needsMachineChoice` | 去选  | 说「连不上」→ 没坏，重试无用              |
+/// | `unreachable`      | 重试    | 说「去配对」→ 把还能用的配置清了          |
+///
+/// 第一条是**首次体验**，最不能搞砸。它曾经显示成「连不上这台电脑」——
+/// 全新安装的用户一台机器都没有，被告知连不上。**这是靠模拟器跑出来
+/// 才看见的**，静态测试与 widget 测试都碰不到。
+class _BlockedBody extends StatelessWidget {
+  const _BlockedBody({required this.reason, required this.message});
+
+  final ListBlockReason reason;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = switch (reason) {
+      ListBlockReason.noMachines => '还没有电脑',
+      ListBlockReason.needsRepair => '需要重新配对',
+      ListBlockReason.needsMachineChoice => '选一台电脑',
+      ListBlockReason.unreachable => '连不上这台电脑',
+    };
+    final icon = switch (reason) {
+      ListBlockReason.noMachines => Icons.devices_other,
+      ListBlockReason.needsRepair => Icons.link_off,
+      ListBlockReason.needsMachineChoice => Icons.dns_outlined,
+      ListBlockReason.unreachable => Icons.cloud_off_outlined,
+    };
+    final action = switch (reason) {
+      ListBlockReason.noMachines => ('去配对', Icons.add_link),
+      ListBlockReason.needsRepair => ('去配对', Icons.link_off),
+      ListBlockReason.needsMachineChoice => ('去选择', Icons.dns_outlined),
+      ListBlockReason.unreachable => ('重试', Icons.refresh),
+    };
+
+    return EmptyHero(
+      title: title,
+      hint: message,
+      icon: icon,
+      action: OutlinedButton.icon(
+        onPressed: () {
+          if (reason == ListBlockReason.unreachable) {
+            ProviderScope.containerOf(context, listen: false)
+                .read(sessionListControllerProvider.notifier)
+                .load();
+          } else {
+            context.push('/connections');
+          }
+        },
+        icon: Icon(action.$2, size: 18),
+        label: Text(action.$1),
+      ),
     );
   }
 }

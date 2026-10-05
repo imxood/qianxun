@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.server
+import re
 import shutil
 import socketserver
 import subprocess
@@ -34,12 +35,24 @@ LABEL = {
     "x86_64": "模拟器 / 少数平板",
 }
 
+# 从 pubspec 读版本号，别在这里手抄一份 —— 抄的那份一定会忘改，
+# 结果就是新版包还叫旧名字，你在手机上分不清自己装的是哪个。
+def app_version() -> str:
+    text = (ROOT / "pubspec.yaml").read_text(encoding="utf-8")
+    m = re.search(r"^version:\s*([0-9]+\.[0-9]+\.[0-9]+)", text, re.M)
+    return m.group(1) if m else "0.0.0"
+
+
 RENAMES = {
-    "app-arm64-v8a-release.apk": "qianxun-0.2.0-arm64.apk",
-    "app-armeabi-v7a-release.apk": "qianxun-0.2.0-armv7.apk",
-    "app-x86_64-release.apk": "qianxun-0.2.0-x86_64.apk",
-    "app-debug.apk": "qianxun-0.2.0-debug.apk",
+    "app-arm64-v8a-release.apk": "qianxun-{v}-arm64.apk",
+    "app-armeabi-v7a-release.apk": "qianxun-{v}-armv7.apk",
+    "app-x86_64-release.apk": "qianxun-{v}-x86_64.apk",
+    "app-debug.apk": "qianxun-{v}-debug.apk",
 }
+
+# 旧版本号的包一并清掉：手机上从同一个 URL 下载时，最容易出的错就是
+# 浏览器拿了一个旧文件（缓存、或上次下到一半），装上去却以为是最新的。
+STALE_SUFFIXES = (".apk",)
 
 
 def sync() -> list[Path]:
@@ -47,13 +60,19 @@ def sync() -> list[Path]:
     if not APK_DIR.is_dir():
         print(f"没有构建产物：{APK_DIR}", file=sys.stderr)
         return []
+    version = app_version()
     SERVE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for old in SERVE_DIR.glob("*.apk"):
+        old.unlink()
+        print(f"  清掉旧包 {old.name}")
+
     out: list[Path] = []
-    for src_name, dst_name in RENAMES.items():
+    for src_name, dst_tpl in RENAMES.items():
         src = APK_DIR / src_name
         if not src.is_file():
             continue
-        dst = SERVE_DIR / dst_name
+        dst = SERVE_DIR / dst_tpl.format(v=version)
         shutil.copy2(src, dst)
         out.append(dst)
     return out

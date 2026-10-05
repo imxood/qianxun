@@ -15,6 +15,7 @@ void main() {
     bool? agentAvailable,
     bool awaiting = false,
     String? response,
+    String? parent,
     int? updatedAt,
   }) {
     return SessionSummary.fromJson({
@@ -22,6 +23,7 @@ void main() {
       'updatedAt': updatedAt ?? 1000,
       'running': running,
       'blank': false,
+      if (parent != null) 'parentSessionId': parent,
       if (agentAvailable != null) 'agentAvailable': agentAvailable,
       if (awaiting) 'userQuestions': {'active': [{'id': 'q1'}]},
       'projections': {
@@ -56,9 +58,31 @@ void main() {
       expect(p.state, QxSessionState.waiting);
     });
 
-    test('已断开 ← agentAvailable 为 false', () {
-      final p = presentSession(s('a', agentAvailable: false, running: true));
+    test('已断开 ← 子会话且父会话不在列表里', () {
+      // ⚠️ 判据换过一次。原先是「agentAvailable 为 false」，那是 05 §2
+      // 在没探针的情况下写的。实测本部署 393 条会话：agentAvailable 分布
+      // 392 × False / 1 × True，其中 142 条是**完全能打开的顶级会话**。
+      // 拿它当判据会把那 142 条全标成「已断开」。
+      final p = presentSession(
+        s('a', parent: 'gone-parent'),
+        knownSessionIds: const {'a'},
+      );
       expect(p.state, QxSessionState.detached);
+    });
+
+    test('顶级会话即使 agentAvailable=false 也不该是「已断开」', () {
+      // 那 142 条的真实形态：不能打开的判据对它不成立。
+      final top = s('a', agentAvailable: false);
+      expect(top.isSubagent, isFalse);
+      expect(presentSession(top).state, isNot(QxSessionState.detached));
+    });
+
+    test('子会话但父会话还在列表里 → 仍可进入', () {
+      final p = presentSession(
+        s('c', parent: 'a'),
+        knownSessionIds: const {'a', 'c'},
+      );
+      expect(p.state, isNot(QxSessionState.detached));
     });
 
     test('已完成 ← 兜底', () {
@@ -91,11 +115,15 @@ void main() {
   });
 
   group('判定顺序：顺序本身就是规则', () {
-    test('已断开压过一切：agent 进不去时不该说它在等你', () {
-      // 投影说「在等人」，但 agent 已经不可用。显示「等你」会让用户
-      // 点进去发现根本进不去 —— 05 §2 说的「凭空捏造的状态」。
+    test('已断开压过一切：父会话没了就不该说它在等你', () {
+      // 投影说「在等人」，但父会话已经不在列表里 —— 点进去根本进不去。
+      // 显示「等你」会把用户引向一条死路（05 §2 说的「凭空捏造的状态」）。
+      //
+      // ⚠️ 前提从 `agentAvailable: false` 换成了「子会话 + 父会话不在列表」，
+      // 因为前者在这台部署上对 142 条正常顶级会话也为 false。
       final p = presentSession(
-        s('a', agentAvailable: false, awaiting: true),
+        s('a', parent: 'gone', awaiting: true),
+        knownSessionIds: const {'a'},
         localPending: [approvalFor('a')],
       );
       expect(p.state, QxSessionState.detached);

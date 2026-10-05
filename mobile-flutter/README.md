@@ -428,8 +428,9 @@ App 内置了完整的日志链路：
 
 ```
 flutter analyze   → No issues found!
-flutter test      → 00:01 +55: All tests passed!
-flutter build apk → √ Built build\app\outputs\flutter-apk\app-debug.apk
+flutter test      → 00:02 +145: All tests passed!
+scripts\check_contrast.py → ✓ 全部达标（明暗两套色板，WCAG AA）
+flutter build apk → √ Built build\app\outputs\flutter-apk\app-*-release.apk
 ```
 
 APK 实测（`aapt2 dump badging`）：
@@ -437,19 +438,27 @@ APK 实测（`aapt2 dump badging`）：
 | 项 | 值 |
 |---|---|
 | package | `com.qianxun.qianxun_mobile` |
-| versionName | `0.2.0` |
+| versionName | `0.3.0` |
 | minSdk / targetSdk / compileSdk | 24 / 36 / 36 |
 | application-label | 千寻 |
-| 大小 | 147.5 MB（debug + 全 ABI） |
+| 大小 | 见下（分 ABI release，arm64 约 18 MB） |
 
-测试分两类：
+测试分五类（145 项）：
 
-- `test/protocol_test.dart`（29）—— **协议契约**：配对链接双格式、
-  cookie 解析、RPC 信封的成功/业务失败/传输失败三分、`tool/result` 的
-  v3/v4 双位置读取、`SessionSummary` 标题只能来自投影、未知事件/块不丢、
-  提问回答的 `custom` 语义。
-- `test/ui_test.dart`（26）—— **布局与状态分支**：窄屏不溢出、状态点
-  语义、思维链与工具参数默认折叠、状态角标可见、markdown 渲染。
+- `test/protocol_test.dart` —— **协议契约**：配对链接双格式、cookie 解析、
+  RPC 信封的成功/业务失败/传输失败三分、`tool/result` 的 v3/v4 双位置读取、
+  `SessionSummary` 标题只能来自投影、`turn/end` 的两种嵌套形状、未知事件/块
+  不丢、提问回答的 `custom` 语义。
+- `test/attachment_test.dart` —— **附件层**：MIME 猜测、二进制上传路由、
+  图片内联不上传、同一 `requestId` 重发安全。
+- `test/session_list_test.dart` —— **五态判定与排序**：每一态都有真实数据源、
+  判定顺序（已断开压过一切 / 实时优先于快照 / 归属不串台）、第二行是 agent
+  做的事而非用户输入、`等你` 永远置顶、`userQuestions` 两个嵌套层级。
+- `test/cold_start_test.dart` —— **冷启动**：恰好一台才自动选、多台不替用户
+  决定、显式选择优先于回退。
+- `test/design_system_test.dart` + `test/ui_test.dart` + `test/logs_test.dart`
+  —— **布局与视觉**：轨的真实渲染宽度、状态词在 320/360/390dp × 1.0/1.5/2.0x
+  下不被裁切、2.0x 字号零溢出、WCAG 对比度闸门。
 
 UI 测试不是「凑合的替代品」：它抓到了三个真机截图看不出来的缺陷，
 其中一个（涟漪被吞）会让所有可点区域**完全没有触觉反馈**。

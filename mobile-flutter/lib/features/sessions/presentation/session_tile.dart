@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/qx_semantic.dart';
+import '../../../app/theme/qx_test_ids.dart';
 import '../../../app/theme/qx_tokens.dart';
 import '../../../app/theme/qx_type.dart';
 import '../../../shared/widgets/primitives.dart';
@@ -51,6 +52,9 @@ class SessionTile extends StatelessWidget {
       // 整行读一遍就够：名称 + 状态。轨与状态点自己**不再标 Semantics**
       // （轨内部已 ExcludeSemantics），否则同一个词会被读三遍。
       label: '${session.displayTitle}，${state.label}',
+      // 给原生自动化留的稳定锚点（uiautomator2 读得到 resource-id）。
+      // 详见 QxTestIds 的说明。**不影响**上面的朗读内容。
+      identifier: QxTestIds.sessionTile,
       child: Material(
         color: theme.colorScheme.surface,
         child: InkWell(

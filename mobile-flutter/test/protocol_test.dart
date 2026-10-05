@@ -362,27 +362,50 @@ void main() {  group('配对链接', () {
   });
 
   group('会话摘要 · 实测字段', () {
-    test('agentAvailable 决定「已断开」', () {
-      final alive = SessionSummary.fromJson({
-        'sessionId': 'a',
-        'updatedAt': 0,
-        'running': false,
-        'blank': false,
-        'agentAvailable': true,
-      });
-      expect(alive.isDetached, isFalse);
+    test('「已断开」= 子会话 且 父会话不在列表里（**不是** agentAvailable）', () {
+      // ⚠️ 这条断言改过一次。原先写的是「agentAvailable 决定已断开」，
+      // 那是 05 §2 在没探针的情况下写的。实测本部署 393 条会话：
+      //   agentAvailable 分布 392 × False / 1 × True
+      //   其中非子会话却有 False 的：142 条
+      //   子会话且父会话真不在列表里的：0 条
+      // 也就是说 agentAvailable 几乎恒为 false，它复述的是「现在没在跑」。
+      // 拿它当判据会把 142 条**完全能打开**的顶级会话标成「已断开」。
 
-      // 子 agent 跑完后：running 也是 false，但 agentAvailable 是 false。
-      // 只看 running 会把它当成「正常空闲」，点进去才发现进不去。
-      final orphan = SessionSummary.fromJson({
-        'sessionId': 'b',
+      // 顶级会话：无论 agentAvailable 是什么，都不是「已断开」。
+      final top = SessionSummary.fromJson({
+        'sessionId': 'a',
         'updatedAt': 0,
         'running': false,
         'blank': false,
         'agentAvailable': false,
       });
-      expect(orphan.isDetached, isTrue);
-      expect(orphan.running, isFalse);
+      expect(top.isSubagent, isFalse);
+      expect(top.isDetachedGiven(const {'a'}), isFalse,
+          reason: '顶级会话没有父会话，不可能是孤儿');
+
+      // 子会话，父会话还在列表里 → 仍可进入。
+      final childOk = SessionSummary.fromJson({
+        'sessionId': 'c',
+        'parentSessionId': 'a',
+        'updatedAt': 0,
+        'running': false,
+        'blank': false,
+        'agentAvailable': false,
+      });
+      expect(childOk.isSubagent, isTrue);
+      expect(childOk.isDetachedGiven(const {'a', 'c'}), isFalse);
+
+      // 子会话，父会话**不在**列表里 → 真·进不去。
+      final childOrphan = SessionSummary.fromJson({
+        'sessionId': 'd',
+        'parentSessionId': 'gone',
+        'updatedAt': 0,
+        'running': false,
+        'blank': false,
+        'agentAvailable': false,
+      });
+      expect(childOrphan.isDetachedGiven(const {'a', 'd'}), isTrue);
+      expect(childOrphan.running, isFalse);
     });
 
     test('turnOutline 提供现成预览', () {

@@ -230,8 +230,10 @@ class SessionSummary {
 
   /// 这个会话当前**有没有可用的 agent**。
   ///
-  /// 与 `running` 是两回事：子 agent 会话在父会话结束后会变成
-  /// `agentAvailable: false`，此时点进去是进不去的。
+  /// ⚠️ **不要拿它当状态判据。** 实测本部署 393 条会话里 392 条为
+  /// `false`，它复述的是「现在没在跑」，不区分「父会话结束了」。
+  /// 当状态用会把大量能正常打开的会话标成「已断开」——
+  /// 详见 [isDetachedGiven] 的数据。
   final bool? agentAvailable;
 
   /// 投影基线 `{asOfSeq, values}`。
@@ -324,11 +326,35 @@ class SessionSummary {
   /// 可能不一致，判决是**实时优先**：列表控制器用本地 waterfall 覆盖它。
   bool get awaitsUser => (userQuestions['active'] as List? ?? const []).isNotEmpty;
 
-  /// 会话是否「孤儿」：子 agent，但父 agent 已经不在。
+  /// 真正「进不去」：是子会话，而**父会话已经不在列表里**。
   ///
-  /// 与 `running` 是两回事——`running:false` 只表示现在没在跑，
-  /// `agentAvailable:false` 表示根本进不去。
-  bool get isDetached => agentAvailable == false;
+  /// ⚠️ **刻意不用 `agentAvailable == false`。** 05 §2 原来写的是
+  /// 「已断开 = `agentAvailable == false`（子 agent 父会话结束）」，
+  /// 但那是在没探针的情况下写的。实测本部署 393 条会话：
+  ///
+  /// ```
+  /// agentAvailable 取值：392 × False, 1 × True
+  /// 其中非子会话却有 False 的：142 条
+  /// 子会话且父会话真不在列表里的：0 条
+  /// ```
+  ///
+  /// 也就是说 `agentAvailable` 在这里**几乎恒为 false**，它复述的其实是
+  /// 「现在没在跑」，不携带「父会话结束了」这个信息。直接拿它当判据，
+  /// 会把 142 条**完全能打开**的顶级会话标成「已断开」—— 界面对着能进
+  /// 去的会话说「进不去」，并且把它们排到所有健康会话之下。这就是
+  /// 05 §2 说的「凭空捏造的状态」，代价是用户不再相信界面上的字。
+  ///
+  /// 改成「子会话 ∧ 父会话不在列表里」之后：判据可从数据算出，语义与
+  /// 05 §2 的原意一致（父会话结束 → 子会话进不去），且当前数据下命中
+  /// 0 条 —— **没有孤儿就是没有孤儿，不该硬凑一个出来显示**。
+  ///
+  /// 需要整份列表才能判，所以真正计算在
+  /// `session_presentation.dart` 的 `presentSession()` 里。
+  bool isDetachedGiven(Set<String> knownSessionIds) {
+    final parent = parentSessionId;
+    if (parent == null || parent.isEmpty) return false;
+    return !knownSessionIds.contains(parent);
+  }
 
   /// 标题：只能来自投影。
   String? get title {
@@ -374,7 +400,9 @@ class SessionSummary {
   }
 
   /// 是否子 agent 会话。
-  bool get isSubagent => parentSessionId != null;
+  ///
+  /// 这是「已断开」的前提条件 —— 完整的判定见 [isDetachedGiven]。
+  bool get isSubagent => parentSessionId != null && parentSessionId!.isNotEmpty;
 }
 
 /// 摘要里的一轮（投影 `turnOutline`）。

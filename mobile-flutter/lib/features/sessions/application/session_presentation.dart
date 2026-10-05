@@ -65,14 +65,20 @@ class SessionPresentation {
 /// 「上一轮结果」投影；那是一次协议变更，得先探针确认。
 SessionPresentation presentSession(
   SessionSummary session, {
+  Set<String> knownSessionIds = const {},
   List<PendingInteraction> localPending = const [],
 }) {
   // 只看属于这条会话的待答。agentId 就是 sessionId（已实测）。
   final mine = localPending.where((p) => p.agentId == session.sessionId);
 
   final state = switch (null) {
-    // agent 不可用 → 无论它在报什么，都是进不去的「已断开」。
-    _ when session.isDetached => QxSessionState.detached,
+    // 父会话不在了 → 无论它在报什么，都是进不去的。
+    //
+    // ⚠️ 这里**不**用 `agentAvailable == false`。实测本部署 393 条会话里
+    // 392 条是 false（含 142 条完全能打开的顶级会话），它复述的是
+    // 「现在没在跑」，拿它当判据会把它们全标成「已断开」。
+    // 详见 `SessionSummary.isDetachedGiven` 的完整数据。
+    _ when session.isDetachedGiven(knownSessionIds) => QxSessionState.detached,
     // 实时优先：本地有未答的 waterfall 就是等你，哪怕投影还没同步。
     _ when mine.isNotEmpty => QxSessionState.waiting,
     // 没有本地 waterfall 时才看服务端投影。
@@ -136,9 +142,20 @@ final sessionPresentationsProvider = Provider.autoDispose<List<SessionPresentati
 
   return sortForList(
     switch (list) {
-      SessionListReady(:final items) =>
-        items.map((s) => presentSession(s, localPending: pending)).toList(),
+      SessionListReady(:final items) => presentAll(items, localPending: pending),
       _ => const <SessionPresentation>[],
     },
   );
 });
+
+/// 整份列表的呈现态。**「已断开」需要全量 id 才能判**（看父会话在不在
+/// 列表里），所以不能逐条独立求值。
+List<SessionPresentation> presentAll(
+  List<SessionSummary> items, {
+  List<PendingInteraction> localPending = const [],
+}) {
+  final ids = items.map((s) => s.sessionId).toSet();
+  return items
+      .map((s) => presentSession(s, knownSessionIds: ids, localPending: localPending))
+      .toList();
+}
