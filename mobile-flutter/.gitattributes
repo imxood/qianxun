@@ -1,0 +1,15 @@
+# Dart / Markdown 用 LF。Git 在 Windows 上默认会把 CRLF 写进仓库，
+# 造成每次改动都出现「CRLF will be replaced by LF」的噪音警告，
+# 也让跨机器的 diff 变得不可读。
+*.dart text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.py   text eol=lf
+
+# 二进制，禁��任何换行转换
+*.ttf  binary
+*.otf  binary
+*.png  binary
+*.jpg  binary
+*.apk  binary

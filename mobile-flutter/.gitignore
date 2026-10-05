@@ -1,0 +1,30 @@
+# Dart / pub 依赖
+.dart_tool/
+.packages
+build/
+pubspec.lock
+
+# Flutter / Android
+.flutter-plugins
+.flutter-plugins-dependencies
+android/.gradle/
+android/local.properties
+android/app/debug/
+android/app/profile/
+android/app/release/
+**/GeneratedPluginRegistrant.*
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+**/*.xcworkspace/xcuserdata/
+
+# 探针脚本的本地临时产物
+**/.probe_sid.txt
+**/probe-*.json
+
+# 截图（本会话生成，用于讨论，不进仓库）
+*.png
+!assets/**/*.png
