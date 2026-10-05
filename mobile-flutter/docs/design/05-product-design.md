@@ -107,14 +107,20 @@ final interactionControllerProvider =
 第 1、2 条关掉了 01 与 03 各自标记的**头号风险**：产品在「哪条会话在等你」这件事上
 从「我们猜它卡住了」变成「**它告诉我它卡住了**」。
 
-### 0.3 开工前唯一的探针动作
+### 0.3 流式渲染的协议形状（已从源码确认，**不是靠抓帧猜的**）
 
-`assistantStream: true` 已经在传（`transcript_controller.dart:196`），`assistant-stream`
-帧已在收，但 `transcript_controller.dart:278-283` **只读了 `start` / `end`**，
-**delta 的文字字段名未验证**。
+`assistantStream: true` 已经在传（`transcript_controller.dart:196`），
+`assistant-stream` 帧已在收，但 `transcript_controller.dart:278-283` **只读了
+`start` / `end`**。
 
-动手改转录之前，先抓一帧 `assistant-stream` 的 `chunk`，确认 delta 落在哪个字段上。
-优先级高于任何视觉工作。
+本节曾是「开工前唯一的探针动作」，现在**已由源码定案**（§12.1.2）：
+帧里**没有 `delta` 字段**，`chunk` 是**压缩 record 流**（`text-chunks` /
+`reasoning-chunks` / `tool-call-chunks` / 原始 `chunk`），连续 delta 被压成
+一整个 run。改动转录前照 §12.1.2 实现等价于 `expandAssistantStream()` 的
+Dart 展开器，并遵守 `revision` / `index` 严格 +1 与 `end.outcome` 权威。
+
+> 这条的价值不在结论本身，而在**它是从 `deepseek-harness` 源码读出来的**，
+> 不是从一次抓帧里看一帧猜的 —— 后者会把 N 段压缩文字误当成 1 段。
 
 ---
 
@@ -145,7 +151,7 @@ final interactionControllerProvider =
 | 状态 | 判定 | 语义色 | 非颜色通道 |
 |---|---|---|---|
 | **运行中** | `running == true` | 绿 | 轨上流光 + 活动行 |
-| **等你** | `userQuestions.active` 非空 **或** 本地有未答 waterfall | 琥珀 | 轨为虚线 + 行置顶 + 全大写中文标签 |
+| **等你** | `projections.values.userQuestions.active` 非空 **或** 本地有未答 waterfall **或** 本地持久化的待答快照未过期（见 §12.1.3） | 琥珀 | 轨为虚线 + 行置顶 + 全大写中文标签 |
 | **已完成** | `running == false` —— 但**不是一个态，是三档**，见 §2.1 | 强档蓝 / 弱档**中性灰** / 不知档灰 | 轨 1dp 细线；不知档加降级轨 |
 | **已断开** | **是子会话 且 父会话不在当前列表里** | 中性灰 | 轨为**虚线段** |
 | **失败** | 不进列表（见下） | 赤 | 轨为实心 + 三角缺口 |
@@ -670,10 +676,11 @@ eager 地 join 完整工具输出、并 pretty-print 参数**。一次宽 `rg` �
 也一并置灰，用户会得到一个「我什么都干不了」的 App —— 而那个动作
 **实际上是安全的**。一刀切的代价是让产品变得比它实际需要的更无能。
 
-**发送消息的特殊处理**：`session/prompt` 的 `requestId` 去重**尚未验证**
-（见 §12 未解项）。在验证之前：重试**不做自动重发**，而是先查转录里
-有没有已落地的同 `requestId` 消息，**查不到才提示用户手动确认**。
-错一次就是两条轮次，**不可逆**。
+**发送消息的特殊处理**：`session/prompt` 的 `requestId` 去重**已在服务端
+验证**（§12.1.1，`hasPromptRequest` 查 inbox + 持久化日志两处，有测试覆盖），
+所以超时**可以**自动用同一 `requestId` 重试。但要设**退避 ≥ 2s、最多 2 次** ——
+去重路径会走 `resolveAgent`，重试可能触发一次**会话恢复**，宿主繁忙时
+反复重试等于反复 resume。
 
 ### 9.6 这次重设计「做完了」怎么判断
 
@@ -774,17 +781,168 @@ eager 地 join 完整工具输出、并 pretty-print 参数**。一次宽 `rg` �
 > 这三项都不是「产品决策」，是**协议事实未知**。每项都有一个明确的
 > 「错了会怎样」，所以宁可晚写也不能猜。
 
-| # | 未验事实 | 错判后果 | 阻塞谁 | 怎么验 |
-|---|---|---|---|---|
-| 1 | **`session/prompt` 的 `requestId` 是否真的去重** | 重试发送产生**两条轮次**，**不可逆**（无法撤回已落地的轮次） | **发送功能上线** | 连发两次同一 `requestId`，数转录里的轮次 |
-| 2 | **审批在 393 条规模下有没有列表级信号** | 「等你」区在 App 重启后**缺一块**：实时 waterfall 收不到重启前的审批，`userQuestions.active` 名字上只管提问。若确实没有列表级信号，只能靠**本地持久化 `callId` 映射**兜底 | 「等你回答」链路 | 构造一个审批后重启 App，看列表能否标出那条会话 |
-| 3 | **`assistant-stream` 的 `delta` 字段名** | 流式文字整个不显示（`transcript_controller.dart:278-283` 只读了 `start`/`end`） | 流式渲染 | 抓一帧 `chunk` 原始 JSON |
+| # | 未验事实 | 错判后果 | 状态 |
+|---|---|---|---|
+| 1 | **`session/prompt` 的 `requestId` 是否真的去重** | 重试发送产生**两条轮次**，**不可逆** | ✅ **已验证，见 §12.1.1** |
+| 2 | **审批在 393 条规模下有没有列表级信号** | 「等你」区在 App 重启后**缺一块** | ⚠️ **已验证：部分覆盖，有确凿缺口，见 §12.1.3** |
+| 3 | **`assistant-stream` 的 `delta` 字段名** | 流式文字整个不显示 | ✅ **已验证，且假设是错的，见 §12.1.2** |
 
-**外加一条已知但未解**：`contextPressure.pressureTokens` 与
-`contextBreakdown` 三段求和实测差 **15.7%–28.1%**（12 条样本），差值不稳定。
-§11.5.1 已定「百分比只用 `projectedTokens / contextWindow`」，**不阻塞**施工；
-但要解这个差值需要在一条**长会话**上同时读两值，看哪个等于服务端自己
-UI 上报的百分比。
+#### 12.1.1 `requestId` 去重：**服务端确实去重，且带测试覆盖**（✅ 已验证）
+
+`deepseek-harness/packages/api/session-controller/src/commands.ts:330`
+
+```ts
+const agent = await this.resolveAgent(request.sessionId)
+if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
+```
+
+`hasPromptRequest`（`:602-614`）查**两处**：
+
+```ts
+if (agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)) return true
+return agent.session.snapshotEvents().some(event =>
+  event.type === 'user/message' && event.data.source.rpcId === requestId)
+```
+
+即：**未消费的队列**（nextTurn / nextStep）+ **持久化日志里的 user/message 事件**。
+两处都覆盖，且 `source.rpcId` 就是 `requestId` 本身（`:333`）。
+
+**两个测试独立覆盖两条路径**（`tests/commands-upload-file.host.spec.ts`）：
+
+| 行 | 场景 | 断言 |
+|---|---|---|
+| `:345` | 重试的 rpcId **已在 inbox** | `followup` 只被调一次 |
+| `:354` | 重试的 rpcId **已在持久化日志** | `followup` **完全没被调** |
+
+**结论：重试发送是安全的，不会产生两条轮次。** 客户端**可以**在超时后
+自动用同一 `requestId` 重试，不需要先查转录。
+
+⚠️ **但有一个边界必须写进实现约束**：去重查的是 `agent.session.snapshotEvents()`，
+而 `snapshotEvents()` 走的是 `ctx.sessions.get(sessionId)`（`index.ts:246`）——
+**该会话必须在宿主内存里 attached**。若会话不在内存，走
+`inspectApiSession(ctx, sessionId)` 读持久化前缀（`index.ts:249`），
+**只读已持久化的事件**。含义：
+
+- 消息已被**持久化**后重试 → 安全（`:354` 那个测试就是这个场景）
+- 消息**尚未持久化**且会话**不在内存** → `resolveAgent` 会先把它 resume 进内存
+  （`agent.ts:170` 注释：「Resolve **or resume** one ordinary Session」），
+  然后按 inbox 路径命中 → 也安全
+
+所以两条路径都安全，但**代价是重试可能触发一次会话恢复**。移动端超时
+重试要设**退避**（≥ 2s）并**最多 2 次**，避免在宿主繁忙时反复触发 resume。
+
+#### 12.1.2 `assistant-stream` **没有 `delta` 字段**（✅ 已验证，原假设是错的）
+
+`transcript_controller.dart:278-283` 只读 `start`/`end` 之前，本文把
+「delta 的文字字段名」列为未验证。**这个问法本身就错了。**
+
+`SessionAssistantStreamFrame`（`session-controller/src/types.ts:513-543`）
+只有三态，**没有 `delta`**：
+
+```ts
+| { type:'start';  attemptId, revision, startedAfterSeq, turn, step }
+| { type:'chunk';  attemptId, revision, index, time, chunk: JsonValue }   ← 注意
+| { type:'end';    attemptId, revision, index, outcome }
+```
+
+`chunk` 是 **`JsonValue`（不透明原始值）**，不是 `{text: '...'}`。它装的是
+**压缩过的 record 流**（`llm/src/assistant-stream.ts:20-44`）：
+
+| record `type` | 载荷 | 对应 StreamChunk |
+|---|---|---|
+| `text-chunks` | `{time0, index, dt[], texts[]}` | `text-delta` × N |
+| `reasoning-chunks` | `{time0, index, dt[], texts[]}` | `reasoning-delta` × N |
+| `tool-call-chunks` | `{time0, index, dt[], id, name?, args[]}` | `tool-call-delta` × N |
+| `chunk` | `{time, chunk}` | `block-start`/`block-end`/`usage`/`finish` 原始块 |
+
+**⚠️ 关键：连续 delta 被压成「一整个 run」**，一个 record 里有 N 个
+`texts` 片段 + `dt` 增量时间戳。所以**不能**写成「遍历 frames，取
+`frame.chunk.text` 逐帧追加」—— 那样会把 N 段文字当成 1 段，或漏掉
+N−1 段。
+
+正确读法：按 `type` 分派，对 run 型 record 遍历 `texts[]` 拼接；
+raw 型 `chunk` 记录按 `record.chunk.type` 分派。权威实现是
+`expandAssistantStream()`（`llm/src/assistant-stream.ts:202-232`），
+它把压缩 record 还原成原始 chunk 序列，**我们的 Dart 端需要一个等价实现**。
+
+**三条协议约束必须遵守**（都在服务端强制，客户端违反会断流）：
+
+1. **`revision` 必须严格 +1 递增**。跳号 → `RemoteStreamCarrierError`
+   `session assistant stream skipped revision N`（`client/transport.ts:208-211`）
+2. **`index` 必须严格 +1 递增**。不连续 → 该 attempt 作废并 `rebaseline`
+   （`client/sessions/assistant-stream.ts:149`）
+3. **`end` 帧携带的 `outcome.seq` 是权威**。`committed` 时才知道
+   `assistant/message` 落在哪个 `seq`；`abandoned` 表示这次尝试作废。
+   **不要用「chunk 数」推断轮次结束** —— `end.index` 是「本帧代表的
+   chunk 帧数」（`types.ts:534`），不是消息长度。
+
+**连带结论：流式是「瞬态」的，最终真相在 `assistant/message` 事件上。**
+`retainedAttempt` 机制（`client/sessions/assistant-stream.ts:190`）说明：
+成功消息的瞬态行要**留到 owning Step 结束才撤**，而 `interrupted === true`
+的立即撤。所以**渲染流式内容时不能把它当最终态提交** —— 落库要等
+`assistant/message`。
+
+#### 12.1.3 待答信号的覆盖边界（⚠️ 部分覆盖 —— **这条改了「等你」区的设计**）
+
+原判断是「审批在列表规模下可能**无**信号，只能靠本地持久化兜底」。
+源码查下来更精确，也更糟一点：
+
+**覆盖到的**：`userQuestions` 投影的形状是
+`{active: PendingUserQuestion[], settled: []}`（`interaction/user-questions/src/types.ts:100-105`），
+且它**确实在 `session/list` 的 `projections.values` 里**（探针已验）。
+`active` 的每一项带 `callId` + `questions[]` + `state`。
+
+所以 **`ask_user_question` 提问在列表级有信号**，且带 `callId`。
+参考客户端正是这么用的（`client/ui-user-questions/src/client/index.ts:315-331`）：
+遍历 bound 会话 → 读 `projections.userQuestions.active` + `projections.inbox` →
+合成待答行。它**不依赖实时 waterfall**。
+
+**但有一个确凿缺口**，`types.ts:95-98` 的注释原文：
+
+> Both halves of one Session's timed `ask_user_question` state, as every Client reads them.
+> **A call made while the blocking legacy tool was in effect appears in neither half.**
+
+即：**blocking legacy 工具**发起的调用，在 `active` 和 `settled` 里
+**都不出现**。这与 `ui-user-questions/src/client/index.ts:275-276` 的
+实现一致：
+
+```
+// A blocking request without a call id is not in the projection;
+// its card ends with its waterfall.
+if (callId === undefined) card.remove()
+```
+
+**含义**：
+- `ask_user_question`（有 `callId`）→ 列表级有信号 ✅
+- **无 `callId` 的阻塞式交互**（旧式审批 / 同步提问）→ **列表级没有信号** ❌
+
+**设计后果（「等你」区必须两条腿走路）：**
+
+1. 列表级信号（`projections.values.userQuestions.active`）作为**主源**，
+   覆盖提问 + 带回 `callId` 的交互。
+2. 实时 waterfall 作为**补充源**，覆盖无 `callId` 的阻塞交互。
+3. **本地持久化 `callId` 映射兜底**：App 重启后 waterfall 收不到重启前的
+   事件（§2.3 否定断言律），所以凡是我们在存活期间见过的待答
+   （无论来自哪一路），**都要落盘**，重启后用快照时间戳呈现为
+   「3 分钟前在等你」而不是「已收工 · 状态待确认」。
+4. ⚠️ 展示上必须**区分两种「等你」**：
+   - 来自投影的 → 可直接答（`userQuestions.answer{agentId,callId,answer}`）
+   - 只来自本地快照的 → **只能置灰**「需要连接」，因为 `callId` 可能已消失。
+     点了发不出去 = 让用户点了个没反应的按钮（§9.2 已列为反模式）。
+
+**⚠️ 仍未验的一环**：`userQuestions.active` 在本部署 393 条里
+实际有几条非空？探针样本那条是 `[]`（`docs/probe/session-list-item.json`）。
+**空数组不区分「没有待答」和「这条会话恰好没有」** —— 单条样本无法下结论。
+这需要一条**真的有待答**的会话才能验，而构造它会污染用户的真实会话列表。
+**这一项留给真机阶段，用一次人工构造来验**（§12.1.4）。
+
+#### 12.1.4 剩下唯一需要真机的一次性验证
+
+| 项 | 做法 | 判据 |
+|---|---|---|
+| `userQuestions.active` 在真有待答时非空 | 人工构造一次 `ask_user_question`（在测试会话里），然后 `session/list` 看该条 | 非空且带 `callId` → §12.1.3 的设计成立；仍为空 → 整个「等你」区要改成纯本地兜底 |
+
+其余协议项均已由 `deepseek-harness` 源码定案，不需要真机。
 
 ### 12.2 需要产品拍板的三个数值（已有默认，不阻塞开工）
 

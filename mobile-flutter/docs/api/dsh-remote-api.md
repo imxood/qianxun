@@ -129,6 +129,115 @@ content-type: application/json
 `address` 两种：`{kind:'session',sessionId}` 或
 `{kind:'subagent',parentSessionId,childSessionId,mode}`。
 
+#### `session/prompt` 的 `requestId` 是**真的去重**（源码级验证）
+
+`packages/api/session-controller/src/commands.ts:330`
+
+```ts
+const agent = await this.resolveAgent(request.sessionId)
+if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
+```
+
+`hasPromptRequest`（`:602-614`）查**两处**，都命中才算重复：
+
+1. `agent.inbox.nextTurn` / `agent.inbox.nextStep` —— 未消费的队列
+2. `agent.session.snapshotEvents()` 里 `type === 'user/message'` 且
+   `data.source.rpcId === requestId` —— 持久化日志
+
+且 `requestId` 被原样写进消息源（`:333` `source.rpcId = request.requestId`），
+所以这是**同一个值**在比对，不是派生值。
+
+**测试覆盖**（`tests/commands-upload-file.host.spec.ts`）：
+
+| 行 | 场景 | 断言 |
+|---|---|---|
+| `:345` | 重试的 rpcId 已在 inbox | `followup` 只调一次 |
+| `:354` | 重试的 rpcId 已在持久化日志 | `followup` **没被调** |
+
+**对客户端的含义**：超时后用同一 `requestId` 自动重试**是安全的**，
+不会产生两条轮次。⚠️ 但去重路径会走 `resolveAgent`（`agent.ts:170`
+「Resolve **or resume**」），会话不在内存时会**触发一次 resume**。
+移动端应设**退避 ≥ 2s、最多 2 次**。
+
+### 2.1.5 `assistant-stream` 的帧形状（源码级确认）
+
+`SessionAssistantStreamFrame`（`session-controller/src/types.ts:513-543`）
+是三态联合，**没有 `delta` 字段**：
+
+| `type` | 字段 |
+|---|---|
+| `start` | `attemptId, revision, startedAfterSeq, turn, step` |
+| `chunk` | `attemptId, revision, index, time, chunk: JsonValue` ← **不透明** |
+| `end` | `attemptId, revision, index, outcome{committed{eventType,seq} \| abandoned}` |
+
+`chunk` 装的是**压缩 record 流**（`llm/src/assistant-stream.ts:20-44`）：
+
+| record `type` | 载荷 | 展开为 |
+|---|---|---|
+| `text-chunks` | `{time0, index, dt[], texts[]}` | `text-delta` × N |
+| `reasoning-chunks` | `{time0, index, dt[], texts[]}` | `reasoning-delta` × N |
+| `tool-call-chunks` | `{time0, index, dt[], id, name?, args[]}` | `tool-call-delta` × N |
+| `chunk` | `{time, chunk}` | `block-start`/`block-end`/`usage`/`finish` 原样 |
+
+⚠️ **连续 delta 被压成「一整个 run」** —— 一个 record 内有 N 个片段。
+不能写成「遍历帧取 `frame.chunk.text`」：那会把 N 段当 1 段。
+权威展开器是 `expandAssistantStream()`（`llm/src/assistant-stream.ts:202-232`），
+**Dart 端需要等价实现**。
+
+**三条服务端强制的客户端约束：**
+
+1. `revision` 严格 +1。跳号 → `RemoteStreamCarrierError`
+   `session assistant stream skipped revision N`（`client/transport.ts:208-211`）
+2. `index` 严格 +1。不连续 → 该 attempt 作废 + `rebaseline`
+   （`client/sessions/assistant-stream.ts:149`）
+3. `end.outcome.seq` 是权威。**不要用 chunk 数推断轮次结束** ——
+   `end.index` 是「本帧代表的 chunk 帧数」（`types.ts:534`），不是消息长度。
+
+流式行是**瞬态**的，最终真相在 `assistant/message` 事件上：
+成功消息的瞬态行留到 owning Step 结束才撤（`client/sessions/assistant-stream.ts:190`），
+`interrupted === true` 的立即撤。**渲染时不能把流式内容当最终态提交。**
+
+### 2.1.6 待答信号的覆盖边界（⚠️ 有确凿缺口）
+
+`UserQuestionProjectionView`（`interaction/user-questions/src/types.ts:100-105`）：
+
+```ts
+{ active: readonly PendingUserQuestion[]   // 仍可作答，按提问顺序
+  settled: readonly SettledUserQuestion[] } // 已被答复结算
+```
+
+每项 `PendingUserQuestion` = `{callId, questions[], state}`，
+`state: 'open' | 'continued'`（`:72`）—— `open` 是工具调用仍可能自己返回答案，
+`continued` 是答案只能作为新一轮消息到达。
+
+**✅ 覆盖**：`ask_user_question` 在 `session/list` 的 `projections.values`
+里有列表级信号，且带 `callId`。参考客户端就是这么用的
+（`client/ui-user-questions/src/client/index.ts:315-331`），
+**不依赖实时 waterfall**。
+
+⚠️ 还要交叉读 `projections.inbox` 的 `next-step` / `next-turn`：
+里面 `source.kind === 'user-question-reply'` 且 `callId` 命中的，
+表示**答复已提交但还没被 agent 消费**，此时应把可编辑卡片撤掉
+（`index.ts:320-328`）。
+
+**❌ 缺口**（`types.ts:95-98` 原文）：
+
+> Both halves of one Session's timed `ask_user_question` state, as every
+> Client reads them. **A call made while the blocking legacy tool was in
+> effect appears in neither half.**
+
+**无 `callId` 的阻塞式交互，在 `active` 与 `settled` 里都不出现。**
+参考客户端对此的处理是直接删卡片
+（`ui-user-questions/src/client/index.ts:275-276`）：
+`if (callId === undefined) card.remove()`。
+
+**对移动端的含义**：「等你」区必须三源合流 ——
+① 投影 `userQuestions.active`（主源，可直接答）
+② 实时 waterfall（覆盖无 `callId` 的阻塞交互）
+③ 本地持久化的待答快照（覆盖 App 重启后 waterfall 收不到事件的情况）
+**且必须区分「可答」与「仅快照」** —— 后者只能置灰，
+因为 `callId` 可能已消失，点了发不出去。
+
 ### 2.2 其余命名空间（移动端相关性分级）
 
 | 命名空间 | 方法 | 移动端相关性 |
