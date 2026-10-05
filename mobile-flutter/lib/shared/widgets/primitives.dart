@@ -212,6 +212,14 @@ class MetaRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final q = context.qx;
+    // 等宽**数据层**锁回 1.0x（04 裁决表）：这一行是「标签 : 值」的
+    // 对齐装置，值放大后列就散了。全局上限已经放宽到 2.0（正文要跟着
+    // 系统走），保护落在这一层。
+    final valueText = SelectableText(
+      value,
+      style: (monospace ? QxType.ident : QxType.caption)
+          .copyWith(color: q.textPrimary),
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: QxSpace.s),
       child: Row(
@@ -226,11 +234,7 @@ class MetaRow extends StatelessWidget {
           ),
           const SizedBox(width: QxSpace.m),
           Expanded(
-            child: SelectableText(
-              value,
-              style: (monospace ? QxType.ident : QxType.caption)
-                  .copyWith(color: q.textPrimary),
-            ),
+            child: monospace ? QxType.dataScaleLocked(child: valueText) : valueText,
           ),
         ],
       ),

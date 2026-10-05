@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qianxun_mobile/app/theme/qx_semantic.dart';
 import 'package:qianxun_mobile/app/theme/qx_theme.dart';
 import 'package:qianxun_mobile/data/models/content.dart';
 import 'package:qianxun_mobile/data/models/session.dart';
+import 'package:qianxun_mobile/features/sessions/application/session_presentation.dart';
 import 'package:qianxun_mobile/features/sessions/presentation/sessions_screen.dart';
+import 'package:qianxun_mobile/features/sessions/presentation/session_tile.dart';
 import 'package:qianxun_mobile/features/workspace/application/transcript_controller.dart';
 import 'package:qianxun_mobile/features/workspace/presentation/transcript_view.dart';
 import 'package:qianxun_mobile/shared/widgets/primitives.dart';
+import 'package:qianxun_mobile/shared/widgets/signal_spine.dart';
 
 /// 界面测试：不依赖设备与网络，直接把 widget 泵进测试树。
 ///
@@ -72,10 +76,12 @@ void main() {
 
   group('会话行', () {
     SessionSummary build({
+      String sessionId = 's1',
       bool running = false,
       String? title,
       String? cwd,
       Map<String, Object?>? projections,
+      Map<String, Object?>? userQuestions,
     }) {
       // ⚠️ 合并成一个 values：写两个 `'projections':` 键时后者会覆盖前者，
       // 曾经因此让「12 轮 / 48k ctx」三个断言全部落空。
@@ -84,29 +90,31 @@ void main() {
         ...?projections,
       };
       return SessionSummary.fromJson({
-        'sessionId': 's1',
+        'sessionId': sessionId,
         'updatedAt': DateTime.now().millisecondsSinceEpoch - 60000,
         'running': running,
         'blank': false,
         if (cwd != null) 'cwd': cwd,
+        if (userQuestions != null) 'userQuestions': userQuestions,
         'projections': {'asOfSeq': 1, 'values': values},
       });
     }
 
+    /// 走真实的状态推导，不在测试里手挑状态 —— 否则测的是「我给什么
+    /// 它渲染什么」，而不是「这份数据该是什么态」。
+    SessionTile tile(SessionSummary s) =>
+        SessionTile(item: presentSession(s), onTap: () {});
+
     testWidgets('显示投影里的标题，不显示"未命名会话"', (tester) async {
-      await tester.pumpWidget(wrap(
-        SessionRow(session: build(title: '重构网关鉴权'), onTap: () {}),
-      ));
+      await tester.pumpWidget(wrap(tile(build(title: '重构网关鉴权'))));
       expect(find.text('重构网关鉴词'), findsNothing);
       expect(find.text('重构网关鉴权'), findsOneWidget);
     });
 
     testWidgets('没有标题投影时退回 cwd 末段，且副行不重复它', (tester) async {
-      await tester.pumpWidget(wrap(
-        SessionRow(session: build(cwd: '/home/me/deep/app'), onTap: () {}),
-      ));
+      await tester.pumpWidget(wrap(tile(build(cwd: '/home/me/deep/app'))));
       // 「只出现一次」**就是**不重复的证据：标题回退到 cwd 末段 `app`，
-      // 副行若再显示一遍 `app`，这里会是 findsNWidgets(2) 而不是 1。
+      // 元信息行若再显示一遍 `app`，这里会是 findsNWidgets(2) 而不是 1。
       //
       // ⚠️ 原来这条断言写了两遍一模一样的 findsOneWidget，于是
       // 一条名叫「副行不重复它」的测试永远不会失败 —— 名字承诺的
@@ -114,54 +122,314 @@ void main() {
       expect(find.text('app'), findsOneWidget);
     });
 
-    testWidgets('有标题时副行才显示 cwd', (tester) async {
-      await tester.pumpWidget(wrap(
-        SessionRow(
-          session: build(title: '重构鉴权', cwd: '/home/me/proj'),
-          onTap: () {},
-        ),
-      ));
+    testWidgets('有标题时元信息行才显示 cwd', (tester) async {
+      await tester.pumpWidget(
+        wrap(tile(build(title: '重构鉴权', cwd: '/home/me/proj'))),
+      );
       expect(find.text('重构鉴权'), findsOneWidget);
       expect(find.text('proj'), findsOneWidget);
     });
 
-    testWidgets('运行中的会话显示状态语义与呼吸点', (tester) async {
-      await tester.pumpWidget(wrap(
-        SessionRow(session: build(title: '跑批处理', running: true), onTap: () {}),
-      ));
-      expect(find.byType(StateDot), findsOneWidget);
-      // 语义标签里必须带状态文字——纯色点在色觉障碍用户眼里没信息。
-      final sem = tester.getSemantics(find.byType(SessionRow));
+    testWidgets('轨出血到屏幕左缘：行内贴行首，且列表**不留左内边距**', (tester) async {
+      // 05 §3.1：轨**出血到屏幕边**，不是内缩成「卡片左边一个小色块」。
+      //
+      // ⚠️ 这里要断**两处**，缺一不可：
+      //   1. 行内：轨的 dx 与行的 dx 齐平（`SignalSpine` 不自带缩进）
+      //   2. 页面：`ListView` 的 padding 不含 left。旧实现正是
+      //      `EdgeInsets.fromLTRB(QxSpace.l, …)`，轨整体右移了 16dp，
+      //      屏幕左缘那条连续的线就断了 —— 而只断第 1 条的话它照样绿。
+      //    本批把那条 padding 删掉了，所以这里也要钉住「删掉之后别加回来」。
+      expect(
+        SessionsScreen.sessionsListHasNoLeftInset,
+        isTrue,
+        reason: '会话列表的 ListView 重新出现了左内边距，轨就不出血了',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: QxTheme.dark(),
+          home: Scaffold(
+            body: ListView(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              children: [tile(build(title: 'x'))],
+            ),
+          ),
+        ),
+      );
+      final tileTopLeft = tester.getTopLeft(find.byType(SessionTile));
+      final spineLeft = tester.getTopLeft(find.byType(SignalSpine));
+      expect(
+        spineLeft.dx - tileTopLeft.dx,
+        0,
+        reason: '轨必须与行的左缘齐平（出血），不能内缩',
+      );
+    });
+
+    testWidgets('行高固定 66dp，idle 与 running 同高', (tester) async {
+      // 05 §4.2。两态行高不同的话，扫一列时行的位置随状态漂移。
+      for (final running in [true, false]) {
+        await tester.pumpWidget(wrap(tile(build(title: 'x', running: running))));
+        expect(
+          tester.getSize(find.byType(SessionTile)).height,
+          SessionTile.rowHeight,
+          reason: 'running=$running 时行高必须是 66',
+        );
+        expect(find.byType(SignalSpine), findsOneWidget, reason: '轨必须渲染');
+      }
+    });
+
+    testWidgets('状态中文词在任何字号下都**不被裁切**', (tester) async {
+      // 05 §4.4 说「溢出用 …」，但那句话只对**次要信息**成立。
+      // 「绝不靠颜色单独表意」要求每态配一个可见中文词；状态词一旦被裁成
+      // 「运行…」，轨的语义就只剩颜色，而 1dp 的已完成轨颜色本身就看不清。
+      //
+      // ⚠️ `find.text('运行中')` 查的是 **widget**，不是字形 —— 就算被裁成
+      // 「运行…」，它照样 findsOneWidget。所以这里量的是
+      // `RenderParagraph.didExceedMaxLines`。
+      for (final scale in [1.0, 1.5, 2.0]) {
+        for (final width in [320.0, 360.0, 390.0]) {
+          tester.view.physicalSize = Size(width * 3, 844 * 3);
+          tester.view.devicePixelRatio = 3.0;
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: QxTheme.dark(),
+              home: Scaffold(
+                body: MediaQuery(
+                  data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+                  child: ListView(
+                    children: [
+                      tile(
+                        build(
+                          title: '一个相当长的会话标题',
+                          cwd: '/home/me/very/deep/project',
+                          projections: const {
+                            'sessionStats': {'turns': 128},
+                            'contextPressure': {'projectedTokens': 48600000},
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+          final label = find.text('已完成');
+          expect(label, findsOneWidget);
+          // 量「实际渲染宽度」与「无约束下的固有宽度」之差。
+          // ⚠️ 不能只看 `didExceedMaxLines`：状态词用的是 `softWrap: false`，
+          // 挤不下时是**溢出**而不是省略，那个标志不可靠。
+          final text = tester.widget<Text>(label);
+          final painter = TextPainter(
+            text: TextSpan(text: text.data!, style: text.style),
+            textDirection: TextDirection.ltr,
+            maxLines: 1,
+          )..layout();
+          final actual = tester.getSize(label).width;
+          expect(
+            actual + 0.5,
+            greaterThanOrEqualTo(painter.width),
+            reason: '${width}dp @ ${scale}x：状态词「已完成」被压缩到 '
+                '$actual < 固有 ${painter.width}',
+          );
+        }
+      }
+      tester.view.reset();
+    });
+
+    testWidgets('第二行是 agent 做的事，不是用户说的话', (tester) async {
+      // 05 §4.3 的核心规则，也是本批最贵的一次分歧的落点。
+      await tester.pumpWidget(
+        wrap(
+          tile(
+            build(
+              title: '部署',
+              projections: const {
+                'turnOutline': [
+                  {
+                    'turn': 1,
+                    'seq': 3,
+                    'prompt': '帮我把测试环境部署一下',
+                    'response': '已经跑完 deploy.sh --env test\n日志见下',
+                  },
+                ],
+              },
+            ),
+          ),
+        ),
+      );
+      // 用户输入的**回声**不许出现在第二行。
+      expect(find.text('帮我把测试环境部署一下'), findsNothing);
+      // agent 的**动作**要出现，且只取首行。
+      expect(find.text('已经跑完 deploy.sh --env test'), findsOneWidget);
+    });
+
+    testWidgets('查不到第二行时不占位，也不拿用户输入填', (tester) async {
+      await tester.pumpWidget(
+        wrap(
+          tile(
+            build(
+              title: '空会话',
+              projections: const {
+                'turnOutline': [
+                  {'turn': 1, 'seq': 1, 'prompt': '只有提问没有回复', 'response': ''},
+                ],
+              },
+            ),
+          ),
+        ),
+      );
+      // 05 §4.3：「查不到 → 空（不占位）」。
+      expect(find.text('只有提问没有回复'), findsNothing);
+      // 行仍在，只是没有第二行。
+      expect(find.byType(SessionTile), findsOneWidget);
+    });
+
+    testWidgets('运行中的会话带「运行中」中文词与语义标签', (tester) async {
+      await tester.pumpWidget(wrap(tile(build(title: '跑批处理', running: true))));
+      // 「绝不靠颜色单独表意」：中文词必须真的画出来。
+      expect(find.text('运行中'), findsOneWidget);
+      // 语义标签里也要有状态 —— 整行读一遍就够，轨与点自己不再标。
+      final sem = tester.getSemantics(find.byType(SessionTile));
       expect(sem.label, contains('运行中'));
     });
 
-    testWidgets('副行给出轮次/上下文/token，且不溢出', (tester) async {
-      await tester.pumpWidget(wrap(
-        SessionRow(
-          session: build(
-            title: '一个相当长的会话标题用来测试单行截断是否正常工作',
-            cwd: '/home/me/proj',
-            projections: const {
-              'sessionStats': {'turns': 12},
-              'contextPressure': {'projectedTokens': 48000},
-              'tokenUsage': {'outputTokens': 3200},
-            },
+    testWidgets('元信息行给出轮次/上下文，且**永不换行**', (tester) async {
+      // 用 320dp + 长路径：只有这样，换行的实现才**真的**需要换行。
+      // 默认宽度下内容本来就挤得下，Wrap 与 Row 渲染结果一模一样，
+      // 任何「看渲染结果」的断言都没有判别力（实测：换成 Wrap 仍全绿）。
+      await tester.pumpWidget(
+        wrap(
+          tile(
+            build(
+              title: '一个相当长的会话标题用来测试单行截断是否正常工作',
+              cwd: '/home/me/a-really-long-directory-name-for-testing',
+              projections: const {
+                'sessionStats': {'turns': 128},
+                'contextPressure': {'projectedTokens': 48600000},
+              },
+            ),
           ),
-          onTap: () {},
+          size: const Size(320, 844),
         ),
-      ));
-      expect(find.textContaining('12 轮'), findsOneWidget);
-      expect(find.textContaining('48k ctx'), findsOneWidget);
-      expect(find.textContaining('↑3.2k'), findsOneWidget);
-      // 窄屏下不得有 RenderFlex 溢出。
-      expect(tester.takeException(), isNull);
+      );
+      expect(find.textContaining('128 轮'), findsOneWidget);
+      expect(find.textContaining('48.6M ctx'), findsOneWidget);
+
+      // ⚠️ 真正的不变式是**每一格自己 `maxLines == 1`**。
+      //
+      // 踩过的坑：先以为外层容器（Row+Expanded vs Wrap）才是防换行的开关，
+      // 于是去断「行高仍 66dp」和「各格高度一致」。实测两种断法都**没有
+      // 判别力** —— 把外层换成 `Wrap` 后测试照样全绿，因为每一格自带
+      // `maxLines: 1`，Wrap 拿到的全是单行子节点，根本没机会换行。
+      // 真正的开关在 `Text` 上。
+      //
+      // 排除标题 / 第二行 / 分隔符 `·`：它们要么本来就单行，要么是单字符。
+      final offenders = tester
+          .widgetList<Text>(find.descendant(
+            of: find.byType(SessionTile),
+            matching: find.byType(Text),
+          ))
+          .where((t) => t.data != '·')
+          .where((t) => t.maxLines != 1)
+          .map((t) => t.data)
+          .toList();
+      expect(
+        offenders,
+        isEmpty,
+        reason: '05 §4.4「永不换行」：每一格都必须是 maxLines: 1，'
+            '否则它会换行把行撑高。违规：$offenders',
+      );
+    });
+
+    testWidgets('正文 2.0x 字号下零溢出（05 §9.5 第 4 条）', (tester) async {
+      // 上限从 1.3 放宽到 2.0 之后，这条从「愿望」变成「必须」。
+      // 04 裁决表：夹取是为了让布局不溢出，不是为了压住无障碍。
+      //
+      // ⚠️ 这里**不能**只断 `takeException() isNull`：行高改用 minHeight
+      // 之后，2.0x 下是「长高」而不是「溢出」，RenderFlex 压根不会报错，
+      // 那条断言永远不会失败。真正要断的是**文字没被裁**。
+      tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: QxTheme.dark(),
+          home: Scaffold(
+            body: MediaQuery(
+              data: const MediaQueryData(textScaler: TextScaler.linear(2.0)),
+              child: ListView(
+                children: [
+                  tile(
+                    build(
+                      title: '一个相当长的会话标题用来测试放大之后会不会撑破',
+                      cwd: '/home/me/very/deep/project',
+                      projections: const {
+                        'sessionStats': {'turns': 128},
+                        'contextPressure': {'projectedTokens': 48600000},
+                        'turnOutline': [
+                          {
+                            'turn': 1,
+                            'seq': 1,
+                            'prompt': 'p',
+                            'response': 'Bash ./deploy.sh --env test --force',
+                          },
+                        ],
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull, reason: '2.0x 字号下不得溢出');
+      // 行必须**长高**（而不是裁内容）：默认 66dp 装不下 2.0x 的三行。
+      expect(
+        tester.getSize(find.byType(SessionTile)).height,
+        greaterThan(SessionTile.rowHeight),
+        reason: '内容装不下时行应该长高',
+      );
+      // 状态词是唯一不许被裁的（见上一条测试）。
+      final para = tester.renderObject<RenderParagraph>(
+        find.descendant(of: find.text('已完成'), matching: find.byType(RichText)).first,
+      );
+      expect(para.didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('idle 会话可以 settle；运行中**故意**不 settle', (tester) async {
+      // 05 §3.1 末尾的取舍说明：默认态（idle 等）树里不得有无限动画；
+      // 运行中的彗尾 1.6s 循环是**故意**不 settle 的。
+      //
+      // 这条测试是那道取舍的锁：它一旦被「修好」（即让运行中也 settle），
+      // 意味着有人为了测试方便砍掉了彗星 —— 而运动是唯一无法被灰度截图
+      // 与色觉障碍读到的通道，砍它等于把签名级编码降级。
+      await tester.pumpWidget(wrap(tile(build(title: 'x'))));
+      await tester.pumpAndSettle(const Duration(milliseconds: 100));
+
+      await tester.pumpWidget(wrap(tile(build(title: 'x', running: true))));
+      await tester.pump(const Duration(milliseconds: 100));
+      var settled = true;
+      try {
+        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+      } on FlutterError {
+        settled = false;
+      }
+      expect(
+        settled,
+        isFalse,
+        reason: '运行中必须有循环彗尾（05 §3.1）。若想让它 settle，'
+            '说明有人砍了运动通道 —— 那是设计降级，不是修复',
+      );
     });
 
     testWidgets('点击回调触发一次', (tester) async {
       var taps = 0;
-      await tester.pumpWidget(wrap(
-        SessionRow(session: build(title: 'x'), onTap: () => taps++),
-      ));
+      await tester.pumpWidget(
+        wrap(SessionTile(item: presentSession(build(title: 'x')), onTap: () => taps++)),
+      );
       await tester.tap(find.text('x'));
       expect(taps, 1);
     });

@@ -130,13 +130,29 @@ final class TurnStartEvent extends SessionEventView {
   final int turn;
 }
 
+/// `turn/end`。轮次收尾，**这是「失败」态唯一真实的数据源**。
+///
+/// ⚠️ 形状容错：kind 既可能在 `data['reason']['kind']`，也可能在
+/// `data['kind']`。原实现把整个 `data` 当成 `reason` 再读 `reason['kind']`，
+/// 也就是只认 `data['kind']` —— 若实际形状是嵌套的那种，`isError` 永远
+/// false，转录里的失败态从来没生效过。两种都读。
 final class TurnEndEvent extends SessionEventView {
-  const TurnEndEvent(super.wire, this.reason);
-  final Map<String, Object?> reason;
+  const TurnEndEvent(super.wire, this.data);
+
+  /// 事件的整个 `data`。
+  final Map<String, Object?> data;
+
+  /// `reason` 子对象（形状 A）；不存在时退回整个 `data`（形状 B）。
+  Map<String, Object?> get reason => asMap(data['reason']).isNotEmpty
+      ? asMap(data['reason'])
+      : data;
 
   String get reasonKind => (reason['kind'] as String?) ?? 'completed';
   bool get isError => reasonKind == 'error';
   bool get isAborted => reasonKind == 'aborted';
+
+  /// 这一轮是不是没收好（报错或被中止）。
+  bool get isBadEnding => isError || isAborted;
 }
 
 final class StepEvent extends SessionEventView {
@@ -196,6 +212,7 @@ class SessionSummary {
     this.agentPreset,
     this.agentAvailable,
     this.projections = const {},
+    this.userQuestions = const {},
   });
 
   final String sessionId;
@@ -220,11 +237,32 @@ class SessionSummary {
   /// 投影基线 `{asOfSeq, values}`。
   final Map<String, Object?> projections;
 
+  /// `userQuestions` 投影，逐会话下发（05 §0.2 已实测：`session/list`
+  /// 每项都带它）。
+  ///
+  /// 它是「**等你**」态的**服务端权威来源** —— 服务端直接告诉客户端哪条
+  /// 会话在等人，不必客户端推断。
+  ///
+  /// ⚠️ 形状容错：顶层与 `projections.values` 两处都读。
+  /// 05 §0.2 只记了「每项都有」，没记它挂在哪一层；两处都读的成本是
+  /// 零，漏读一处的代价是整个「等你」态永不点亮（而这是本 App 的第二
+  /// 签名级元素）。**探针一旦确认层级，就把 fallback 删掉。**
+  final Map<String, Object?> userQuestions;
+
   factory SessionSummary.fromJson(Map<String, Object?> json) {
     final projBlock = asMap(json['projections']);
     final values = asMap(projBlock['values']);
     final direct = json['agentPreset'] as String?;
     final projected = values['agentPreset'] as String?;
+    // 顶层优先，缺失时从投影里取（与 agentPreset 同一套路）。
+    //
+    // ⚠️ 判「有没有」要按**键是否存在**，不是按 map 非空。若顶层给了一个
+    // 空的 `{}` 而投影里留着上一轮的快照，用 `isNotEmpty` 会去读那个
+    // **过期的**投影，把已经解决掉的提问继续显示成「等你」—— 而误报
+    // 「等你」会把一条早就没人管的会话顶到列表最前面。
+    final uqTop = json.containsKey('userQuestions')
+        ? asMap(json['userQuestions'])
+        : asMap(values['userQuestions']);
     return SessionSummary(
       sessionId: (json['sessionId'] as String?) ?? '',
       updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
@@ -237,24 +275,54 @@ class SessionSummary {
       agentPreset: direct ?? projected,
       agentAvailable: json['agentAvailable'] as bool?,
       projections: values,
+      userQuestions: uqTop,
     );
   }
 
   /// 投影里的 `turnOutline`：每一轮的「问了什么 / 答了什么」。
   ///
   /// 这是 DSH 给的**现成预览**，比客户端自己从转录里猜要准——它就是宿主
-  /// 认定的摘要。列表行拿它当副标题。
+  /// 认定的摘要。列表行的第二行取它的 `response`（见
+  /// [lastResponseFirstLine]），**不取** `prompt`。
   List<TurnOutlineItem> get turnOutline => (projections['turnOutline'] as List? ?? const [])
       .map((e) => TurnOutlineItem.fromJson(asMap(e)))
       .toList(growable: false);
 
-  /// 最近一轮的提问，作为列表副标题。
+  /// 最近一轮的**提问**。
+  ///
+  /// 05 §4.3：「第二行永远是『agent 最近做的那件事』……**永远不是用户
+  /// 自己说过的话**。」所以列表**不许**用它（用 [lastResponseFirstLine]）。
+  ///
+  /// ⚠️ 当前 `lib/` 里没有调用方：它是对协议的忠实建模，且转录/详情页
+  /// 迟早要用「这一轮问了什么」。留着，但别拿它当列表摘要。
   String? get lastPrompt {
     final t = turnOutline;
     if (t.isEmpty) return null;
     final p = t.last.prompt.trim();
     return p.isEmpty ? null : p;
   }
+
+  /// 列表第二行：agent 最近做的那件事（05 §4.3）。
+  ///
+  /// - 刚收工 → `turnOutline.last.response` 的首行
+  /// - 查不到 → null（**不占位**，空就空着，不要拿用户输入的回声填）
+  ///
+  /// 在跑时的「当前工具名 + 参数」来自 `$events` 的 waterfall，客户端侧
+  /// 由调用方合并（列表控制器持有实时状态，模型本身不持有）。
+  String? get lastResponseFirstLine {
+    final t = turnOutline;
+    if (t.isEmpty) return null;
+    final r = t.last.response.trim();
+    if (r.isEmpty) return null;
+    return r.split('\n').first.trim();
+  }
+
+  /// 服务端说这条会话**正在等人回答**。
+  ///
+  /// ⚠️ 这只是**两路来源之一**。另一路是本地 `$events` waterfall
+  /// （`InteractionController`），它更实时。04 C10 的残留风险写明了两路
+  /// 可能不一致，判决是**实时优先**：列表控制器用本地 waterfall 覆盖它。
+  bool get awaitsUser => (userQuestions['active'] as List? ?? const []).isNotEmpty;
 
   /// 会话是否「孤儿」：子 agent，但父 agent 已经不在。
   ///

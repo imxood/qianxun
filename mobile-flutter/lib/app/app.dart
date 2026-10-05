@@ -12,10 +12,15 @@ import '../features/workspace/presentation/session_screen.dart';
 import 'theme/qx_theme.dart';
 
 final _router = GoRouter(
-  initialLocation: '/',
+  // 05 §5.2：冷启动**必须**落会话列表，不是连接页。
+  // 用户 95% 的冷启动是想看 agent 在干什么，不是想连电脑。原实现把
+  // `/connections` 当根，等于每次开 App 都先逼用户做一次「选机器」的
+  // 例行动作，才能看到他真正要看的东西。
+  initialLocation: '/workspace',
   routes: [
+    // 连接管理降级为会话列表里的一个入口（顶栏机器名可点）。
     GoRoute(
-      path: '/',
+      path: '/connections',
       builder: (context, state) => ConnectionsScreen(
         onOpen: (conn) {
           HapticFeedback.selectionClick();
@@ -73,17 +78,27 @@ class QxApp extends StatelessWidget {
         // 待答审批是阻塞状态，用户停在哪个界面都不该让它消失。
         // 放在这里（而不是某个 screen 里）是因为 `MaterialApp.builder`
         // 是整个 widget 树里唯一一定会被构建的位置。
-        ProviderScope.containerOf(
-          context,
-          listen: false,
-        ).read(connectionRootProvider);
+        final container = ProviderScope.containerOf(context, listen: false);
+        container.read(connectionRootProvider);
+        // 冷启动自动选中唯一那台电脑（05 §5.2）**不需要**在这里做任何事：
+        // 它是 `soleConnectionIdProvider` 的纯派生，`selectedConnectionProvider`
+        // 读得到。曾经的写法是在这里 `read(autoSelect…)` 去写状态 ——
+        // 那会在 provider 初始化期间改另一个 provider，Riverpod 直接断言禁止。
 
-        // 尊重系统的字号缩放，但**封顶**——工具界面里 2 倍字号会把
-        // 每一行都撑成两行，转录会变得没法读。
+        // 尊重系统的字号缩放。
+        //
+        // 上限 0.9–2.0（不是原来的 0.9–1.3）。04 裁决表明确：夹取是为了
+        // 让布局不溢出，**不是为了压住无障碍**；把上限卡在 1.3 等于告诉
+        // 「需要大字号的用户」这个 App 不为你服务。05 §9.5 第 4 条的验收项
+        // 正是「正文文字缩放 2.0 时零溢出」。
+        //
+        // 等宽**数据层**（`ident` / `metric` / `code`）另在 `QxType` 各自
+        // 封顶 1.0x：数字放大会撑破列对齐，那才是 02 保留封顶的理由。
+        // 正文与状态角标跟着系统走。
         final media = MediaQuery.of(context);
         final clamped = media.textScaler.clamp(
           minScaleFactor: 0.9,
-          maxScaleFactor: 1.3,
+          maxScaleFactor: 2.0,
         );
         return MediaQuery(
           data: media.copyWith(textScaler: clamped),

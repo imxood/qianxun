@@ -17,9 +17,22 @@ class SessionListLoading extends SessionListState {
 }
 
 class SessionListError extends SessionListState {
-  const SessionListError(this.message, {this.needsPairing = false});
+  const SessionListError(
+    this.message, {
+    this.needsPairing = false,
+    this.needsMachineChoice = false,
+  });
+
   final String message;
   final bool needsPairing;
+
+  /// 保存了多台电脑、但**还没选哪一台**。
+  ///
+  /// ⚠️ 这与「连不上」是**两件事**，曾经混在一起，于是多机用户每次冷启动
+  /// 都看到「连不上这台电脑」加一个「重试」按钮 —— 什么都没有坏，
+  /// 重试一万次也没用。App 只是不肯替他挑一台（05 §5.2：多台时不自动选，
+  /// 那是他要做的决定）。把两者分开，这里就该引导他去**选**，不是去**重试**。
+  final bool needsMachineChoice;
 }
 
 class SessionListReady extends SessionListState {
@@ -27,7 +40,6 @@ class SessionListReady extends SessionListState {
     this.items, {
     this.loading = false,
     this.error,
-    this.query = '',
   });
 
   final List<SessionSummary> items;
@@ -35,28 +47,31 @@ class SessionListReady extends SessionListState {
 
   /// 非致命错误（一次刷新失败但旧数据还在）。
   final String? error;
-  final String query;
 
   SessionListReady copyWith({
     List<SessionSummary>? items,
     bool? loading,
     String? error,
-    String? query,
     bool clearError = false,
   }) =>
       SessionListReady(
         items ?? this.items,
         loading: loading ?? this.loading,
         error: clearError ? null : (error ?? this.error),
-        query: query ?? this.query,
       );
 }
 
 /// 会话列表控制器。
 ///
-/// 数据来源：开局一次 `session/list` 拿快照，之后靠 `$events` 与
-/// `workspace/follow` 增量更新。**不做轮询**——轮询会把刚发生的对话
-/// 拖慢好几秒才显示。
+/// 数据来源：开局一次 `session/list` 拿快照。**不做轮询**——轮询会把刚
+/// 发生的对话拖慢好几秒才显示。
+///
+/// ⚠️ 这里**刻意没有搜索**。`session/search` 在本部署是 `openAt "never"`
+/// （已实测），是一个必然返回空/报错的死功能；05 §11 把它和搜索框一起
+/// 列为「明确不做」。曾经这里有 `search()` + 350ms 防抖 + 一个把
+/// `snippet` 硬塞进 `cwd` 的临时行构造函数——那套代码让搜索框看起来
+/// 能用，实际一搜就空。现在要做的是排序（`等你` 置顶），见
+/// `session_presentation.dart`。
 class SessionListController extends StateNotifier<SessionListState> {
   SessionListController(this._ref) : super(const SessionListLoading()) {
     _bind();
@@ -64,7 +79,6 @@ class SessionListController extends StateNotifier<SessionListState> {
 
   final Ref _ref;
   StreamSubscription<Object?>? _sub;
-  Timer? _debounce;
 
   DshClient? get _client => _ref.read(dshClientProvider);
 
@@ -72,7 +86,13 @@ class SessionListController extends StateNotifier<SessionListState> {
     _sub?.cancel();
     final conn = _ref.read(selectedConnectionProvider);
     if (conn == null) {
-      state = const SessionListError('还没有选择电脑。');
+      // 「还没选机器」≠「连不上」。见 [SessionListError.needsMachineChoice]。
+      final saved = _ref.read(connectionsControllerProvider);
+      final many = saved is ConnectionsReady ? saved.list.length > 1 : false;
+      state = SessionListError(
+        many ? '选一台电脑，就能看到它的会话了。' : '还没有选择电脑。',
+        needsMachineChoice: many,
+      );
       return;
     }
     // ⚠️ 必须是 `watch` 而不是 `read`：`dshConnectionProvider` 是
@@ -99,7 +119,6 @@ class SessionListController extends StateNotifier<SessionListState> {
   @override
   void dispose() {
     _sub?.cancel();
-    _debounce?.cancel();
     super.dispose();
   }
 
@@ -124,53 +143,6 @@ class SessionListController extends StateNotifier<SessionListState> {
       (err) => current is SessionListReady
           ? current.copyWith(loading: false, error: err.message)
           : SessionListError(err.message, needsPairing: err.needsRepairing),
-    );
-  }
-
-  /// 搜索。带防抖——每敲一个字打一次会打爆小路由上的手机。
-  void search(String query) {
-    _debounce?.cancel();
-    final current = state;
-    if (current is SessionListReady) {
-      state = current.copyWith(query: query);
-    }
-    if (query.trim().isEmpty) {
-      unawaited(load());
-      return;
-    }
-    _debounce = Timer(const Duration(milliseconds: 350), () => _search(query));
-  }
-
-  Future<void> _search(String query) async {
-    final client = _client;
-    if (client == null) return;
-    final res = await client.call('session/search', request: {'query': query});
-    if (!mounted) return;
-    final current = state;
-    if (current is! SessionListReady) return;
-    state = res.map(
-      (value) {
-        final items = (asMap(value)['items'] as List? ?? const []);
-        // 搜索结果没有完整摘要，用 snippet 造一条最小可渲染的行。
-        state = current.copyWith(
-          loading: false,
-          clearError: true,
-          items: items.map((e) {
-            final m = asMap(e);
-            final id = (m['sessionId'] as String?) ?? '';
-            final snippet = (m['snippet'] as String?) ?? '';
-            return SessionSummary(
-              sessionId: id,
-              updatedAt: DateTime.now().millisecondsSinceEpoch,
-              running: false,
-              blank: false,
-              cwd: snippet,
-            );
-          }).toList(),
-        );
-        return current;
-      },
-      (err) => current.copyWith(loading: false, error: err.message) as SessionListState,
     );
   }
 

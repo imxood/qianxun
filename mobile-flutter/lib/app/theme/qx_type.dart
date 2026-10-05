@@ -96,6 +96,24 @@ abstract final class QxType {
     fontFeatures: [FontFeature.tabularFigures()],
   );
 
+  /// 这几个样式属于**等宽数据层**：不跟随系统字号缩放。
+  ///
+  /// 04 裁决表保留了「等宽数据层 1.0x 封顶」——数字与标识符放大会撑破列
+  /// 对齐，刷新时整行左右抖。正文与状态角标**不**在名单里，跟着系统走
+  /// （见 `app.dart` 的 2.0x 上限）。
+  ///
+  /// ⚠️ 实现方式是给调用点包一层 [dataScaleLocked]，**不是**在 `TextStyle`
+  /// 上挂 `textScaler` —— 这个 Flutter 版本的 `TextStyle` 还没有那个字段
+  /// （它在 `resolve()` 上作为参数存在，不是可声明的属性）。
+  static bool isDataLayer(TextStyle style) =>
+      identical(style.fontFamily, mono) && style != overline;
+
+  /// 把子树里的字号缩放锁回 1.0x。给等宽数据层用。
+  static Widget dataScaleLocked({required Widget child}) => MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.noScaling),
+        child: child,
+      );
+
   /// 主按钮 / 关键动作。
   static const TextStyle action = TextStyle(
     fontSize: 15,

@@ -237,15 +237,43 @@ final connectionsControllerProvider =
   return ConnectionsController(ref.watch(connectionStoreProvider));
 });
 
+/// 冷启动自动选中的 id（05 §5.2）。**纯计算，不写任何状态。**
+///
+/// 只有**恰好一台**已保存电脑时才给出它。多台时返回 null：那属于需要用户
+/// 做的决定（你想看哪台机器上的 agent），替他猜一次就是替他做决定。
+///
+/// 为什么需要它：根路由已经改成会话列表，用户冷启动直接落这里。若不自动
+/// 选，`selectedConnectionProvider` 永远是 null，列表会显示「还没有选择
+/// 电脑」——用户明明只有一台电脑，却被要求先做一次无意义的���择。
+///
+/// ⚠️ 这里刻意**不是**一个「在 provider 里写另一个 provider」的副作用。
+/// 那种写法在 Riverpod 里会触发「Providers are not allowed to modify
+/// other providers during their initialization」的断言（release 下断言被
+/// 剥掉，于是变成「能用但脆弱」）。派生更简单：显式选择优先，回退其次，
+/// 「用户手动切过机器后不被覆盖」这条规则也自动成立，不需要额外的守卫。
+final soleConnectionIdProvider = Provider<String?>((ref) {
+  final state = ref.watch(connectionsControllerProvider);
+  if (state is! ConnectionsReady) return null;
+  return state.list.length == 1 ? state.list.first.id : null;
+});
+
 /// 当前选中的连接。
 final selectedConnectionProvider = Provider<Connection?>((ref) {
-  final id = ref.watch(selectedConnectionIdProvider);
   final state = ref.watch(connectionsControllerProvider);
-  if (id == null || state is! ConnectionsReady) return null;
-  for (final c in state.list) {
-    if (c.id == id) return c;
+  if (state is! ConnectionsReady) return null;
+
+  // 显式选择优先 —— 这就是「用户手动切过机器后不被自动选择覆盖」的全部实现。
+  final explicit = ref.watch(selectedConnectionIdProvider);
+  if (explicit != null) {
+    for (final c in state.list) {
+      if (c.id == explicit) return c;
+    }
   }
-  return null;
+
+  // 显式 id 失效（那台机器被删了）时回退到唯一那台，而不是返回 null。
+  // 返回 null 会把界面卡在「还没有选择电脑」——列表里明明还有一台可用的，
+  // 用户却只能先去连接管理页才能出来。这是自己挖的坑自己堵。
+  return state.list.length == 1 ? state.list.first : null;
 });
 
 /// 选中连接对应的 DSH 连接（`$events` + 重连代际）。

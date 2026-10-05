@@ -7,8 +7,7 @@ import 'package:qianxun_mobile/data/dsh/rpc_envelope.dart';
 import 'package:qianxun_mobile/data/models/content.dart';
 import 'package:qianxun_mobile/data/models/session.dart';
 
-void main() {
-  group('配对链接', () {
+void main() {  group('配对链接', () {
     test('认当前格式的 ?code=', () {
       final pair = PairUrl.tryParse('http://192.168.1.9:23090/qx-gate?code=${'a' * 32}');
       expect(pair, isNotNull);
@@ -415,6 +414,48 @@ void main() {
         'blank': true,
       });
       expect(s.lastPrompt, isNull);
+    });
+  });
+
+  group('turn/end：失败态唯一真实的数据源', () {
+    TurnEndEvent ev(Map<String, Object?> data) =>
+        SessionEventView.fromWire(
+          SessionWireEvent(type: 'turn/end', seq: 1, time: 0, data: data),
+        ) as TurnEndEvent;
+
+    test('嵌套形状 data.reason.kind 能读到', () {
+      // ⚠️ 原实现把整个 `data` 当 reason 再读 `reason['kind']`，
+      // 也就是只认 data['kind']。若实际形状是嵌套的，isError 永远 false，
+      // 转录里的失败态从来没生效过。
+      final e = ev({
+        'turn': 1,
+        'reason': {'kind': 'error'},
+      });
+      expect(e.reasonKind, 'error');
+      expect(e.isError, isTrue);
+      expect(e.isBadEnding, isTrue);
+    });
+
+    test('扁平形状 data.kind 也能读到', () {
+      final e = ev({'turn': 1, 'kind': 'aborted'});
+      expect(e.reasonKind, 'aborted');
+      expect(e.isAborted, isTrue);
+      expect(e.isBadEnding, isTrue);
+    });
+
+    test('正常收尾不算坏结局', () {
+      final e = ev({
+        'turn': 1,
+        'reason': {'kind': 'completed'},
+      });
+      expect(e.isBadEnding, isFalse);
+      expect(e.isError, isFalse);
+    });
+
+    test('没有 reason 时按 completed 处理，不猜', () {
+      final e = ev({'turn': 1});
+      expect(e.reasonKind, 'completed');
+      expect(e.isBadEnding, isFalse);
     });
   });
 }
