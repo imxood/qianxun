@@ -67,6 +67,7 @@
     restoreVersion,
     runScore,
     startCooldowns,
+    toPersistTask,
     wrapPolicy,
     type AuditEntry,
     type EvoState,
@@ -85,26 +86,43 @@
 
   import { MarioDriver, type LogRow, type SentRow } from './driver';
   import { createGameState, IDLE_INPUT, step, type GameState, type Input } from './engine';
-  import { autopilotInput, nextIntent, type Action } from './planner';
+  import { autopilotInput, nextIntent, type Action, type Intent } from './planner';
   import { buildLevelCanvas, drawFrame } from './renderer';
   import type { DriveMode } from './brain';
-  import { COLS, TILE, WORLD_1_1 } from './world1-1';
+  import { COLS, TILE, getWorld, LEVEL_KEYS } from './world1-1';
 
   let { onBack }: { onBack: () => void } = $props();
 
   // ---- 引擎世界($state.raw:重赋值可触发更新;深变更刻意不跟踪——
   // 60fps 数据不进深响应式,HUD 走 10Hz 快照,docs/11 §2 差异①) ----
-  const world = WORLD_1_1;
+  let levelKey = $state('1-1');
+  let world = $derived(getWorld(levelKey));
   let s = $state.raw<GameState>(createGameState(world));
   const driver = new MarioDriver();
-  let level: HTMLCanvasElement | null = null;
+  // 背板是 world 的纯函数产物（修复 P0，见 docs/18 S1）：
+  // 旧实现是普通 `let`，switchLevel 置 null 注释声称「触发 $effect 重建」，
+  // 但全组件没有任何 $effect 监听它 —— drawFrame 的 level 守卫此后永假，
+  // 1-1→1-2 后画面冻结在旧帧而 HUD 已换关卡。
+  // 现在走 $derived：关卡一变，背板自动重建。
+  let level = $derived(buildLevelCanvas(world));
   let currentInput: Input = IDLE_INPUT;
+
+  /** 切换关卡:重建世界与状态,并重绘背板。 */
+  function switchLevel(key: string): void {
+    if (key === levelKey) return;
+    levelKey = key;
+    s = createGameState(getWorld(key));
+    // 背板由下面的 $effect 跟随 levelKey 重建（不再手工置 null）。
+    displayIntent = null;
+    deaths = [];
+    pushLog('text-sky-300', `切换到关卡 ${key}`, 'game');
+  }
 
   // ---- 响应式:HUD 10Hz 快照 + 驾驶舱状态 ----
   type Phase = 'idle' | 'running' | 'paused';
   let phase = $state<Phase>('idle');
   let mode = $state<DriveMode>('human');
-  let hud = $state({ score: 0, coins: 0, time: 300, life: 1, pct: 0 });
+  let hud = $state({ score: 0, coins: 0, time: 300, life: 1, pct: 0, power: 'small', combo: 0 });
   let layaOk = $state(false);
   let qwenOk = $state(false);
   let lastDecision = $state<{
@@ -330,7 +348,17 @@
       const r = scheduleTask([...taskBacklog, ...taskQueue], t);
       taskQueue = r.queue.filter((x) => !taskBacklog.some((b) => b.key === x.key));
       taskBacklog = r.queue.filter((x) => taskBacklog.some((b) => b.key === x.key));
-      if (r.overflow !== null) evo = bumpQwen(evo, 'droppedByCap');
+      if (r.overflow !== null) {
+        // 溢出落盘（分析 S7/P1，兑现 machine.ts:90「不丢死亡」承诺）：
+        // 此前只 bumpQwen 计数后丢弃，死亡样本永久消失。
+        evo = bumpQwen(evo, 'droppedByCap');
+        evo = {
+          ...evo,
+          pendingAnalyses: [...evo.pendingAnalyses, toPersistTask(r.overflow)],
+        };
+        // 立刻回灌内存 backlog：当前周期排空后仍能补跑，不必等重启。
+        taskBacklog = [...taskBacklog, r.overflow];
+      }
       if (r.merged) evo = bumpQwen(evo, 'merged');
       runTasksPlanned += 1;
     }
@@ -471,6 +499,8 @@
       right: keys.has('ArrowRight') || keys.has('KeyD'),
       run: keys.has('ShiftLeft') || keys.has('ShiftRight'),
       jump: keys.has('Space') || keys.has('KeyZ') || keys.has('ArrowUp'),
+      // 发火:X / J(仅 fire 形态在引擎里有反应)
+      fire: keys.has('KeyX') || keys.has('KeyJ'),
     };
   }
   function onKey(e: KeyboardEvent, down: boolean): void {
@@ -498,6 +528,8 @@
       'KeyA',
       'KeyD',
       'KeyZ',
+      'KeyX',
+      'KeyJ',
       'ShiftLeft',
       'ShiftRight',
     ];
@@ -538,12 +570,20 @@
     return () => ro.disconnect();
   });
 
+  // 关卡背板 = world 的纯函数产物，由上面的 $derived 自动跟随（docs/18 S1）。
+  // 不再需要「切关卡时手工置 null + $effect 重建」那套易漏的机制。
+
   // ---- 主循环:固定步长累加器(60Hz),速度滑杆只改消费速率 ----
   let raf = 0;
   let last = 0;
   let acc = 0;
   let lastHud = 0;
   const TICK = 1000 / 60;
+  /** 叠加层用的意图(节流重算,见 frame 内的注释)。 */
+  let displayIntent: Intent | null = null;
+  let lastIntentAt = 0;
+  /** 画 System 2 搜索得分条。 */
+  let showSearchBars = $state(true);
 
   function frame(now: number): void {
     raf = requestAnimationFrame(frame);
@@ -606,11 +646,21 @@
       if (mode === 'reflex' || mode === 'pure') void driver.maybeDecide(s, world, now);
     }
     if (canvasEl && ctx && level) {
+      // 意图节流重算:nextIntent 是一次完整 rollout 搜索(候选 × horizon
+      // 次 step),每帧调会把主循环打爆。autopilot 模式下 autopilotInput
+      // 已经算过一次,这里靠 planner 的 (state,tick) 缓存命中,零额外开销。
+      if (mode === 'autopilot') {
+        displayIntent = nextIntent(s, world, runPolicy ?? undefined);
+      } else if (mode === 'reflex' && now - lastIntentAt >= settings.intervalMs) {
+        lastIntentAt = now;
+        displayIntent = nextIntent(s, world, runPolicy ?? undefined);
+      }
       drawFrame(ctx, level, world, s, {
         viewTiles,
-        intent: mode === 'reflex' ? nextIntent(s, world) : null,
+        intent: displayIntent,
         heldInput: currentInput,
         rippleAge: rippleTick === null ? null : s.tick - rippleTick,
+        showSearch: showSearchBars,
       });
     }
     if (now - lastHud >= 100) {
@@ -621,6 +671,8 @@
         time: Math.max(0, s.timeUnits),
         life: s.attempts,
         pct: Math.min(100, Math.round((s.maxX / world.worldWidthPx) * 100)),
+        power: s.mario.power,
+        combo: s.maxCombo,
       };
       stats = { ...driver.stats };
     }
@@ -1259,7 +1311,8 @@
   }
 
   onMount(() => {
-    level = buildLevelCanvas(world);
+    // 背板由 $derived(buildLevelCanvas(world)) 构建，
+    // 挂载与切关卡共用同一条路径（onMount 不再单独构建）。
     ctx = canvasEl?.getContext('2d') ?? null;
     // 统一数据根加载(docs/13 §5):信封策略 / 手册 / 历史 / 簿记 / 审计尾;
     // 旧 localStorage 键作为一次性回退(纯 web dev 场景)。
@@ -1303,15 +1356,25 @@
         chat = rebuildFromAudit(parseAuditLines(await store.read(EVOLUTION_FILE))).slice(-CHAT_CAP);
       }
     })();
-    void driver.probe().then(() => {
+    // 探活 → 熔断复位（分析 D4/P1 修复）：CircuitBreaker 的注释承诺
+    // 「探活成功由宿主调 reset 复位」，此前宿主从不调，导致连续失败 3 次后
+    // 分析循环在 :1043 直接 break，UI 的「探活恢复自启」是错误承诺。
+    const applyProbe = (): void => {
       layaOk = driver.layaReady;
       qwenOk = driver.qwenReady;
-    });
+      const wasTripped = breaker.tripped;
+      if (qwenOk) {
+        breaker.ok();
+        breakerTripped = breaker.tripped;
+        // Qwen 恢复后排空队列（分析 D5/P1）：否则熔断期间积压的任务永不再跑。
+        if (wasTripped && !breakerTripped) {
+          kickQueue(null, driver.sessionSnapshot(), [...driver.sentLog], driver.runId);
+        }
+      }
+    };
+    void driver.probe().then(applyProbe);
     const probeTimer = setInterval(() => {
-      void driver.probe().then(() => {
-        layaOk = driver.layaReady;
-        qwenOk = driver.qwenReady;
-      });
+      void driver.probe().then(applyProbe);
     }, 10_000);
     const flushTimer = setInterval(() => void driver.flush(), 5_000);
     last = performance.now();
@@ -1355,11 +1418,36 @@
       >
     </button>
     <div class="text-[13px] font-semibold">
-      Laya Jump · 1-1
+      Laya Jump · {levelKey}
       <span class="ml-2 hidden text-[11px] font-normal text-muted lg:inline"
         >Laya × Qwen 自进化</span
       >
     </div>
+    <div class="ml-1 flex items-center gap-0.5 rounded-lg border border-line bg-[#0d0f14] p-0.5">
+      {#each LEVEL_KEYS as k (k)}
+        <button
+          class="rounded-md px-2 py-1 text-[11px] transition-colors {levelKey === k
+            ? 'bg-sky-500/15 text-sky-300 shadow-[inset_0_0_0_1px_rgba(56,189,248,.35)]'
+            : 'text-muted hover:text-white'}"
+          onclick={() => switchLevel(k)}
+          disabled={phase === 'running'}
+          title={phase === 'running' ? '先暂停再切关' : `切到 ${k}`}
+          data-testid="level-{k}"
+        >
+          {k}
+        </button>
+      {/each}
+    </div>
+    <button
+      class="ml-1 rounded-md border border-line px-2 py-1 text-[11px] transition-colors {showSearchBars
+        ? 'bg-emerald-500/10 text-emerald-400'
+        : 'text-muted hover:text-white'}"
+      onclick={() => (showSearchBars = !showSearchBars)}
+      title="叠加层显示 System 2 rollout 搜索的候选动作得分"
+      data-testid="btn-search-bars"
+    >
+      S2 得分
+    </button>
     <div class="ml-auto flex items-center gap-0.5 rounded-lg border border-line bg-[#0d0f14] p-0.5">
       {#each MODES as m (m.id)}
         <button
@@ -1456,7 +1544,7 @@
         /></svg
       >
     </button>
-    <div class="flex items-center gap-2 pl-1" title="Laya :10230 · Qwen :17230(只读探活)">
+    <div class="flex items-center gap-2 pl-1" title="Laya :10230 · Qwen :23661(只读探活)">
       <span class="size-1.5 rounded-full {dot(layaOk)}" data-testid="dot-laya"></span>
       <span class="size-1.5 rounded-full {dot(qwenOk)}" data-testid="dot-qwen"></span>
     </div>
@@ -1480,7 +1568,20 @@
         <div class="flex gap-3 text-white [text-shadow:0_1px_2px_rgba(0,0,0,.7)]">
           <span>SCORE {String(hud.score).padStart(6, '0')}</span>
           <span>COINS ×{String(hud.coins).padStart(2, '0')}</span>
-          <span class="hidden sm:inline">WORLD 1-1</span>
+          <span class="hidden sm:inline">WORLD {levelKey}</span>
+          {#if hud.power !== 'small'}
+            <span
+              class="rounded px-1 font-semibold {hud.power === 'fire'
+                ? 'bg-orange-500/25 text-orange-300'
+                : 'bg-emerald-500/25 text-emerald-300'}"
+              >{hud.power === 'fire' ? 'FIRE' : 'SUPER'}</span
+            >
+          {/if}
+          {#if hud.combo > 1}
+            <span class="rounded bg-amber-500/25 px-1 font-semibold text-amber-300"
+              >COMBO ×{hud.combo}</span
+            >
+          {/if}
         </div>
         <div class="flex items-center gap-2">
           {#if lastDecision}

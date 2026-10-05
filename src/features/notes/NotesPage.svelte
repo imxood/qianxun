@@ -125,29 +125,61 @@
     return () => window.removeEventListener('focus', onFocus);
   });
 
-  // 自动保存：Ctrl+S 手动兜底。
+  // 自动保存：Ctrl+S 手动兜底。保存中按 Ctrl+S 也排一次，不静默吞掉。
   function onKeydown(event: KeyboardEvent): void {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
       event.preventDefault();
       if (dirty && !saving) void save();
+      else if (dirty) scheduleSave();
     }
   }
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
-    // 自动保存防抖句柄的最终清理。
+    // 卸载前 flush 未保存内容（分析 S8/P1 修复）：
+    // 此前只 clearTimeout —— 防抖窗口内的编辑随组件销毁一起消失且无提示。
+    // 组件销毁（Svelte keep-alive 之外的路径）里 IPC 仍可用，直接 save。
+    // 关窗路径无法可靠 await，故另用 beforeunload 提示用户。
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      if (dirty && !saving) {
+        event.preventDefault();
+        event.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
     return () => {
       if (saveTimer !== null) clearTimeout(saveTimer);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      if (dirty && !saving) void save();
     };
   });
 
   function markDirty(): void {
     dirty = true;
     if (saveTimer !== null) clearTimeout(saveTimer);
+    scheduleSave();
+  }
+
+  /**
+   * 排一次防抖保存。
+   *
+   * 关键修复（分析 S8/P1）：旧实现在防抖回调里 `if (dirty && !saving)`，
+   * 保存进行中时回调**空转且无人重调度** —— 大笔记下防抖必然落在一次
+   * 保存的飞行窗口内，于是这轮编辑永远不落盘，且无任何提示。
+   * 现在：保存中则重排一个定时器，保存结束后若仍 dirty 会再触发一轮。
+   */
+  function scheduleSave(): void {
+    if (saveTimer !== null) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      if (dirty && !saving) void save();
+      if (!dirty) return;
+      if (saving) {
+        // 保存进行中：稍后重试，绝不静默丢弃这一轮编辑。
+        scheduleSave();
+        return;
+      }
+      void save();
     }, 1500);
   }
 

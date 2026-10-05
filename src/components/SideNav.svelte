@@ -2,6 +2,7 @@
   import { call } from '../lib/ipc';
   import { contextMenu } from '../lib/menu.svelte';
   import { nav, type PageId } from '../stores/nav.svelte';
+  import { toast } from '../stores/toast.svelte';
 
   /** 主导航项：settings 独立沉底（低频项与工具项分组）。 */
   const items: Array<{ id: PageId; label: string; icon: string; detachable: boolean }> = [
@@ -42,6 +43,12 @@
       detachable: false,
     },
     {
+      id: 'intel',
+      label: '情报',
+      icon: 'M12 2a10 10 0 100 20 10 10 0 000-20zM16.5 7.5l-2.6 6.4-6.4 2.6 2.6-6.4z',
+      detachable: false,
+    },
+    {
       id: 'games',
       label: '游戏',
       icon: 'M6 9h4m-2-2v4M15 8h.01M18 10h.01M7.5 4h9A4.5 4.5 0 0121 8.5v5a4.5 4.5 0 01-4.5 4.5h-9A4.5 4.5 0 013 13.5v-5A4.5 4.5 0 017.5 4zM8 14h2m-1-1v2m7-1h.01M17.5 15h.01',
@@ -58,13 +65,27 @@
   /** 可分离视图类型（与 Rust standalone_view_meta 对应）。 */
   const DETACHABLE_VIEWS = new Set<string>(['dsh']);
 
-  /** 分离到独立窗口：spawn 成功才让位（失败保持原状）。 */
+  /** 分离中（spawn 未返回）的视图，防止重复右键连点开两个窗。 */
+  let detaching: PageId | null = null;
+
+  /**
+   * 分离到独立窗口：spawn 成功才让位（失败保持原状）。
+   * 失败给用户可见反馈（分析 S6/P2：此前只有 console.error，零反馈）。
+   */
   async function detachToWindow(item: { id: PageId; label: string }): Promise<void> {
+    // in-flight 守卫：spawn 返回前不接受第二次分离，
+    // 否则窗口标签数与 nav.detached 计数可能不同步。
+    if (detaching === item.id) return;
+    detaching = item.id;
     try {
       await call<string>('window_spawn_view', { view: item.id });
       nav.detach(item.id);
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       console.error(`分离「${item.label}」失败`, error);
+      toast.show(`分离「${item.label}」失败：${reason}`);
+    } finally {
+      detaching = null;
     }
   }
 

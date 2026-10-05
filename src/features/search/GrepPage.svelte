@@ -246,8 +246,25 @@
           {#if !collapsed.includes(path)}
             <div class="pb-2">
               {#each hits as hit (path + hit.lineNumber)}
+                <!--
+                  上下文行（分析 S5/P1）：contextBefore/contextAfter 此前由后端
+                  按 opts.beforeContext/afterContext 真实填充并进 GrepHit，
+                  但前端零处渲染 —— 「上下文 0–10」控件是纯视觉空操作。
+                  下面按 gutter 缩进渲染，命中行加左边线以示定位。
+                -->
+                {#each hit.contextBefore ?? [] as before, bi (hit.lineNumber + '-b' + bi)}
+                  <div
+                    class="block w-full px-3 py-px text-left font-mono text-xs text-muted/50"
+                    aria-hidden="true"
+                  >
+                    <span class="w-12 inline-block text-right"
+                      >{hit.lineNumber - (hit.contextBefore?.length ?? 0) + bi}</span
+                    >
+                    <span class="ml-2 whitespace-pre-wrap break-all">{before}</span>
+                  </div>
+                {/each}
                 <button
-                  class="block w-full px-3 py-0.5 text-left transition-colors hover:bg-accent-soft/30"
+                  class="block w-full border-l-2 border-accent/50 px-3 py-0.5 text-left transition-colors hover:bg-accent-soft/30"
                   onclick={() => openFile(hit.path)}
                   oncontextmenu={(event) => hitMenu(event, hit)}
                 >
@@ -260,6 +277,15 @@
                         >{:else}{segment.text}{/if}{/each}
                   </span>
                 </button>
+                {#each hit.contextAfter ?? [] as after, ai (hit.lineNumber + '-a' + ai)}
+                  <div
+                    class="block w-full px-3 py-px text-left font-mono text-xs text-muted/50"
+                    aria-hidden="true"
+                  >
+                    <span class="w-12 inline-block text-right">{hit.lineNumber + ai + 1}</span>
+                    <span class="ml-2 whitespace-pre-wrap break-all">{after}</span>
+                  </div>
+                {/each}
               {/each}
             </div>
           {/if}

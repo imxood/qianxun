@@ -178,6 +178,31 @@ export type PersistTask = {
   ts: string;
 };
 
+/**
+ * 内存调度任务 → 落盘 backlog（分析 S7/P1 修复的转换端）。
+ * `pendingAnalyses` 的既有语义就是「队列溢出落盘，不丢死亡」
+ * （本文件 :224 注释），此前无调用方写入 —— 溢出的死亡任务被静默丢弃。
+ */
+export function toPersistTask(task: SchedTaskLike, now = new Date()): PersistTask {
+  return {
+    key: task.key,
+    kind: task.kind,
+    attempt: task.attempt,
+    sig: task.sig ?? null,
+    reason: task.reason,
+    ts: now.toISOString(),
+  };
+}
+
+/** 入参用结构化类型，避免 evolution ↔ machine 的模块级循环依赖。 */
+type SchedTaskLike = {
+  key: string;
+  kind: 'death' | 'win' | 'plateau';
+  attempt?: number;
+  sig?: string | null;
+  reason: string;
+};
+
 /** 变更-效果账本行(docs/15 §6.7 D1):信用分配的地基。 */
 export type ChangeLedgerRow = {
   changeId: string;

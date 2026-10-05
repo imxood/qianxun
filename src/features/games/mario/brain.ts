@@ -31,6 +31,9 @@ const MAX_RE_SENSE = 2;
 
 export const ENDPOINT_DEFAULT = 'http://127.0.0.1:10230';
 
+/** /predict 单次请求超时（ms）。sidecar 半死时必须让 fetch settle。 */
+export const PREDICT_TIMEOUT_MS = 3000;
+
 export function applyGate(conf: number, gateExecute: number, gateEscalate: number): Gate {
   return conf >= gateExecute ? 'EXECUTE' : conf >= gateEscalate ? 'RE_SENSE' : 'ESCALATE';
 }
@@ -96,13 +99,6 @@ export function threatRows(s: GameState, world: World, lookPx = 176): string {
   return parts.length > 0 ? parts.join(' | ') : 'none';
 }
 
-/** 位姿压缩文案:`+2.5/0 g1 R r12`(含自身行号,与 rows 威胁行号同一坐标系)。 */
-function pose(s: GameState): string {
-  const m = s.mario;
-  const v = `${m.vx >= 0 ? '+' : ''}${m.vx.toFixed(1)}/${m.vy >= 0 ? '' : '+'}${m.vy.toFixed(1)}`;
-  return `${v} g${m.onGround ? 1 : 0} ${m.face === 1 ? 'R' : 'L'} r${Math.floor(m.y / TILE)}`;
-}
-
 /** profile 数字串 RLE:`13*12 9*2 5`(游程 ≥2 折叠,计数无损)。 */
 export function rleProfile(nums: number[]): string {
   const parts: string[] = [];
@@ -120,7 +116,15 @@ export function rleProfile(nums: number[]): string {
 /** 附加状态字段(brain 无历史,由 driver 传入,docs/15 §6.3)。 */
 export type ObsExtra = Partial<Record<ObsExtraKey, string | number>>;
 
-/** 把状态文本化为 laya-server 的 state(编码模板版本号随数据落盘,便于消融)。 */
+/**
+ * v3-obs 编码:压 token 的直接手段(实测延迟 ≈ 0.8ms/token,i9-14900HX)。
+ * 规则:
+ * - profile 从"逐列数字"改成 RLE 游程(`13*12 9*2 5`),无损但省 60%+ token;
+ * - 姿态只留 3 个字符量纲(vx 档位 / 空中 / 朝向),小数点全部删掉;
+ * - 进度只留百分比 + 关键计数,删掉 `x=1234/3392` 这种可由百分比反推的冗余;
+ * - 目标编码版本号随数据落盘(便于事后消融某一段文本的贡献)。
+ * 目标:常态 ≤125 token(≈100ms 档),给 10Hz 决策频率留出余量。
+ */
 export function encodeState(
   s: GameState,
   world: World,
@@ -131,16 +135,17 @@ export function encodeState(
   // 观测件按策略沙盒裁剪(docs/14 §4 + docs/15 §6.4):agent 可消融任何观测与文案变体
   const P = getPolicy();
   const pct = Math.round((s.maxX / world.worldWidthPx) * 100);
-  const state: Record<string, unknown> = { encoding: 'v2-obs' };
+  const state: Record<string, unknown> = { encoding: 'v3-obs' };
   if (P.obsProgressStyle === 'full') {
-    state.progress = `x=${Math.round(s.mario.x)}/${world.worldWidthPx} ${pct}% coins=${s.coinCount} time=${s.timeUnits} attempt=${s.attempts}`;
+    state.p = `${pct}% c${s.coinCount} t${s.timeUnits} a${s.attempts}`;
   } else if (P.obsProgressStyle === 'pct') {
-    state.progress = `${pct}% coins=${s.coinCount} time=${s.timeUnits} att=${s.attempts}`;
+    state.p = `${pct}% c${s.coinCount}`;
   }
-  state.profile = rleProfile(profile16(s, P.obsProfileCols));
-  if (P.obsThreatFormat === 'named') state.threats = threatText(s, world, P.obsThreatsLookPx);
-  else if (P.obsThreatFormat === 'rows') state.threats = threatRows(s, world, P.obsThreatsLookPx);
-  if (P.obsIncludePose) state.mario = pose(s);
+  state.prof = rleProfile(profile16(s, P.obsProfileCols));
+  if (P.obsThreatFormat === 'named') state.th = threatText(s, world, P.obsThreatsLookPx);
+  else if (P.obsThreatFormat === 'rows') state.th = threatRows(s, world, P.obsThreatsLookPx);
+  if (P.obsIncludePose) state.m = poseShort(s);
+  if (s.mario.power !== 'small') state.pw = s.mario.power === 'fire' ? 'F' : 'B';
   if (extra && P.obsStateExtra.length > 0) {
     const label: Record<ObsExtraKey, string> = {
       lastAction: 'last',
@@ -155,41 +160,44 @@ export function encodeState(
     }
     if (parts.length > 0) state.ctx = parts.join(' ');
   }
-  state.subgoal =
+  state.sub =
     mode === 'reflex' && intent && P.obsIncludeSubgoal
-      ? `${intent.type} ${intent.note} -> candidates [${intent.candidates.join(', ')}]`
-      : '(none - pure reflex, judge the frame yourself)';
+      ? `${intent.type} ${intent.note} [${intent.candidates.join(' ')}]`
+      : '(none)';
   return state;
 }
 
-/** terse 提示文案(代码注册变体,≤4 词)。 */
+/** 位姿超短文案:`v2 a0 R`(速度档位 / 空中 / 朝向)——小数全部丢弃。 */
+function poseShort(s: GameState): string {
+  const m = s.mario;
+  const v = Math.min(9, Math.round(Math.abs(m.vx)));
+  return `v${v} a${m.onGround ? 0 : 1} ${m.face === 1 ? 'R' : 'L'}`;
+}
+
+/** terse 提示文案(代码注册变体,≤3 词)。 */
 const TERSE_HINTS: Record<Action, string> = {
   idle: 'wait',
   left: 'walk left',
   right: 'walk right',
   run_left: 'run left',
-  run_right: 'run right (default)',
+  run_right: 'run right',
   jump: 'jump up',
-  jump_left: 'short jump left',
+  jump_left: 'jump left',
   jump_right: 'short jump right',
-  jump_run_right: 'run-jump right (wide gaps, tall pipes)',
-  jump_run_left: 'run-jump left (wide gaps, tall pipes)',
+  jump_run_right: 'run-jump right',
+  jump_run_left: 'run-jump left',
+  fire_right: 'walk right + fire',
 };
 
 /** 指令模板变体(代码注册;{n} 插 obsProfileCols,防 concise 在小列数时说谎)。 */
 const INSTRUCTIONS: Record<string, (n: number) => string> = {
+  // 实测(docs/16 §4.3):指令文案是 token 的大头之一。把图例压进半句话
+  // 比展开写省 ~30 token,且不影响零样本可用性(Laya 本来就靠 subgoal)。
   default: (n) =>
-    `Mario reflex step. profile = first solid tile row of the ${n} tiles ahead ` +
-    '(13 = ground level, 15 = open pit, 9 = floating block row). Threats list ' +
-    'hazards with distance and row. Choose exactly one next action.',
-  concise: (n) =>
-    `Pick one action. profile = first solid row ahead, ${n} tiles (13 ground, 15 pit, 9 block).`,
+    `Pick one action. prof=RLE first solid row of next ${n} tiles (13=ground 15=pit). th=hazards.`,
+  concise: (n) => `Pick one action. prof=${n} tiles ahead (13 ground, 15 pit).`,
   checklist: (n) =>
-    'Choose one action.\n' +
-    '1. hazard <=2 tiles & same row -> jump over\n' +
-    '2. gap ahead -> jump_run_right\n' +
-    '3. clear -> run_right\n' +
-    `profile = ${n} tiles ahead: 13 ground, 15 pit, 9 block.`,
+    `Pick one action. 1 th gap/pipe -> run-jump right. 2 th enemy -> jump. 3 else run right. prof=${n} tiles.`,
 };
 
 /** questions:仅候选动作单题;提示/指令文案随消息设计策略选型(docs/15 §6.4)。 */
@@ -328,10 +336,14 @@ export class MarioBrain {
     state: Record<string, unknown>,
     questions: Record<string, unknown>,
   ): Promise<PredictAnswer> {
+    // 超时是硬要求（分析 D2/P1）：sidecar 半死时 fetch 永不 settle，
+    // driver 的 inFlight 会永为 true，整局决策永久停摆。10Hz 决策频率下
+    // 3s 足够覆盖实测 240ms 档（docs/12 §3.6）的数十倍余量。
     const res = await this.fetchImpl(`${this.endpoint}/predict`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state, questions }),
+      signal: AbortSignal.timeout(PREDICT_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`laya-server ${res.status}`);
     return (await res.json()) as PredictAnswer;

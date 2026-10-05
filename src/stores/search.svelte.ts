@@ -191,6 +191,9 @@ class SearchStore {
       this.grepSeq += 1;
       this.grepResult = null;
       this.grepError = '';
+      // 空查询早退也要释放 busy（分析 S4/P1）：此前此处在 grepBusy=true
+      // 之前 return，清空输入框后 UI 永久卡在「扫描中 + 停止按钮」。
+      this.grepBusy = false;
       return;
     }
     const seq = ++this.grepSeq;
@@ -291,7 +294,17 @@ class SearchStore {
     // 然后调后端置 token=true；旧 promise 的 Channel onmessage 到达时
     // seq !== grepSeq 会被守卫丢弃。
     this.grepSeq += 1;
-    await call('search_cancel');
+    // 取消方自己就是「最后一次 ++ 的人」，所以必须在这里释放 busy
+    // （分析 S4/P1）：旧调用的 finally 走不到 seq === grepSeq 分支，
+    // 而 generationChanged 只在根目录切换时为 true —— 两者都不命中，
+    // 结果点「停止」后 grepBusy 永不复位。
+    this.grepBusy = false;
+    try {
+      await call('search_cancel');
+    } catch (cause) {
+      // 取消失败也不该冒泡成 unhandled rejection（调用点是 void）。
+      this.grepError = cause instanceof Error ? cause.message : String(cause);
+    }
   }
 
   dispose(): void {

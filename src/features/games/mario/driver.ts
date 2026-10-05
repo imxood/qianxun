@@ -31,7 +31,7 @@ import {
 import { TILE, type World } from './world1-1';
 
 const LAYA_HEALTH = `${ENDPOINT_DEFAULT}/health`;
-const QWEN_HEALTH = 'http://127.0.0.1:17230/health';
+const QWEN_HEALTH = 'http://127.0.0.1:23661/health';
 
 /** runId 序号:模块级单调递增,配合时间戳保证进程内唯一。 */
 let runSeq = 0;
@@ -365,7 +365,9 @@ export class MarioDriver {
     if (this.forcedEscalate > 0) {
       this.forcedEscalate -= 1;
       this.lastFire = nowMs;
-      this.held = autopilotInput(s, world);
+      // 传局内策略快照（分析 S7/P1）：此前漏参使 autopilotInput 回退
+      // 全局 getPolicy()，违反 docs/13 不变量①「局内一律读快照」。
+      this.held = autopilotInput(s, world, this.policy());
       this.lastJump = this.held.jump;
       this.stats.decisions += 1;
       this.stats.escalate += 1;
@@ -439,7 +441,11 @@ export class MarioDriver {
         return;
       }
       this.lastDecision = d;
-      this.held = d.escalateManeuver ? autopilotInput(s, world) : actionInput(d.action);
+      // 同上：ESCALATE 兜底拍也必须用局内快照，否则 Qwen 在局中改策略会
+      // 立刻影响本局兜底行为，破坏「更新只影响下一局」的不变量。
+      this.held = d.escalateManeuver
+        ? autopilotInput(s, world, this.policy())
+        : actionInput(d.action);
       const n = this.stats.decisions + 1;
       this.stats.decisions = n;
       if (d.gate === 'EXECUTE') this.stats.exec += 1;

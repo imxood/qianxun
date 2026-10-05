@@ -374,6 +374,41 @@ describe('SearchStore.cancelGrep', () => {
     await search.cancelGrep();
     expect(ipcCalls.map((c) => c.command)).toContain('search_cancel');
   });
+
+  // 分析 S4/P1 的回归护栏：此前本组只断言 ++grepSeq 与 IPC 调用，
+  // 不断言 grepBusy，于是「点停止后 UI 永久卡扫描中」长期漏网。
+  it('cancelGrep 必须复位 grepBusy（旧调用的 finally 两条分支都不命中）', async () => {
+    respond('search_cancel', () => undefined);
+    search.grepBusy = true; // 模拟「正在扫描」
+    await search.cancelGrep();
+    expect(search.grepBusy).toBe(false);
+  });
+
+  it('cancelGrep 在 busy 为 false 时保持 false（不误改）', async () => {
+    respond('search_cancel', () => undefined);
+    search.grepBusy = false;
+    await search.cancelGrep();
+    expect(search.grepBusy).toBe(false);
+  });
+
+  it('cancelGrep 的 IPC 失败不冒泡 unhandled rejection', async () => {
+    respond('search_cancel', () => {
+      throw new Error('后端已停止');
+    });
+    await expect(search.cancelGrep()).resolves.toBeUndefined();
+    // 失败信息落到 grepError，且 busy 仍被释放。
+    expect(search.grepBusy).toBe(false);
+    expect(search.grepError).toContain('后端已停止');
+  });
+
+  it('清空 grep 输入框后 runGrep 早退必须复位 grepBusy', async () => {
+    search.grepQuery = 'foo';
+    search.grepBusy = true;
+    search.grepQuery = '   '; // 全空白 → 早退分支
+    await search.runGrep();
+    expect(search.grepBusy).toBe(false);
+    expect(search.grepResult).toBeNull();
+  });
 });
 
 describe('SearchStore.generation 代际守卫（汇总 §3.6 / PR3.5）', () => {
