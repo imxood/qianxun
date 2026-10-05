@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:qianxun_mobile/data/dsh/attachment_uploader.dart';
 import 'package:qianxun_mobile/data/dsh/qx_protocol.dart';
+import 'package:qianxun_mobile/data/models/session.dart';
 
 /// 假的服务端。逐条记录收到的请求，好断言线格式。
 class _FakeGateway {
@@ -20,7 +21,63 @@ class _FakeGateway {
 }
 
 void main() {
-  group('上传路径', () {
+  group('图片硬限制（服务端下发，见 docs/probe/session-list-item.json）', () {
+    // 实测值（`fromJson` 不是 const，所以这条也不是 const）
+    final limits = ImageLimits.fromJson(const {
+      'maxImageBytes': 20971520,
+      'maxImageDimension': 8192,
+      'maxImagePixels': 64000000,
+      'maxImagesPerMessage': 20,
+      'maxMessageImageBytes': 209715200,
+      'mediaTypes': ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    });
+
+    test('从投影里能读出限制', () {
+      final s = SessionSummary.fromJson(const {
+        'sessionId': 'a',
+        'updatedAt': 0,
+        'running': false,
+        'blank': false,
+        'projections': {
+          'asOfSeq': 1,
+          'values': {
+            'imageLimits': {
+              'maxImageBytes': 20971520,
+              'maxImagesPerMessage': 20,
+              'mediaTypes': ['image/png', 'image/jpeg'],
+            },
+          },
+        },
+      });
+      expect(s.imageLimits.maxImageBytes, 20971520);
+      expect(s.imageLimits.maxImagesPerMessage, 20);
+      expect(s.imageLimits.mediaTypes, ['image/png', 'image/jpeg']);
+    });
+
+    test('没下发限制时**不拦**（缺失 ≠ 0）', () {
+      // 假装有校验、实际把 0 当上限，会把所有图片都拒掉。
+      final none = ImageLimits.fromJson(const {});
+      expect(none.maxImageBytes, isNull);
+      expect(none.mediaTypes, isEmpty);
+      expect(none.hasEnoughToEnforce, isFalse);
+    });
+
+    test('上限来自服务端，不写死在代码里', () {
+      // 换一台机器 / 升一个 harness 版本，限制可能就变了。写死 20MB 会在
+      // 对方改成 10MB 时静默放行超限图 —— 而服务端拒绝的文案是英文的。
+      expect(limits.maxImageBytes, 20971520); // 20 MB
+      const overBy1 = 20971520 + 1;
+      expect(overBy1, greaterThan(limits.maxImageBytes!));
+    });
+
+    test('支持的类型来自服务端，不是我们写死的', () {
+      expect(limits.mediaTypes.any((m) => m.endsWith('/png')), isTrue);
+      expect(limits.mediaTypes.any((m) => m.endsWith('/gif')), isTrue);
+      expect(limits.mediaTypes.any((m) => m.endsWith('/bmp')), isFalse);
+    });
+  });
+
+  group('图片与文件的生命周期（实测，见 probe_upload.py）', () {
     test('sessionId 与 name 走 query，不是 body 也不是 header', () {
       final path = qxUploadPath('sess-123', '截图.png');
       expect(path, startsWith('/api/session/uploadFileBinary?'));

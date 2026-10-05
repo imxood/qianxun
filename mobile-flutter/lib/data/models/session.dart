@@ -197,6 +197,54 @@ final class UnknownSessionEvent extends SessionEventView {
 /// 会话摘要（`session/list` 的一行）。
 ///
 /// ⚠️ **没有 `title` 字段，也没有 `createdAt`。**
+/// 服务端下发的图片附件硬限制。
+///
+/// 实测值（`docs/probe/session-list-item.json`）：
+/// ```json
+/// { "maxImageBytes": 20971520, "maxImageDimension": 8192,
+///   "maxImagePixels": 64000000, "maxImagesPerMessage": 20,
+///   "maxMessageImageBytes": 209715200,
+///   "mediaTypes": ["image/png","image/jpeg","image/webp","image/gif"] }
+/// ```
+///
+/// ⚠️ **每个字段都可能缺失** —— 不同 harness 版本下发的子集不同。
+/// 所以全部可空，缺哪条就**不拦那一条**，绝不把缺失当成 0
+/// （那会把所有图片都拒掉）。
+class ImageLimits {
+  const ImageLimits({
+    this.maxImageBytes,
+    this.maxImageDimension,
+    this.maxImagePixels,
+    this.maxImagesPerMessage,
+    this.maxMessageImageBytes,
+    this.mediaTypes = const [],
+  });
+
+  final int? maxImageBytes;
+  final int? maxImageDimension;
+  final int? maxImagePixels;
+  final int? maxImagesPerMessage;
+  final int? maxMessageImageBytes;
+  final List<String> mediaTypes;
+
+  factory ImageLimits.fromJson(Map<String, Object?> json) => ImageLimits(
+        maxImageBytes: (json['maxImageBytes'] as num?)?.toInt(),
+        maxImageDimension: (json['maxImageDimension'] as num?)?.toInt(),
+        maxImagePixels: (json['maxImagePixels'] as num?)?.toInt(),
+        maxImagesPerMessage: (json['maxImagesPerMessage'] as num?)?.toInt(),
+        maxMessageImageBytes: (json['maxMessageImageBytes'] as num?)?.toInt(),
+        mediaTypes: (json['mediaTypes'] as List? ?? const [])
+            .map((e) => '$e')
+            .toList(growable: false),
+      );
+
+  /// 我们**确实**知道的限制。
+  ///
+  /// 没拿到限制时**不能宣称「已按服务端限制校验过」**——那会用一件我们
+  /// 根本没做的事骗用户。界面据此决定要不要把限制告诉用户。
+  bool get hasEnoughToEnforce => maxImageBytes != null && mediaTypes.isNotEmpty;
+}
+
 /// 标题只存在于 `projections.values["title"]`（`session/title` 事件的投影），
 /// 所以列表行必须从投影里取标题，取不到再回退到 `cwd` 或 `sessionId`。
 /// 这一点与直觉相反，是最容易写错的地方。
@@ -356,6 +404,11 @@ class SessionSummary {
     return !knownSessionIds.contains(parent);
   }
 
+  /// 图片类附件的服务端硬限制（实测值见 [ImageLimits]）。
+  ImageLimits get imageLimits => ImageLimits.fromJson(
+        asMap(projections['imageLimits']),
+      );
+
   /// 标题：只能来自投影。
   String? get title {
     final t = projections['title'];
@@ -398,6 +451,17 @@ class SessionSummary {
     final raw = asMap(projections['contextPressure'])['projectedTokens'];
     return (raw as num?)?.toInt();
   }
+
+  /// 服务端下发的**附件硬限制**。
+  ///
+  /// 数据里已经存在、但我们一直没读的一组数字
+  /// （证据：`docs/probe/session-list-item.json` 的 `projections.values.imageLimits`）。
+  ///
+  /// ⚠️ 不校验的后果不是「慢一点」，是**用户撞上一条英文协议错误**：
+  /// 挂一张 50MB 的图 → 客户端不拦 → 服务端拒 → 界面弹一句
+  /// `attachment-invalid` 的英文。用户不知道是自己图太大。
+  ///
+  /// 所以限制必须在**选择时**就告诉用户，而不是等服务端拒绝。
 
   /// 是否子 agent 会话。
   ///

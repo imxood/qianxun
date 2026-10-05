@@ -60,17 +60,47 @@ final interactionControllerProvider =
 > 白名单实际是「安全剧场」：看着在管安全，实际要么全不通、要么被整体放开。
 > 后续要么整体放开并写明理由，要么明确列入已知缺口 —— 不能留着假装在管。
 
-#### 0.2.2 协议（探针实测）
+#### 0.2.2 协议
+
+> ⚠️ **本节的「证据」列现在指仓库里真实存在的文件。** 此前三个探针只
+> `print` 到 stdout，仓库里没有任何一份输出，于是整张表全靠注释转述 ——
+> 任何人重写客户端时无法复核。`scripts/probe_session_list_item.py` 把一条
+> `session/list` 的**原始 item** 落盘到 `docs/probe/session-list-item.json`，
+> 下表引用的就是它。
 
 | 事实 | 证据 | 意义 |
 |---|---|---|
-| `agentTeam.members[].id` **就是** `sessionId` | 三个会话逐一对上 | waterfall 的 `agentId` 可直接映射到会话行 |
-| `userQuestions: {active, settled}` **逐会话下发** | `session/list` 每项都有 | **服务端直接告诉你哪条会话在等你**，不必推断 |
-| `permissions.currentValue` 逐会话下发 | `"danger-full-access"` | 输入栏可显示权限档位 |
-| `turnOutline: [{turn, seq, prompt, response}]` | 每轮都有 | 列表第二行的素材 |
-| `agentAvailable: bool` | ⚠️ **实测 392/393 为 false**，含 142 条正常顶级会话 | **不可用作状态判据**，详见 §2 |
+| `agentTeam.members[].id` **就是** `sessionId` | `docs/probe/session-list-item.json`：`sessionId` 与 `agentTeam.members[0].id` 逐字相同 | waterfall 的 `agentId` 可直接映射到会话行 |
+| `userQuestions: {active, settled}` 在 **`projections.values`** 里 | 同上，键为 `active` / `settled` | **服务端直接告诉你哪条会话在等你**，不必推断。⚠️ 不在顶层 —— 客户端的双层 fallback 目前是靠**第二层**命中的 |
+| `turnOutline: [{turn, seq, prompt, response}]` 在 **`projections.values`** 里 | 同上 | 列表第二行的素材。客户端的单层读法**正确** |
+| `permissions.currentValue` 逐会话下发 | 同上，值 `"danger-full-access"` | 输入栏可显示权限档位。⚠️ **目前零实现** |
+| `agentAvailable: bool` | ⚠️ 实测 393 条里 **392 条为 false**，含 142 条正常顶级会话 | **不可用作状态判据**，详见 §2 |
 | **`session/search` 在本部署被禁用** | `openAt "never"` | **搜索框是死功能，必须砍掉** |
 | RPC 参数信封 `{"args":{"request":{…}}}` | `session/list` 例外用 `_request` | 已落地，见 README §2.2.1 |
+
+#### 0.2.3 一条 `session/list` 里我们**还没读**的 14 个投影字段
+
+`docs/probe/session-list-item.json` 显示 `projections.values` 有 **19 个字段**，
+我们的客户端只读了 5 个。数据一直都在，只是没人接：
+
+| 字段 | 形状 | 用途 | 我们的状态 |
+|---|---|---|---|
+| `contextBreakdown` | `{messageTokens, systemTokens, toolsTokens}` | **分段式上下文计量表的数据源**（System/Tools/Messages 三段） | ❌ 未读。05 §3.4 说它「协议侧形状已备」——现已确证 |
+| `imageLimits` | `{maxImageBytes: 20MB, maxImagesPerMessage: 20, maxMessageImageBytes: 200MB, mediaTypes: [png,jpeg,webp,gif], maxImageDimension: 8192}` | **服务端下发的附件硬限制** | ❌ 未读。**我们的附件功能一个都没校验** |
+| `permissions` | `{currentValue}` | 输入栏权限档位 | ❌ 未读 |
+| `agentTeam` | `{members:[{id,name,phase,role}], tasks:[]}` | 子 agent 树；`phase: active` | ❌ 未读（只用作归属判据） |
+| `inbox` | `{next-step: [], next-turn: []}` | **待发队列**（`updateQueue` 的数据源） | ❌ 未读 |
+| `todos` | `null`（本条为空） | 待办清单 | ❌ 未读 |
+| `plan` | `{active, pending}` | 计划状态 | ❌ 未读 |
+| `goal` | `null` | 目标 | ❌ 未读 |
+| `modelSelection` | `{lastUsed:{model,provider,reasoningEffort}, next:{…}}` | 当前模型 | ❌ 未读 |
+| `subagentCatalog` / `subagent` / `subagentTiming` | `[]` / … / `{lastTurnCompleted, settledMs}` | 子 agent | ❌ 未读 |
+| `sessionListMetadata` | `{blank, lastPromptAt}` | 列表排序/空态判据 | ❌ 未读 |
+| `imageLimits` 之外 | — | — | — |
+
+> ⚠️ **`imageLimits` 是最紧急的一条**：用户可以挂一张 50MB 的 PNG，
+> 客户端不拦，服务端拒，用户看到的是一条英文协议错误。把这份限制接进
+> 附件入口（含超限时**明确说清**是多大），是 Batch 4 的必做项。
 
 第 1、2 条关掉了 01 与 03 各自标记的**头号风险**：产品在「哪条会话在等你」这件事上
 从「我们猜它卡住了」变成「**它告诉我它卡住了**」。
@@ -547,7 +577,7 @@ eager 地 join 完整工具输出、并 pretty-print 参数**。一次宽 `rg` �
 
 | 不做 | 理由 |
 |---|---|
-| 手机上传图片 | 手机拍一张传给家里的 PC 是绕远路，桌面端发图更直接 |
+| ~~手机上传图片~~ **改为做** | 原判断是「手机拍一张传给家里的 PC 是绕远路」。**但产品负责人明确要求「支持图片与文件的发送」**，指令覆盖本文。图片内联 base64 本就不走上传，实现成本极低（`ComposerController.attachImage` 早就写好了，缺的只是 UI） |
 | 手机改模型 / 权限档 | 那是坐在电脑前才做的决策 |
 | 真正的推送 | 明文 VPN 上没有可达的推送中继。**为了推送引入中继会毁掉 v1「装上就能用」的价值主张**。Android 走前台服务常驻 socket（iOS 做不到），**并把局限写进关于页** |
 | `session/search` 搜索框 | 本部署 `openAt "never"`，是死功能。详见下方「已知缺口」 |
@@ -597,15 +627,82 @@ eager 地 join 完整工具输出、并 pretty-print 参数**。一次宽 `rg` �
 
 ## 附：与参考客户端的取舍
 
-参考客户端（Kotlin/Compose）的**信息装置**值得学：单行工具披露行、
-`Title :: value` 排版装置、分段式上下文计量表、密集指标底栏。
+参考客户端 = `E:\develop\dsh-workspace\deepseek-harness-mobile`（Kotlin/Compose，
+`com.labteto.dshmobile`）。设计系统在 `ui/theme/`，组件在 `ui/components/`，
+**截图在 `docs/images/`**（`home` / `chat` / `trajectory` / `subagent` /
+`session-info` 五张）。下面每条判断都对着源码或截图核过。
 
-它的**色彩与排版**不学：默认 Material 浅靛蓝读起来很普通。
+它的**信息装置**值得学：单行工具披露行、`Title :: value` 排版装置、
+分段式上下文计量表、密集指标底栏。
 
-明确**反对**它的四处：
+它的**色彩与排版**不学：默认 Material 浅靛蓝读起来很普通
+（`Color.kt`：`accent = #4176E6` 亮 / `#679EFE` 暗，就是标准 Material 蓝）。
 
-1. `chat.png` 的 Chat 标签是一面 19 行折叠工具行，**零结论**，那是日志，不是聊天
-2. `TTFT 4.3s · 80 tok/s` 常驻聊天底栏，那是 PC 侧引擎指标，搬进信息抽屉
-3. Chat / Trajectory 双顶层 tab，同一个会话两条找不着北的路，占掉一半转录空间
-4. 连接页约 45% 屏高给了 logo + 副标题 + Preview 按钮 + 橙色警告，而副标题只是把
-   App 名字重说一遍
+### 11.2 截图实证：§11 的四条批评逐条对上
+
+| 批评 | 截图证据 |
+|---|---|
+| Chat 屏是 19 行折叠工具行，零结论 | `chat.png`：一屏 19 条 `Bash / Write / Read`，形态几乎全同，无一处结论 |
+| `TTFT 4.3s · 80 tok/s` 常驻底栏 | `chat.png` 底部一行 `15 turns · 283 steps · TTFT 4.3s · 80 tok/s · Cache 99%` |
+| Chat / Trajectory 双顶层 tab | `chat.png` / `trajectory.png` 顶部同一位置的两枚分段按钮 |
+| 连接页 45% 屏高给 logo + 副标题 | `home.png`：logo + `DeepSeek Harness Remote` + 一句只是重说 App 名的副标题 + `Preview` 按钮，占顶部约 30%（05 原估 45% 偏保守） |
+
+§8.5 的「中英混排」同样被实证：`chat.png` 顶部一行里
+`Mobile App Connector for DeepS…`（英文）与 `标准模式`（中文）并列。
+
+### 11.3 截图暴露的新问题（05 原文没记录）
+
+1. **`trajectory.png`：一轮只有 1 步时，Trajectory 视图约 65% 屏高是空白。**
+   「按轮次聚合的视图」在小轮次下退化成空屏。→ 我们若做轮次视图，
+   必须处理「这一轮很小」的情况，不能只为大轮次设计。
+2. **`chat.png` 的 `Stopped` 药丸夹在两条 Bash 之间**，读者不知道它在说
+   什么。状态词脱离了它修饰的对象。→ 状态词必须与它描述的轮次/行
+   **同处一个视觉组**。
+3. **`subagent.png`：12 条子 agent 形态全同**，只有名字不同，右侧一律
+   `Continuable`。→ 若做子 agent 列表，行之间必须有不同的可扫通道
+   （轨 / 状态词 / 计数），否则一屏 12 行等于没有层次。
+4. **`home.png` 的配对是手填 host + port(3080)**，还有 `Scan network` 扫网
+   段。我们走配对链接，体验路径完全不同 —— 05 对配对首启的判断（§9.1）
+   在这个前提下更成立：用户不需要「填地址」，他需要「扫码」。
+
+### 11.4 明确该抄的（已实测成立，不是想象）
+
+1. **单行工具披露行**：`> Bash :: List GitHub workflows a…` 一行装下
+   工具名 + 摘要。`chat.png` 里 19 行虽然密，但**每行都自带一个可读结论**。
+   我们 Batch 4 的 `ToolCard` 方向对。
+2. **`::` 分隔装置**（`Type.kt` 之外，`DisclosureRow.kt` 大量使用）。
+3. **文件类工具有专属图标**（Write / Edit / Read 的斜杠框线，截图里一眼
+   可辨），比纯文字行强。我们该给 `Write` / `Edit` 单独的字形。
+4. **分段式上下文计量表**：`session-info.png` 的 `Context :: 49%` +
+   System/Tools/Messages 图例 + `86.4M in · 242.5k out`。
+5. **输入栏里的权限芯片**：`chat.png` 的 `Full access`。协议侧
+   `permissions.currentValue` 我们已实测可用。
+
+### 11.5 一处与 §3.4 正面冲突的判据（未裁决）
+
+`ContextMeter.kt` 的注释是一句设计判据，三份文档里都没有：
+
+> The harness keeps this next to the composer rather than in a panel, and
+> that placement is the point: context pressure is something you act on while
+> writing the next message, not something you go looking for after a turn fails.
+
+`chat.png` 证实它确实**同时**出现在输入栏右侧（一条蓝白小条）与详情抽屉里。
+
+而 §3.4 把它判给抽屉，理由是「列表行是被扫的，指标微栅是被查的」。
+
+**两条理由都成立**，分歧在：千寻的场景是「地铁上瞄一眼 agent 状态」，
+不是「盯着自己的上下文」。若用户要发消息时确实会想「我上下文快满了」，
+放输入栏旁更实用。**这一条需要产品拍板**，本文暂按 §3.4 执行
+（输入栏已有 steer 切换，位置紧张）。
+
+### 11.6 它有一条我们没有的判据，值得留着当尺子
+
+`Color.kt` 的 `userBubble` 注释：
+
+> …At phone size and phone brightness the shape stopped reading, and a
+> message you cannot tell apart from the assistant's is a worse failure than
+> a fill that is a shade off the reference.
+
+即：为了手机尺寸下能分辨气泡形状，宁可偏离参考值一档。
+**「分不出是谁说的话」比「颜色差一档」更糟** —— 这条尺子对我们同样适用。
+

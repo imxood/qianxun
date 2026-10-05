@@ -1,0 +1,129 @@
+{
+  "_probe": {
+    "argKey": "_request",
+    "capturedAt": "2026-10-05T16:12:33+00:00",
+    "method": "session/list",
+    "note": "原始响应未做任何改动。若日后 §0.2 的某条声明被推翻，请重跑 probe_session_list_item.py 并覆盖本文件，同时改 05-product-design.md §0.2 —— 不要只改代码注释。",
+    "origin": "http://192.168.20.2:23090",
+    "totalSessionsInResponse": 393
+  },
+  "item": {
+    "agentAvailable": false,
+    "blank": false,
+    "cwd": "E:\\develop\\dsh-workspace\\qianxun",
+    "origin": "subagent",
+    "parentSessionId": "session-c214c7f0-769b-4f55-8e91-492d7b4aac9c",
+    "projections": {
+      "asOfSeq": 169,
+      "kind": "cached",
+      "values": {
+        "agentPreset": "cordis",
+        "agentTeam": {
+          "members": [
+            {
+              "id": "9de92e39-7fcc-4215-91ba-1a031729a7d4",
+              "name": "lead",
+              "phase": "active",
+              "role": "lead"
+            }
+          ],
+          "tasks": []
+        },
+        "contextBreakdown": {
+          "messageTokens": 67555,
+          "systemTokens": 1550,
+          "toolsTokens": 11773
+        },
+        "contextPressure": {
+          "contextWindow": 500000,
+          "pressureTokens": 98478,
+          "projectedTokens": 100121
+        },
+        "goal": null,
+        "imageLimits": {
+          "maxImageBytes": 20971520,
+          "maxImageDimension": 8192,
+          "maxImagePixels": 64000000,
+          "maxImagesPerMessage": 20,
+          "maxMessageImageBytes": 209715200,
+          "mediaTypes": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif"
+          ]
+        },
+        "inbox": {
+          "next-step": [],
+          "next-turn": []
+        },
+        "modelSelection": {
+          "lastUsed": {
+            "model": "MiniMax-M3.1-Flash-Preview",
+            "provider": "minimax-cn",
+            "reasoningEffort": "max"
+          },
+          "next": {
+            "model": "MiniMax-M3.1-Flash-Preview",
+            "provider": "minimax-cn",
+            "reasoningEffort": "max"
+          }
+        },
+        "permissions": {
+          "currentValue": "danger-full-access"
+        },
+        "plan": {
+          "active": false,
+          "pending": false
+        },
+        "sessionListMetadata": {
+          "blank": false,
+          "lastPromptAt": 1791181073818
+        },
+        "sessionStats": {
+          "decodeMs": 74681,
+          "decodeTokens": 10094,
+          "llmMs": 105072,
+          "steps": 23,
+          "toolMs": 6199,
+          "ttftMs": 30391,
+          "ttftSteps": 23,
+          "turns": 1
+        },
+        "subagent": {
+          "label": "Survey qianxun judge model usage",
+          "mode": "continuable",
+          "seq": 0
+        },
+        "subagentCatalog": [],
+        "subagentTiming": {
+          "lastTurnCompleted": true,
+          "settledMs": 111364
+        },
+        "title": "You are analyzing the local",
+        "todos": null,
+        "tokenUsage": {
+          "cacheReadTokens": 1276559,
+          "cacheWriteTokens": 0,
+          "outputTokens": 10094,
+          "uncachedInputTokens": 91055
+        },
+        "turnOutline": [
+          {
+            "prompt": "You are analyzing the local project at E:\\develop…",
+            "response": "# 千寻 (qianxun) 裁判模型 / 小模型决策 — 代码级清单 > 结论先行:**\"裁判\"在本项目里不是 LLM,而是两类确定性代码** —— ① 局内 Laya(System 1 反射)+ 置信度门控;② 局间 `judgeCa…",
+            "seq": 5,
+            "turn": 1
+          }
+        ],
+        "userQuestions": {
+          "active": [],
+          "settled": []
+        }
+      }
+    },
+    "running": false,
+    "sessionId": "9de92e39-7fcc-4215-91ba-1a031729a7d4",
+    "updatedAt": 1791181073818
+  }
+}

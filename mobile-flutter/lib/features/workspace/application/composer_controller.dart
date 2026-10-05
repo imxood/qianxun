@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/qx_log.dart';
 import '../../../data/dsh/attachment_uploader.dart';
 import '../../../data/dsh/rpc_envelope.dart';
+import '../../../data/models/session.dart';
+import '../../../shared/widgets/primitives.dart';
 import '../../connections/application/connections_controller.dart';
 
 /// 一个待发送或已发送的附件。
@@ -158,10 +160,21 @@ class ComposerController extends StateNotifier<ComposerState> {
   ///
   /// **不上传。** 图片是内联 base64 进消息的，走上传既慢又白搭一跳。
   /// 所以它挂上就是 `ready`。
+  ///
+  /// ⚠️ 挂之前**先按服务端下发的硬限制校验**（`projections.values.imageLimits`，
+  /// 证据见 `docs/probe/session-list-item.json`）。不校验的后果不是「慢一点」，
+  /// 是用户挂一张 50MB 的图 → 客户端放行 → 服务端拒 → 界面弹一句
+  /// `attachment-invalid` 的英文，用户完全不知道是自己图太大。
   Future<void> attachImage({
     required String name,
     required Uint8List bytes,
   }) async {
+    final reason = imageRejectionReason(name, bytes);
+    if (reason != null) {
+      state = state.copyWith(error: reason, clearError: false);
+      return;
+    }
+    state = state.copyWith(clearError: true);
     _mutate(
       PendingAttachment(
         localId: 'a${DateTime.now().microsecondsSinceEpoch}',
@@ -173,6 +186,40 @@ class ComposerController extends StateNotifier<ComposerState> {
       ),
     );
   }
+
+  /// 这张图为什么**不能**挂？返回 null 表示可以。
+  ///
+  /// 逐条给出**具体数字**（「图太大：52 MB，上限 20 MB」）而不是
+  /// 「图片无效」—— 报错必须说清差在哪，否则用户只会反复重试。
+  String? imageRejectionReason(String name, Uint8List bytes) {
+    final lim = _imageLimits;
+    if (lim == null || !lim.hasEnoughToEnforce) {
+      // 服务端没下发限制 → 不拦。**绝不能**假装有校验。
+      return null;
+    }
+    final max = lim.maxImageBytes!;
+    if (bytes.length > max) {
+      return '「$name」太大了：${formatBytes(bytes.length)}，'
+          '一条图的上限是 ${formatBytes(max)}。';
+    }
+    if (lim.maxImagesPerMessage != null &&
+        state.attachments.where((a) => a.isImage).length >=
+            lim.maxImagesPerMessage!) {
+      return '一条消息最多 ${lim.maxImagesPerMessage} 张图，'
+          '先把已经挂上的发出去。';
+    }
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    if (ext.isNotEmpty &&
+        !lim.mediaTypes.any((m) => m.endsWith('/$ext'))) {
+      return '服务端只收 ${lim.mediaTypes.map((m) => m.split('/').last).join(' / ')}，'
+          '「$name」是 .$ext。';
+    }
+    return null;
+  }
+
+  /// 图片硬限制。`session/list` 的投影里带，没有就当没有（不拦）。
+  ImageLimits? _imageLimits;
+  set imageLimits(ImageLimits? v) => _imageLimits = v;
 
   /// 挂一个文件。需要先上传换 `receiptId`。
   Future<void> attachFile(File file) async {
