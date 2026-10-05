@@ -1,4 +1,4 @@
-﻿{
+{
   "bundle": "laya-multilingual-onnx",
   "generated_by": "由 receptron/laya 导出管线生成(见 docs/09 §2):mmBERT 多语言 checkpoint → ONNX opset 导出,parity+压测通过",
   "source": "local-export",

@@ -12,6 +12,7 @@
     SyncItemResult,
     SyncStatus,
     ThemePreference,
+    WebEngineSettings,
   } from '../../lib/ipc/contract';
   import { nav } from '../../stores/nav.svelte';
   import { settings } from '../../stores/settings.svelte';
@@ -140,6 +141,63 @@
   const registryValid = $derived(
     ['official', 'npmmirror'].includes(registryInput) || /^https?:\/\/.+/.test(registryInput),
   );
+
+  // ---- 搜索引擎清单（docs/18 C1）----
+  const ENGINE_KINDS: ReadonlyArray<WebEngineSettings['kind']> = ['bing', 'duckduckgo', 'searxng'];
+  /** 与 Rust WebSettings 的注释一致：上限 8。 */
+  const ENGINE_CAP = 8;
+  let newEngineId = $state('');
+  let newEngineKind = $state<WebEngineSettings['kind']>('duckduckgo');
+  let newEngineEndpoint = $state('');
+
+  const engines = $derived(settings.current?.web.engines ?? []);
+  const trimmedNewId = $derived(newEngineId.trim());
+
+  const addEngineHint = $derived.by(() => {
+    if (engines.length >= ENGINE_CAP) return `已达上限 ${ENGINE_CAP} 个`;
+    if (!trimmedNewId) return '请先填写引擎 id';
+    if (engines.some((engine) => engine.id === trimmedNewId)) return '该 id 已存在';
+    if (newEngineKind === 'searxng' && !/^https?:\/\/.+/.test(newEngineEndpoint.trim())) {
+      return 'searxng 需要 http(s) 实例地址';
+    }
+    return '添加到引擎清单';
+  });
+
+  const newEngineValid = $derived(
+    engines.length < ENGINE_CAP &&
+      trimmedNewId !== '' &&
+      !engines.some((engine) => engine.id === trimmedNewId) &&
+      (newEngineKind !== 'searxng' || /^https?:\/\/.+/.test(newEngineEndpoint.trim())),
+  );
+
+  /** 整份替换引擎清单；Rust 的 merge 会逐字段深合并 web.engines。 */
+  async function patchEngines(next: WebEngineSettings[]): Promise<void> {
+    // 默认引擎必须仍能在清单里找到，否则 Rust 侧校验会拒绝整份补丁。
+    const ids = new Set(next.map((engine) => engine.id));
+    const defaultEngine = ids.has(settings.current?.web.defaultEngine ?? '')
+      ? settings.current!.web.defaultEngine
+      : (next[0]?.id ?? '');
+    await save({ web: { engines: next, defaultEngine } });
+  }
+
+  async function addEngine(): Promise<void> {
+    if (!newEngineValid) return;
+    await patchEngines([
+      ...engines,
+      {
+        id: trimmedNewId,
+        kind: newEngineKind,
+        endpoint: newEngineKind === 'searxng' ? newEngineEndpoint.trim() : '',
+      },
+    ]);
+    newEngineId = '';
+    newEngineEndpoint = '';
+  }
+
+  async function removeEngine(id: string): Promise<void> {
+    if (engines.length <= 1) return;
+    await patchEngines(engines.filter((engine) => engine.id !== id));
+  }
 
   onMount(() => {
     void (async () => {
@@ -719,7 +777,7 @@
           <div class="divide-y divide-line/60">
             <SettingRow
               label="默认引擎"
-              hint={`与 DSH web_search 共用清单 · 已装 ${settings.current.web.engines.length} 个 · 增删请编辑 settings.json`}
+              hint={`与 DSH web_search 共用清单 · 已装 ${settings.current.web.engines.length}/8 个`}
             >
               <select
                 class="qx-select w-44"
@@ -735,6 +793,109 @@
                   <option value={engine.id}>{engine.id}</option>
                 {/each}
               </select>
+            </SettingRow>
+
+            <!--
+              引擎增删（docs/18 C1）：此前 hint 直接写「增删请编辑 settings.json」，
+              把唯一需要用户决策的配置项推到改 JSON。这是本模块唯一的功能缺口。
+              约束与 Rust 侧一致：上限 8、id 唯一、searxng 必填 endpoint。
+            -->
+            <SettingRow label="引擎清单" hint="上限 8 个，id 唯一；searxng 需填实例地址">
+              <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+                {#each settings.current.web.engines as engine (engine.id)}
+                  <div class="flex items-center gap-2" data-testid="web-engine-row">
+                    <input
+                      class="qx-input w-32 font-mono text-xs"
+                      type="text"
+                      aria-label="引擎 id"
+                      value={engine.id}
+                      readonly
+                    />
+                    <select
+                      class="qx-select w-36 py-1 text-xs"
+                      aria-label="引擎类型"
+                      value={engine.kind}
+                      onchange={(event) => {
+                        const kind = event.currentTarget.value as WebEngineSettings['kind'];
+                        void patchEngines(
+                          settings.current!.web.engines.map((item) =>
+                            item.id === engine.id ? { ...item, kind } : item,
+                          ),
+                        );
+                      }}
+                    >
+                      {#each ENGINE_KINDS as kind (kind)}
+                        <option value={kind}>{kind}</option>
+                      {/each}
+                    </select>
+                    {#if engine.kind === 'searxng'}
+                      <input
+                        class="qx-input min-w-0 flex-1 font-mono text-xs"
+                        type="text"
+                        placeholder="https://searx.example.com"
+                        aria-label="SearXNG 实例地址"
+                        value={engine.endpoint}
+                        onblur={(event) => {
+                          const endpoint = event.currentTarget.value.trim();
+                          if (endpoint === engine.endpoint) return;
+                          void patchEngines(
+                            settings.current!.web.engines.map((item) =>
+                              item.id === engine.id ? { ...item, endpoint } : item,
+                            ),
+                          );
+                        }}
+                      />
+                    {:else}
+                      <span class="flex-1 text-xs text-muted/60">—</span>
+                    {/if}
+                    <button
+                      class="qx-btn qx-btn-sm qx-btn-outline shrink-0"
+                      disabled={settings.current.web.engines.length <= 1}
+                      title={settings.current.web.engines.length <= 1
+                        ? '至少保留一个引擎'
+                        : `移除 ${engine.id}`}
+                      onclick={() => void removeEngine(engine.id)}
+                    >
+                      移除
+                    </button>
+                  </div>
+                {/each}
+                <div class="flex items-center gap-2">
+                  <input
+                    class="qx-input w-32 font-mono text-xs"
+                    type="text"
+                    placeholder="新引擎 id"
+                    aria-label="新引擎 id"
+                    bind:value={newEngineId}
+                    data-testid="web-engine-new-id"
+                  />
+                  <select
+                    class="qx-select w-36 py-1 text-xs"
+                    aria-label="新引擎类型"
+                    bind:value={newEngineKind}
+                  >
+                    {#each ENGINE_KINDS as kind (kind)}
+                      <option value={kind}>{kind}</option>
+                    {/each}
+                  </select>
+                  <input
+                    class="qx-input min-w-0 flex-1 font-mono text-xs"
+                    type="text"
+                    placeholder="SearXNG 地址（新引擎为 searxng 时必填）"
+                    aria-label="新引擎 SearXNG 地址"
+                    bind:value={newEngineEndpoint}
+                  />
+                  <button
+                    class="qx-btn qx-btn-sm qx-btn-primary shrink-0"
+                    disabled={!newEngineValid}
+                    title={addEngineHint}
+                    onclick={() => void addEngine()}
+                    data-testid="web-engine-add"
+                  >
+                    添加
+                  </button>
+                </div>
+              </div>
             </SettingRow>
             <SettingRow label="Moli 路径" fill>
               <input

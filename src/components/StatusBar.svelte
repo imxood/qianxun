@@ -59,6 +59,25 @@
     void harness.wire();
   });
 
+  // ---- 截屏可发现性（docs/18 C5）----
+  // 截屏域有 10 个 IPC 命令、默认热键 Alt+A，但侧栏**没有入口**、状态栏
+  // 也不提它——新用户没有任何路径发现这个功能。这里给一个常驻但安静的
+  // 入口，走 shots_start（与热键同一条 start_session 路径，行为完全一致）。
+  const screenshotAccel = $derived(settings.current?.hotkeys.screenshot || 'Alt+A');
+  let shotBusy = $state(false);
+
+  async function startScreenshot(): Promise<void> {
+    if (shotBusy) return;
+    shotBusy = true;
+    try {
+      await call('shots_start');
+    } catch {
+      /* 覆盖窗已在开或无可用显示器：Rust 侧已记日志，这里不打扰状态栏 */
+    } finally {
+      shotBusy = false;
+    }
+  }
+
   function cycleTheme(): void {
     const index = themeCycle.indexOf(theme.preference);
     const next = themeCycle[(index + 1) % themeCycle.length] ?? 'system';
@@ -90,6 +109,28 @@
       {#if harness.status.phase === 'ready'}<span class="opacity-70">· {harness.status.origin}</span
         >{/if}
     </span>
+    <button
+      class="flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors outline-none hover:bg-accent-soft hover:text-fg focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50"
+      disabled={shotBusy}
+      onclick={() => void startScreenshot()}
+      title={`截屏（${screenshotAccel}）`}
+      data-testid="statusbar-screenshot"
+    >
+      <svg
+        viewBox="0 0 24 24"
+        class="size-3"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M4 8h3l1.5-2h7L17 8h3v11H4z" />
+        <circle cx="12" cy="13" r="3.2" />
+      </svg>
+      截屏
+    </button>
     <button
       class="flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors outline-none hover:bg-accent-soft hover:text-fg focus-visible:ring-2 focus-visible:ring-accent/50"
       onclick={cycleTheme}

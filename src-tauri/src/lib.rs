@@ -11,6 +11,7 @@ mod disk;
 mod dsh_upstream;
 mod error;
 mod harness;
+mod intel;
 mod logging;
 mod mario;
 mod market;
@@ -188,7 +189,11 @@ pub fn run() {
             app.manage(tools::qwen::QwenProcState::default());
             app.manage(shots::commands::ShotsState::default());
             app.manage(disk::DiskScanManager::default());
+            app.manage(intel::scheduler::IntelRuntime::default());
+            app.manage(intel::digest::DigestRuntime::default());
             forward_events(handle, &supervisor);
+            // 情报域：启动补抓（当天一次，docs/17）+ 过期天文件清理。
+            intel::scheduler::spawn_startup(handle.clone());
             // 远程/回环双端网关：setup 即占位监听回环网关端口（默认
             // release 23090 / debug 23091，DSH 页 iframe 立刻有稳定地址），
             // 启用远程时再额外绑 LAN。DSH 就绪事件由 forward_events
@@ -299,6 +304,7 @@ pub fn run() {
             search::commands::search_wait_ready,
             search::commands::search_list_drives,
             shots::commands::shots_capture,
+            shots::commands::shots_start,
             shots::commands::shots_window_at,
             shots::commands::shots_overlay_ready,
             shots::commands::shots_set_hotkey,
@@ -318,6 +324,17 @@ pub fn run() {
             notes::commands::notes_create,
             notes::commands::notes_delete,
             notes::commands::notes_init,
+            intel::commands::intel_topics,
+            intel::commands::intel_topic_day,
+            intel::commands::intel_articles,
+            intel::commands::intel_digest_status,
+            intel::commands::intel_digest_start,
+            intel::commands::intel_days,
+            intel::commands::intel_refresh,
+            intel::commands::intel_save,
+            intel::commands::intel_unsave,
+            intel::commands::intel_favorites,
+            intel::commands::intel_mark_read,
             mario::commands::mario_state_append,
             mario::commands::mario_state_list,
             mario::commands::mario_state_read,

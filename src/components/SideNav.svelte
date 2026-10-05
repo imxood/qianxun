@@ -190,13 +190,17 @@
   tooltip / aria-label。比文字纵排窄 16px，视觉也更静。
 -->
 <!--
-  svelte-ignore a11y_no_noninteractive_element_interactions
   键盘导航（docs/18 C4）挂在 nav 上：10 个入口此前只能用鼠标点。
-  `<nav>` 是导航 landmark，给它绑 keydown 属于 roving-tabindex 的标准做法
-  （方向键在按钮组间移动、数字键直达），告警规则不区分这一类。
-  实际焦点通过每个按钮的 tabindex=0/-1 落在真按钮上，键盘用户拿到的仍是
-  按钮语义与 aria-current。
+  真正的焦点通过每个按钮的 tabindex=0/-1 落在按钮上，键盘用户拿到的仍是
+  按钮语义与 aria-current；nav 只做事件委托（方向键/数字键）。
+
+  下面两条抑制各有原因：
+  - svelte-ignore：svelte-check 的 a11y 规则不接受 landmark 元素绑 keydown；
+  - eslint-disable：eslint 侧插件未启用该 a11y 规则，会把上一条判成
+    「多余的 svelte-ignore」。两者规则集不同，只能都关。
 -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<!-- eslint-disable-next-line svelte/no-unused-svelte-ignore -->
 <nav
   class="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-surface py-2"
   aria-label="主导航"

@@ -1,5 +1,5 @@
 //! 窗口域：前置窗口查找、显示/聚焦、几何记忆（恢复与持久化），
-//! 以及「独立窗口」的生命周期（终端 / DSH 页分离到独立 OS 窗口），
+//! 以及「独立窗口」的生命周期（DSH 页分离到独立 OS 窗口），
 //! 外加内置浏览器窗（DSH 页外链分流：单例复用 + 多开级联）。
 //!
 //! 几何记忆采用「关闭/退出时一次性快照」而非每次移动都写盘：
@@ -149,7 +149,7 @@ pub fn on_close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) 
     };
 
     // 设了「关到托盘」→ 隐藏；没设但独立窗口还开着 → 也隐藏：
-    // 真退出会把独立窗口连同它们的终端会话一起带走，用户预期是
+    // 真退出会把独立窗口连同它们的 DSH 会话一起带走，用户预期是
     // 「关的是主窗，不是整个应用」。独立窗口全关后恢复设置语义。
     let any_standalone = app
         .webview_windows()
@@ -324,7 +324,7 @@ pub fn app_toggle_devtools(app: AppHandle) -> crate::error::Result<()> {
     Ok(())
 }
 
-// ---- 独立窗口（终端 / DSH 分离窗）----
+// ---- 独立窗口（DSH 分离窗）----
 
 /// `window://closed` 事件负载：主窗前端据此恢复侧栏项。
 #[derive(Serialize, Clone)]

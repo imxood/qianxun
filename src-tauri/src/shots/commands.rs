@@ -341,6 +341,11 @@ fn decode_base64(text: &str) -> Result<Vec<u8>> {
 
 /// 热键触发的完整流程：capture → 每屏一个覆盖窗。
 /// 由 lib.rs 的快捷键 handler 调用（也供托盘菜单/前端按钮复用）。
+#[tauri::command]
+pub fn shots_start(app: AppHandle) {
+    start_session(&app);
+}
+
 pub fn start_session(app: &AppHandle) {
     let state = app.state::<ShotsState>();
     if state.overlay_active.swap(true, Ordering::AcqRel) {

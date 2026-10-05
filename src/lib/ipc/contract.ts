@@ -44,6 +44,7 @@ export const IPC_COMMANDS = [
   'search_wait_ready',
   'search_list_drives',
   'shots_capture',
+  'shots_start',
   'shots_window_at',
   'shots_overlay_ready',
   'shots_set_hotkey',
@@ -61,6 +62,17 @@ export const IPC_COMMANDS = [
   'notes_create',
   'notes_delete',
   'notes_init',
+  'intel_topics',
+  'intel_topic_day',
+  'intel_articles',
+  'intel_digest_status',
+  'intel_digest_start',
+  'intel_days',
+  'intel_refresh',
+  'intel_save',
+  'intel_unsave',
+  'intel_favorites',
+  'intel_mark_read',
   'mario_state_read',
   'mario_state_write',
   'mario_state_append',
@@ -102,6 +114,9 @@ export const IPC_EVENTS = [
   'harness://install-progress',
   'system://theme',
   'window://closed',
+  'intel://updated',
+  'intel://digest',
+  'intel://fetching',
 ] as const;
 
 /**
@@ -215,24 +230,25 @@ export interface LayaStatus {
   detail: string | null;
 }
 
-/** QWen 本地推理服务配置（OpenAI 兼容，如 llama-server）。 */
+/** Qwen3.8-Flash-Next 本地模型服务（Strata 引擎，OpenAI/Anthropic 兼容）配置。 */
 export interface QwenSettings {
-  /** 服务可执行文件绝对路径（必填）。 */
-  serverExe: string;
-  /** 启动参数（空白分词透传；缺 --port 时千寻自动追加配置端口）。 */
-  args: string;
+  /** Strata 程序本体目录（含 .venv\Scripts\python.exe 与 serve\server.py）。 */
+  strataHome: string;
+  /** 引擎配置：绝对路径，或相对 strataHome 的文件名（规范档在 D:\AI\Strata\strata-iq2_xs.json）。 */
+  config: string;
   port: number;
 }
 
-/** QWen 服务状态。 */
+/** Qwen 服务状态。 */
 export interface QwenStatus {
   /** 端口有监听者（含外部实例）。 */
   running: boolean;
-  /** /health 明确 200（llama-server 加载中为 503）。 */
+  /** /health 明确 200（Strata 载入模型期间连接拒绝或非 200）。 */
   ready: boolean;
   pid: number | null;
   port: number;
-  serverExe: string | null;
+  /** 生效的引擎配置绝对路径；未配置/程序目录不存在为 null。 */
+  configJson: string | null;
   detail: string | null;
 }
 
@@ -290,6 +306,155 @@ export interface SettingsPatch {
   hotkeys?: Partial<HotkeysSettings>;
   notes?: Partial<NotesSettings>;
   remote?: Partial<RemoteSettings>;
+}
+
+// ---------------------------------------------------------------------------
+// intel_*（情报域，docs/17；M3 起所有主题都是杂志流，无榜单形态）
+// ---------------------------------------------------------------------------
+
+/** intel_topics 返回项：主题卡片的三行信息。 */
+export interface IntelTopicStatus {
+  id: string;
+  label: string;
+  /** 当天条目数（条）。 */
+  todayCount: number;
+  /** 最近一次成功抓取（毫秒；任一源）。 */
+  lastFetchAt: number | null;
+  /** 全部源都成功过且无遗留错误。 */
+  ok: boolean;
+  /** 抓取进行中。 */
+  fetching: boolean;
+  /** 汇总错误摘要。 */
+  lastError: string | null;
+  /** 抓取中当前并发请求（状态页「正在请求 xxx」）。 */
+  active: SourceActivity[];
+}
+
+/** Feed 条目：原始字段永不改写，来源 URL 常驻。 */
+export interface FeedItem {
+  /** sha2(sourceId + 归一化 url)：同源幂等去重主键。 */
+  id: string;
+  /** 源标识（徽章显示）。 */
+  sourceId: string;
+  /** 原文标题，永不改写。 */
+  title: string;
+  /** 来源 URL。 */
+  url: string;
+  /** 源自带的原始摘要（无则空串）。 */
+  summary: string;
+  /** 热度/排名（无热度语义 = null）。 */
+  heat: number | null;
+  /** 发布时间（毫秒；源未给 = 抓取时刻）。 */
+  publishedAt: number | null;
+  /** 首次入库时间（毫秒）。 */
+  firstSeenAt: number;
+}
+
+/** Design Arena / 模型家族条目等榜单类型已在 M3 移除（docs/17 §7.6）。 */
+
+/** intel_topic_day 返回：当天无数据 items 为 null。 */
+export interface IntelTopicDay {
+  topicId: string;
+  date: string;
+  items: FeedItem[] | null;
+  fetchedAt: number | null;
+  /** 已读表（只含本日条目 id）。 */
+  read: Record<string, number>;
+}
+
+/** intel_save 入参：收藏 = 深拷贝快照。 */
+export interface IntelSaveArgs {
+  topicId: string;
+  feed?: FeedItem | null;
+  article?: Article | null;
+}
+
+/** 收藏条目。旧数据可能残留 model 字段（榜单时代），读取端忽略。 */
+export interface IntelFavorite {
+  /** feed.id / article.id。 */
+  id: string;
+  topicId: string;
+  savedAt: number;
+  feed: FeedItem | null;
+  article: Article | null;
+}
+
+/** intel://updated 事件负载。 */
+export interface IntelUpdatedEvent {
+  topicId: string;
+}
+
+// ---------------------------------------------------------------------------
+// intel 出刊文章（Agent 编辑部，docs/17 §7.4）
+// ---------------------------------------------------------------------------
+
+/** 文章的原始来源引用（多源归并时多条）。 */
+export interface ArticleSource {
+  /** 原 FeedItem.id。 */
+  itemId: string;
+  sourceId: string;
+  url: string;
+  /** 原文标题（永不改写）。 */
+  title: string;
+}
+
+/** 加工成品文章：Agent 撰写的中文内容。 */
+export interface Article {
+  id: string;
+  topicId: string;
+  title: string;
+  lead: string;
+  body: string[];
+  tags: string[];
+  /** Agent 评的重要性 1-5。 */
+  importance: number;
+  sources: ArticleSource[];
+  /** 加工模型（provider/model，溯源）。 */
+  model: string;
+  createdAt: number;
+}
+
+/** intel_articles 返回：当天出刊（articles 空 = 尚未出刊）。 */
+export interface ArticlesDay {
+  topicId: string;
+  date: string;
+  /** 出刊模型；空串 = 未出刊。 */
+  model: string;
+  articles: Article[];
+}
+
+/** 出刊阶段（intel://digest 的 stage）。 */
+export type DigestStage =
+  | 'idle'
+  | 'fetching'
+  | 'triage'
+  | 'bodies'
+  | 'rewriting'
+  | 'synthesis'
+  | 'done'
+  | 'failed'
+  | 'llm-unavailable';
+
+/** intel://digest 事件负载 + intel_digest_status 返回值。 */
+export interface DigestProgress {
+  topicId: string;
+  stage: DigestStage;
+  done: number;
+  total: number;
+  message: string;
+  startedAt: number | null;
+}
+
+/** 一个正在进行的 HTTP 请求（intel://fetching 事件项）。 */
+export interface SourceActivity {
+  sourceId: string;
+  url: string;
+}
+
+/** intel://fetching 事件负载：某主题当前并发中的请求（active 空 = 结束）。 */
+export interface IntelFetchingEvent {
+  topicId: string;
+  active: SourceActivity[];
 }
 
 // ---------------------------------------------------------------------------

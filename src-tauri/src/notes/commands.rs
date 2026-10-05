@@ -31,14 +31,22 @@ pub struct NoteContent {
 }
 
 /// 列出库内全部 Markdown 笔记（walk 一层子目录即可满足当前需求；深层递归也做）。
+///
+/// `async` + `spawn_blocking`（docs/18 C3）：Tauri v2 中非 async 命令在**主线程**
+/// 执行，而本命令要遍历整个库并逐篇读文件头——笔记页每次聚焦/保存后都会调它，
+/// 1000 篇规模下会周期性卡住 UI。搬到阻塞线程池后主线程不再被占。
 #[tauri::command]
-pub fn notes_list(vault: String) -> Result<Vec<NoteMeta>> {
-    let root = vault_root(&vault)?;
-    let mut notes = Vec::new();
-    collect_notes(&root, &root, &mut notes)?;
-    // 最近修改优先。
-    notes.sort_by_key(|note| Reverse(note.updated));
-    Ok(notes)
+pub async fn notes_list(vault: String) -> Result<Vec<NoteMeta>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = vault_root(&vault)?;
+        let mut notes = Vec::new();
+        collect_notes(&root, &root, &mut notes)?;
+        // 最近修改优先。
+        notes.sort_by_key(|note| Reverse(note.updated));
+        Ok(notes)
+    })
+    .await
+    .map_err(|cause| Error::Notes(format!("清单扫描任务失败：{cause}")))?
 }
 
 /// 读取一篇笔记（正文 + 元数据）。
@@ -154,6 +162,26 @@ fn note_path(vault: &str, relative: &str) -> Result<PathBuf> {
     Ok(file)
 }
 
+/// 清单扫描时读取单篇的上限（docs/18 C3）。
+///
+/// 摘要只需要 frontmatter + 正文开头几十字节，但旧实现为了算 80 字摘要
+/// 把**整篇**读进内存——一篇 5MB 的长笔记就是 5MB 的分配 × N 篇。
+/// 超限后只读前 `EXCERPT_READ_CAP` 字节：摘要与 title 的来源都在文件头，
+/// 截断不影响清单正确性（正文要读时走 notes_read，那条路不截断）。
+const EXCERPT_READ_CAP: u64 = 64 * 1024;
+
+/// 读取清单所需的文件头（最多 `EXCERPT_READ_CAP` 字节）。
+fn read_head(path: &Path) -> String {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    // 读超量会返回 io::ErrorKind::UnexpectedEof，取已读部分即可。
+    let _ = file.by_ref().take(EXCERPT_READ_CAP).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 fn collect_notes(root: &Path, dir: &Path, out: &mut Vec<NoteMeta>) -> Result<()> {
     let entries =
         std::fs::read_dir(dir).map_err(|cause| Error::Notes(format!("遍历笔记库失败：{cause}")))?;
@@ -166,7 +194,7 @@ fn collect_notes(root: &Path, dir: &Path, out: &mut Vec<NoteMeta>) -> Result<()>
         if path.is_dir() {
             collect_notes(root, &path, out)?;
         } else if name.to_lowercase().ends_with(".md") {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = read_head(&path);
             if let Ok(meta) = meta_from_file(&path, root, &text) {
                 out.push(meta);
             }
@@ -357,5 +385,61 @@ mod tests {
         assert!(note_path(&vault, "../escape.md").is_err());
         assert!(note_path(&vault, "Z:/abs.md").is_err());
         assert!(note_path(&vault, "definitely-missing.md").is_err());
+    }
+
+    /// docs/18 C3：清单只读文件头，不得把整篇长笔记拉进内存。
+    #[test]
+    fn 清单只读文件头且仍能取出摘要() {
+        let dir = std::env::temp_dir().join("qx-notes-head-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建库目录");
+        // 正文远大于上限：模拟一篇长笔记。
+        let long_body = "长正文内容。".repeat(40_000); // ≈ 280KB > 64KB
+        let content = format!(
+            "---\ntitle: 长笔记\ntags: [\"测试\"]\ncreated: 2026-09-03\n---\n\n摘要首行。\n{long_body}"
+        );
+        let file = dir.join("long.md");
+        std::fs::write(&file, &content).expect("写文件");
+
+        let head = read_head(&file);
+        assert!(
+            head.len() as u64 <= EXCERPT_READ_CAP,
+            "读取量必须被上限约束，实际 {} 字节",
+            head.len()
+        );
+        // 关键：摘要与 title 的来源都在文件头，截断不影响清单正确性。
+        let meta = meta_from_file(&file, &dir, &head).expect("应解析出元数据");
+        assert_eq!(meta.title, "长笔记");
+        assert!(meta.excerpt.contains("摘要首行"), "摘要应来自文件头");
+        assert!(
+            meta.size > EXCERPT_READ_CAP,
+            "size 取真实文件大小而非读取量"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 清单扫描跳过隐藏目录与超长读取() {
+        let dir = std::env::temp_dir().join("qx-notes-walk-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".trash")).expect("建库目录");
+        std::fs::write(dir.join("a.md"), "---\ntitle: A\n---\n\n正文").expect("写 A");
+        std::fs::write(dir.join(".trash/deleted.md"), "---\ntitle: 删\n---\n\nx")
+            .expect("写回收站");
+        std::fs::create_dir_all(dir.join("sub")).expect("建子目录");
+        std::fs::write(dir.join("sub/b.md"), "---\ntitle: B\n---\n\n正文").expect("写 B");
+
+        let mut out = Vec::new();
+        collect_notes(&dir, &dir, &mut out).expect("遍历应成功");
+        let titles: Vec<&str> = out.iter().map(|n| n.title.as_str()).collect();
+        assert!(
+            titles.contains(&"A") && titles.contains(&"B"),
+            "应含 A 与 B"
+        );
+        assert!(!titles.contains(&"删"), ".trash 必须跳过");
+        assert_eq!(out.len(), 2, "只应有 2 篇");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
