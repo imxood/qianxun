@@ -24,7 +24,9 @@ pub struct Detail {
     pub bundle: bool,
     /// 与千寻锁定的 DSH 版本的兼容结论。
     pub compatibility: Compatibility,
-    #[allow(dead_code)]
+    /// 安装时会被 pnpm 执行的脚本（`preinstall`/`install`/`postinstall`/
+    /// `prepare`）。非空 = 该包安装阶段可执行任意代码，是供应链面，
+    /// 必须在安装前明示（docs/18 A1）。
     pub lifecycle_scripts: Vec<String>,
     /// 发布者标记的弃用说明；存在即拒绝安装。
     pub deprecated: Option<String>,
@@ -83,6 +85,25 @@ pub fn validate(detail: &Detail) -> Result<()> {
     if let Compatibility::Block { reason, .. } = &detail.compatibility {
         return Err(Error::Market(format!(
             "与千寻适配的 DSH {PINNED_VERSION} 不兼容：{reason}"
+        )));
+    }
+    Ok(())
+}
+
+/// 带 lifecycle 脚本确认的门槛（docs/18 A1）。
+///
+/// `pnpm add` 会执行包的 `preinstall`/`install`/`postinstall`/`prepare`，
+/// 即安装阶段可执行任意代码。采集数据一直存在却从未参与决策（此前带
+/// `#[allow(dead_code)]`），是唯一真正的供应链攻击面。
+///
+/// 策略：**不静默放行，也不一刀切拦死**。声明了安装脚本的包必须由用户
+/// 显式确认（`ack_scripts=true`）才放行；无脚本的包零摩擦通过。
+pub fn validate_install(detail: &Detail, ack_scripts: bool) -> Result<()> {
+    validate(detail)?;
+    if !detail.lifecycle_scripts.is_empty() && !ack_scripts {
+        return Err(Error::Market(format!(
+            "该包安装时会执行脚本（{}），可在安装阶段运行任意代码。确认信任后再安装。",
+            detail.lifecycle_scripts.join(", ")
         )));
     }
     Ok(())
@@ -196,7 +217,7 @@ fn string(value: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use super::{
         compatibility, detail_from_manifest, is_package_name, manifest_for_version, validate,
-        Compatibility,
+        validate_install, Compatibility,
     };
 
     #[test]
@@ -276,5 +297,47 @@ mod tests {
         assert!(!is_package_name(""));
         assert!(!is_package_name("@only-scope"));
         assert!(!is_package_name("Bad/Name"));
+    }
+
+    /// docs/18 A1：带安装期脚本的包必须显式确认才放行。
+    #[test]
+    fn 安装门槛对生命周期脚本要求显式确认() {
+        let scripted = detail_from_manifest(
+            "risky",
+            &serde_json::json!({
+                "name": "risky",
+                "version": "1.0.0",
+                "scripts": { "postinstall": "node setup.js", "prepare": "tsc" }
+            }),
+        );
+        assert_eq!(scripted.lifecycle_scripts, ["postinstall", "prepare"]);
+        // 未确认 → 拦截，且消息带上脚本名（供 UI 直接展示）
+        let err = validate_install(&scripted, false).unwrap_err().to_string();
+        assert!(
+            err.contains("postinstall") && err.contains("prepare"),
+            "{err}"
+        );
+        // 已确认 → 放行
+        assert!(validate_install(&scripted, true).is_ok());
+
+        // 无脚本的包零摩擦通过（不因新门槛改变既有体验）
+        let clean = detail_from_manifest(
+            "clean",
+            &serde_json::json!({ "name": "clean", "version": "0.1.0" }),
+        );
+        assert!(clean.lifecycle_scripts.is_empty());
+        assert!(validate_install(&clean, false).is_ok());
+
+        // 门槛叠加：已弃用优先于脚本确认（ack 也救不回来）
+        let deprecated = detail_from_manifest(
+            "old",
+            &serde_json::json!({
+                "name": "old",
+                "version": "1.0.0",
+                "deprecated": "用新包",
+                "scripts": { "postinstall": "x" }
+            }),
+        );
+        assert!(validate_install(&deprecated, true).is_err());
     }
 }

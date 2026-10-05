@@ -27,6 +27,7 @@
   import { harness } from '../../stores/harness.svelte';
   import { settings } from '../../stores/settings.svelte';
   import MarketDetailDialog from './MarketDetailDialog.svelte';
+  import ConfirmDialog from '../../components/ConfirmDialog.svelte';
 
   type Tab = 'featured' | 'search' | 'installed';
   /** 推荐排序键：目录顺序 = 上游策展原序（类内按收录时间倒序）。 */
@@ -221,12 +222,36 @@
     dialogError = '';
   }
 
+  /**
+   * 安装：声明了安装期脚本的包必须先弹确认（docs/18 A1）。
+   * Rust 侧 validate_install 是硬门槛，这里只是把同一条件前置成一次
+   * 可读的用户确认——不在前端判、后端也不拦。
+   */
+  let scriptConfirm = $state<{ name: string; version: string; scripts: string[] } | null>(null);
+
   async function install(name: string, version: string): Promise<void> {
+    const detail = details.get(detailKey(name));
+    const scripts = detail?.lifecycleScripts ?? [];
+    if (scripts.length > 0) {
+      scriptConfirm = { name, version: detail?.version ?? version, scripts };
+      return;
+    }
+    await runInstall(name, version, false);
+  }
+
+  async function confirmScriptInstall(): Promise<void> {
+    const pending = scriptConfirm;
+    scriptConfirm = null;
+    if (!pending) return;
+    await runInstall(pending.name, pending.version, true);
+  }
+
+  async function runInstall(name: string, version: string, ackScripts: boolean): Promise<void> {
     working = name;
     error = '';
     try {
       const target = details.get(detailKey(name))?.version ?? version;
-      await call('market_install', { name, version: target });
+      await call('market_install', { name, version: target, ackScripts });
       await refreshInstalled();
     } catch (failure) {
       error = failure instanceof Error ? failure.message : String(failure);
@@ -412,6 +437,14 @@
             {#if cached.deprecated}
               <span class="shrink-0 rounded bg-danger/10 px-1.5 py-0.5 text-xs text-danger">
                 已弃用
+              </span>
+            {/if}
+            {#if cached.lifecycleScripts.length > 0}
+              <span
+                class="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-xs text-warning"
+                title="安装时将执行 {cached.lifecycleScripts.join('、')}"
+              >
+                安装脚本 ×{cached.lifecycleScripts.length}
               </span>
             {/if}
           {/if}
@@ -787,4 +820,21 @@
     if (selected) void install(selected.name, selected.version);
   }}
   onclose={closeDetail}
+/>
+
+<!-- 安装期脚本确认（docs/18 A1）：pnpm add 会执行包的 preinstall/install/
+     postinstall/prepare，即安装阶段可执行任意代码。Rust 侧 validate_install
+     是硬门槛，这里是同一条规则的用户可见形态。 -->
+<ConfirmDialog
+  open={scriptConfirm !== null}
+  danger
+  title="该插件会在安装时执行脚本"
+  confirmLabel="我信任它，继续安装"
+  cancelLabel="取消"
+  message={scriptConfirm
+    ? `${scriptConfirm.name}@${scriptConfirm.version} 声明了 ${scriptConfirm.scripts.join('、')}。` +
+      '安装时这些脚本将以你的权限运行任意代码。仅在你信任该发布者时继续。'
+    : ''}
+  onconfirm={() => void confirmScriptInstall()}
+  oncancel={() => (scriptConfirm = null)}
 />

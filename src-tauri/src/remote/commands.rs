@@ -105,11 +105,11 @@ pub fn remote_pair(app: AppHandle, name: String) -> Result<String> {
         created_at: chrono::Local::now().timestamp_millis(),
         revoked: false,
     };
-    let url = remote::gateway::pair_url(
-        &settings.remote.bind_ip,
-        settings.remote.port,
-        &device.token,
-    );
+    // 配对 URL 携带一次性短期 code（docs/18 A4），不再直接暴露长期 token：
+    // code 5 分钟有效、兑换即消费，长期 token 只落在兑换后的 cookie 里。
+    let code = remote::gateway::global_pair_codes().issue(&device.token);
+    let url =
+        remote::gateway::pair_url_with_code(&settings.remote.bind_ip, settings.remote.port, &code);
     settings.remote.devices.push(device);
     crate::settings::save(&path, &settings)?;
     drop(settings);
@@ -403,11 +403,14 @@ mod tests {
         let token = remote::gateway::new_token();
         assert_eq!(token.len(), 64);
         assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
-        let url = remote::gateway::pair_url("10.144.3.2", 17400, &token);
+        // 配对 URL 只带一次性 code，不带长期 token（docs/18 A4）。
+        let code = remote::gateway::global_pair_codes().issue(&token);
+        let url = remote::gateway::pair_url_with_code("10.144.3.2", 17400, &code);
         assert_eq!(
             url,
-            format!("http://10.144.3.2:17400/qx-gate?token={token}")
+            format!("http://10.144.3.2:17400/qx-gate?code={code}")
         );
+        assert!(!url.contains(&token), "配对 URL 不得内嵌长期 token");
         let id = remote::gateway::new_device_id();
         assert!(id.starts_with("dev-"));
     }

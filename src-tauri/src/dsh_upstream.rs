@@ -26,6 +26,13 @@ use tokio_tungstenite::tungstenite::http::Request as HttpRequest;
 /// DSH 签名 cookie 的名字前缀（@deepseek-ai/dsh-client-connection）。
 const DSH_COOKIE_PREFIX: &str = "dsh-auth-";
 
+/// WS 桥空闲超时（docs/18 A3）。
+///
+/// 取 10 分钟：远端手机会息屏，DSH agent 也可能长时间无输出（一次模型
+/// 推理可以很久），阈值过短会误杀正常会话。ping/pong 帧同样计入「有活动」，
+/// 所以上游或浏览器自带的保活不会让这个计时器空转。
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// 上游建连超时；上游在回环，给小超时。
 /// 注意：转发请求**不设总超时**——`.timeout()` 是「发起→响应体读完」
 /// 全程计时，会把 `/plugins/events`（HMR SSE）等长连接在时限处腰斩
@@ -422,6 +429,11 @@ pub(crate) async fn upgrade_ws(
 /// 双向桥：浏览器 WS ↔ DSH WS（帧级透传，ping/pong/close 各自终结）。
 /// 全程留痕：上游连接成败（含原因）与两侧泵的结束原因都进日志——
 /// 上游连接失败时浏览器只会看到裸 1006（无 close 帧），不落日志无法归因。
+///
+/// 空闲治理（docs/18 A3）：两侧泵原本是无界 `loop`，只有对端发帧或断开
+/// 才结束。手机息屏 / 弱网下 TCP 连接会长期半开而不发 FIN，两个 future 与
+/// 它们的缓冲区一起泄漏，agent 侧表现为「连着但无响应」。
+/// 现在每条收到的帧都刷新空闲计时，超过 `WS_IDLE_TIMEOUT` 判定半开并收尾。
 async fn bridge_ws(client: WebSocket, upstream_request: HttpRequest<()>, path: String) {
     let (upstream, _) = match tokio_tungstenite::connect_async(upstream_request).await {
         Ok(pair) => pair,
@@ -436,30 +448,32 @@ async fn bridge_ws(client: WebSocket, upstream_request: HttpRequest<()>, path: S
     crate::logging::log("info", &format!("[ws-bridge] {path} 上游已连通"));
     let (mut client_tx, mut client_rx) = client.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
-    // 两侧泵各自跑到对端关闭/出错为止；结束原因转文字进收尾日志。
+    // 两侧泵各自跑到对端关闭/出错/空闲超时为止；结束原因转文字进收尾日志。
     let to_upstream = async {
         loop {
-            match client_rx.next().await {
-                Some(Ok(frame)) => {
+            match tokio::time::timeout(WS_IDLE_TIMEOUT, client_rx.next()).await {
+                Err(_) => break "浏览器侧空闲超时（疑似半开连接）".to_owned(),
+                Ok(None) => break "浏览器侧正常关闭".to_owned(),
+                Ok(Some(Err(cause))) => break format!("浏览器侧读错误：{cause}"),
+                Ok(Some(Ok(frame))) => {
                     if upstream_tx.send(to_tungstenite(frame)).await.is_err() {
                         break "上行发送失败（上游已断）".to_owned();
                     }
                 }
-                Some(Err(cause)) => break format!("浏览器侧读错误：{cause}"),
-                None => break "浏览器侧正常关闭".to_owned(),
             }
         }
     };
     let to_client = async {
         loop {
-            match upstream_rx.next().await {
-                Some(Ok(frame)) => {
+            match tokio::time::timeout(WS_IDLE_TIMEOUT, upstream_rx.next()).await {
+                Err(_) => break "上游侧空闲超时（疑似半开连接）".to_owned(),
+                Ok(None) => break "上游侧正常关闭".to_owned(),
+                Ok(Some(Err(cause))) => break format!("上游侧读错误：{cause}"),
+                Ok(Some(Ok(frame))) => {
                     if client_tx.send(to_axum(frame)).await.is_err() {
                         break "下行发送失败（浏览器已断）".to_owned();
                     }
                 }
-                Some(Err(cause)) => break format!("上游侧读错误：{cause}"),
-                None => break "上游侧正常关闭".to_owned(),
             }
         }
     };

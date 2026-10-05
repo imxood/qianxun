@@ -82,8 +82,17 @@ pub fn market_installed(app: AppHandle) -> Result<Vec<InstalledBundle>> {
 }
 
 /// 安装精确版本并加入 bundles。每一步与 pnpm 输出都进 supervisor 日志。
+///
+/// `ack_scripts`：用户已确认信任该包的安装期脚本（见 registry::validate_install）。
+/// 默认 false —— 声明了 `preinstall`/`install`/`postinstall`/`prepare` 的包
+/// 必须显式确认才放行（docs/18 A1）。
 #[tauri::command]
-pub async fn market_install(app: AppHandle, name: String, version: String) -> Result<()> {
+pub async fn market_install(
+    app: AppHandle,
+    name: String,
+    version: String,
+    ack_scripts: Option<bool>,
+) -> Result<()> {
     let _busy = claim_busy()?;
     ensure_not_safe_mode(&app)?;
     let settings = crate::settings_snapshot(&app)?;
@@ -104,7 +113,7 @@ pub async fn market_install(app: AppHandle, name: String, version: String) -> Re
             return Err(failure);
         }
     };
-    if let Err(failure) = registry::validate(&detail) {
+    if let Err(failure) = registry::validate_install(&detail, ack_scripts.unwrap_or(false)) {
         supervisor.note(Stream::Stderr, format!("[插件] 安装失败：{failure}"));
         return Err(failure);
     }

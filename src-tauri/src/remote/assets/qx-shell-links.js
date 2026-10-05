@@ -114,4 +114,93 @@
     },
     true
   );
+
+  // ---- 顶层导航守卫（docs/18 A6）----
+  // 原实现只拦 click/auxclick 上的 <a>，因此 DSH 页面里的
+  //   location.href = 'https://evil.example'、<form action>、window.open
+  // 都能让 iframe 顶层导航到任意外站，且 iframe 带 allow-downloads /
+  // allow-popups 时后果更大。
+  // 现在：武装后若本 iframe 即将离开当前 origin，一律拦下并交给外壳分流。
+  // 未武装时（用户直接用浏览器打开网关）完全放行，零破坏。
+  function isCrossOrigin(target) {
+    if (!target || target === location.href) return false;
+    // 只管 http/https；about:blank / data: 之类是 iframe 自身生命周期。
+    if (target.indexOf('http://') !== 0 && target.indexOf('https://') !== 0) return false;
+    try {
+      return new URL(target).origin !== location.origin;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function interceptNavigation(target, via) {
+    if (!armed || !isCrossOrigin(target)) return false;
+    try {
+      history.pushState(history.state, '', location.href);
+    } catch (error) {
+      /* 某些上下文不可写历史：忽略，阻止动作本身已生效。 */
+    }
+    post({
+      __qxShell: TAG,
+      kind: 'open-url',
+      url: target,
+      via: via,
+      ctrl: false,
+      middle: false,
+      shift: false
+    });
+    return true;
+  }
+
+  // location.href 赋值 / history.pushState：能拦下 JS 发起的主框架导航。
+  var nativeAssign = window.location.assign;
+  var nativeReplace = window.location.replace;
+  function wrapNavigation(native, via) {
+    if (typeof native !== 'function') return;
+    return function (url) {
+      var href = String(url);
+      var absolute;
+      try {
+        absolute = new URL(href, location.href).href;
+      } catch (error) {
+        absolute = href;
+      }
+      if (!interceptNavigation(absolute, via)) native.call(window.location, url);
+    };
+  }
+  try {
+    window.location.assign = wrapNavigation(nativeAssign, 'assign');
+    window.location.replace = wrapNavigation(nativeReplace, 'replace');
+  } catch (error) {
+    /* 极端情况下 location 不可写：退回下面的 form/beforeunload 兜底。 */
+  }
+
+  // 表单提交：action 指向外站时拦下（GET/POST 都拦，避免带数据的提交外泄）。
+  document.addEventListener(
+    'submit',
+    function (event) {
+      var form = event.target;
+      if (!form || !form.getAttribute) return;
+      var action = form.getAttribute('action') || form.action;
+      if (!action) return;
+      var absolute;
+      try {
+        absolute = new URL(action, location.href).href;
+      } catch (error) {
+        return;
+      }
+      if (!interceptNavigation(absolute, 'form')) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    true
+  );
+
+  // 兜底：document 即将离开当前 origin 时（location 不可写等退化路径）。
+  window.addEventListener('beforeunload', function (event) {
+    if (!armed || !isCrossOrigin(location.href)) return undefined;
+    event.preventDefault();
+    event.returnValue = '';
+    return '';
+  });
 })();

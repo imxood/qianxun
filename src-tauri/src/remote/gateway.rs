@@ -60,16 +60,20 @@ pub struct GatewayState {
     pub loopback_addr: SocketAddr,
     /// 移动定制层（/qx-mobile/* 的文件服务）。
     pub mobile: Arc<MobileUi>,
+    /// 一次性配对 code 表（docs/18 A4）。`/qx-gate?code=` 凭它兑换长期 token。
+    pub pair_codes: PairCodes,
 }
 
 impl GatewayState {
     /// 设备鉴权（仅局域网入口走）。
+    ///
+    /// 常量时间比较（docs/18 A4 加固）：逐 `.any(|d| d.token == presented)`
+    /// 会在首个不匹配字符处短路，理论上可被计时攻击逐字节试探。
     fn token_valid(&self, presented: &str) -> bool {
         !presented.is_empty()
-            && self
-                .devices
-                .iter()
-                .any(|device| !device.revoked && device.token == presented)
+            && self.devices.iter().any(|device| {
+                !device.revoked && constant_time_eq(device.token.as_bytes(), presented.as_bytes())
+            })
     }
 
     /// 当前请求来自回环入口？靠 Host 头与本机回环端口比对——同进程绑了
@@ -124,6 +128,8 @@ pub async fn start(
         devices: Arc::new(devices),
         loopback_addr,
         mobile: Arc::new(MobileUi::new(mobile_access_dir)),
+        // 与 remote_add 共用进程级同一张表：配对 URL 在网关启动前就已签发。
+        pair_codes: global_pair_codes().clone(),
     };
     // 顺手把登录兑换做掉：首个请求就不必等一次兑换往返。
     if dsh_url.is_some() {
@@ -309,11 +315,24 @@ async fn handler(State(state): State<GatewayState>, request: Request<Body>) -> R
 
     // 局域网入口：配对 → 鉴权 → 转发（含 SSE 流响应）。
     if path == "/qx-gate" {
+        // 首选一次性 code（docs/18 A4）：二维码/URL 里带的是 5 分钟有效的
+        // 一次性凭据，兑换后立刻消费，长期 token 只进 cookie 不进 URL。
+        let code = query_param(&query, "code");
+        if let Some(token) = state.pair_codes.redeem(&code) {
+            if state.token_valid(&token) {
+                return response_with_cookie(&token);
+            }
+            return plain(StatusCode::UNAUTHORIZED, "配对码对应的设备已被吊销");
+        }
+        // 兼容旧版客户端仍直传长期 token；新生成的配对链接不再走这条路径。
         let token = query_param(&query, "token");
         if state.token_valid(&token) {
             return response_with_cookie(&token);
         }
-        return plain(StatusCode::UNAUTHORIZED, "无效或已吊销的配对 token");
+        return plain(
+            StatusCode::UNAUTHORIZED,
+            "配对码无效、已过期或已被使用；请重新扫码获取",
+        );
     }
     if !authorized(&state, &query, &request.headers().clone()) {
         return plain(
@@ -567,8 +586,11 @@ async fn inject_layer_into(
 }
 
 /// 供 commands 生成配对 URL 展示二维码：http://<bind>:<port>/qx-gate?token=…
-pub fn pair_url(bind_ip: &str, port: u16, token: &str) -> String {
-    format!("http://{bind_ip}:{port}/qx-gate?token={token}")
+/// 配对 URL：携带一次性短期 code 而非长期 token（docs/18 A4）。
+///
+/// 长期凭据只落在兑换后的 cookie 里，不再出现在二维码、URL 与日志中。
+pub fn pair_url_with_code(bind_ip: &str, port: u16, code: &str) -> String {
+    format!("http://{bind_ip}:{port}/qx-gate?code={code}")
 }
 
 /// 生成 256bit hex token。
@@ -577,6 +599,121 @@ pub fn new_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// 配对一次性 code 的有效期（docs/18 A4）。
+///
+/// 原实现把**长期 token 本身**放进二维码/URL，且 `Max-Age` 是一年、记录无过期
+/// 字段——凭据长期有效、明文展示、还进了 URL（会进浏览器历史与服务器日志）。
+/// 改成「一次性短期 code 换 cookie」后，URL 里出现的只是一次性凭据。
+const PAIR_CODE_TTL: Duration = Duration::from_secs(300);
+
+/// 一次性的配对兑换凭据（docs/18 A4）。
+#[derive(Clone, Debug)]
+pub struct PairCode {
+    /// 兑换成功后写入 cookie 的长期 token。
+    pub token: String,
+    pub expires_at: std::time::Instant,
+}
+
+/// 进程内的一次性 code 表：code → 目标 token。
+///
+/// 刻意只放内存：不落盘，进程退出即全部失效（用户重新扫码即可）。
+/// 消费后立即移除，天然「一次性」。
+#[derive(Clone, Default)]
+pub struct PairCodes(Arc<std::sync::Mutex<std::collections::HashMap<String, PairCode>>>);
+
+/// 全局 code 表：`remote_add` 在网关启动前就要签发 code（配对 URL 由
+/// 桌面端立即返回给用户扫码），而 `GatewayState` 是网关启动后才构造的。
+/// 进程内单例，两者共用同一张表。
+static GLOBAL_PAIR_CODES: std::sync::OnceLock<PairCodes> = std::sync::OnceLock::new();
+
+/// 取得全局一次性 code 表。
+pub fn global_pair_codes() -> &'static PairCodes {
+    GLOBAL_PAIR_CODES.get_or_init(PairCodes::new)
+}
+
+impl PairCodes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 为某个设备 token 签发一次性 code（覆盖同 token 的旧 code）。
+    pub fn issue(&self, token: &str) -> String {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        // 小写十六进制，便于手机键盘手输。
+        let code = format!("{code:02x}", code = bytes[0])
+            + &bytes[1..]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.retain(|_, entry| entry.expires_at > std::time::Instant::now());
+        guard.insert(
+            code.clone(),
+            PairCode {
+                token: token.to_owned(),
+                expires_at: std::time::Instant::now() + PAIR_CODE_TTL,
+            },
+        );
+        code
+    }
+
+    /// 兑换：命中且未过期则消费（一次性）并返回目标 token。
+    pub fn redeem(&self, presented: &str) -> Option<String> {
+        if presented.is_empty() {
+            return None;
+        }
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 常量时间比较，避免按前缀逐字节试探（docs/18 A4 附带的加固）。
+        let matched = guard
+            .keys()
+            .find(|candidate| constant_time_eq(candidate.as_bytes(), presented.as_bytes()));
+        let key = matched?.clone();
+        let entry = guard.get(&key)?;
+        if entry.expires_at <= std::time::Instant::now() {
+            guard.remove(&key);
+            return None;
+        }
+        // 先取出 token 再移除：一次性语义的兑现点就在这次 remove。
+        let token = entry.token.clone();
+        guard.remove(&key);
+        Some(token)
+    }
+
+    /// 存活 code 数量：供测试断言「一次性」语义，生产路径不需要。
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// 长度不等即 false；等长则按字节累积异或，避免早退泄露前缀长度信息。
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 /// 生成短 id（配对时间戳 + 随机尾巴，可读可吊销）。
@@ -591,8 +728,67 @@ pub fn new_device_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{access_allowed, inject_mobile_layer, loopback_authority, origin_allowed, start};
+    use super::{
+        access_allowed, constant_time_eq, inject_mobile_layer, loopback_authority, origin_allowed,
+        pair_url_with_code, start, PairCodes,
+    };
     use axum::http::{HeaderMap, Method};
+
+    /// docs/18 A4：配对 code 必须一次性、短时效、且不与长期 token 混同。
+    #[test]
+    fn 配对code一次性且短时效() {
+        let codes = PairCodes::new();
+        let token = "t".repeat(64);
+        let code = codes.issue(&token);
+        assert_eq!(code.len(), 32, "code 应为 16 字节 hex");
+        assert!(!code.contains(&token), "code 不得内嵌长期 token");
+        assert_eq!(codes.len(), 1);
+
+        // 首次兑换成功，拿到长期 token
+        assert_eq!(codes.redeem(&code), Some(token.clone()));
+        // 一次性：同一个 code 再来直接失效
+        assert_eq!(codes.redeem(&code), None);
+        assert!(codes.is_empty());
+
+        // 错误 code / 空串都不放行
+        let code2 = codes.issue(&token);
+        assert_eq!(codes.redeem(""), None);
+        assert_eq!(codes.redeem(&"0".repeat(32)), None);
+        // 正确 code 仍可用（前面的错误尝试没有误消费）
+        assert_eq!(codes.redeem(&code2), Some(token));
+    }
+
+    /// 过期 code 必须被拒（构造已过期的条目而不真等 5 分钟）。
+    #[test]
+    fn 过期配对code被拒() {
+        let codes = PairCodes::new();
+        let code = codes.issue("t");
+        // 直接把唯一条目的到期时间改到过去，模拟 TTL 流逝。
+        {
+            let mut guard = codes.0.lock().unwrap();
+            for entry in guard.values_mut() {
+                entry.expires_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            }
+        }
+        assert_eq!(codes.redeem(&code), None);
+        assert!(codes.is_empty(), "过期条目应被清理");
+    }
+
+    #[test]
+    fn 常量时间比较语义正确() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"), "长度不等直接 false");
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn 配对url只带code不带token() {
+        let url = pair_url_with_code("192.168.1.9", 17400, "abc123");
+        assert_eq!(url, "http://192.168.1.9:17400/qx-gate?code=abc123");
+        assert!(!url.contains("token"), "URL 不得出现长期 token 参数");
+    }
 
     const GET: Method = Method::GET;
 

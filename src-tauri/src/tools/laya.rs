@@ -28,6 +28,13 @@ const START_READY_TIMEOUT_MS: u64 = 20_000;
 #[derive(Default)]
 pub struct LayaProcState {
     pub child: Mutex<Option<std::process::Child>>,
+    /// 启动互斥（docs/18 A5）。
+    ///
+    /// 原先并发双启会各自 spawn 一个 laya-server，后写者覆盖
+    /// `state.child`，先写者的进程从此**无人收割**（既不会被 stop 杀掉，
+    /// 也不会被 wait 回收）——孤儿进程占着模型与端口。
+    /// 置位期间后续启动请求直接返回，不 spawn 第二个。
+    pub starting: Mutex<bool>,
 }
 
 /// laya_status / laya_start 返回快照。
@@ -202,7 +209,34 @@ pub async fn laya_start(app: AppHandle) -> Result<LayaStatus> {
         .map_err(|error| Error::Spawn(format!("启动任务失败：{error}")))?
 }
 
+/// 启动互斥的 RAII 复位（docs/18 A5）。
+///
+/// 放 `Drop` 而不是在函数尾部手动清位：`laya_start_blocking` 有多处提前
+/// return（配置缺失、端口占用、spawn 失败…），任何一条漏掉复位都会让
+/// 「启动中」永久为真，之后再也起不来。
+struct StartGuard<'a> {
+    flag: &'a Mutex<bool>,
+}
+
+impl Drop for StartGuard<'_> {
+    fn drop(&mut self) {
+        *self.flag.lock().unwrap() = false;
+    }
+}
+
 fn laya_start_blocking(app: &AppHandle, state: &State<'_, LayaProcState>) -> Result<LayaStatus> {
+    // 启动互斥（docs/18 A5）：并发双启会让先写的子进程失去引用 → 孤儿。
+    {
+        let mut starting = state.starting.lock().unwrap();
+        if *starting {
+            return Err(Error::Spawn("Laya 正在启动中，请等它完成再试".to_owned()));
+        }
+        *starting = true;
+    }
+    // 无论成功、失败还是提前 return，都必须复位，否则一次失败会永久锁死启动。
+    let _guard = StartGuard {
+        flag: &state.starting,
+    };
     let settings = settings_snapshot(app)?;
     let port = settings.tools.laya.port;
     let (running, checkpoint) = probe_health(port);
