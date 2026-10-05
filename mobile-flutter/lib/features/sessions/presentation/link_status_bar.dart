@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
-import '../../../app/theme/qx_tokens.dart';
 import '../../../app/theme/qx_type.dart';
 import '../../../data/dsh/dsh_connection.dart';
+import '../../../../app/theme/qx_semantic.dart';
+import '../../../app/theme/qx_tokens.dart';
 
 /// 连接状态条。
 ///
@@ -51,7 +52,7 @@ class LinkStatusBar extends StatelessWidget {
       width: double.infinity,
       color: isFatal
           ? theme.colorScheme.error.withValues(alpha: 0.10)
-          : QxColor.sunken(theme.brightness),
+          : context.qx.surfaceSunken,
       padding: const EdgeInsets.fromLTRB(QxSpace.l, QxSpace.s, QxSpace.m, QxSpace.s),
       child: Row(
         children: [

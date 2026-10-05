@@ -7,6 +7,8 @@ import '../../../data/models/content.dart';
 import '../../../data/models/session.dart';
 import '../../../shared/widgets/primitives.dart';
 import '../application/interaction_controller.dart';
+import '../../../app/theme/qx_theme.dart';
+import '../../../../app/theme/qx_semantic.dart';
 
 /// 待答交互提示条。
 ///
@@ -25,11 +27,11 @@ class PendingInteractionBar extends ConsumerWidget {
     final theme = Theme.of(context);
 
     return Material(
-      color: QxColor.raised(theme.brightness),
+      color: context.qx.surfaceRaised,
       child: Container(
         decoration: BoxDecoration(
           border: Border(
-            top: BorderSide(color: QxColor.hairline(theme.brightness)),
+            top: BorderSide(color: context.qx.hairline),
           ),
         ),
         child: InkWell(
@@ -46,7 +48,7 @@ class PendingInteractionBar extends ConsumerWidget {
                 _UrgentGlyph(
                   isApproval: head is PendingApproval,
                   color: head is PendingApproval
-                      ? QxColor.pending(theme.brightness)
+                      ? context.qx.waiting
                       : theme.colorScheme.primary,
                 ),
                 const SizedBox(width: QxSpace.m),
@@ -134,7 +136,16 @@ Future<void> showApprovalSheet(
   PendingApproval item,
 ) {
   final theme = Theme.of(context);
-  final accent = QxColor.pending(theme.brightness);
+  // ⚠️ 按钮底必须是 **accent**，不能是 `waiting` 琥珀。
+  // 05 §6.2：「允许这一次」accent 填充，且末行明确「状态色不进按钮填充」——
+  // 琥珀是「它在等你」这个**状态**的色，拿来当按钮底会让「状态」和
+  // 「可点的承诺」混成一个视觉信号，用户会以为批准本身就是状态。
+  //
+  // 顺带修掉一个真对比度 bug：这里原来写死 `Colors.black`，亮色板下
+  // waiting `#996300` 上只有 4.14:1（低于 AA 的 4.5）。accent + onAccent
+  // 由 check_contrast.py 守住（实测 5.13:1）。
+  final accent = context.qx.accent;
+  final onAccent = context.qx.onAccent;
 
   return showModalBottomSheet<void>(
     context: context,
@@ -153,7 +164,8 @@ Future<void> showApprovalSheet(
           children: [
             Row(
               children: [
-                MonoBadge(label: 'TOOL APPROVAL', color: accent, filled: true),
+                // 05 §8.5：全中文，只有代码 / 路径 / 工具名保留原文。
+                MonoBadge(label: '工具审批', color: accent, filled: true),
                 const Spacer(),
                 Text(
                   'agent ${item.agentId}',
@@ -187,7 +199,10 @@ Future<void> showApprovalSheet(
             ],
             const SizedBox(height: QxSpace.xl),
             FilledButton.icon(
-              style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
+              style: FilledButton.styleFrom(
+                backgroundColor: accent,
+                foregroundColor: onAccent,
+              ),
               onPressed: () {
                 Navigator.pop(sheetContext);
                 controller.answerApproval(item.eventId, 'allowed-once');
@@ -297,7 +312,7 @@ class _QuestionSheetState extends State<_QuestionSheet> {
             Row(
               children: [
                 MonoBadge(
-                  label: 'AGENT QUESTION',
+                  label: 'agent 提问',
                   color: theme.colorScheme.primary,
                   filled: true,
                 ),
@@ -375,7 +390,7 @@ class _QuestionCard extends StatelessWidget {
           if (question.header != null) ...[
             Text(
               question.header!.toUpperCase(),
-              style: QxType.overlineIn(theme.colorScheme.onSurfaceVariant),
+              style: QxType.overline.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
             const SizedBox(height: QxSpace.s),
           ],
@@ -404,9 +419,11 @@ class _QuestionCard extends StatelessWidget {
                 label: option.label,
                 description: option.description,
                 selected: selected.contains(option.label),
-                // plan-review：只有「批准」那个选项是正向的，其他都是
-                // 拒绝。用颜色与文案区分，避免用户误点。
-                isApprove: question.isPlanReview && option.label == question.planReviewApprove,
+                // 曾经这里对 plan-review 的「批准」选项单独上 `running` 绿，
+                // 注释说是「避免用户误点」。已删：它只在**选中之后**改色，
+                // 防不了误点，却把会话状态色（运行中）塞进了一个选择菜单，
+                // 还违反 05 §6.2「状态色不进按钮填充」。选中与否由勾选图标 +
+                // 描边 + 底色三条通道表达，够清楚了。
                 onTap: () => onToggle(option.label),
               ),
           ],
@@ -433,24 +450,23 @@ class _OptionRow extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.description,
-    this.isApprove = false,
   });
 
   final String label;
   final String? description;
   final bool selected;
-  final bool isApprove;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final accent = isApprove ? QxColor.running(theme.brightness) : theme.colorScheme.primary;
+    // 选中与否统一用 accent：它表示「可点 / 已选中」，不表示状态。
+    final accent = context.qx.accent;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: QxSpace.xs),
       child: Material(
-        color: selected ? accent.withValues(alpha: 0.12) : QxColor.sunken(theme.brightness),
+        color: selected ? accent.withValues(alpha: 0.12) : context.qx.surfaceSunken,
         borderRadius: QxRadius.controlAll,
         child: InkWell(
           onTap: onTap,
@@ -463,7 +479,7 @@ class _OptionRow extends StatelessWidget {
             decoration: BoxDecoration(
               borderRadius: QxRadius.controlAll,
               border: Border.all(
-                color: selected ? accent : QxColor.hairline(theme.brightness),
+                color: selected ? accent : context.qx.hairline,
               ),
             ),
             child: Row(

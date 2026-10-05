@@ -11,6 +11,8 @@ import '../../connections/application/connections_controller.dart';
 import '../application/session_list_controller.dart';
 import 'link_status_bar.dart';
 import '../../workspace/presentation/pending_interaction_bar.dart';
+import '../../../app/theme/qx_theme.dart';
+import '../../../../app/theme/qx_semantic.dart';
 
 /// 会话列表（DSH 工作台首页）。
 ///
@@ -216,21 +218,20 @@ class SessionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final brightness = theme.brightness;
-    // 三种状态要三种语义色，**不能**按 running/blank 二分：
-    //   运行中 = agent 正在跑
-    //   空闲   = 有 agent 但这会儿没在跑
-    //   已断开 = 子 agent 没了（agentAvailable:false），点进去进不去
-    final accent = session.running
-        ? QxColor.running(brightness)
-        : session.isDetached
-            ? QxColor.offline
-            : QxColor.done(brightness);
-    final stateLabel = session.running
-        ? '运行中'
-        : session.isDetached
-            ? '已断开'
-            : '空闲';
+    // 状态判定与取色**只能**来自 [QxSessionState]，不许在这里另写一套词表：
+    // 早期版本这里手搓了「运行中 / 空闲 / 已断开」三选一，跟 05 §2 的五态词表
+    // 各说各话，同一屏会出现两套词。Batch 3 重做本列表时这一整段会被
+    // SessionTile 取代，但在那之前也不许再分叉。
+    //
+    // 目前只用得到三态：running / detached / done。等你与失败要等
+    // `userQuestions.active` 与 waterfall 接进数据源（Batch 3）。
+    final state = switch (session) {
+      _ when session.running => QxSessionState.running,
+      _ when session.isDetached => QxSessionState.detached,
+      _ => QxSessionState.done,
+    };
+    final accent = state.colorOf(theme.qx);
+    final stateLabel = state.label;
 
     final stats = session.stats;
     final usage = session.tokenUsage;
@@ -253,7 +254,7 @@ class SessionRow extends StatelessWidget {
               borderRadius: QxRadius.cardAll,
               border: Border.all(
                 color:
-                    session.running ? accent.withValues(alpha: 0.42) : QxColor.hairline(brightness),
+                    session.running ? accent.withValues(alpha: 0.42) : theme.qx.hairline,
               ),
             ),
             padding: const EdgeInsets.all(QxSpace.l),
@@ -265,7 +266,7 @@ class SessionRow extends StatelessWidget {
                   children: [
                     Padding(
                       padding: const EdgeInsets.only(top: 5),
-                      child: StateDot(color: accent, pulsing: session.running),
+                      child: StateDot(state: state, animate: session.running),
                     ),
                     const SizedBox(width: QxSpace.m),
                     Expanded(
@@ -311,7 +312,7 @@ class SessionRow extends StatelessWidget {
                   padding: const EdgeInsets.only(left: QxSpace.l + QxSpace.xs),
                   child: _MetaLine(
                     session: session,
-                    stateLabel: stateLabel,
+                    state: state,
                     stats: stats,
                     usage: usage,
                   ),
@@ -328,13 +329,16 @@ class SessionRow extends StatelessWidget {
 class _MetaLine extends StatelessWidget {
   const _MetaLine({
     required this.session,
-    required this.stateLabel,
+    required this.state,
     required this.stats,
     required this.usage,
   });
 
   final SessionSummary session;
-  final String stateLabel;
+
+  /// 状态。**词与色都从它派生**（`state.label` / `state.colorOf`），
+  /// 传两个平行字段进来就等于允许两者对不上。
+  final QxSessionState state;
   final SessionStats? stats;
   final TokenUsage? usage;
 
@@ -344,11 +348,9 @@ class _MetaLine extends StatelessWidget {
     final dim = theme.colorScheme.onSurfaceVariant;
     final parts = <(String, Color)>[
       // 状态**带颜色**地放在最前面：一眼扫过去就知道哪些在跑。
-      (stateLabel, session.running
-          ? QxColor.running(theme.brightness)
-          : session.isDetached
-              ? QxColor.offline
-              : QxColor.done(theme.brightness)),
+      // 取色走 [QxSessionState.colorOf]，不自己重推三元 —— 同一份映射
+      // 写两遍，等于给「新增第 4/5 态」留一个必炸的漏改点。
+      (state.label, state.colorOf(context.qx)),
     ];
 
     if (session.metaCwd != null) parts.add((session.metaCwd!, dim));

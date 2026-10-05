@@ -8,6 +8,8 @@ import '../../../app/theme/qx_type.dart';
 import '../../../data/models/content.dart';
 import '../../../shared/widgets/primitives.dart';
 import '../application/transcript_controller.dart';
+import '../../../app/theme/qx_theme.dart';
+import '../../../../app/theme/qx_semantic.dart';
 
 /// 转录视图。
 ///
@@ -243,11 +245,11 @@ class _ReasoningBlock extends StatelessWidget {
       // 同理也不能只设 ListTileTheme 的 tileColor 为透明：那只是让底色不
       // 遮挡，涟漪仍然画在外层 Material 上。唯一正确的解法是让这个
       // Material 本身成为「最近的 Material 祖先」。
-      color: QxColor.sunken(theme.brightness),
+      color: context.qx.surfaceSunken,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: QxRadius.controlAll,
-        side: BorderSide(color: QxColor.hairline(theme.brightness)),
+        side: BorderSide(color: context.qx.hairline),
       ),
       child: Theme(
         data: theme.copyWith(dividerColor: Colors.transparent),
@@ -309,16 +311,18 @@ class ToolCallCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final brightness = theme.brightness;
+    final q = theme.qx;
+    // 失败有两种来源：显式的 error 引用，或结果块里 isError。
     final failed = row.error != null ||
         (row.result?.message.content.whereType<ContentToolResult>().any((b) => b.isError == true) ??
             false);
-
-    final (accent, label) = switch ((row.isRunning, failed)) {
-      (true, _) => (QxColor.running(brightness), '运行中'),
-      (false, true) => (QxColor.fail(brightness), '失败'),
-      _ => (QxColor.done(brightness), '完成'),
+    // 工具卡的态只有三种，与会话的五态不是一回事。
+    final state = switch ((row.isRunning, failed)) {
+      (true, _) => QxSessionState.running,
+      (false, true) => QxSessionState.failed,
+      _ => QxSessionState.done,
     };
+    final accent = state.colorOf(q);
 
     final output = row.result?.message.content
         .whereType<ContentToolResult>()
@@ -329,11 +333,11 @@ class ToolCallCard extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: QxSpace.s),
       child: Material(
         // 同上：用 Material 承载表面，让涟漪有地方画。
-        color: QxColor.sunken(theme.brightness),
+        color: context.qx.surfaceSunken,
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
           borderRadius: QxRadius.controlAll,
-          side: BorderSide(color: QxColor.hairline(theme.brightness)),
+          side: BorderSide(color: context.qx.hairline),
         ),
         child: Theme(
           data: theme.copyWith(dividerColor: Colors.transparent),
@@ -349,17 +353,14 @@ class ToolCallCard extends StatelessWidget {
             ),
             title: Row(
               children: [
-                if (row.isRunning)
-                  SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.6,
-                      color: accent,
-                    ),
-                  )
-                else
-                  StateDot(color: accent),
+                // 05 §8.4：运行态**不转圈**。
+                // 原来这里是 12dp 的 CircularProgressIndicator，它带来两个
+                // 代价：默认态的转录里有了一个无限动画（`pumpAndSettle`
+                // 必然超时，测试只能绕），以及一个仅靠运动表意的状态 ——
+                // 运动是唯一不能被灰度截图与色觉障碍读到的通道。
+                // 换成静态 StateDot（自带字形）＋ 右侧已有的「运行中」角标，
+                // 两条静态通道，信息一点没少。
+                StateDot(state: state),
                 const SizedBox(width: QxSpace.s),
                 Expanded(
                   child: Text(
@@ -378,7 +379,7 @@ class ToolCallCard extends StatelessWidget {
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                 const SizedBox(width: QxSpace.xs),
-                MonoBadge(label: label, color: accent),
+                MonoBadge(label: state.label, color: accent, filled: true),
               ],
             ),
             // 错误码必须在**展开前**可读。折叠里是过程信息，状态才是结论：
@@ -392,7 +393,7 @@ class ToolCallCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: QxType.ident.copyWith(
-                        color: QxColor.fail(brightness),
+                        color: q.failed,
                         fontSize: 11,
                       ),
                     ),
@@ -440,8 +441,8 @@ class _CodePanel extends StatelessWidget {
       children: [
         Text(
           title.toUpperCase(),
-          style: QxType.overlineIn(
-            dim ? QxColor.fail(theme.brightness) : theme.colorScheme.onSurfaceVariant,
+          style: QxType.overline.copyWith(color: 
+            dim ? context.qx.failed : theme.colorScheme.onSurfaceVariant,
           ).copyWith(fontSize: 9.5),
         ),
         const SizedBox(height: QxSpace.xs),
@@ -451,9 +452,9 @@ class _CodePanel extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.all(QxSpace.s + QxSpace.xxs),
             decoration: BoxDecoration(
-              color: QxColor.sunken(theme.brightness),
+              color: context.qx.surfaceSunken,
               borderRadius: BorderRadius.circular(QxSpace.s),
-              border: Border.all(color: QxColor.hairline(theme.brightness)),
+              border: Border.all(color: context.qx.hairline),
             ),
             child: Scrollbar(
               child: SingleChildScrollView(
@@ -463,7 +464,7 @@ class _CodePanel extends StatelessWidget {
                     content,
                     style: QxType.code.copyWith(
                       color: dim
-                          ? QxColor.fail(theme.brightness)
+                          ? context.qx.failed
                           : theme.colorScheme.onSurface.withValues(alpha: 0.88),
                       fontSize: 12,
                     ),
@@ -532,9 +533,9 @@ class TodoCard extends StatelessWidget {
                               : Icons.check_box_outline_blank,
                       size: 14,
                       color: todo.isDone
-                          ? QxColor.done(theme.brightness)
+                          ? context.qx.done
                           : todo.isActive
-                              ? QxColor.running(theme.brightness)
+                              ? context.qx.running
                               : theme.colorScheme.onSurfaceVariant,
                     ),
                     const SizedBox(width: QxSpace.s),
@@ -572,17 +573,17 @@ class TurnDivider extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: QxSpace.m),
       child: Row(
         children: [
-          Expanded(child: Divider(color: QxColor.hairline(theme.brightness))),
+          Expanded(child: Divider(color: context.qx.hairline)),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: QxSpace.m),
             child: Text(
               'TURN $turn',
-              style: QxType.monoOverline.copyWith(
+              style: QxType.overline.copyWith(
                 color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
               ),
             ),
           ),
-          Expanded(child: Divider(color: QxColor.hairline(theme.brightness))),
+          Expanded(child: Divider(color: context.qx.hairline)),
         ],
       ),
     );
@@ -683,9 +684,9 @@ class _MarkdownBody extends StatelessWidget {
             decorationColor: dim,
           ),
           codeblockDecoration: BoxDecoration(
-            color: QxColor.sunken(theme.brightness),
+            color: context.qx.surfaceSunken,
             borderRadius: BorderRadius.circular(QxSpace.s),
-            border: Border.all(color: QxColor.hairline(theme.brightness)),
+            border: Border.all(color: context.qx.hairline),
           ),
           blockquoteDecoration: BoxDecoration(
             color: dim.withValues(alpha: 0.07),
@@ -702,9 +703,9 @@ class _MarkdownBody extends StatelessWidget {
             QxSpace.s,
           ),
           horizontalRuleDecoration: BoxDecoration(
-            border: Border(top: BorderSide(color: QxColor.hairline(theme.brightness))),
+            border: Border(top: BorderSide(color: context.qx.hairline)),
           ),
-          tableBorder: TableBorder.all(color: QxColor.hairline(theme.brightness), width: 1),
+          tableBorder: TableBorder.all(color: context.qx.hairline, width: 1),
           tableHead: QxType.caption.copyWith(fontWeight: FontWeight.w700, color: on),
           tableBody: QxType.caption.copyWith(color: on),
           tableCellsPadding: const EdgeInsets.all(QxSpace.s),

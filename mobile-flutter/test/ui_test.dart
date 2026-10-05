@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qianxun_mobile/app/theme/qx_semantic.dart';
 import 'package:qianxun_mobile/app/theme/qx_theme.dart';
 import 'package:qianxun_mobile/data/models/content.dart';
 import 'package:qianxun_mobile/data/models/session.dart';
@@ -59,7 +60,10 @@ void main() {
 
     testWidgets('StateDot 呼吸态用 RepaintBoundary 包裹（隔离重绘）', (tester) async {
       await tester.pumpWidget(wrap(
-        const StateDot(color: Color(0xFF3DDC97), pulsing: true),
+        const StateDot(
+        state: QxSessionState.running,
+        animate: true,
+      ),
       ));
       expect(find.byType(StateDot), findsOneWidget);
       expect(find.byType(RepaintBoundary), findsWidgets);
@@ -101,9 +105,12 @@ void main() {
       await tester.pumpWidget(wrap(
         SessionRow(session: build(cwd: '/home/me/deep/app'), onTap: () {}),
       ));
-      // 标题回退到 cwd 末段…
-      expect(find.text('app'), findsOneWidget);
-      // …副行就**不能**再显示一遍。同一条路径出现两次是纯冗余。
+      // 「只出现一次」**就是**不重复的证据：标题回退到 cwd 末段 `app`，
+      // 副行若再显示一遍 `app`，这里会是 findsNWidgets(2) 而不是 1。
+      //
+      // ⚠️ 原来这条断言写了两遍一模一样的 findsOneWidget，于是
+      // 一条名叫「副行不重复它」的测试永远不会失败 —— 名字承诺的
+      // 不变量根本没被断言。合成一条，并把理由写清楚。
       expect(find.text('app'), findsOneWidget);
     });
 
@@ -169,7 +176,7 @@ void main() {
           arguments: '{"pattern":"qx-gate"}',
         );
 
-    testWidgets('运行中：显示 spinner 与「运行中」角标', (tester) async {
+    testWidgets('运行中：静态状态点 + 「运行中」角标，**不转圈**', (tester) async {
       await tester.pumpWidget(wrap(
         ToolCallCard(
           row: RowToolCall(
@@ -181,10 +188,17 @@ void main() {
       ));
       expect(find.text('rg'), findsOneWidget);
       expect(find.text('运行中'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      // 05 §8.4：默认态不能有无限动画。转圈是唯一不能被灰度截图读到的
+      // 通道，而且会让 pumpAndSettle 永久超时。这条断言原来是
+      // `findsOneWidget`（在**要求** spinner 存在），把违规锁成了契约。
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      // 静态 StateDot（自带字形）+ 文字角标，两条静态通道。
+      expect(find.byType(StateDot), findsOneWidget);
+      // 反向保证：整棵树能 settle，说明确实没有在跑的动画。
+      await tester.pumpAndSettle(const Duration(milliseconds: 100));
     });
 
-    testWidgets('完成：状态点变实心，角标为「完成」', (tester) async {
+    testWidgets('完成：状态点为静态字形，角标为「已完成」', (tester) async {
       await tester.pumpWidget(wrap(
         ToolCallCard(
           row: RowToolCall(
@@ -204,7 +218,8 @@ void main() {
           ),
         ),
       ));
-      expect(find.text('完成'), findsOneWidget);
+      // 角标文案来自 QxSessionState.done.label（05 §2 的规范用词）
+      expect(find.text('已完成'), findsOneWidget);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(find.byType(StateDot), findsOneWidget);
     });
@@ -443,7 +458,7 @@ void main() {
   group('格式化工具', () {
     test('相对时间', () {
       final now = DateTime.now().millisecondsSinceEpoch;
-      expect(relTime(0), '从未使用');
+      expect(relTime(0), '从未用过');
       expect(relTime(now - 10 * 1000), '刚刚');
       expect(relTime(now - 5 * 60000), '5 分钟前');
       expect(relTime(now - 3 * 3600000), '3 小时前');

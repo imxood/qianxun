@@ -488,6 +488,12 @@ class QuestionItem {
   final bool? multiSelect;
 
   /// `intent.kind == "plan-review"` 时的批准选项标签。
+  ///
+  /// **协议建模，UI 消费推迟到 Batch 5。** 字段照留是因为它是服务端真实下发的
+  /// 东西，删了将来还得重新探。`isPlanReview` 目前没有调用方：原先
+  /// `_OptionRow` 用它给批准项单独上 `running` 绿，已按 05 §6.2
+  /// 「状态色不进按钮填充」删掉。Batch 5 决定 plan-review 在待答链路里
+  /// 到底怎么表达——大概率是给批准项加一个**可见中文标记**而不是靠颜色。
   final String? planReviewApprove;
 
   bool get isPlanReview => planReviewApprove != null;

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  千寻网关只有明文 HTTP / WS（没有 TLS），密文性完全由 EasyTier 隧道提供。
+
+  因此 base-config 保持禁止明文，只对私网段放开——这样万一 App 里出现了
+  指向公网的明文请求，Android 会直接拦掉，而不是静默放行。
+
+  ⚠️ <domain> 不支持 CIDR，所以只能按段列举。EasyTier 默认分配 10.x.x.x；
+  若你的网络用了别的段，在下面补一行。
+
+  iOS 侧对应的是 Info.plist 的 NSAppTransportSecurity，见 README。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- 回环 -->
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <!-- 常见私网 -->
+        <domain includeSubdomains="true">10.0.0.0</domain>
+        <domain includeSubdomains="true">172.16.0.0</domain>
+        <domain includeSubdomains="true">192.168.0.0</domain>
+        <!-- EasyTier 常用虚拟网卡名 -->
+        <domain includeSubdomains="true">easytier</domain>
+    </domain-config>
+</network-security-config>

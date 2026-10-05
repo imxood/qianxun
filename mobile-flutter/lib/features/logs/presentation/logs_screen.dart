@@ -3,9 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
-import '../../../app/theme/qx_tokens.dart';
 import '../../../app/theme/qx_type.dart';
 import '../../../core/qx_log.dart';
+import '../../../../app/theme/qx_semantic.dart';
+import '../../../app/theme/qx_tokens.dart';
 
 /// 日志页。
 ///
@@ -277,12 +278,12 @@ class _Chip extends StatelessWidget {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(6),
               border: Border.all(
-                color: selected ? c.withValues(alpha: 0.5) : QxColor.hairline(theme.brightness),
+                color: selected ? c.withValues(alpha: 0.5) : context.qx.hairline,
               ),
             ),
             child: Text(
               label,
-              style: QxType.monoOverline.copyWith(
+              style: QxType.overline.copyWith(
                 color: selected ? c : theme.colorScheme.onSurfaceVariant,
               ),
             ),
@@ -327,7 +328,7 @@ class _LogRow extends StatelessWidget {
             width: 46,
             child: Text(
               entry.level.label,
-              style: QxType.monoOverline.copyWith(color: c, fontSize: 9.5),
+              style: QxType.overline.copyWith(color: c, fontSize: 9.5),
             ),
           ),
           Expanded(
@@ -366,7 +367,7 @@ class _LogRow extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: QxType.code.copyWith(
                         fontSize: 10.5,
-                        color: QxColor.fail(theme.brightness),
+                        color: context.qx.failed,
                       ),
                     ),
                   ),
@@ -421,13 +422,30 @@ class _EmptyLog extends StatelessWidget {
   }
 }
 
+/// 日志级别 → 颜色。
+///
+/// 规格：`02-visual-system.md` §7 的 `LogRow` 行——
+/// 非颜色通道是**级别字母**（W/I/E），颜色规则是「**仅 warn 及以上用状态色**」。
+///
+/// 所以这是一条**严重度阶梯**，不是第二套会话词表：
+/// trace/debug/info 全部走中性文字三级，warn 才升到琥珀，error 升到红。
+/// 借 `waiting` / `failed` 的色相是有意的——严重度用琥珀与红是通用惯例，
+/// 且日志与会话列表是两个屏幕，不会同屏误读。真正要避免的是**把绿色给 INFO**：
+/// 绿色在本 App 里专属「有一个 agent 正在跑」，给一条普通日志会让整列
+/// 读起来像一堆会话。
+///
+/// ⚠️ `info` 原来取 `q.onAccent`。`onAccent` 是**配对色**，只在 accent 底上成立，
+/// 单独用只有 1.14:1 —— 级别竖条和选中态筛选 chip 的文字都等于隐形，
+/// 用户看不出当前选了哪个级别筛选。这类 bug 对比度脚本抓不到，
+/// 因为脚本只按「onAccent vs accent」验（6.60 / 5.13，通过）。
+/// 教训：配对色不能当独立色用。已加进 `check_contrast.py` 的闸门。
 Color _levelColor(BuildContext context, QxLevel l) {
-  final b = Theme.of(context).brightness;
+  final q = context.qx;
   return switch (l) {
-    QxLevel.trace => Theme.of(context).colorScheme.onSurfaceVariant,
-    QxLevel.debug => QxColor.done(b),
-    QxLevel.info => QxColor.running(b),
-    QxLevel.warn => QxColor.pending(b),
-    QxLevel.error => QxColor.fail(b),
+    QxLevel.trace => q.textTertiary,
+    QxLevel.debug => q.textSecondary,
+    QxLevel.info => q.textPrimary,
+    QxLevel.warn => q.waiting,
+    QxLevel.error => q.failed,
   };
 }

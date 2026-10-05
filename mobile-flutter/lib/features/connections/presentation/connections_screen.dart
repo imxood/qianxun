@@ -9,6 +9,8 @@ import '../../../data/dsh/gateway_client.dart';
 import '../../../data/store/connection_store.dart';
 import '../../../shared/widgets/primitives.dart';
 import '../application/connections_controller.dart';
+import '../../../app/theme/qx_theme.dart';
+import '../../../../app/theme/qx_semantic.dart';
 
 /// 连接列表。
 ///
@@ -169,7 +171,7 @@ class _IconAction extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final button = Material(
-      color: QxColor.raised(theme.brightness),
+      color: context.qx.surfaceRaised,
       borderRadius: BorderRadius.circular(22),
       child: InkWell(
         onTap: () {
@@ -209,7 +211,7 @@ class _ConnectionGroup extends StatelessWidget {
         child: Column(
           children: [
             for (var i = 0; i < connections.length; i++) ...[
-              if (i > 0) Divider(height: 1, color: QxColor.hairline(theme.brightness)),
+              if (i > 0) Divider(height: 1, color: context.qx.hairline),
               _ConnectionRow(
                 conn: connections[i],
                 onOpen: () => onOpen(connections[i]),
@@ -239,16 +241,18 @@ class _ConnectionRow extends ConsumerWidget {
     final theme = Theme.of(context);
     final probe = ref.watch(connectionsControllerProvider.notifier).probeOf(conn.id);
 
-    final (dotColor, statusText, pulsing) = switch (probe) {
+    // 连接态与会话态是**两套词表**：连接只分「通不通」，不管 agent 在干嘛。
+    // 所以这里用「在线 / DSH 未运行 / 离线」而不是会话的五态。
+    final (connColor, statusText, pulsing) = switch (probe) {
       ProbeOk(:final info) => (
-          info.dshReady ? QxColor.running(theme.brightness) : QxColor.pending(theme.brightness),
+          info.dshReady ? context.qx.running : context.qx.waiting,
           info.dshReady ? '在线' : 'DSH 未启动',
           info.dshReady,
         ),
-      ProbeUnreachable() => (QxColor.offline, '离线', false),
-      ProbeUpstreamDown() => (QxColor.pending(theme.brightness), 'DSH 未运行', false),
-      ProbeUnauthorized() => (QxColor.fail(theme.brightness), '凭据失效', false),
-      ProbeBadUrl() => (QxColor.fail(theme.brightness), '链接无效', false),
+      ProbeUnreachable() => (context.qx.detached, '离线', false),
+      ProbeUpstreamDown() => (context.qx.waiting, 'DSH 未运行', false),
+      ProbeUnauthorized() => (context.qx.failed, '凭据失效', false),
+      ProbeBadUrl() => (context.qx.failed, '链接无效', false),
       null => (theme.colorScheme.onSurfaceVariant, '检测中…', false),
     };
 
@@ -266,7 +270,7 @@ class _ConnectionRow extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              StateDot(color: dotColor, pulsing: pulsing),
+              StateDot.colored(color: connColor, animate: pulsing),
               const SizedBox(width: QxSpace.m),
               Expanded(
                 child: Column(
@@ -301,7 +305,7 @@ class _ConnectionRow extends ConsumerWidget {
                         // 必须能读到同样的信息。
                         Text(
                           statusText,
-                          style: QxType.caption.copyWith(color: dotColor),
+                          style: QxType.caption.copyWith(color: connColor),
                         ),
                       ],
                     ),

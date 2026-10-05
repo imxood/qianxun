@@ -10,6 +10,7 @@ import '../../sessions/presentation/link_status_bar.dart';
 import '../application/transcript_controller.dart';
 import 'pending_interaction_bar.dart';
 import 'transcript_view.dart';
+import '../../../../app/theme/qx_semantic.dart';
 
 /// 会话详情（原生 DSH 页面）。
 class SessionScreen extends ConsumerStatefulWidget {
@@ -79,7 +80,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+
     final state = ref.watch(transcriptControllerProvider(widget.sessionId));
     final controller = ref.read(transcriptControllerProvider(widget.sessionId).notifier);
     final conn = ref.watch(selectedConnectionProvider);
@@ -109,16 +110,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 padding: const EdgeInsets.only(top: 1),
                 child: Row(
                   children: [
-                    StateDot(
-                      color: QxColor.running(theme.brightness),
+                    const StateDot(
+                      state: QxSessionState.running,
                       size: 6,
-                      pulsing: true,
+                      animate: true,
                     ),
                     const SizedBox(width: 6),
                     Text(
                       'agent 运行中',
                       style: QxType.micro.copyWith(
-                        color: QxColor.running(theme.brightness),
+                        color: context.qx.running,
                         fontSize: 10.5,
                       ),
                     ),
@@ -203,13 +204,12 @@ class _Composer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final hasText = controller.text.trim().isNotEmpty;
 
     return Container(
       decoration: BoxDecoration(
-        color: QxColor.surface(theme.brightness),
-        border: Border(top: BorderSide(color: QxColor.hairline(theme.brightness))),
+        color: context.qx.surface,
+        border: Border(top: BorderSide(color: context.qx.hairline)),
       ),
       child: SafeArea(
         top: false,
@@ -272,14 +272,17 @@ class _SendButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final q = context.qx;
     return AnimatedContainer(
       duration: QxMotion.quick,
       curve: QxMotion.enter,
       width: 44,
       height: 44,
       decoration: BoxDecoration(
-        color: enabled ? theme.colorScheme.primary : QxColor.raised(theme.brightness),
+        // 可发送时用 accent 填充。**状态色不得进按钮**——按钮是
+        // 「可操作」，不是「当前状态」，混进来会让用户以为这个按钮
+        // 代表着 agent 的状态。
+        color: enabled ? q.accent : q.surfaceRaised,
         borderRadius: QxRadius.controlAll,
       ),
       child: Material(
@@ -292,16 +295,19 @@ class _SendButton extends StatelessWidget {
                 ? SizedBox(
                     width: 17,
                     height: 17,
+                    // 与下方箭头同一个 `onAccent`。这里原来硬写
+                    // `Colors.white`，在暗色 accent `#12B5A8` 上只有 2.56:1，
+                    // 比它替换掉的箭头还看不见——而箭头早就改对了，
+                    // spinner 被漏了一次。
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
-                      color: theme.colorScheme.onPrimary,
+                      color: enabled ? q.onAccent : q.textTertiary,
                     ),
                   )
                 : Icon(
                     Icons.arrow_upward,
                     size: 20,
-                    color:
-                        enabled ? theme.colorScheme.onPrimary : theme.colorScheme.onSurfaceVariant,
+                    color: enabled ? q.onAccent : q.textTertiary,
                   ),
           ),
         ),

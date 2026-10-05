@@ -2,7 +2,10 @@
 .dart_tool/
 .packages
 build/
-pubspec.lock
+
+# ⚠️ pubspec.lock **要入库**。官方口径：包（library）忽略它，应用（app）必须提交。
+# 本目录是应用，锁文件是构建可复现的前提——忽略它等于让每个人拉到不同依赖版本，
+# 而 Flutter/Dart 生态的破坏性升级很常见。
 
 # Flutter / Android
 .flutter-plugins
@@ -24,6 +27,16 @@ ios/Flutter/Flutter.podspec
 # 探针脚本的本地临时产物
 **/.probe_sid.txt
 **/probe-*.json
+
+# Python（本仓的脚本一律用 .py，见 AGENTS.md）
+__pycache__/
+*.py[cod]
+
+# IDE / 编辑器（JetBrains 与 VS 会各写一份自己的元数据，不该进仓库）
+.idea/
+*.iml
+.vscode/
+*.swp
 
 # 截图（本会话生成，用于讨论，不进仓库）
 *.png

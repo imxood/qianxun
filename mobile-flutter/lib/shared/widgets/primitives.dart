@@ -1,52 +1,92 @@
 import 'package:flutter/material.dart';
 
+import '../../app/theme/qx_semantic.dart';
 import '../../app/theme/qx_tokens.dart';
 import '../../app/theme/qx_type.dart';
 
 /// 状态点。
 ///
-/// 这是整个 App 信息密度最高的 8 像素。它必须能在一米外被认出，并且
-/// **永远 accompanied by 文字**——纯色点在色觉障碍用户眼里毫无信息，
-/// 所以本 App 的每个状态点旁边都有一行状态文字，不靠颜色单独表意。
+/// **不是**信号轨的替代品。轨用于列表行（可扫、需要排序），
+/// 点用于列表行**之外**的场景（弹层、空态、日志行），那里没有「成列扫」
+///的场景，一个 8px 的点加文字就够了。
 class StateDot extends StatelessWidget {
+  /// 会话态。色与中文标签都由 [QxSessionState] 决定。
   const StateDot({
     super.key,
-    required this.color,
+    required this.state,
     this.size = 8,
-    this.pulsing = false,
+    this.animate = false,
+  })  : _color = null;
+
+  /// 只给颜色。**仅用于连接态**——它有自己的词表
+  /// （在线 / DSH 未运行 / 离线 / 凭据失效），与会话的五态不是一回事。
+  ///
+  /// ⚠️ 点自身**不标 Semantics**（否则整行 + 可见文字 + 点 = 读三遍）。
+  /// 「绝不靠颜色单独表意」的责任落在**调用方**：
+  /// 用了这个构造器，就必须在同一行渲染出可见的状态文字。
+  /// 参见 `connections_screen.dart` 的 `_ConnectionRow`。
+  const StateDot.colored({
+    super.key,
+    required Color color,
+    this.size = 8,
+    this.animate = false,
+  })  : state = null,
+        _color = color;
+
+  final QxSessionState? state;
+  final Color? _color;
+  final double size;
+
+  /// 运行态呼吸。**默认关**：默认态下树里不能有无限动画，
+  /// 否则 `pumpAndSettle` 会超时。
+  final bool animate;
+
+  @override
+  Widget build(BuildContext context) {
+    final q = context.qx;
+    // 两个构造器都保证有 label，这里只是为了让类型收窄。
+    final color = state?.colorOf(q) ?? _color ?? q.detached;
+    final glyph = state?.glyph ?? Icons.circle;
+
+    // ⚠️ 这里**不标 Semantics**：整行的 InkWell 已经带上了状态文字，
+    // 点自己再标一次会让 TalkBack 把同一个词读三遍（三次停顿），
+    // 用户会以为卡住了。`excludeSemantics` 之外的重复标注是噪音。
+    if (!animate) {
+      return ExcludeSemantics(
+        child: SizedBox(
+          width: size,
+          height: size,
+          // 静态态也**必须有字形**。纯色点对色觉障碍用户与灰度截图
+          // 零信息；字形 + 旁边的中文词构成两条独立通道。
+          child: Icon(glyph, size: size, color: color),
+        ),
+      );
+    }
+    return _BreathingDot(color: color, size: size, glyph: glyph);
+  }
+}
+
+/// 呼吸点：核心 + 一圈缓慢扩张淡出的光晕。
+///
+/// 表达「它在跑」而不是「在等」。等状态用静态点 + 虚线轨，
+/// 因为「等」是静止的状态，用呼吸会误导。
+class _BreathingDot extends StatefulWidget {
+  const _BreathingDot({
+    required this.color,
+    required this.size,
+    required this.glyph,
   });
 
   final Color color;
   final double size;
-
-  /// 运行态的呼吸动画。
-  final bool pulsing;
+  final IconData glyph;
 
   @override
-  Widget build(BuildContext context) {
-    if (!pulsing) {
-      return Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      );
-    }
-    return _PulsingDot(color: color, size: size);
-  }
+  State<_BreathingDot> createState() => _BreathingDotState();
 }
 
-/// 呼吸点。用一个极克制的扩张环表达「活着」，而不是转圈加载器——
-/// 转圈表达「在等」，呼吸表达「在跑」，语义不同。
-class _PulsingDot extends StatefulWidget {
-  const _PulsingDot({required this.color, required this.size});
-  final Color color;
-  final double size;
-
-  @override
-  State<_PulsingDot> createState() => _PulsingDotState();
-}
-
-class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderStateMixin {
+class _BreathingDotState extends State<_BreathingDot>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1600),
@@ -60,45 +100,73 @@ class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderState
 
   @override
   Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: SizedBox(
-        width: widget.size * 2.4,
-        height: widget.size * 2.4,
-        child: AnimatedBuilder(
-          animation: _c,
-          builder: (context, _) {
-            final t = _c.value;
-            // 一个周期：0→1 扩张淡出，然后重来。
-            final halo = (1 - t).clamp(0.0, 1.0);
-            return Stack(
-              alignment: Alignment.center,
-              children: [
-                Container(
-                  width: widget.size * (1 + t * 0.9),
-                  height: widget.size * (1 + t * 0.9),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: widget.color.withValues(alpha: 0.28 * halo),
+    return ExcludeSemantics(
+      child: RepaintBoundary(
+        child: SizedBox(
+          width: widget.size * 2.6,
+          height: widget.size * 2.6,
+          child: AnimatedBuilder(
+            animation: _c,
+            builder: (context, _) {
+              final t = _c.value;
+              final fade = (1 - t).clamp(0.0, 1.0);
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  Container(
+                    width: widget.size * (1 + t * 0.9),
+                    height: widget.size * (1 + t * 0.9),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: widget.color.withValues(alpha: 0.26 * fade),
+                    ),
                   ),
-                ),
-                Container(
-                  width: widget.size,
-                  height: widget.size,
-                  decoration: BoxDecoration(
-                    color: widget.color,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              ],
-            );
-          },
+                  Icon(widget.glyph, size: widget.size * 1.6, color: widget.color),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
   }
 }
 
-/// 等宽小标签。用于状态、阶段、工具名。
+/// 状态标签。
+///
+/// 状态词**必须**以可见中文出现——纯色点在色觉障碍用户与灰度截图下
+/// 毫无信息。这是整个 App 不可协商的无障碍底线。
+class StateBadge extends StatelessWidget {
+  const StateBadge({super.key, required this.state, this.dense = false});
+
+  final QxSessionState state;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final q = context.qx;
+    final color = state.colorOf(q);
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: dense ? 4 : 6,
+        vertical: dense ? 1 : 2,
+      ),
+      decoration: BoxDecoration(
+        // ⚠️ 不要给状态词加半透明底色。状态色本身在 canvas 上就贴着
+        // 4.5:1 的下限，再压一层 14% 的同色底会把它拖到 4:0 左右，
+        // 亮色模式五个状态全部不达标。描边可以弱化，字色必须是原色。
+        borderRadius: QxRadius.chipAll,
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Text(state.label, style: QxType.badge(color)),
+    );
+  }
+}
+
+/// 徽标。等宽 + 小字 + 描边。
+///
+/// 用在**非状态**的场合（工具名、字节数、模式名）。
+/// 状态本身请用 [StateBadge]，它带中文标签，无障碍更稳。
 class MonoBadge extends StatelessWidget {
   const MonoBadge({
     super.key,
@@ -109,8 +177,6 @@ class MonoBadge extends StatelessWidget {
 
   final String label;
   final Color color;
-
-  /// 实心底（高强调）还是描边（次强调）。
   final bool filled;
 
   @override
@@ -119,10 +185,55 @@ class MonoBadge extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: filled ? color.withValues(alpha: 0.16) : Colors.transparent,
+        borderRadius: QxRadius.chipAll,
         border: Border.all(color: color.withValues(alpha: 0.42)),
-        borderRadius: BorderRadius.circular(4),
       ),
       child: Text(label, style: QxType.badge(color)),
+    );
+  }
+}
+
+/// 一行「标签 : 值」。值默认等宽。
+///
+/// 这里的 `:` 分隔是参考客户端 `Title :: value` 排版装置的轻量版：
+/// 元数据多起来之后，没有分隔符的「标题 值」会糊成一团。
+class MetaRow extends StatelessWidget {
+  const MetaRow({
+    super.key,
+    required this.label,
+    required this.value,
+    this.monospace = true,
+  });
+
+  final String label;
+  final String value;
+  final bool monospace;
+
+  @override
+  Widget build(BuildContext context) {
+    final q = context.qx;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: QxSpace.s),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 72,
+            child: Text(
+              label,
+              style: QxType.caption.copyWith(color: q.textSecondary),
+            ),
+          ),
+          const SizedBox(width: QxSpace.m),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: (monospace ? QxType.ident : QxType.caption)
+                  .copyWith(color: q.textPrimary),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -136,7 +247,6 @@ class SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         QxSpace.xs,
@@ -149,7 +259,7 @@ class SectionHeader extends StatelessWidget {
           Expanded(
             child: Text(
               label.toUpperCase(),
-              style: QxType.overlineIn(theme.colorScheme.onSurfaceVariant),
+              style: QxType.overline.copyWith(color: context.qx.textSecondary),
             ),
           ),
           if (trailing != null) trailing!,
@@ -161,14 +271,14 @@ class SectionHeader extends StatelessWidget {
 
 /// 空状态。
 ///
-/// 空状态是唯一允许「说一句人话」的地方——它是用户和功能之间的第一次
+/// 空状态是唯一允许「说一句人话」的地方——它是用户与功能之间的第一次
 /// 接触，应该解释**为什么空**以及**下一步做什么**，而不是画个灰图标。
 class EmptyHero extends StatelessWidget {
   const EmptyHero({
     super.key,
     required this.title,
     required this.hint,
-    this.icon = Icons.dns_outlined,
+    this.icon = Icons.inbox_outlined,
     this.action,
   });
 
@@ -179,7 +289,7 @@ class EmptyHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final q = context.qx;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(QxSpace.xxxl),
@@ -189,21 +299,20 @@ class EmptyHero extends StatelessWidget {
             Container(
               width: 56,
               height: 56,
-              decoration: theme.sunkenBox,
-              child: Icon(icon, size: 24, color: theme.colorScheme.onSurfaceVariant),
+              decoration: BoxDecoration(
+                color: q.surfaceSunken,
+                borderRadius: QxRadius.blockAll,
+                border: Border.all(color: q.hairline),
+              ),
+              child: Icon(icon, size: 24, color: q.textSecondary),
             ),
             const SizedBox(height: QxSpace.l),
-            Text(title,
-                style: QxType.body.copyWith(
-                  color: theme.colorScheme.onSurface,
-                )),
+            Text(title, style: QxType.body.copyWith(color: q.textPrimary)),
             const SizedBox(height: QxSpace.s),
             Text(
               hint,
               textAlign: TextAlign.center,
-              style: QxType.caption.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              style: QxType.caption.copyWith(color: q.textSecondary, height: 1.5),
             ),
             if (action != null) ...[
               const SizedBox(height: QxSpace.xl),
@@ -216,46 +325,7 @@ class EmptyHero extends StatelessWidget {
   }
 }
 
-/// 一行「等宽值 + 说明」。用于连接详情这类技术信息展示。
-class MetaRow extends StatelessWidget {
-  const MetaRow({super.key, required this.label, required this.value, this.monospace = true});
-
-  final String label;
-  final String value;
-  final bool monospace;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: QxSpace.s),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 76,
-            child: Text(
-              label,
-              style: QxType.caption.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(width: QxSpace.m),
-          Expanded(
-            child: SelectableText(
-              value,
-              style: (monospace ? QxType.ident : QxType.caption)
-                  .copyWith(color: theme.colorScheme.onSurface),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 一行说明文字。成功用主色，失败用 error。
+/// 一行提示。成功用次要色，失败用 error 色。
 class InlineNotice extends StatelessWidget {
   const InlineNotice({super.key, required this.text, required this.isError});
 
@@ -264,30 +334,26 @@ class InlineNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = isError ? theme.colorScheme.error : theme.colorScheme.onSurfaceVariant;
+    final q = context.qx;
+    final color = isError ? q.failed : q.textSecondary;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(QxSpace.m),
       decoration: BoxDecoration(
-        color: isError
-            ? theme.colorScheme.error.withValues(alpha: 0.10)
-            : theme.colorScheme.surfaceContainerLowest.withValues(alpha: 0.6),
+        color: (isError ? q.failed : q.surfaceSunken).withValues(alpha: isError ? 0.10 : 1),
         borderRadius: QxRadius.controlAll,
         border: Border.all(
-          color: isError
-              ? theme.colorScheme.error.withValues(alpha: 0.35)
-              : QxColor.hairline(theme.brightness),
+          color: isError ? q.failed.withValues(alpha: 0.35) : q.hairline,
         ),
       ),
-      child: Text(text, style: QxType.caption.copyWith(color: color)),
+      child: Text(text, style: QxType.caption.copyWith(color: color, height: 1.45)),
     );
   }
 }
 
-/// 相对时间。用于「3 分钟前使用」这类。
+/// 相对时间。
 String relTime(int epochMs) {
-  if (epochMs <= 0) return '从未使用';
+  if (epochMs <= 0) return '从未用过';
   final diff = DateTime.now().millisecondsSinceEpoch - epochMs;
   if (diff < 0) return '刚刚';
   const minute = 60000;
@@ -298,18 +364,17 @@ String relTime(int epochMs) {
   return '${diff ~/ (30 * 24 * 60 * minute)} 个月前';
 }
 
-/// 时长。用于「12s」「3m 20s」。
+/// 时长。
 String formatDuration(Duration d) {
   if (d.inSeconds < 1) return '${d.inMilliseconds}ms';
   if (d.inSeconds < 60) return '${d.inSeconds}s';
   final m = d.inMinutes;
   final s = d.inSeconds % 60;
   if (m < 60) return s == 0 ? '${m}m' : '${m}m ${s}s';
-  final h = m ~/ 60;
-  return '${h}h ${m % 60}m';
+  return '${m ~/ 60}h ${m % 60}m';
 }
 
-/// 紧凑 token 数。1.2k 而不是 1234——列表行宽度有限。
+/// 紧凑 token 数。`1.2k` 而不是 `1234`。
 String formatTokens(int tokens) {
   if (tokens < 1000) return '$tokens';
   if (tokens < 1000000) {
@@ -317,4 +382,14 @@ String formatTokens(int tokens) {
     return '${v < 10 ? v.toStringAsFixed(1) : v.round()}k';
   }
   return '${(tokens / 1000000).toStringAsFixed(1)}M';
+}
+
+/// 相对字节。
+String formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
 }
