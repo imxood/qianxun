@@ -601,6 +601,108 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     doc.addEventListener('click', state.onRowPicked, true)
   }
 
+  /**
+   * 把「被省略号砍掉」的横向行标记出来，交给 CSS 改成换行。
+   *
+   * 起因（359dp 真机宽度实测）：composer 底部状态行三个药丸
+   *   「11 轮 446 步·103 t…」少 63px
+   *   「89.2M tok·缓存命中 98%」少 57px
+   * 「缓存命中 98%」被砍成「98」是**信息丢失** —— 用户会以为缓存没命中。
+   *
+   * ⚠️ 为什么用「JS 打标记 + CSS 改样式」而不是直接写选择器：
+   *   那一行的 class 是构建期哈希（实测 bOPqQW_ / uV2eYG_ / JObwrW_），
+   *   每次 DSH 构建都变，写进 CSS 等于给自己埋一颗定时炸弹。
+   *   JS 按**行为**（scrollWidth > clientWidth）找它，与命名无关。
+   *
+   * ⚠️ 为什么不直接把标签加长：那是改文案不是改布局。
+   */
+  function markClippedRows() {
+    for (const el of doc.querySelectorAll('span, div')) {
+      if (el.scrollWidth <= el.clientWidth + 2) continue
+      const r = el.getBoundingClientRect()
+      if (r.width < 24 || r.height > 40) continue
+      let row = el.parentElement
+      // 往上找到最近一个「横向排布子元素」的容器 —— 那才是该换行的行
+      while (row && row !== doc.body) {
+        const disp = win.getComputedStyle(row).display
+        if (disp.indexOf('flex') !== -1 || disp === 'grid') break
+        row = row.parentElement
+      }
+      if (row && row !== doc.body) row.setAttribute('data-qx-clipped', '1')
+    }
+  }
+
+  /**
+   * 标记「真的看不清」的文本（字号 < 12px），交给 CSS 托到 12px。
+   *
+   * 实测（359dp）：转录里的代码块 chrome（`_header_` / `_heading_` /
+   * `_language_`）是 11px，个别 code 10.5px。代码是要**照着抄**的内容，
+   * 比正文更不该小；12px 是这里定的下限。
+   *
+   * ⚠️ 只标记「用户看得见的文字节点」，不扫所有元素 ——
+   *    扫全树会把 DSH 那些不可见的测量节点也标上，白白多几百个属性。
+   *
+   * ⚠️ **必须用内联样式，不能只靠 CSS 规则。** 实测踩过：
+   *    `._markdown_ :not(pre) > code { font-size: .875em }` 的特异性是
+   *    (0,3,0) 且带 !important，压过了我们的 `[data-qx-tiny]`
+   *    ——(0,1,0)+!important。标记打了，字号纹丝不动（11.375px）。
+   *    内联 style 才能稳赢（除非对方也写内联 !important，实测没有）。
+   */
+  function markTinyText() {
+    for (const el of doc.querySelectorAll('span, div, pre, code, kbd, samp')) {
+      if (!el.firstChild) continue
+      const txt = (el.textContent || '')
+      if (!txt.trim()) continue
+      if (parseFloat(win.getComputedStyle(el).fontSize) >= 12) continue
+      el.setAttribute('data-qx-tiny', '1')
+      el.style.setProperty('font-size', '12px', 'important')
+    }
+  }
+
+  /**
+   * 标记「太矮的块级可点元素」，交给 CSS 补到 40px 高。
+   *
+   * 实测（359dp）：转录里的审批/提问选项只有 23px 高、283px 宽 ——
+   * 手指点「批准」这种一次误触就出事的地方，23px 是不够的。
+   *
+   * ⚠️ **不能一刀切所有矮元素**。正文里还有 15px 高的行内按钮
+   *    （`O_Ebla_title` 134×15），那是句子里的链接；
+   *    给它 `min-height:40px` 会把整段文字撑成一片，**比原来更糟**。
+   *    所以三个条件缺一不可：
+   *      1. display 是 block/flex（排除行内）
+   *      2. 宽度 > 视口的 55%（行内链接不会占这么宽）
+   *      3. 高度在 12–32px 之间（低于 12 的是图标碎片，高于 32 的本来就够）
+   */
+  function markShortTapRows() {
+    const vw = win.innerWidth
+    for (const el of doc.querySelectorAll('button, [role="button"], [role="option"], a')) {
+      const cs = win.getComputedStyle(el)
+      const r = el.getBoundingClientRect()
+      if (r.width < 24 || r.height < 12) continue
+
+      if (cs.display === 'inline' || cs.display === 'inline-block'
+          || cs.display === 'inline-flex') {
+        // 行内元素（正文里的链接）：**纵向 padding 不改变行盒高度**，
+        // 所以可以放心加大热区而不会把段落撑开 ——
+        // 这与块级元素必须用 min-height 是两套办法，不能混用。
+        if (r.height < 24) {
+          el.setAttribute('data-qx-inline-tap', '1')
+          el.style.setProperty('padding-top', '9px', 'important')
+          el.style.setProperty('padding-bottom', '9px', 'important')
+        }
+        continue
+      }
+
+      if (cs.display !== 'block' && cs.display !== 'flex') continue
+      // 阈值从 55% 降到 45%：实测文件链接 193/359 = 53.8%，
+      // 差一点点就被 55% 挡在门外 —— 阈值卡太紧会漏掉真正该补的元素。
+      if (r.width < vw * 0.45) continue
+      if (r.height >= 44) continue
+      el.setAttribute('data-qx-short-tap', '1')
+      el.style.setProperty('min-height', '44px', 'important')
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════
   // 窄屏导航：☰ → 工作区独立页
   // ══════════════════════════════════════════════════════════════════
@@ -687,6 +789,9 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     suppressPreviewNotice()
     paintToolCards()
     paintSidebarRows()
+    markClippedRows()
+    markTinyText()
+    markShortTapRows()
   }
   // 头 6 秒每 300ms 扫一次 —— 覆盖 DSH 插件异步加载那段窗口，
   // 否则用户会在弹窗消失前先摸到屏幕。
@@ -725,6 +830,17 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     for (let i = 0; i < leftovers.length; i += 1) leftovers[i].remove()
     const pendingRows = doc.querySelectorAll('.qx-row--pending')
     for (let i = 0; i < pendingRows.length; i += 1) pendingRows[i].classList.remove('qx-row--pending')
+    const marks = doc.querySelectorAll('[data-qx-clipped], [data-qx-tiny], [data-qx-short-tap], [data-qx-inline-tap]')
+    for (let i = 0; i < marks.length; i += 1) {
+      marks[i].removeAttribute('data-qx-clipped')
+      marks[i].removeAttribute('data-qx-tiny')
+      marks[i].removeAttribute('data-qx-short-tap')
+      marks[i].removeAttribute('data-qx-inline-tap')
+      marks[i].style.removeProperty('padding-top')
+      marks[i].style.removeProperty('padding-bottom')
+      marks[i].style.removeProperty('font-size')
+      marks[i].style.removeProperty('min-height')
+    }
     if (layer) { layer.remove(); layer = null }
     for (const node of doc.querySelectorAll('[data-qx-sheet]')) node.remove()
   }

@@ -24,9 +24,25 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- deep link：qianxun://app/dsh 打开最近那台电脑的 DSH 页。
+                 两个用途：
+                   1. 手机锁屏时 adb 仍能拉起 DSH 页 —— 远程验证的唯一路径
+                      （锁屏挡得住触摸，挡不住 Intent）
+                   2. 桌面端可以做「在手机上打开这个会话」的链接
+                 必须同时开 flutter_deeplinking_enabled，否则 Flutter
+                 不会把 Intent 的 URI 交给 GoRouter 做初始路由。 -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="qianxun" android:host="app"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

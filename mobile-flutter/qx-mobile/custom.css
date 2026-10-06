@@ -281,6 +281,72 @@
   .qx-menu-btn { opacity: .55; }
 }
 
+/* ── A13 被砍掉的横向行：换行，不省略 ──────────────────────────────
+ * 标记由 custom.js 的 markClippedRows() 打（按「真的被截断」这个**行为**
+ * 找元素，不靠 class —— DSH 的 class 是构建期哈希，写死就等于埋雷）。
+ *
+ * 起因（359dp 真机宽度实测）：composer 底部状态行
+ *   「11 轮 446 步·103 t…」   少 63px
+ *   「89.2M tok·缓存命中 98%」 少 57px
+ * 「缓存命中 98%」被砍成「98」是**信息丢失**：用户会以为缓存没命中。
+ *
+ * 做法是换行而不是删字段 —— 功能全保留，只是多占一行高度。
+ */
+@media (max-width: 760px) {
+  [data-qx-clipped] {
+    flex-wrap: wrap !important;
+    row-gap: 2px;
+  }
+  [data-qx-clipped] > * {
+    flex: 0 0 auto !important;
+    min-width: max-content;      /* 不许再被压到省略号 */
+  }
+}
+
+/* ── A14 代码/等宽内容：11px 与 10.5px 真机上根本看不清 ──────────────
+ * 实测（359dp）：转录里的 pre / code 被 DSH 设成 11px，个别 10.5px。
+ * 代码是**要照着抄**的内容，比正文更不该小。
+ * 12px 是这里定的下限 —— 再小就不是「紧凑」而是「看不清」了。
+ * 与 DSH 自己的终端规则（也是 12px）保持一致，不打架。
+ */
+@media (max-width: 760px) {
+  pre, code, kbd, samp {
+    font-size: max(12px, 1em) !important;
+  }
+  /* 行内 code 跟着正文走，但**不许低于 12px**。
+     ⚠️ 写成 `0.94em` 会把父级本来就 11px 的行内 code 压到 10.5px ——
+        实测过，比不写还糟。下限必须一起兜住。 */
+  :not(pre) > code {
+    font-size: max(12px, 0.94em) !important;
+  }
+  /* JS 标记出来的「真的小于 12px」的文本，统一托到 12px。
+     靠标记而不是选择器 —— DSH 的 class 是构建期哈希。 */
+  [data-qx-tiny] { font-size: 12px !important; }
+}
+
+/* ── A15 顶栏 / tabs 的触控目标补到 44dp 宽 ──────────────────────────
+ * 实测（359dp）：顶栏图标按钮只有 17–28px 宽（高倒是 48px），
+ * Chat/Trajectory 两个 tab 各 27px —— 手指点不准，而且点错了没有补救。
+ *
+ * 为什么用 min-width 而不是 ::after 扩热区：
+ *   ::after 覆盖层会让相邻按钮的热区**互相重叠**（28px 的按钮间距只有 ~36px，
+ *   扩到 44px 每边多出 8px），后一个会把前一个的边角吃掉 ——
+ *   那是把「点不准」换成「点错地方」，不算改进。
+ *
+ * 代价是顶栏可能更高，所以这条要和 A10 一起看效果。
+ */
+@media (max-width: 760px) {
+  [data-slot='conversation.header'] button,
+  [data-slot='conversation.header'] [role='tab'] {
+    min-width: 44px !important;
+  }
+  [role='tablist'] [role='tab'] {
+    min-width: 56px !important;   /* 「Trajectory」这种长词给足 */
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * §B · 我们的覆盖层
  * ═══════════════════════════════════════════════════════════════════════ */

@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../data/store/connection_store.dart';
 import '../features/connections/application/connections_controller.dart';
 import '../features/connections/presentation/connections_screen.dart';
 import '../features/dsh/presentation/dsh_page.dart';
@@ -39,19 +38,17 @@ final _router = GoRouter(
         },
       ),
     ),
+    // deep link 入口：`qianxun://app/dsh` → 打开最近用过那台电脑。
+    // 不是为了好看，是两个真实用途：手机锁屏时 adb 仍能拉起这一页
+    // （远程验证的唯一路径），以及桌面端做「在手机上打开这个会话」的链接。
+    GoRoute(
+      path: '/dsh',
+      builder: (context, state) => const _DshPickRoute(),
+    ),
     GoRoute(
       path: '/dsh/:connectionId',
-      builder: (context, state) {
-        final id = state.pathParameters['connectionId'] ?? '';
-        final container = ProviderScope.containerOf(context, listen: false);
-        final conn = _findConnection(container, id);
-        if (conn == null) {
-          // 找不到这条连接：回设备列表而不是显示空页 ——
-          // 空页会让用户以为「坏了」，而实际问题只是「这条已被删除」。
-          return const _MissingConnection();
-        }
-        return DshPage(connection: conn);
-      },
+      builder: (context, state) =>
+          _DshRoute(connectionId: state.pathParameters['connectionId'] ?? ''),
     ),
     GoRoute(
       path: '/logs',
@@ -60,18 +57,61 @@ final _router = GoRouter(
   ],
 );
 
-/// 按 id 找连接。找不到返回 null。
+
+/// DSH 路由。
 ///
-/// 不用 `firstWhere(orElse:)` 塞一个空 `Connection` —— 那会让 DSH 页
-/// 拿一个空 url 去加载，表现为「白屏 + 网络错误」，而真实原因是
-/// 「这条连接已经不在了」。两者的排查方向完全不同。
-Connection? _findConnection(ProviderContainer container, String id) {
-  final state = container.read(connectionsControllerProvider);
-  if (state is! ConnectionsReady) return null;
-  for (final conn in state.list) {
-    if (conn.id == id) return conn;
+/// ⚠️ **必须是 Consumer**：连接是从磁盘异步读的。冷启动走 deep link 时
+///   controller 往往还没 ready —— 实测过一次，页面直接显示「找不到这台电脑」，
+///   而用户明明配对过。那不是「这条被删了」，是**读早了**。
+///   `container.read` 不会在数据到达时重建，必须 `watch`。
+class _DshRoute extends ConsumerWidget {
+  const _DshRoute({required this.connectionId});
+
+  final String connectionId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(connectionsControllerProvider);
+    if (state is! ConnectionsReady) return const _DshLoading();
+    for (final c in state.list) {
+      if (c.id == connectionId) return DshPage(connection: c);
+    }
+    return const _MissingConnection();
   }
-  return null;
+}
+
+/// deep link 入口：优先「最近用过的那台」，没有就取第一台。
+class _DshPickRoute extends ConsumerWidget {
+  const _DshPickRoute();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(connectionsControllerProvider);
+    if (state is! ConnectionsReady) return const _DshLoading();
+    if (state.list.isEmpty) return const _MissingConnection();
+    final selected = ref.watch(selectedConnectionIdProvider);
+    for (final c in state.list) {
+      if (c.id == selected) return DshPage(connection: c);
+    }
+    return DshPage(connection: state.list.first);
+  }
+}
+
+class _DshLoading extends StatelessWidget {
+  const _DshLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(strokeWidth: 2.5),
+        ),
+      ),
+    );
+  }
 }
 
 /// 连接已不在（被删或 id 变了）。给一个能回到列表的页面，而不是白屏。

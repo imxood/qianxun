@@ -25,6 +25,7 @@ CDP 直连后可以：
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -34,7 +35,31 @@ from pathlib import Path
 
 ADB = Path(r"D:\programs\android-sdk\platform-tools\adb.exe")
 PKG = "com.qianxun.qianxun_mobile"
-SERIAL = "emulator-5554"
+
+# 设备序列号。真机与模拟器常常同时连着，所以要能切：
+#   python scripts/cdp_webview.py --serial AEQC8P55MFCYBUFA eval "document.title"
+#   或设环境变量 QX_SERIAL=AEQC8P55MFCYBUFA
+_DEFAULT_SERIAL = "emulator-5554"
+SERIAL = os.environ.get("QX_SERIAL", _DEFAULT_SERIAL)
+
+
+def _apply_serial_argv(argv: list[str]) -> list[str]:
+    """把 --serial/--emulator 从 argv 里摘出来并写进 SERIAL。"""
+    global SERIAL
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--serial" and i + 1 < len(argv):
+            SERIAL = argv[i + 1]
+            i += 2
+            continue
+        if argv[i] == "--emulator":
+            SERIAL = _DEFAULT_SERIAL
+            i += 1
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
 
 
 def adb(*args: str, timeout: int = 30) -> str:
@@ -43,6 +68,43 @@ def adb(*args: str, timeout: int = 30) -> str:
         capture_output=True, timeout=timeout,
     )
     return (proc.stdout or b"").decode("utf-8", "ignore")
+
+
+def pick_socket(want_url: str = "") -> tuple[str, int] | None:
+    """挑出**属于本项目**的那个 WebView socket，返回 (socket, 本地端口)。
+
+    ⚠️⚠️ 真机上不止一个 WebView —— 实测同一台 OPPO 上同时有：
+        webview_devtools_remote_6413   ← 我们的 DSH 页
+        webview_devtools_remote_10976  ← iot-cloud 的 VPN 应用（tauri.localhost）
+    按名字取第一个会连到 VPN 应用去，看到的是
+    `http://tauri.localhost/`「Tauri + Vue + TS」，跟本项目毫无关系，
+    而且**看起来一切正常**（能 eval、能截图），只是内容完全不对。
+    这种错连比连不上更难发现。
+
+    所以这里逐个 forward 并**按页面 URL 判定**，命中不了就报清楚看到了什么。
+    """
+    socks = webview_sockets()
+    if not socks:
+        return None
+    seen: list[str] = []
+    for s in socks:
+        port = forward(s)
+        if port is None:
+            continue
+        try:
+            listing = pages(port)
+        except Exception:
+            continue
+        for p in listing:
+            url = p.get("url", "")
+            if want_url and want_url in url:
+                return s, port
+            seen.append(f"{s} → {url[:60]}")
+    print("没找到属于本项目的 WebView。逐个 forward 看到的是：")
+    for line in seen:
+        print("   ", line)
+    print(f"（要找的 URL 片段：{want_url!r}）")
+    return None
 
 
 def webview_sockets() -> list[str]:
@@ -86,10 +148,12 @@ def ws_url(port: int, page: dict) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    sys.argv = _apply_serial_argv(sys.argv[1:])
+    print(f"设备 {SERIAL}")
+    if len(sys.argv) < 1:
         print(__doc__)
         return 1
-    cmd = sys.argv[1]
+    cmd = sys.argv[0]
 
     socks = webview_sockets()
     if not socks:
@@ -98,11 +162,11 @@ def main() -> int:
         return 1
     print(f"webview sockets: {socks}")
 
-    port = forward(socks[0])
-    if port is None:
-        print("forward 后连不上")
+    picked = pick_socket(os.environ.get("QX_URL_MATCH", "192.168."))
+    if picked is None:
         return 1
-    print(f"本地端口 {port}")
+    _sock, port = picked
+    print(f"已连上本地端口 {port}")
 
     listing = pages(port)
     print(f"页面 {len(listing)} 个:")
@@ -125,18 +189,18 @@ def main() -> int:
         return 0
     if cmd == "shot":
         # 用 Page.captureScreenshot
-        return capture(ws, sys.argv[2] if len(sys.argv) > 2 else ".tmp/webview.png")
+        return capture(ws, sys.argv[1] if len(sys.argv) > 1 else ".tmp/webview.png")
     if cmd == "eval":
         # `eval --file <路径>`：表达式从文件读。
         # 为什么必须有它：PowerShell 会吞引号、反引号和 $var，
         # 而要 eval 的 JS 往往正好是带模板字符串的（踩过一次，注入的 CSS 整段丢失）。
-        if len(sys.argv) >= 4 and sys.argv[2] == "--file":
-            path = Path(sys.argv[3])
+        if len(sys.argv) >= 3 and sys.argv[1] == "--file":
+            path = Path(sys.argv[2])
             if not path.is_file():
                 print(f"找不到 {path}")
                 return 1
             return evaluate(ws, path.read_text(encoding="utf-8"))
-        expr = sys.argv[2] if len(sys.argv) > 2 else "document.title"
+        expr = sys.argv[1] if len(sys.argv) > 1 else "document.title"
         return evaluate(ws, expr)
 
     print(__doc__)
@@ -159,7 +223,10 @@ class WS:
             # Android 常见形态：ws://127.0.0.1:PORT/devtools/page/ID 或裸 ID
             raise ValueError(f"无法解析 ws url: {url}")
         host, port, path = m.group(1), int(m.group(2)), m.group(3)
-        self.sock = socket.create_connection((host, port), timeout=20)
+        # ⚠️ 20s 在真机上不够：手机走 VPN 隧道到桌面，实测 RTT 230–600ms
+        #    （ping 192.168.20.2）。一个「依次 fetch 三个资源」的探针
+        #    光网络就吃掉好几秒，直接 TimeoutError，而栈里看不出是哪一步超时。
+        self.sock = socket.create_connection((host, port), timeout=60)
         key = base64.b64encode(os.urandom(16)).decode()
         req = (
             f"GET {path} HTTP/1.1\r\n"

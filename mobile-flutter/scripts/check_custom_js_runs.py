@@ -90,6 +90,12 @@ function makeEl(tag) {
       return null;
     },
     querySelector() { return null; },
+    // markClippedRows / markTinyText 会用 getBoundingClientRect 与
+    // window.getComputedStyle —— 替身不给就等于这两条路径**根本没被测到**，
+    // 闸门会绿得像没这回事（真机已经因此错过一次 11px→10.5px 的反向劣化）。
+    getBoundingClientRect() { return { x: 0, y: 0, width: 40, height: 20 }; },
+    scrollWidth: 40,
+    clientWidth: 40,
     // 支持 `.class` 选择器 —— appendHint 靠它清旧提示条，
     // 不支持的话闸门会**永远看不到重复**，等于这条断言是假的。
     querySelectorAll(sel) {
@@ -154,7 +160,13 @@ const window = {
   addEventListener() {},
   removeEventListener() {},
   dispatchEvent() {},
-  getComputedStyle: (el) => ({ position: el && el.__pos ? el.__pos : 'static' }),
+  getComputedStyle: (el) => ({
+    position: el && el.__pos ? el.__pos : 'static',
+    display: (el && el.__disp) || 'flex',
+    // 给足字号，好让 markTinyText 走「已达标」那条分支；
+    // 越界分支另由下面的专属断言覆盖。
+    fontSize: '16px',
+  }),
   fetch: () => Promise.resolve({
     ok: true,
     json: () => Promise.resolve({ result: { ok: true, value: { items: FAKE_ITEMS } } }),
@@ -313,11 +325,16 @@ console.log('PASS register 收到的是函数');
     dialogs() { return [dialog, approval]; },
     tree() { return treeRows; },
     sidebarButtons() { return [collapseBtn]; },
+    plain() { return sel.__plain || []; },
   };
   document.querySelectorAll = (q) => {
     if (q.indexOf('treeitem') !== -1) return sel.tree();
     if (q.indexOf('[role="dialog"]') !== -1 || q.indexOf('[aria-modal') !== -1) return sel.dialogs();
     if (q.indexOf('sidebar') !== -1) return sel.sidebarButtons();
+    // ⚠️ 必须排在 TAGS 前面：'span, div' 里也有 div，
+    //    走 divChain 分支的话 markClippedRows / markTinyText
+    //    永远看不到下面造的那两个「坏元素」，闸门就绿得像没这回事。
+    if (q.indexOf('span') !== -1 || q.indexOf('samp') !== -1) return sel.plain();
     if (TAGS.test(q)) return sel.divChain();
     return [];
   };
@@ -443,6 +460,61 @@ console.log('PASS register 收到的是函数');
     process.exit(1);
   }
   console.log('PASS ☰ 落在顶栏空槽，点击走 DSH 自己的 Open sidebar');
+
+  // ── 窄屏排版两道标记 ──────────────────────────────────────────────
+  // 这两道是「按行为找元素」，所以替身必须能造出对应的坏元素，
+  // 否则闸门永远走「一切正常」那条分支 —— 绿得像没这回事。
+  const tinyEl = makeEl('span');
+  tinyEl.__disp = 'block';
+  tinyEl.children = [{ nodeType: 3, textContent: 'x' }];
+  // ⚠️ 不能写 `tinyEl.firstChild = {...}` —— makeEl 的 firstChild 只有 getter，
+  //    赋值会被**静默忽略**，于是 `!el.firstChild` 恒成立、
+  //    markTinyText 每次都 continue，闸门就绿得像没这回事。
+  const tinyBox = {
+    width: 40, height: 20, x: 0, y: 0,
+    scrollWidth: 40, clientWidth: 40,
+  };
+  tinyEl.getBoundingClientRect = () => tinyBox;
+  tinyEl.scrollWidth = 40;
+  tinyEl.clientWidth = 40;
+
+  const clippedEl = makeEl('span');
+  const clippedBox = {
+    width: 40, height: 20, x: 0, y: 0,
+    scrollWidth: 103, clientWidth: 40,     // ← 真的被砍了 63px
+  };
+  clippedEl.getBoundingClientRect = () => clippedBox;
+  clippedEl.scrollWidth = 103;
+  clippedEl.clientWidth = 40;
+  clippedEl.children = [{ nodeType: 3, textContent: 'y' }];
+
+  const row = makeEl('div');
+  row.children = [clippedEl];
+  clippedEl.parentNode = row;
+  row.getBoundingClientRect = () => ({ width: 200, height: 20, x: 0, y: 0 });
+  body.children = [row];
+
+  // 让 getComputedStyle 对这两个元素报 11px
+  const prevGCS = window.getComputedStyle;
+  sel.__plain = [tinyEl, clippedEl];
+  window.getComputedStyle = (el) => {
+    if (el === tinyEl || el === clippedEl) {
+      return { position: 'static', display: 'block', fontSize: '11px' };
+    }
+    return prevGCS(el);
+  };
+  tick();
+
+  if (!clippedEl.attrs['data-qx-clipped'] && !row.attrs['data-qx-clipped']) {
+    console.log('FAIL 被截断的行没有被打上 data-qx-clipped');
+    process.exit(1);
+  }
+  if (!tinyEl.attrs['data-qx-tiny']) {
+    console.log('FAIL 11px 的文本没有被打上 data-qx-tiny');
+    process.exit(1);
+  }
+  console.log('PASS 被截断的行与小字号文本都被标记（CSS 据此改成换行 / 托到 12px）');
+  window.getComputedStyle = prevGCS;
 
   // ── 提示条不能重复（必须放在最后：它会 dispose 掉当前这一轮）──────
   // ⚠️ 真机症状：定制层热替换后，DSH 行里出现**两个**「上下文 79%」。
