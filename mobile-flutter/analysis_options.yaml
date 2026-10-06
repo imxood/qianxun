@@ -14,6 +14,30 @@ analyzer:
     - build/**
     - android/**
     - ios/**
+    # ── 方案 B：已作废的 Flutter 界面层 ──────────────────────────
+    #
+    # DSH 页面现在由 WebView 承载，界面由
+    # `<dsh_home>/mobile-access/custom.{js,css}` 在页面内重建
+    # （docs/design/11-qx-mobile-layer.md）。下面两棵树的 Flutter 界面
+    # **不再参与运行**。
+    #
+    # 为什么是 exclude 而不是删掉：
+    #   · 它们是设计证据（05 裁决的落点、信号轨验证、稀疏行认知的推导），
+    #     删掉等于丢掉可追溯性
+    #   · 它们引用 file_picker，而方案 B 下附件由页面负责，
+    #     依赖已移除 —— 继续编译会直接报错
+    #   · 它们的 117 个测试测的是不再跑的东西，会挡住真正的门禁
+    #
+    # 恢复方式：删掉这两行即可，无需改任何代码。
+    # 说明见 lib/features/README.md。
+    - lib/features/sessions/**
+    - lib/features/workspace/**
+    # 对应测试已移到 test/legacy_flutter_ui/（flutter test **不认**
+    # analysis_options 的 exclude，所以只能靠移目录才能真正移出门禁）。
+    # 文件保留作对照，见 test/README.md。
+    - test/legacy_flutter_ui/**
+    # 对应的测试：它们 import 上面那两棵树，且 file_picker 依赖已移除。
+    # 保留文件作对照（test/README.md 有说明），但不再跑。
 
 linter:
   # The lint rules applied to this project can be customized in the

@@ -31,6 +31,29 @@ FLUTTER = Path(r"E:\develop\tools\flutter\bin\flutter.bat")
 JDK = Path(r"D:\programs\jdk-17.0.20.1+1")
 ANDROID = Path(r"D:\programs\android-sdk")
 
+# 活门禁只跑这些测试。
+#
+# 为什么不用不带路径的 `flutter test`：
+#   它**递归**扫 test/ 下所有 _test.dart，且**不认** analysis_options.yaml
+#   的 exclude。所以方案 B 下作废的 UI 测试即使被 exclude 掉，
+#   `flutter test` 仍会加载它们 —— 表现为
+#   `test/legacy_flutter_ui/composer_test.dart: loading …` 直接失败。
+#
+# 显式列出来的第二个好处：门禁范围是**可见的**。加新测试时要主动决定
+# 它属于「活」还是「作废」，而不是被目录扫描顺手带进来。若哪天有人把
+# 作废测试挪回 test/ 顶层，它会**静默地**重新进门禁而没人察觉。
+#
+# 清单与逐条理由见 test/README.md。
+TEST_TARGETS = [
+    "test/protocol_test.dart",             # RPC 信封 / WS mux / requestId 去重 / 流式压缩
+    "test/mobile_access_test.dart",        # 端点与凭据模型、过期边界、凭据不泄漏
+    "test/dsh_back_test.dart",             # 返回键三级递进
+    "test/connection_equality_test.dart",  # Connection 值相等（真机才暴露的坑）
+    "test/design_system_test.dart",        # 对比度闸门
+    "test/logs_test.dart",                 # release 唯一的排查通道
+    "test/cold_start_test.dart",           # 冷启动落点
+]
+
 # 缺少的组件会在这里被直接报出来，而不是让 flutter 抛一堆看不懂的错。
 REQUIRED = [
     FLUTTER,
@@ -101,14 +124,14 @@ def main() -> int:
     if args.cmd == "analyze":
         return run(["analyze"])
     if args.cmd == "test":
-        return run(["test"])
+        return run(["test"] + TEST_TARGETS)
     if args.cmd == "clean":
         return run(["clean"])
     if args.cmd == "check":
         rc = run(["analyze"])
         if rc != 0:
             return rc
-        return run(["test"])
+        return run(["test"] + TEST_TARGETS)
     if args.cmd == "apk":
         argv = ["build", "apk", "--target", args.target]
         if args.debug:

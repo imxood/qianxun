@@ -1,7 +1,89 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qianxun_mobile/data/store/connection_store.dart';
+import 'package:qianxun_mobile/features/dsh/presentation/dsh_credential.dart';
 import 'package:qianxun_mobile/features/dsh/presentation/webview_host_state.dart';
 
 void main() {
+  group('凭据解析 —— 真机才暴露的那个坑', () {
+    // 实测模拟器上的真实存储（RN 客户端写的）：
+    //   { "url": "http://192.168.20.2:23090/qx-gate?token=<64hex>",
+    //     "qxToken": null }
+    //
+    // 症状：设备列表显示「在线」（探活走 GatewayClient，它自己会从 url
+    // 提 token），但 DSH 页说「这条连接没有凭据」。
+    // 根因：WebView 宿主只读 `connection.qxToken`，而旧数据里它是 null。
+
+    test('从 url 的 ?token= 提取（64 位 hex）', () {
+      const hex =
+          '746f7635ddef778bcfeb8cf0a38e6f0720b8d7d0517a49053d1ae22b9d76f60c';
+      final url = Uri.parse('http://192.168.20.2:23090/qx-gate?token=$hex');
+      expect(resolveCredential(url, null), hex);
+    });
+
+    test('qxToken 字段优先于 url（旧数据两者都在时用字段）', () {
+      const fromField = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      final url = Uri.parse('http://192.168.20.2:23090/qx-gate?token=bbbb');
+      expect(resolveCredential(url, fromField), fromField);
+    });
+
+    test('?code= 是一次性兑换码，提不出 token → 报「重新配对」', () {
+      // ⚠️ 不能把 code 当 token 用 —— 它必须真的去 /qx-gate 兑换一次。
+      // 拿它当 cookie 发出去会得到 401，且用户完全看不懂为什么。
+      final url = Uri.parse('http://192.168.20.2:23090/qx-gate?code=abc123');
+      expect(resolveCredential(url, null), isNull);
+    });
+
+    test('两处都没有 → null', () {
+      final url = Uri.parse('http://192.168.20.2:23090/');
+      expect(resolveCredential(url, null), isNull);
+      expect(resolveCredential(url, ''), isNull);
+    });
+
+    test('太短的 token 视为无效', () {
+      // 1 位不是 token，硬用会得到一个毫无意义的 401。
+      final url = Uri.parse('http://192.168.20.2:23090/qx-gate?token=x');
+      expect(resolveCredential(url, null), isNull);
+    });
+
+    test('**只从 url 提，不改 url 本身**', () {
+      // 提取后若把它写回 url，带凭据的 URL 会进日志、进路由、
+      // 进而进浏览历史。token 只该进 cookie。
+      const hex =
+          '746f7635ddef778bcfeb8cf0a38e6f0720b8d7d0517a49053d1ae22b9d76f60c';
+      final url = Uri.parse('http://192.168.20.2:23090/qx-gate?token=$hex');
+      final token = resolveCredential(url, null);
+      expect(token, isNotNull);
+
+      // 原 url 未被改写（它仍是入参，不可变）
+      expect(url.toString(), contains('token=$hex'));
+
+      // 而提供给 WebView 的必须**没有凭据**。
+      // ⚠️ stripCredential 只清 query/fragment，**保留 path** ——
+      //    这是刻意的：万一将来有需要带路径的地址形态，清掉 path
+      //    会把地址悄悄改成站点根。现在调用方另外做 `resolve('/')`。
+      final stripped = stripCredential(url);
+      expect(stripped.query, isEmpty);
+      expect(stripped.toString(), isNot(contains(hex)));
+      expect(stripped.resolve('/').toString(), 'http://192.168.20.2:23090/');
+    });
+  });
+
+  group('Connection 值相等仍含凭据', () {
+    test('同机器重新配对（token 变了）→ 视为不同连接', () {
+      // 没有这条，重新配对后 WebView 会继续用旧 cookie，
+      // 表现为「配对成功了但还是 401」。
+      const a = Connection(
+        id: 'c1',
+        name: 'PC',
+        url: 'http://192.168.20.2:23090/qx-gate?token=old',
+        addedAt: 1,
+        qxToken: 'old',
+      );
+      final b = a.copyWith(qxToken: 'new');
+      expect(a, isNot(equals(b)));
+    });
+  });
+
   group('decideBackAction 三级递进', () {
     // 顺序不可调换（10-shell-bridge.md §4）：
     //   1. WebView 有历史 → 后退

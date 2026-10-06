@@ -11,6 +11,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../../core/qx_log.dart';
 import '../../../data/store/connection_store.dart';
+import 'dsh_credential.dart';
 import 'webview_host_state.dart';
 
 /// DSH 页面宿主。
@@ -62,9 +63,23 @@ class _DshPageState extends ConsumerState<DshPage> {
   Future<void> _init() async {
     final connection = widget.connection;
     final url = Uri.parse(connection.url);
-    final token = connection.qxToken;
 
-    if (token == null || token.isEmpty) {
+    // ⚠️ **凭据有两个可能的位置，且旧数据只有第一个。**
+    //
+    // 实测模拟器上的真实存储（RN 客户端写的）：
+    //   { "url": "http://192.168.20.2:23090/qx-gate?token=<64hex>",
+    //     "qxToken": null }
+    // 即 **token 在 url 的 query 里，qxToken 字段是 null**。
+    //
+    // 只读 `connection.qxToken` 会得到「没有凭据」——
+    // 那是个**假象**：用户明明配对过，列表里也显示「在线」
+    // （探活走 GatewayClient，它自己会从 url 提 token），
+    // 但 WebView 宿主读 `qxToken` 就说没凭据。
+    //
+    // 判定逻辑在 dsh_credential.dart（纯函数 + 6 个测试），
+    // 因为这是「真机才暴露、widget 测试碰不到」的那类坑。
+    final token = resolveCredential(url, connection.qxToken);
+    if (token == null) {
       setState(() => _loadError = '这条连接没有凭据。重新扫码配对一次。');
       return;
     }
@@ -145,7 +160,10 @@ class _DshPageState extends ConsumerState<DshPage> {
 
     _controller = controller;
 
-    final target = url.resolve('/');
+    // ⚠️ 必须剥掉 query —— 旧数据的 url 里带 `?token=<64hex>`，
+    // 直接加载会让它进 WebView 的历史与（万一的）日志。
+    // token 已经进 cookie 了，url 不需要再带一遍。
+    final target = stripCredential(url).resolve('/');
     qxlog.info('dsh', '加载 $target');
     await controller.loadRequest(target);
 
@@ -163,6 +181,14 @@ class _DshPageState extends ConsumerState<DshPage> {
         candidate.host == base.host &&
         candidate.port == base.port;
   }
+
+  /// 从配对链接里取长期 token（兼容旧数据）。
+  ///
+  /// 已移到 `dsh_credential.dart` 的 `resolveCredential()` —— 那里有 6 个
+  /// 测试钉住，理由写在该文件的注释里。留在 State 里就只能靠真机验。
+  ///
+  /// ⚠️ WebView 加载的地址必须用 `stripCredential()` 剥掉 query：
+  /// `?token=<64hex>` 会跟着进路由栈与浏览历史，token 只进 cookie。
 
   void _openExternally(String url) {
     qxlog.info('dsh', '外部链接交系统浏览器：$url');

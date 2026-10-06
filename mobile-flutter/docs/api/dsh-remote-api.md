@@ -118,10 +118,32 @@ content-type: application/json
 | `session/attachment` | 443 | `request{sessionId,attachmentId}` | `{attachment,data /*base64*/}` |
 | `session/updateQueue` | 453 | `request{sessionId,itemId,action:{kind:'edit'\|'remove'\|'steer'}}` | `{accepted:true}` |
 | `session/cancel` | 463 | `request{sessionId}` | `{accepted:true}` |
-| `session/page` | 474 | `request{address,throughSeq,beforeSeq?,maxMessages?,turnWindow?}` | `{records,hasMore}` |
-| `session/follow` * | 486 | `request{address,maxMessages?,turnWindow?,assistantStream?:true}` | `snapshot` / `event` / `assistant-stream` 帧 |
+| `session/page` | 474 | ⚠️ **`{request{address,throughSeq,beforeSeq?,maxMessages?,turnWindow?}}`** | `{records,hasMore}` |
+| `session/follow` * | 486 | ⚠️ **`{request{address,maxMessages?,turnWindow?,assistantStream?:true}}`** | `snapshot` / `event` / `assistant-stream` 帧 |
 | `session/projections` | 497 | `request{sessionId}` | 基线 或 `null` |
 | `session/control` * | 526 | — | `baseline`/`projection` 帧（宿主全局） |
+
+> ⚠️ **⚠️ 上面 `session/page` 与 `session/follow` 的参数表是错的，实测已更正。**
+>
+> 原表把它们记成**平铺**的 `{address, throughSeq, …}`，但实测：
+>
+> ```
+> 平铺 → gateway/arguments-invalid
+>      args fields do not match the descriptor:
+>      missing "request"; unexpected "address", "throughSeq", "maxMessages"
+> 正确 → { request: { address, throughSeq, … } }
+> ```
+>
+> **规律**：除 `session/list`（参数键恰好叫 `_request`，平铺）之外，
+> **其余方法都要包一层 `request`**。
+> 早前那句「`payload.args` 是唯一合法键」只说了信封层，
+> **没说清 args 内部还有一层 `request`** —— 那是这份文档的一个实质误导点。
+> 依据：`scripts/probe_transcript_scale.py` 实测。
+>
+> ⚠️ 另：`throughSeq` 是**游标**，不是任意上限。填 `2**31-1` 会得到
+> `session page through seq 2147483647 is past cursor 13487`。
+> 真实值取自 `projections.asOfSeq`。
+
 
 `session/prompt` 的 `content` 三种 part：
 `{type:'text',text}` / `{type:'image',mediaType,data,name?}` / `{type:'file',receiptId}`。

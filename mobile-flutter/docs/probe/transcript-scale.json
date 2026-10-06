@@ -1,0 +1,47 @@
+{
+  "_probe": {
+    "note": "真实长会话的转录规模。custom.js 的工具卡截断阈值依据它定，不凭感觉。**只记分布，不含任何会话内容。**",
+    "source": "probe_transcript_scale.py",
+    "sessionId": "session-ef57cbfd-6667-4cb1-86be-6309f2a38d89",
+    "records": 1910,
+    "hasMore": true
+  },
+  "totalBytes": 6642122,
+  "perEventBytes": {
+    "p50": 489,
+    "p90": 9592,
+    "p99": 45209,
+    "max": 142782
+  },
+  "eventTypeCounts": {
+    "assistant/message": 360,
+    "tool/call": 351,
+    "tool/result": 355,
+    "step/end": 360,
+    "step/start": 359,
+    "user/message": 42,
+    "deliverables/presented": 7,
+    "workspace/changes": 8,
+    "turn/end": 9,
+    "agent/inbox/spliced": 32,
+    "turn/start": 8,
+    "compaction/prune": 4,
+    "request/header": 4,
+    "compaction/start": 2,
+    "compaction/summary": 2,
+    "compaction/end": 2,
+    "assistant/attempt": 1,
+    "llm/retry": 1,
+    "llm/retry-started": 1,
+    "session/end-seed": 1,
+    "system/message": 1
+  },
+  "overThreshold": {
+    "8KB": 211,
+    "16KB": 105,
+    "32KB": 41,
+    "64KB": 8,
+    "128KB": 1,
+    "256KB": 0
+  }
+}
