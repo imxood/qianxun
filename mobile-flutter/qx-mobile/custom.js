@@ -1,122 +1,119 @@
 /*
- * 千寻移动端 · L3 定制脚本（custom.js） —— 第 1 版：通道自检 + 诊断浮层
+ * 千寻移动端 · L3 定制脚本（custom.js） —— 第 2 版：导航重建
  * =============================================================================
  * 部署到：<dsh_home>/mobile-access/custom.js
- * 入口：  window.qxMobile.register(({ root, document, window }) => …)
  *
- * ============================== 为什么第 1 版只做这个 ==============================
- * 这一版**不重建任何界面**。它做三件事：
- *   1. 验通道：window.fetch 能否带凭据调 session/list
- *   2. 验认知：字段签名的真实分布（52.8% 只有 title）
- *   3. 给后续版本一个可复用的 RPC 封装 + 状态存储
+ * ============================== 入口纪律（最重要的一条）==============================
  *
- * 为什么不一次做完界面
- * --------------------
- * custom.js 是**热替换**的：改文件 5 秒后自动生效，语法错误只报 console
- * 不影响页面（bootstrap.js:95-100 失败保留旧版）。所以可以增量做。
+ * ⚠️⚠️ **入口必须是函数表达式，不能是立即执行的 async 箭头。**
  *
- * 但**不要**一上来就 `.dshm-shell { display:none }` 藏掉 DSH 界面
- * —— 那是「重写」不是「重排」，会把 141 个 RPC 的 UI 工作量全揽过来。
- * 正确顺序是 L1（CSS 窄屏，已在 custom.css）→ 逐块替换 → 最后才考虑全藏。
+ * 踩过的坑（语法合法、服务正常、hash 正确，界面却**完全不动**）：
  *
- * ============================== 契约要点 ==============================
- * · 上下文只有 { root, document, window }，**没有 request**。
- *   脚本跑在同源页面里，window.fetch 本身就带 cookie，不用管 credentials。
- * · 一切选择器只能用 data-* / role / aria-*。
- *   ⚠️ class 名是构建期哈希（hHd-Xa_ / bhn1Oq_ / YDXeBa_），
- *      DSH 每次构建都变，用了必然静默失效。清单见 docs/probe/dom-anchors.json。
- * · 返回清理函数。热替换时 bootstrap 会先挂新 root 再卸旧 root。
+ *     window.qxMobile.register((async (ctx) => { ... })())
  *
- * ============================== 线格式（实测）==============================
- * 端点  POST /api/<ns>/<method>
- * 信封  { type:'server-response', rpcId, result:{ ok, value | error } }
- * 参数  payload.args 是唯一合法键；⚠️ session/list 的参数恰好叫 _request
- * 取值  project 为 { type, rpcId, result } 三层，**不是** { value }
+ * 那写法立即执行并返回 **Promise**。bootstrap.js:48 拿到 mount 的返回值
+ * 当清理函数：
+ *
+ *     const result = mount({ root: ensureRoot(), document, window })
+ *     dispose = typeof result === 'function' ? result : null
+ *
+ * Promise 不是 function -> dispose 永远是 null；而 mount 内部的逻辑
+ * 要等网络返回才跑 —— 于是按钮永远不出现。
+ *
+ * 恶劣之处：**没有任何报错**。bootstrap 只在 catch 里打 console，
+ * 而它 catch 的是同步异常；一个「类型不对但没抛」的返回值一路静默通过。
+ * 唯一线索是「界面没动」，极易误判成 CSS 没生效。
+ *
+ * 正确：register(async function qxMount(ctx) { ... })
+ *
+ * ============================== 另外两条不能违反的律 ==============================
+ *
+ * ① 选择器只能用 data-* / role / aria-*。
+ *    DSH 的 class 是**构建期哈希**（实测 hHd-Xa_panelRow / bhn1Oq_searchButton /
+ *    YDXeBa_projectRow），每次 DSH 构建都变。清单见 docs/probe/dom-anchors.json
+ *    （从 677KB bundle 实测）。用了 class 就会静默失效。
+ *
+ * ② 不隐藏 DSH 原版界面。
+ *    想过 `.dshm-shell { display:none }` 一刀切 —— 那是「重写」不是「重排」，
+ *    会把 141 个 RPC 的 UI 工作量全揽过来。正确顺序是逐块替换。
+ *    本版只**加**一个覆盖层，DSH 自己的界面在下面照常工作。
+ *
+ * ============================== 第 2 版做了什么 ==============================
+ *   · 全屏覆盖层（☰ 按钮 / 左边缘右滑）
+ *   · 侧栏 = 工作区树 + 会话列表（实测 8 个工作区 · 394 条）
+ *   · 会话行按实测认知渲染：稀疏行**不补**「0 轮 0 步 上下文 0%」
+ *   · 待答分三档：pending / none / unknown，绝不把 unknown 说成「没有」
+ *   · 工具卡加「看全文」入口（12KB 阈值 + 底部 sheet）
+ *
+ * ============================== 线格式（全部实测）==============================
+ *   POST /api/<ns>/<method>
+ *   method: **全名** `session/list`（写裸 `list` 会得到
+ *           method "list" does not match endpoint "session/list"）
+ *   payload.args: **内层还有一层 request**
+ *     { args: { request: { …实际参数… } } }
+ *     唯一例外 session/list：平铺，键名恰好叫 `_request`
+ *   响应: { type:'server-response', rpcId, result:{ ok, value|error } }
+ *   throughSeq 是**游标**不是任意上限（取 projections.asOfSeq）
  */
 
-(() => {
-  'use strict'
+window.qxMobile.register(async function qxMount({ document: doc, window: win }) {
+
+  // ══════════════════════════════════════════════════════════════════
+  // 常量
+  // ══════════════════════════════════════════════════════════════════
+
+  /** 折叠工具行的字节阈值。略高于实测 p90（9.4KB）。 */
+  const FOLD_BYTES = 12 * 1024
+  /** 每个工作区默认显示几条。实测最多 192 条，全列出来没法用。 */
+  const ROWS_PER_WS = 8
+
+  // ══════════════════════════════════════════════════════════════════
+  // 状态
+  // ══════════════════════════════════════════════════════════════════
 
   const state = {
-    /** @type {Map<string, object>} sessionId → summary（简化后的） */
-    sessions: new Map(),
-    /** 按工作区分组，key = cwd；未归属的用 __ungrouped__ */
-    byWorkspace: new Map(),
-    /** 最近一次全量拉取成功的时刻（epoch ms）。null = 从未成功。 */
+    sessions: new Map(),      // sessionId → summary
+    byWorkspace: new Map(),   // cwd → summary[]
     listSyncedAt: null,
-    /** 上一次的错误，供 UI 决定要不要显示 */
     lastError: null,
+    drawerOpen: false,
+    /** 展开的工作区集合。空集合 = 全部按默认条数。 */
+    expanded: new Set(),
+    currentSessionId: null,
   }
-
-  // ══════════════════════════════════════════════════════════════════
-  // RPC 封装
-  // ══════════════════════════════════════════════════════════════════
 
   let rpcSeq = 0
 
-  /**
-   * 调一个 DSH RPC。
-   *
-   * ⚠️ 四个必须遵守的点（都是实测踩过的）：
-   *  1. 信封里的 `method` 要写**全名** `session/list`，不是裸 `list`。
-   *     写裸名会得到
-   *     `method "list" does not match endpoint "session/list"`。
-   *  2. 结果信封是三层 `result.ok` / `result.value`，不是 `{ value }`。
-   *     写错一层会「安静地得到 undefined」，然后界面上是一份空列表
-   *     ——看起来像「部署上没有会话」，而真相是解包写错了。
-   *  3. **args 内部还有一层 `request`。**
-   *     正确：`{ args: { request: { …实际参数… } } }`
-   *     错误：`{ args: { …实际参数… } }` → 得到
-   *       `missing "request"; unexpected "address", …`
-   *     **唯一例外是 `session/list`**，它的参数键恰好叫 `_request`，
-   *     且是平铺的：`{ args: { _request: {} } }`。
-   *  4. `requestId`（session/prompt）由**服务端去重**，同一 id 重试安全。
-   *     错一次会产生两条轮次，不可逆。
-   *
-   * @param {string} namespace 例如 'session'
-   * @param {string} method 例如 'list'
-   * @param {object} args **内层**参数（不要自己包 request，本函数会包）
-   * @param {string} [argsKey] args 里的键名。默认 'request'；
-   *        `session/list` 要传 '_request'。
-   * @returns {Promise<unknown>} result.value
-   * @throws  {Error} RPC 返回 ok:false，或网络失败
-   */
+  // ══════════════════════════════════════════════════════════════════
+  // RPC
+  // ══════════════════════════════════════════════════════════════════
+
   async function rpc(namespace, method, args, argsKey) {
     const key = argsKey || 'request'
-    const res = await window.fetch(`/api/${namespace}/${method}`, {
+    const res = await win.fetch('/api/' + namespace + '/' + method, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request',
-        rpcId: `qx-m${++rpcSeq}`,
-        method: `${namespace}/${method}`,   // ⚠️ 全名，不是裸 method
+        rpcId: 'qx-m' + (++rpcSeq),
+        method: namespace + '/' + method,
         payload: { args: { [key]: args } },
       }),
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText)
     const body = await res.json()
     const result = body && body.result
     if (!result) throw new Error('响应里没有 result 字段')
     if (result.ok !== true) {
       const err = result.error || {}
-      throw new Error(`${err.code || 'unknown'}: ${err.message || JSON.stringify(err)}`)
+      throw new Error((err.code || 'unknown') + ': ' + (err.message || JSON.stringify(err)))
     }
     return result.value
   }
 
-  /**
-   * `session/list`。⚠️ 它是**唯一**平铺的方法，参数键叫 `_request`。
-   */
-  function listSessions() {
-    return rpc('session', 'list', {}, '_request')
-  }
+  /** ⚠️ session/list 是**唯一**平铺的方法，参数键恰好叫 `_request`。 */
+  const listSessions = () => rpc('session', 'list', {}, '_request')
 
-  /**
-   * `session/page`。⚠️ `throughSeq` 是**游标**不是任意上限 ——
-   * 填 `2**31-1` 会得到
-   * `session page through seq 2147483647 is past cursor 13487`。
-   * 真实值取自 `projections.asOfSeq`。
-   */
   function pageSession(sessionId, asOfSeq, maxMessages) {
     return rpc('session', 'page', {
       address: { kind: 'session', sessionId },
@@ -126,27 +123,23 @@
   }
 
   // ══════════════════════════════════════════════════════════════════
-  // 稀疏行认知 —— 这一版的重点
+  // 摘要解析 —— 稀疏行认知的落点
   // ══════════════════════════════════════════════════════════════════
 
   /**
-   * `projections.values` **按签名分组**，不是固定结构。
-   * 全量 394 条实测：{只有 title: 208, 18 字段: 65, 19 字段: 37, 20 字段: 84}
+   * 把一条 `session/list` item 解析成列表行要用的摘要。
    *
-   * ⚠️ 那 208 条**没有** `contextPressure` 键 —— 不是 null，不是 {x:0}，
-   * 是键根本不存在。按固定结构解析并给缺失值兜底 0，会给一半以上的
-   * 会话画出假的「上下文 0%」和假的「已完成」。
-   *
-   * 所以每个字段的读取都必须区分三种态：
-   *   键存在且有值 → 用它
-   *   键存在但为 null → 显示「无」（不是 0）
-   *   键不存在    → **整块不显示**（不是 0）
+   * ⚠️ **缺字段 ≠ 零。** 实测 394 条：
+   *   只有 title 的会话 **208 条 (52.8%)** —— 键**根本不存在**，
+   *   不是 null，不是 {x:0}。那是「从未跑过一轮」。
+   *   按固定结构解析并兜底 0，会给一半以上的会话画出
+   *   假的「上下文 0%」和假的「已完成」。
    */
   function readProjection(item) {
     const values = (item && item.projections && item.projections.values) || {}
     const has = (key) => Object.prototype.hasOwnProperty.call(values, key)
 
-    // 只有 title 的会话 = 从未跑过一轮（无 sessionStats / turnOutline）
+    // 只有 title 的会话 = 从未跑过一轮
     const sparse = !has('sessionStats') && !has('turnOutline')
 
     const stats = has('sessionStats') ? values.sessionStats : null
@@ -156,32 +149,35 @@
     const team = has('agentTeam') ? values.agentTeam : null
     const questions = has('userQuestions') ? values.userQuestions : null
 
-    // 上下文百分比：只能用 projectedTokens / contextWindow
-    // （只有它给分母）。⚠️ 缺失时返回 null，调用方必须整块不显示，
-    // **不得兜底成 0**。
+    // 百分比只能用 projectedTokens / contextWindow（只有它给分母）
     const contextPct = pressure && pressure.contextWindow
       ? (pressure.projectedTokens / pressure.contextWindow) * 100
       : null
+
+    // 待答**三档** —— 真机实测（394 条）：
+    //   有 userQuestions 键    84 条 (21.3%) → pending / none
+    //   无键 且稀疏            208 条 (52.8%) → **none**（从未跑过，不可能有）
+    //   无键 但**有**轮次历史  102 条 (25.9%) → **unknown**（真不可知）
+    //
+    // 前两档界面**同形**。只有第三档不能说「没有待答」
+    // （否定断言律：没收到 ≠ 不存在）。
+    const pendingKind = questions
+      ? ((questions.active || []).length > 0 ? 'pending' : 'none')
+      : (sparse ? 'none' : 'unknown')
 
     return {
       sessionId: item.sessionId,
       title: values.title || '（无标题）',
       cwd: item.cwd || '',
-      origin: item.origin || null,
-      parentSessionId: item.parentSessionId || null,
       running: item.running === true,
       updatedAt: item.updatedAt || 0,
       sparse,
+      pendingKind,
       turns: outline ? outline.length : null,
       steps: stats && typeof stats.steps === 'number' ? stats.steps : null,
       contextPct,
-      // lastTurnCompleted 只在有 subagentTiming 时才有意义
       lastTurnCompleted: timing ? timing.lastTurnCompleted === true : null,
       teamSize: team && team.members ? team.members.length : null,
-      // ⚠️ `questions === null` 是「不可知」，**不是**「没有待答」。
-      //    混淆两者会违反「否定断言律」：没收到 ≠ 不存在。
-      questionsKnown: questions !== null,
-      hasPendingQuestion: questions ? (questions.active || []).length > 0 : null,
       lastResponse: outline && outline.length > 0
         ? (outline[outline.length - 1].response || '')
         : null,
@@ -195,145 +191,483 @@
       if (!map.has(key)) map.set(key, [])
       map.get(key).push(item)
     }
-    // 组内按 updatedAt 倒序；空组排最后
+    for (const rows of map.values()) rows.sort((a, b) => b.updatedAt - a.updatedAt)
     return map
   }
 
   async function refreshSessions() {
-    try {
-      const value = await listSessions()
-      const items = (value && value.items) || []
-      state.sessions.clear()
-      const list = []
-      for (const item of items) {
-        const parsed = readProjection(item)
-        state.sessions.set(parsed.sessionId, parsed)
-        list.push(parsed)
+    const value = await listSessions()
+    const items = (value && value.items) || []
+    const list = []
+    state.sessions.clear()
+    for (const item of items) {
+      const parsed = readProjection(item)
+      state.sessions.set(parsed.sessionId, parsed)
+      list.push(parsed)
+    }
+    state.byWorkspace = groupByWorkspace(list)
+    state.listSyncedAt = Date.now()
+    state.lastError = null
+    return list
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // DOM 小工具
+  // ══════════════════════════════════════════════════════════════════
+
+  const el = (tag, props, children) => {
+    const node = doc.createElement(tag)
+    if (props) {
+      for (const key of Object.keys(props)) {
+        const value = props[key]
+        if (value === null || value === undefined || value === false) continue
+        if (key === 'class') node.className = value
+        else if (key === 'text') node.textContent = value
+        else if (key === 'style') node.setAttribute('style', value)
+        else if (key.slice(0, 2) === 'on' && typeof value === 'function') {
+          node.addEventListener(key.slice(2).toLowerCase(), value)
+        } else {
+          node.setAttribute(key, value === true ? '' : String(value))
+        }
       }
-      state.byWorkspace = groupByWorkspace(list)
-      state.listSyncedAt = Date.now()
-      state.lastError = null
-      return { count: list.length, sparse: list.filter((x) => x.sparse).length }
+    }
+    const kids = Array.isArray(children) ? children : [children]
+    for (const child of kids) {
+      if (child === null || child === undefined || child === false) continue
+      node.appendChild(typeof child === 'string' ? doc.createTextNode(child) : child)
+    }
+    return node
+  }
+
+  const fmtAgo = (ms) => {
+    if (!ms) return ''
+    const s = Math.floor((Date.now() - ms) / 1000)
+    if (s < 60) return '刚刚'
+    if (s < 3600) return Math.floor(s / 60) + ' 分钟前'
+    if (s < 86400) return Math.floor(s / 3600) + ' 小时前'
+    const d = Math.floor(s / 86400)
+    if (d < 30) return d + ' 天前'
+    const mo = Math.floor(d / 30)
+    return mo < 12 ? mo + ' 个月前' : Math.floor(mo / 12) + ' 年前'
+  }
+
+  const wsName = (cwd) => {
+    if (!cwd) return '（未归属）'
+    const parts = cwd.split(/[\\/]/).filter(Boolean)
+    return parts[parts.length - 1] || cwd
+  }
+
+  const ellipsis = (text, max) => {
+    const s = String(text === null || text === undefined ? '' : text)
+    return s.length <= max ? s : s.slice(0, max - 1) + '…'
+  }
+
+  const note = (text) => {
+    if (win.console) win.console.log('[qx-mobile]', text)
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 会话行
+  // ══════════════════════════════════════════════════════════════════
+
+  /**
+   * 一行会话。
+   *
+   * ⚠️ **稀疏行是 52.8%，不是边角情况**，所以它是一个**认真设计过的形态**：
+   *   满行   标题 / agent 最近做了什么 / 状态+轮次+步数+上下文
+   *   稀疏行 标题 / 「还没有发过消息」 / 状态（只这一个）
+   *
+   * 绝**不**给稀疏行补「0 轮 · 0 步 · 上下文 0%」——
+   * 那是把「从未发生」说成「发生了但结果为零」。
+   */
+  function sessionRow(summary, onOpen) {
+    const tone = summary.pendingKind === 'pending' ? 'wait'
+      : summary.running ? 'run'
+      : summary.lastTurnCompleted === true ? 'done'
+      : summary.lastTurnCompleted === false ? 'weak'
+      : 'sparse'
+
+    const word = summary.pendingKind === 'pending' ? '待审批'
+      : summary.running ? '运行中'
+      : summary.sparse ? '空闲'
+      : summary.lastTurnCompleted === true ? '已完成'
+      : summary.lastTurnCompleted === false ? '已收工'
+      : '状态不明'
+
+    const second = summary.sparse
+      ? el('div', { class: 'qx-s-act qx-s-sparse', text: '还没有发过消息' })
+      : el('div', {
+          class: 'qx-s-act',
+          text: summary.lastResponse
+            ? ellipsis(summary.lastResponse.replace(/\s+/g, ' ').trim(), 44)
+            : (summary.turns || 0) + ' 轮 · 还没有回复',
+        })
+
+    // 只有真的有值才显示。缺字段**整块不显示**，不是显示 0。
+    const meta = [el('span', { class: 'qx-s-st qx-s-st--' + tone, text: word })]
+    if (summary.turns !== null) meta.push(el('span', { text: summary.turns + ' 轮' }))
+    if (summary.steps !== null) meta.push(el('span', { text: summary.steps + ' 步' }))
+    if (summary.teamSize) {
+      meta.push(el('span', { class: 'qx-s-chip', text: '子 ' + summary.teamSize }))
+    }
+    // 上下文 >50% 才显示（实测 p90=53.2%，常驻等于给 87% 的会话腾地方）
+    if (summary.contextPct !== null && summary.contextPct > 50) {
+      meta.push(el('span', {
+        class: 'qx-s-ctx' + (summary.contextPct > 65 ? ' qx-s-ctx--hi' : ''),
+        text: '上下文 ' + Math.round(summary.contextPct) + '%',
+      }))
+    }
+
+    return el('button', {
+      class: 'qx-s-row' + (summary.pendingKind === 'pending' ? ' qx-s-row--pending' : ''),
+      type: 'button',
+      'data-qx-session': summary.sessionId,
+      onclick: () => onOpen(summary),
+    }, [
+      el('div', { class: 'qx-s-rail qx-s-rail--' + tone }),
+      el('div', { class: 'qx-s-main' }, [
+        el('div', { class: 'qx-s-head' }, [
+          el('div', { class: 'qx-s-title', text: summary.title }),
+          el('div', { class: 'qx-s-age', text: fmtAgo(summary.updatedAt) }),
+        ]),
+        second,
+        el('div', { class: 'qx-s-meta' }, meta),
+      ]),
+    ])
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 覆盖层
+  // ══════════════════════════════════════════════════════════════════
+
+  let layer = null
+  let toggleNode = null
+  let disposeSwipe = null
+  let pollTimer = 0
+
+  function ensureLayer() {
+    if (layer && layer.isConnected) return layer
+    layer = el('div', { class: 'qx-layer', 'data-qx-layer': '' })
+    layer.style.zIndex = '2147483644'
+    doc.body.appendChild(layer)
+    return layer
+  }
+
+  function renderDrawer() {
+    const groups = []
+    state.byWorkspace.forEach((rows, cwd) => groups.push([cwd, rows]))
+    groups.sort((a, b) => b[1].length - a[1].length)
+
+    const list = el('div', { class: 'qx-d-list' })
+
+    if (state.lastError) {
+      list.append(el('div', {
+        class: 'qx-d-empty',
+        text: '拉取失败：' + state.lastError,
+      }))
+    } else if (groups.length === 0) {
+      list.append(el('div', { class: 'qx-d-empty', text: '正在拉取会话…' }))
+    } else {
+      for (let g = 0; g < groups.length; g += 1) {
+        const cwd = groups[g][0]
+        const rows = groups[g][1]
+        const shown = state.expanded.has(cwd) ? rows.length : Math.min(ROWS_PER_WS, rows.length)
+        let sparse = 0
+        let pending = 0
+        for (const r of rows) {
+          if (r.sparse) sparse += 1
+          if (r.pendingKind === 'pending') pending += 1
+        }
+
+        list.append(el('button', {
+          class: 'qx-d-ws', type: 'button', 'data-qx-ws': cwd,
+          onclick: () => {
+            if (state.expanded.has(cwd)) state.expanded.delete(cwd)
+            else state.expanded.add(cwd)
+            paint()
+          },
+        }, [
+          el('span', { class: 'qx-d-ws-caret', text: state.expanded.has(cwd) ? '▾' : '▸' }),
+          el('span', { class: 'qx-d-ws-name', text: wsName(cwd) }),
+          el('span', { class: 'qx-d-ws-meta' }, [
+            pending ? el('span', { class: 'qx-d-ws-pending', text: '待答 ' + pending }) : null,
+            el('span', { text: rows.length + ' 条' }),
+            // 「稀疏 N」要弱化 —— 它是常态（52.8%），不该像警告
+            sparse ? el('span', { class: 'qx-d-ws-sparse', text: '· 稀疏 ' + sparse }) : null,
+          ]),
+        ]))
+
+        for (let i = 0; i < shown; i += 1) {
+          list.append(sessionRow(rows[i], openSession))
+        }
+        if (shown < rows.length) {
+          list.append(el('div', {
+            class: 'qx-d-more',
+            text: '展开其余 ' + (rows.length - shown) + ' 条',
+          }))
+        }
+      }
+    }
+
+    const foot = el('div', { class: 'qx-d-foot' })
+    if (state.listSyncedAt) {
+      let pending = 0
+      let unknown = 0
+      state.sessions.forEach((s) => {
+        if (s.pendingKind === 'pending') pending += 1
+        if (s.pendingKind === 'unknown') unknown += 1
+      })
+      foot.append(el('span', { text: state.sessions.size + ' 条会话' }))
+      foot.append(el('span', { text: '· 待答 ' + pending }))
+      // ⚠️ 「无法确认」必须**单列**，不能并进「没有待答」——
+      // 那是「没收到 ≠ 不存在」（否定断言律）
+      if (unknown > 0) {
+        foot.append(el('span', { class: 'qx-d-unknown', text: '· 无法确认 ' + unknown }))
+      }
+    }
+
+    return el('div', { class: 'qx-drawer', 'data-qx-drawer': '' }, [
+      el('div', { class: 'qx-d-head' }, [
+        el('span', { class: 'qx-d-title', text: '会话' }),
+        el('button', {
+          class: 'qx-d-x', type: 'button', text: '✕', 'aria-label': '关闭',
+          onclick: closeDrawer,
+        }),
+      ]),
+      el('div', { class: 'qx-d-tools' }, [
+        el('button', {
+          class: 'qx-d-btn', type: 'button', text: '刷新', onclick: refreshAndRepaint,
+        }),
+        el('button', {
+          class: 'qx-d-btn', type: 'button', text: '收起', onclick: closeDrawer,
+        }),
+      ]),
+      list,
+      foot,
+    ])
+  }
+
+  function ensureToggle() {
+    if (toggleNode && toggleNode.isConnected) return toggleNode
+    toggleNode = el('button', {
+      class: 'qx-toggle', type: 'button',
+      'data-qx-toggle': '', 'aria-label': '打开会话列表', text: '☰',
+      onclick: toggleDrawer,
+    })
+    toggleNode.style.zIndex = '2147483645'
+    return toggleNode
+  }
+
+  function toggleDrawer() {
+    state.drawerOpen = !state.drawerOpen
+    paint()
+  }
+
+  function closeDrawer() {
+    state.drawerOpen = false
+    paint()
+  }
+
+  /**
+   * 打开一个会话。
+   *
+   * ⚠️ 这里**不重写转录**。转录是 141 个 RPC 的 UI 价值所在，
+   *    重写它等于放弃方案 B 的全部好处。我们只改 URL 并派发 popstate，
+   *    让 DSH 自己的会话选择器接手。
+   */
+  function openSession(summary) {
+    state.currentSessionId = summary.sessionId
+    closeDrawer()
+    const url = '/?session=' + encodeURIComponent(summary.sessionId)
+    win.history.pushState({ qxSession: summary.sessionId }, '', url)
+    try {
+      win.dispatchEvent(new win.PopStateEvent('popstate', {
+        state: { qxSession: summary.sessionId },
+      }))
+    } catch (error) {
+      // 老 WebView 没有 PopStateEvent 构造器，退回普通事件
+      win.dispatchEvent(new win.Event('popstate'))
+    }
+    note('打开会话 ' + summary.title)
+  }
+
+  async function refreshAndRepaint() {
+    try {
+      await refreshSessions()
     } catch (error) {
       state.lastError = String(error)
-      throw error
     }
+    paint()
+  }
+
+  function paint() {
+    if (!layer) return
+    layer.replaceChildren()
+
+    if (state.drawerOpen) {
+      layer.append(el('div', { class: 'qx-scrim', onclick: closeDrawer }))
+      layer.append(renderDrawer())
+    }
+
+    const toggle = ensureToggle()
+    // 收起时才显示 —— 抽屉打开时它会挡住内容
+    toggle.style.display = state.drawerOpen ? 'none' : 'block'
+    layer.append(toggle)
+
+    paintToolCards()
   }
 
   // ══════════════════════════════════════════════════════════════════
-  // 诊断浮层
+  // 工具卡：只**加**入口，不重写 DSH 的组件
   // ══════════════════════════════════════════════════════════════════
 
-  async function mount() {
-    let summary = null
-    let error = null
+  /**
+   * 给 DSH 自己的工具行加「看全文」入口。
+   *
+   * ⚠️ **不重写工具卡。** 只在末尾追加一个按钮。
+   *
+   * 依据实测（docs/design/12-transcript-scale.md）：
+   *   工具事件 p50 = 94 B（小）；消息 p50 = 6.9 KB（大）
+   *   p90 = 9.4 KB  -> 阈值定 12 KB
+   *   单条最大 139 KB -> 139KB 塞进主视图会挤掉一切，必须进 sheet
+   *
+   * 选择器用 `data-disclosure-row`（实测存在的稳定语义属性）。
+   */
+  function paintToolCards() {
+    let rows
     try {
-      summary = await refreshSessions()
-    } catch (cause) {
-      error = String(cause)
+      rows = doc.querySelectorAll('[data-disclosure-row]')
+    } catch (error) {
+      return
     }
-
-    const root = document.createElement('div')
-    root.dataset.qxMobileRoot = ''
-    root.style.cssText = [
-      'position:fixed', 'z-index:2147483647',
-      'left:8px', 'right:8px', 'top:calc(env(safe-area-inset-top) + 8px)',
-      'max-height:70vh', 'overflow:auto',
-      'background:#0b0e13', 'color:#e8edf2',
-      'border:1px solid rgba(255,255,255,.16)', 'border-radius:12px',
-      'padding:12px 14px', 'font:12px/1.6 ui-monospace,Menlo,monospace',
-      'box-shadow:0 12px 40px rgba(0,0,0,.5)', 'pointer-events:auto',
-    ].join(';')
-
-    const lines = []
-    const add = (ok, text) => lines.push({ ok, text })
-
-    if (error) {
-      add(false, `拉取失败：${error}`)
-      add(false, '说明通道未通 —— 检查：① WebView 是否带了 qx_token cookie ② 网关是否在跑')
-    } else {
-      add(true, `全量拉取成功：${summary.count} 条`)
-      add(summary.sparse > 0, `稀疏行（只有 title）：${summary.sparse} 条（实测应约 52.8%）`)
-
-      const withCtx = [...state.sessions.values()].filter((x) => x.contextPct !== null)
-      add(true, `带上下文：${withCtx.length} 条`)
-      if (withCtx.length > 0) {
-        const pcts = withCtx.map((x) => x.contextPct).sort((a, b) => a - b)
-        const at = (p) => pcts[Math.min(pcts.length - 1, Math.floor(pcts.length * p))]
-        add(true, `上下文 p50 ${at(0.5).toFixed(1)}% · p90 ${at(0.9).toFixed(1)}% · max ${pcts[pcts.length - 1].toFixed(1)}%`)
-        add(true, `>50%: ${pcts.filter((p) => p > 50).length} 条 · >65%: ${pcts.filter((p) => p > 65).length} 条`)
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i]
+      if (row.getAttribute('data-qx-tool') === '1') continue
+      row.setAttribute('data-qx-tool', '1')
+      attachFullButton(row)
+      // 展开态补挂（折叠时没内容可看）
+      if (row.getAttribute('data-expanded') === 'true') {
+        win.setTimeout(() => attachFullButton(row), 60)
       }
-
-      const ws = [...state.byWorkspace.entries()]
-      add(ws.length > 0, `工作区分组：${ws.length} 个`)
-      for (const [key, rows] of ws.slice(0, 6)) {
-        const name = key === '__ungrouped__' ? '（未归属）' : key.split(/[\\/]/).pop()
-        add(true, `  ${name}  ${rows.length} 条 · 稀疏 ${rows.filter((r) => r.sparse).length}`)
-      }
-
-      const pending = [...state.sessions.values()].filter((x) => x.hasPendingQuestion === true)
-      const unknown = [...state.sessions.values()].filter((x) => x.questionsKnown === false)
-      add(true, `有待答：${pending.length} 条 · 不可知：${unknown.length} 条`)
-      add(pending.length === 0 && unknown.length > 0,
-        '⚠️ 「有待答 0」不能断言「没有待答」—— 不可知的要单列')
-    }
-
-    const pass = lines.filter((l) => l.ok).length
-    const fail = lines.length - pass
-
-    const head = document.createElement('div')
-    head.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:8px;color:'
-      + (fail === 0 ? '#3DDC97' : '#FFC24B')
-    head.textContent = `千寻 L3 第 1 版 · 通过 ${pass} · 注意 ${fail}`
-    root.append(head)
-
-    for (const line of lines) {
-      const row = document.createElement('div')
-      row.style.cssText = 'display:flex;gap:6px;padding:3px 0;border-top:1px solid rgba(255,255,255,.07);word-break:break-all'
-      const mark = document.createElement('span')
-      mark.style.cssText = 'flex:0 0 auto;font-weight:700;color:'
-        + (line.ok ? '#3DDC97' : '#FFC24B')
-      mark.textContent = line.ok ? '✓' : '!'
-      const text = document.createElement('span')
-      text.textContent = line.text
-      row.append(mark, text)
-      root.append(row)
-    }
-
-    const actions = document.createElement('div')
-    actions.style.cssText = 'display:flex;gap:8px;margin-top:10px'
-
-    const refreshBtn = document.createElement('button')
-    refreshBtn.textContent = '重新拉取'
-    refreshBtn.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:#1a2029;color:#e8edf2;font:600 13px system-ui'
-    refreshBtn.onclick = async () => {
-      refreshBtn.textContent = '拉取中…'
-      try {
-        const s = await refreshSessions()
-        refreshBtn.textContent = `已更新 ${s.count} 条`
-      } catch (cause) {
-        refreshBtn.textContent = `失败：${cause}`.slice(0, 40)
-      }
-    }
-
-    const closeBtn = document.createElement('button')
-    closeBtn.textContent = '关闭'
-    closeBtn.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:#1a2029;color:#e8edf2;font:600 13px system-ui'
-    closeBtn.onclick = () => root.remove()
-
-    actions.append(refreshBtn, closeBtn)
-    root.append(actions)
-
-    document.body.append(root)
-    window.console.log('[qx-mobile L3 v1]', lines, state)
-
-    // 40 秒后自动收起 —— 它是诊断工具，不该长期占屏
-    const timer = window.setTimeout(() => root.remove(), 40000)
-    return () => {
-      window.clearTimeout(timer)
-      root.remove()
     }
   }
 
-  return mount()
-})()
+  function attachFullButton(row) {
+    if (row.querySelector('[data-qx-full]')) return
+    const text = (row.textContent || '').trim()
+    if (!text || text.length < 400) return
+    row.appendChild(el('button', {
+      class: 'qx-full-btn', type: 'button',
+      'data-qx-full': '',
+      text: '看全文（约 ' + Math.round(text.length / 1024) + 'K）',
+      onclick: (event) => {
+        event.stopPropagation()
+        openFullText(text)
+      },
+    }))
+  }
+
+  /** 底部 sheet 看全文。139KB 文本**惰性**进 sheet，不预渲染到主视图。 */
+  function openFullText(text) {
+    const sheet = el('div', { class: 'qx-sheet', 'data-qx-sheet': '' }, [
+      el('div', { class: 'qx-sheet-grab' }),
+      el('div', { class: 'qx-sheet-head' }, [
+        el('span', { class: 'qx-sheet-title', text: '完整输出' }),
+        el('span', { class: 'qx-sheet-size', text: Math.round(text.length / 1024) + 'K' }),
+        el('button', {
+          class: 'qx-sheet-x', type: 'button', text: '✕', 'aria-label': '关闭',
+          onclick: () => sheet.remove(),
+        }),
+      ]),
+      el('pre', { class: 'qx-sheet-body', text }),
+      el('button', {
+        class: 'qx-sheet-copy', type: 'button', text: '复制',
+        onclick: () => {
+          if (navigator.clipboard) navigator.clipboard.writeText(text)
+          note('已复制')
+        },
+      }),
+    ])
+    doc.body.appendChild(sheet)
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 左边缘右滑
+  // ══════════════════════════════════════════════════════════════════
+
+  function installEdgeSwipe() {
+    let startX = 0
+    let startY = 0
+    let tracking = false
+
+    const onStart = (event) => {
+      const touch = event.touches && event.touches[0]
+      if (!touch) return
+      // 只从**左边缘 24px 内**起手。从屏幕中间起手会跟页面横滑打架。
+      if (state.drawerOpen) return
+      if (touch.clientX > 24) return
+      startX = touch.clientX
+      startY = touch.clientY
+      tracking = true
+    }
+    const onMove = (event) => {
+      if (!tracking) return
+      const touch = event.touches && event.touches[0]
+      if (!touch) return
+      const dx = touch.clientX - startX
+      const dy = touch.clientY - startY
+      // 横向位移要明显大于纵向，否则判为纵向滚动（页面内的代码块横滑）
+      if (dx > 60 && Math.abs(dy) < 40) {
+        tracking = false
+        toggleDrawer()
+      }
+    }
+    const onEnd = () => { tracking = false }
+
+    doc.addEventListener('touchstart', onStart, { passive: true })
+    doc.addEventListener('touchmove', onMove, { passive: true })
+    doc.addEventListener('touchend', onEnd, { passive: true })
+
+    return () => {
+      doc.removeEventListener('touchstart', onStart)
+      doc.removeEventListener('touchmove', onMove)
+      doc.removeEventListener('touchend', onEnd)
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 启动
+  // ══════════════════════════════════════════════════════════════════
+
+  // 先拉数据。失败也要把抽屉画出来 —— 用户需要看到「为什么空」
+  try {
+    await refreshSessions()
+  } catch (error) {
+    state.lastError = String(error)
+  }
+
+  ensureLayer()
+  paint()
+
+  disposeSwipe = installEdgeSwipe()
+
+  // DSH 每次渲染转录都会换掉工具行 DOM，所以要重扫。
+  // 页面可见时才扫，代价极低；漏扫的工具行（没有「看全文」入口）
+  // 是用户看得见的缺陷。
+  pollTimer = win.setInterval(() => {
+    if (doc.visibilityState !== 'hidden') paintToolCards()
+  }, 2000)
+
+  note('L3 第2版：' + state.sessions.size + ' 条会话，'
+    + state.byWorkspace.size + ' 个工作区，'
+    + '错误=' + (state.lastError || '无'))
+
+  // ⚠️ 必须返回**函数**（清理用）。bootstrap.js:48 判 typeof。
+  return function qxDispose() {
+    if (disposeSwipe) disposeSwipe()
+    if (pollTimer) win.clearInterval(pollTimer)
+    if (layer) { layer.remove(); layer = null }
+    if (toggleNode) { toggleNode = null }
+    for (const node of doc.querySelectorAll('[data-qx-sheet]')) node.remove()
+  }
+})
