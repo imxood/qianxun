@@ -197,12 +197,88 @@
     align-items: center;
     row-gap: 0;
   }
-  /* 行 1：标题块独占一行（里面含标题与 Agent Team 之类的 chip）。
-     匹配「直接子级且含 nav」的那一层，不写死是第几个子元素。 */
+  /* 行 1：☰ + 标题块（含 Agent Team 之类的 chip）。
+     ⚠️ 这里**不能**写 flex-basis:100% —— ☰ 按钮也在这个 flex 容器里，
+     标题块占满 100% 会把 ☰ 挤到第二排（实测它掉到了 📁 那一行左边）。
+     flex:1 1 auto = 吃掉本行剩余空间，后面的按钮自然换到第二排。
+     标题短的时候它一行就放得下，标题长的时候自动分两行 —— 两种都成立。 */
   [data-slot='conversation.session.header'] > div:has(nav) > *:has(nav) {
-    flex: 1 1 100% !important;
+    flex: 1 1 auto !important;
     min-width: 0;
   }
+}
+
+/* ── A11 窄屏导航：侧边**不常驻**，工作区改成独立页面 ──────────────
+ *
+ * 手机上 412px 的视口里，那条 56px 的图标 rail 一直占着 13.6% 的宽度 ——
+ * 而它上面的功能（新建 / 插件 / 自动化 / 搜索 / 设置 / 移动访问）
+ * **在展开后的工作区页里一个都不少**，纯占位。
+ *
+ * 所以窄屏下：
+ *   收起态 → rail 不显示，主区从 56px 拿回整屏（356 → 412）
+ *   展开态 → 侧栏就是「工作区独立页」（A1 那条规则已经把它变成全屏浮层）
+ * 导航变成：☰ → 工作区列表 →（点工作区）会话列表 →（点会话）Chat 页
+ *
+ * ⚠️ 这里**只改显示，不改状态**：collapsed 属性照旧由 DSH 自己管。
+ *    收起态选择器要挂在 `[data-sidebar-collapsed]` **后代**上，
+ *    直接挂 frame 本身会把整个应用 display:none。
+ */
+@media (max-width: 760px) {
+  /* ⚠️⚠️ **不能删掉 rail**（display:none）—— 栅格是**按顺序自动放置**的。
+   *    实测踩过：删掉第 1 项后 main 滑到第 2 列，而第 2 列是 0px，
+   *    整个主区被推出屏幕（main 在 x=412、w=0，header 跟着跑到 x=412）。
+   *    正确做法是**保持它在流里**，只把那一列压成 0。
+   */
+  [data-slot='root'] > [data-sidebar-collapsed] {
+    grid-template-columns: 0px minmax(0, 1fr) 0px !important;
+  }
+  [data-slot='root'] > [data-sidebar-collapsed] [data-slot='sidebar'] > * {
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    /* 用 visibility 而不是 display —— 前者彻底断掉交互，
+       但 JS 的 .click() 仍然派发（☰ 要靠它打开工作区页） */
+    visibility: hidden !important;
+  }
+}
+
+/* ── A12 我们的菜单按钮 ─────────────────────────────────────────────
+ * 落点：[data-slot="conversation.header.leading"]
+ *   实测：display:contents、**内容为空**（innerHTML 为 ""）、
+ *         位置正是顶栏最左边那个 0×48 的空位。
+ * 所以这是「DSH 自己留出来的空槽」，我们填一个按钮进去，
+ * 既不用挪别人的元素，也不用新开一个会遮住顶栏的浮层。
+ *
+ * 样式跟着 DSH 的图标按钮走（44×44、居中、淡边框），
+ * 但颜色只用 currentColor，不给 DSH 的元素上自定义色 —— 免得跟主题打架。
+ */
+.qx-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  /* ⚠️ align-self:start 不能省 ——
+     [conversation.header.leading] 是 display:contents，按钮因此**直接**
+     成了 header 栅格的子项，会被默认的 align-items:center 垂直居中。
+     而我们的顶栏有两行（96px 高），居中就把 ☰ 顶到了两行中间（y=34），
+     和标题（y=10）对不齐。顶对齐才和标题同一基线。 */
+  align-self: start;
+  margin: 10px 8px 0 2px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  opacity: .62;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.qx-menu-btn:active { opacity: 1; }
+@media (prefers-color-scheme: dark) {
+  .qx-menu-btn { opacity: .55; }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════

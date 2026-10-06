@@ -90,7 +90,21 @@ function makeEl(tag) {
       return null;
     },
     querySelector() { return null; },
-    querySelectorAll() { return []; },
+    // 支持 `.class` 选择器 —— appendHint 靠它清旧提示条，
+    // 不支持的话闸门会**永远看不到重复**，等于这条断言是假的。
+    querySelectorAll(sel) {
+      if (typeof sel !== 'string' || sel[0] !== '.') return [];
+      const want = sel.slice(1);
+      const out = [];
+      const walk = (n) => {
+        for (const c of (n.children || [])) {
+          if (c.className && c.className.split(' ').indexOf(want) !== -1) out.push(c);
+          walk(c);
+        }
+      };
+      walk(this);
+      return out;
+    },
     contains() { return false; },
     cloneNode() { return makeEl(tag); },
     get firstChild() { return this.children[0] || null; },
@@ -176,6 +190,23 @@ if (typeof registered !== 'function') {
 console.log('PASS register 收到的是函数');
 
 (async () => {
+  // 窄屏导航用的锚点必须在 mount **之前**建好 ——
+  // installMenuButton() 是在 mount 里跑的，锚点晚建就断言不到。
+  // 实测：顶栏左侧那个槽是空的（display:contents、innerHTML ""）。
+  const lead = makeEl('div');
+  lead.setAttribute('data-slot', 'conversation.header.leading');
+  const openBtn = makeEl('button');
+  openBtn.setAttribute('aria-label', 'Open sidebar');
+  let opened = 0;
+  openBtn.addEventListener('click', () => { opened += 1; });
+  const frame = makeEl('div');
+  frame.setAttribute('data-slot', 'root');
+  document.querySelector = (q) => {
+    if (q === '[data-slot="conversation.header.leading"]') return lead;
+    if (q === '[data-slot="root"] > *') return frame;
+    return null;
+  };
+
   let dispose;
   try {
     dispose = registered({ document, window, root: makeEl('div') });
@@ -361,15 +392,12 @@ console.log('PASS register 收到的是函数');
 
   // ── 第 4 版：选完会话自动收起侧栏 ────────────────────────────────
   // 真机症状：点会话会跳转，但侧栏不收起 → 浮层挡住，永远看不到对话。
-  const frame = makeEl('div');
-  frame.setAttribute('data-slot', 'root');           // 展开态 = 无 data-sidebar-collapsed
   const collapseBtn = makeEl('button');
   collapseBtn.setAttribute('aria-label', 'Collapse sidebar');
   // 真实 DSH 里点这个按钮会收起侧栏；替身要**真的产生状态变化**，
   // 否则断言只能验「按钮被点了」，验不到「侧栏真收起了」。
   collapseBtn.addEventListener('click', () => frame.setAttribute('data-sidebar-collapsed', ''));
   sel.sidebarButtons = () => [collapseBtn];
-  document.querySelector = (q) => (q === '[data-slot="root"] > *' ? frame : null);
 
   const onClick = document.__l && document.__l.click;
   if (!onClick) {
@@ -393,7 +421,69 @@ console.log('PASS register 收到的是函数');
   }
   console.log('PASS 点会话后自动收起，点工作区行不收起');
 
-  dispose();
+  // ── 第 5 版：窄屏 ☰ 打开工作区独立页 ─────────────────────────────
+  // 真机实测的落点：[data-slot=conversation.header.leading]
+  //   display:contents、**内容为空**（innerHTML ""）、位置是顶栏最左 0×48 的空位。
+  // ⚠️ 窄屏下 rail 是 display:none，但 display:none 元素上的 .click()
+  //    **照样派发** —— 所以「打开工作区」不需要手改 DSH 的状态机。
+  sel.sidebarButtons = () => [openBtn];
+
+  const mountedMenu = lead.children.filter((c) => c.className === 'qx-menu-btn');
+  if (mountedMenu.length !== 1) {
+    console.log('FAIL 顶栏空槽里没有且仅有一个 qx-menu-btn（实得 ' + mountedMenu.length + '）');
+    process.exit(1);
+  }
+  if (lead.children.length !== 1) {
+    console.log('FAIL 菜单按钮挤掉了槽里原有的东西');
+    process.exit(1);
+  }
+  mountedMenu[0].click();
+  if (opened !== 1) {
+    console.log('FAIL 点 ☰ 没有触发 DSH 自己的「Open sidebar」（opened=' + opened + '）');
+    process.exit(1);
+  }
+  console.log('PASS ☰ 落在顶栏空槽，点击走 DSH 自己的 Open sidebar');
+
+  // ── 提示条不能重复（必须放在最后：它会 dispose 掉当前这一轮）──────
+  // ⚠️ 真机症状：定制层热替换后，DSH 行里出现**两个**「上下文 79%」。
+  //   原因：提示条插在 DSH 自己的行里（不在我们的 layer 里），
+  //   dispose 掉 layer 带不走它们；新 mount 的 state.painted 又是空的。
+  // 这里真跑一次「dispose → 再 mount」，复现整条热替换路径。
+  const countCtx = (r) => r.children.filter(
+    (c) => c.className.indexOf('qx-hint-ctx') === 0).length;
+  const before = treeRows.map(countCtx);
+  // 注意：不是每行都该有提示 —— AAA 是稀疏行（本就没有），
+  // ZZZ 不在列表里、Ws 是工作区行。所以只查「没超过 1」。
+  if (before.some((n) => n > 1)) {
+    console.log('FAIL 第一轮就有重复：' + JSON.stringify(before));
+    process.exit(1);
+  }
+  if (before.filter((n) => n === 1).length !== 1) {
+    console.log('FAIL 第一轮该有一条上下文提示（BBB），实得 ' + JSON.stringify(before));
+    process.exit(1);
+  }
+
+  dispose();                                   // 模拟 bootstrap 的热替换
+  let dispose2;
+  try {
+    dispose2 = registered({ document, window, root: makeEl('div') });
+    if (dispose2 && typeof dispose2.then === 'function') dispose2 = await dispose2;
+  } catch (e) {
+    console.log('FAIL 第二次 mount 抛错: ' + e.message);
+    process.exit(1);
+  }
+  tick(); tick();
+  const after = treeRows.map(countCtx);
+  if (after.some((n, i) => n > before[i])) {
+    console.log('FAIL 热替换后提示条变多了：' + JSON.stringify(before) + ' → ' + JSON.stringify(after));
+    process.exit(1);
+  }
+  if (after.some((n) => n > 1)) {
+    console.log('FAIL 热替换后出现重复：' + JSON.stringify(after));
+    process.exit(1);
+  }
+  console.log('PASS 提示条幂等：热替换（dispose → 再 mount）后仍只有一条');
+  dispose2();
   console.log('PASS dispose 可调用');
   console.log('\n全部通过 ✓');
 })();

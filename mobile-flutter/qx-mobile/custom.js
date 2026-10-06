@@ -412,16 +412,15 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
 
       // 1. 稀疏行：补一句「还没有发过消息」
       if (summary.sparse) {
-        const hint = el('div', {
+        appendHint(row, el('div', {
           class: 'qx-hint-sparse',
           text: WORD.neverRan,
-        })
-        row.appendChild(hint)
+        }))
       }
 
       // 2. 上下文占用（>50% 才显示；>65% 转琥珀）
       if (summary.contextPct !== null && summary.contextPct > 50) {
-        row.appendChild(el('div', {
+        appendHint(row, el('div', {
           class: 'qx-hint-ctx' + (summary.contextPct > 65 ? ' qx-hint-ctx--hi' : ''),
           text: '上下文 ' + Math.round(summary.contextPct) + '%',
         }))
@@ -433,6 +432,24 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
         row.classList.add('qx-row--pending')
       }
     }
+  }
+
+  /**
+   * 插提示条，**先清掉同类旧节点**。
+   *
+   * ⚠️ 为什么不能只靠 `state.painted`（WeakSet）防重复：
+   *   定制层是**热替换**的 —— bootstrap 轮询到 hash 变了就 dispose 旧的、
+   *   mount 新的，而提示条是插在 **DSH 自己的行**里的，不在我们自己的
+   *   layer 里。dispose 掉 layer 并不会带走它们。
+   *   于是新 mount 的 `state.painted` 是**空**的，会再插一遍。
+   *   真机症状：一行出现两个「上下文 79%」（第 4 版截图里实测到）。
+   *
+   * 所以：清掉同类的再插，幂等，不依赖 mount 之间共享状态。
+   */
+  function appendHint(row, node) {
+    const old = row.querySelectorAll('.' + node.className.split(' ')[0])
+    for (let i = 0; i < old.length; i += 1) old[i].remove()
+    row.appendChild(node)
   }
 
   /**
@@ -585,6 +602,70 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
   }
 
   // ══════════════════════════════════════════════════════════════════
+  // 窄屏导航：☰ → 工作区独立页
+  // ══════════════════════════════════════════════════════════════════
+
+  /**
+   * 在顶栏左侧那个**空的** leading 槽里放一个菜单按钮。
+   *
+   * 落点实测：`[data-slot="conversation.header.leading"]`
+   *   display: contents、innerHTML 为空 ""、位置是顶栏最左边那个 0×48 的空位。
+   * 所以这是 DSH 自己留出来的槽 —— 我们填进去既不用挪它的元素，
+   * 也不用新开一个会盖住顶栏的浮层。
+   *
+   * ⚠️ 只在窄屏插：宽屏下 DSH 自己的 rail 就在那儿，再加一个就是两套导航。
+   */
+  function installMenuButton() {
+    const NARROW = 760
+    const slot = doc.querySelector('[data-slot="conversation.header.leading"]')
+    if (!slot) return false
+    // 已经有东西了就不插 —— 宁可少一个按钮，也不要叠两个
+    if (slot.querySelector('.qx-menu-btn')) return true
+    if (slot.children.length > 0) return false
+
+    const btn = el('button', {
+      class: 'qx-menu-btn',
+      type: 'button',
+      'aria-label': '打开工作区',
+      text: '☰',
+    })
+    btn.addEventListener('click', () => { openWorkspacePage() })
+    slot.appendChild(btn)
+
+    // 视口从窄变宽（比如折叠屏展开 / 横屏）时把按钮撤掉，交还给 rail
+    const watch = () => {
+      if (win.innerWidth > NARROW && btn.parentNode) btn.remove()
+      else if (win.innerWidth <= NARROW && !btn.parentNode) slot.appendChild(btn)
+    }
+    win.addEventListener('resize', watch)
+    state.onResize = watch
+    return true
+  }
+
+  /**
+   * 打开工作区页。
+   *
+   * ⚠️ 窄屏下 rail 是 `display:none`（custom.css A11），
+   *    但 **`display:none` 元素上的 `.click()` 照样派发** —— 所以直接点
+   *    DSH 自己的「Open sidebar」按钮就行。
+   *
+   * 为什么不自己增删 `data-sidebar-collapsed`：
+   *   那是 DSH 内部状态机的输出，手改会和它打架（展开动画、localStorage
+   *   里的 dsh.workspace.view.v5 都会对不上）。
+   */
+  function openWorkspacePage() {
+    const buttons = doc.querySelectorAll('[data-slot="sidebar"] button, [data-slot="sidebar"] [role="button"]')
+    for (let i = 0; i < buttons.length; i += 1) {
+      const label = buttons[i].getAttribute('aria-label') || ''
+      if (label.toLowerCase().indexOf('open sidebar') !== -1) {
+        buttons[i].click()
+        return true
+      }
+    }
+    return false
+  }
+
+  // ══════════════════════════════════════════════════════════════════
   // 启动
   // ══════════════════════════════════════════════════════════════════
 
@@ -618,6 +699,7 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
   }, 2000)
 
   installAutoCollapseSidebar()
+  installMenuButton()
 
   let pending = 0
   let unknown = 0
@@ -634,6 +716,15 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     if (state.pollTimer) win.clearInterval(state.pollTimer)
     if (warmup) win.clearTimeout(warmup)
     if (state.onRowPicked) doc.removeEventListener('click', state.onRowPicked, true)
+    if (state.onResize) win.removeEventListener('resize', state.onResize)
+    const menuBtn = doc.querySelector('.qx-menu-btn')
+    if (menuBtn) menuBtn.remove()
+    // 提示条插在 DSH 自己的行里，不在 layer 里 —— 必须单独清，
+    // 否则热替换之后旧的还留着，新 mount 会再插一遍（出现过两个「上下文 79%」）
+    const leftovers = doc.querySelectorAll('.qx-hint-sparse, .qx-hint-ctx, .qx-full-btn')
+    for (let i = 0; i < leftovers.length; i += 1) leftovers[i].remove()
+    const pendingRows = doc.querySelectorAll('.qx-row--pending')
+    for (let i = 0; i < pendingRows.length; i += 1) pendingRows[i].classList.remove('qx-row--pending')
     if (layer) { layer.remove(); layer = null }
     for (const node of doc.querySelectorAll('[data-qx-sheet]')) node.remove()
   }
