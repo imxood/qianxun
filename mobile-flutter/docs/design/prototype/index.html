@@ -239,6 +239,21 @@ nav a.on{background:var(--accent);color:var(--on-accent);border-color:var(--acce
 .btn-p.off{background:var(--rail-idle);color:var(--t3)}
 .btn-s{border:1px solid var(--hairline);color:var(--t2)}
 
+/* 参考项目做对且我们该抄的一条：常驻 dock 摘要。
+   deepseek-harness-mobile 的 Docks.kt:54-62 注释写明：数据到达时把
+   transcript 和 composer 顶来顶去会让人点错东西，所以 TodoDock /
+   GoalBar / QueueDock 全部渲染成**折叠的单行摘要**、点击才展开。
+   「等你」条同理 —— 常驻但不长大。 */
+.dock{
+  flex:0 0 auto;display:flex;align-items:center;gap:var(--s2);
+  background:var(--surface);border-top:1px solid var(--hairline);
+  border-bottom:1px solid var(--hairline);
+  padding:7px var(--s4);font-size:var(--f3);color:var(--t2);
+}
+.dock .k{color:var(--t3);flex:0 0 auto}
+.dock .v{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dock .more{flex:0 0 auto;color:var(--accent)}
+
 /* ── 断链横幅 ── */
 .banner{
   flex:0 0 auto;background:rgba(115,124,135,.13);
@@ -310,10 +325,12 @@ const REAL = {
 
 const esc = s => String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-/* 状态元表：轨宽 / 轨形 / 状态词 / 状态色 —— 四重编码，颜色只是其中一条 */
+/* 状态元表：轨宽 / 轨形 / 状态词 / 状态色 —— 四重编码，颜色只是其中一条
+   状态词长度参照 deepseek-harness 的三字紧凑式（待审批/待回答），
+   那里是因为行高只有 32px；我们 66dp 放得下更多，但紧凑式在灰度下更快被扫到。 */
 const STATES = {
   running:{cls:'r-run', st:'st-run', word:'运行中', w:4, rail:'实心 + 流光'},
-  waiting:{cls:'r-wait',st:'st-wait', word:'等你',   w:3, rail:'虚线 6/5'},
+  waiting:{cls:'r-wait',st:'st-wait', word:'待审批', w:3, rail:'虚线 6/5'},
   done:   {cls:'r-done', st:'st-done', word:'已完成', w:1, rail:'实心细线'},
   weak:   {cls:'r-weak', st:'st-weak', word:'已收工', w:1, rail:'实心细线'},
   stale:  {cls:'r-stale',st:'st-stale',word:'3 分钟前',w:1,rail:'密虚线 + 降级'},
@@ -442,6 +459,11 @@ function screenChat(){
         text-overflow:ellipsis;white-space:nowrap">HM2电流测试PC端与固件差异</h2>
       <div class="chip">17 轮</div>
       <div class="icon">⋯</div>
+    </div>
+    <div class="dock">
+      <span class="k">待办</span>
+      <span class="v">2 项未完成 · 最近：跑完双 Bank 编译并校验 zip</span>
+      <span class="more">展开 ›</span>
     </div>
     <div class="list" style="padding:var(--s3) var(--s4)">
       <div style="display:flex;flex-direction:column;gap:var(--s3)">
@@ -679,7 +701,7 @@ function screenGrayscale(){
 }
 
 const SCREENS = [
-  {id:'home',    name:'根屏 · 看护带+列表', fn:screenHome,        why:'393 条会话在 66dp 行高下约 45 屏。纯列表下，「我不在的这段时间发生了什么」只能靠扫 45 屏去归纳 —— 这个问题在纯列表里答不了。'},
+  {id:'home',    name:'根屏 · 看护带+列表', fn:screenHome,        why:'393 条会话在 66dp 行高下约 45 屏。纯列表下，「我不在的这段时间发生了什么」只能靠扫 45 屏去归纳 —— 这个问题在纯列表里答不了。', flag:'待决'},
   {id:'stale',   name:'断链 · 全部降级',    fn:screenStale,       why:'链路断开时，「已完成」本身就是一个宿主断言，而 socket 正是它的载体。所以连「已完成」都不显示，只说「3 分钟前」。'},
   {id:'chat',    name:'详情 · 引导/排队',   fn:screenChat,        why:'手机没有 Alt+Enter。引导和排队是两个不同后果的动作，必须做成拇指可达的切换，而不是一个藏在长按里的手势。'},
   {id:'approve', name:'审批 · 可答',        fn:screenApprove,     why:'审批是唯一允许抢焦点的功能。按钮写「允许这一次」而不是「允许执行」—— 后者读起来像长期授权。'},
@@ -696,14 +718,20 @@ function render(){
   const hash = location.hash.slice(1);
   const cur = SCREENS.find(s=>s.id===hash) || SCREENS[0];
   document.getElementById('nav').innerHTML = SCREENS.map(s=>
-    `<a href="#${s.id}" class="${s.id===cur.id?'on':''}">${s.name}</a>`).join('');
+    `<a href="#${s.id}" class="${s.id===cur.id?'on':''}">${s.name}${s.flag?'<sup>'+s.flag+'</sup>':''}</a>`).join('');
   document.getElementById('stage').innerHTML = `
     <div class="col">
-      <div class="cap">${cur.name}</div>
+      <div class="cap">${cur.name}${cur.flag?' · '+cur.flag:''}</div>
       ${cur.fn()}
       <div class="legend">
         <b>为什么这么设计：</b>${cur.why}
         <br><b>数据：</b>真实 session/list 样本（共 ${REAL.totalSessions} 条，此处 14 条）。标题服务端截断至 40 字。
+        ${cur.flag?`<br><b style="color:var(--waiting)">⚠ 待决：</b>三个 DSH 系参考项目
+          都没有看护带（根屏是对话/工作区，列表在侧栏，待处理做成行内标签 +
+          系统通知）。它们的会话行只有 32px、一屏 20+ 行，排序置顶这个赌注
+          在那里赢得下来；手机 393 条 = 45 屏，同一个赌注输掉了。
+          这一屏采纳它们的紧凑三字标签，但保留看护带。详见
+          05 §5.4.1 与 research/04-reference-root-screens.md`:''}
       </div>
     </div>`;
   window.scrollTo(0,0);
