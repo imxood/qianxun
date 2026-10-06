@@ -1,0 +1,60 @@
+{
+  "_probe": {
+    "note": "工作区归属实测。**显式注册表 ≠ cwd 推断**：注册表 6 个工作区 / 143 条，session/list 394 条，其中 251 条（63.7%）不属于任何工作区 —— DSH 侧栏把它们放在「未分组」区。按 cwd 分组会凭空多造工作区并伪造层级。",
+    "source": "probe_workspace_ownership.py"
+  },
+  "totalSessions": 394,
+  "registeredSessions": 143,
+  "unownedSessions": 251,
+  "workspaces": [
+    {
+      "id": "190c9537-05d8-4522-8bee-16c377645872",
+      "title": "test_dsh",
+      "path": "E:\\tests\\test_dsh",
+      "registeredSessionIds": 24
+    },
+    {
+      "id": "549935e1-bada-4637-aeb9-7f1bebfb8072",
+      "title": "hm2",
+      "path": "D:\\work\\rf_scanner\\hm2",
+      "registeredSessionIds": 12
+    },
+    {
+      "id": "025b57f7-3b6e-4bef-8cd2-c11cac7eb203",
+      "title": "iot_tool_cloud",
+      "path": "E:\\git\\maxu\\iot_tool_cloud",
+      "registeredSessionIds": 71
+    },
+    {
+      "id": "50798de9-0c6e-478c-95d4-9298627b258f",
+      "title": "qianxun",
+      "path": "E:\\develop\\dsh-workspace\\qianxun",
+      "registeredSessionIds": 26
+    },
+    {
+      "id": "f9c00fe2-049a-41bd-8726-a97c17b75bec",
+      "title": "egui_hikvision_app",
+      "path": "E:\\git\\maxu\\egui_hikvision_app",
+      "registeredSessionIds": 7
+    },
+    {
+      "id": "48231145-4874-434e-b47c-06070bff3668",
+      "title": "服务部署",
+      "path": "E:\\develop\\服务部署",
+      "registeredSessionIds": 3
+    }
+  ],
+  "unownedByCwd": {
+    "iot_tool_cloud": 121,
+    "egui_hikvision_app": 69,
+    "hm2": 33,
+    "qianxun": 26,
+    "ai_test": 1,
+    "develop": 1
+  },
+  "global": {
+    "workspaceIds": 6,
+    "archivedSessionIds": 3,
+    "pinnedSessionIds": 0
+  }
+}

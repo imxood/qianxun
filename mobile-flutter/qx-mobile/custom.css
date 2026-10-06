@@ -1,100 +1,162 @@
 /* ═══════════════════════════════════════════════════════════════════════
- * 千寻移动端 · L3 第 2 版样式（custom.css）
+ * 千寻移动端 · L3 定制层样式（custom.css）
  * ═══════════════════════════════════════════════════════════════════════
  * 部署到：<dsh_home>/mobile-access/custom.css
  *
  * 分两部分：
- *   §A  DSH 原版界面的窄屏适配（L1 层，只让它不崩）
- *   §B  我们自己的覆盖层（qx-layer / qx-drawer / qx-sheet / qx-toggle …）
+ *   §A  DSH 原版界面的窄屏适配（L1 层，只重排，不重写）
+ *   §B  我们自己的覆盖层（qx-layer / qx-sheet / qx-full-btn / qx-hint-*）
  *
  * ============================== 选择器纪律 ==============================
  * ⚠️ **绝不写 class 名选择器去改 DSH 的东西。** 它的 class 是构建期哈希
- *    （实测 hHd-Xa_ / bhn1Oq_ / YDXeBa_），每次 DSH 构建都变。
- *    只能用 data-* / role / aria-*。清单：docs/probe/dom-anchors.json
+ *    （实测 hHd-Xa_ / bhn1Oq_ / pI_x6G_ / YDXeBa_），每次 DSH 构建都变。
+ *
+ * ✅ 改用 `data-slot`（Base UI 的部件标记，语义化、带版本）：
+ *    root / sidebar / main / rightbar / shell.overlay
+ *    conversation.composer / conversation.input.dock / conversation.header …
+ *    另有 `data-sidebar-collapsed`（展开态 = 属性**不存在**，实测）
+ *    以及 `data-row-key`（`workspace:<uuid>` / `session:session-<uuid>`）。
+ *    实测清单：docs/probe/dom-anchors.json
  *
  * ⚠️ 我们的自定义类**全部**带 `qx-` 前缀，且只作用在 `.qx-layer` 之下
  *    或 `.qx-*` 自身 —— 双重保险，避免污染 DSH。
  */
 
 /* ═══════════════════════════════════════════════════════════════════════
- * §A · DSH 原版界面的窄屏适配
- * ═══════════════════════════════════════════════════════════════════════ */
+ * §A · DSH 原版界面的窄屏适配（L1 层，只让它不崩）
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * ⚠️⚠️ 第 2 版的整节 §A 是**死代码**，已全部作废。
+ *
+ *   它写的是 `.dshm-shell` / `.dshm-drawer` / `.dshm-details` / `.dshm-scrim`
+ *   / `.dshm-main` —— 那是我自己编的类名，DSH 里**根本不存在**。
+ *   真机实测（cdp_webview.py）：这 5 个选择器各命中 **0** 个元素。
+ *   也就是说「12 组窄屏适配已部署」这句话是错的：部署了，但一条都没生效。
+ *   教训：CSS 规则不查命中数，等于没写。
+ *
+ * ── 现在这一节改用什么锚点 ──────────────────────────────────────────
+ * DSH 用 Base UI 的 `data-slot` 标记每个部件，且语义化、带版本：
+ *     root / sidebar / main / rightbar / shell.overlay
+ *     conversation.composer / conversation.input.dock / conversation.header …
+ * 这比 class 可靠 —— class 是构建期哈希（实测 hHd-Xa_ / bhn1Oq_ / pI_x6G_，
+ * 每次构建都变），data-slot 是 API 的一部分。
+ * 实测清单：docs/probe/dom-anchors.json
+ */
 
-@media (max-width: 900px) {
-  /* A1 三栏在任何情况下都不并排。390dp 减去 56px rail 剩 334dp，
-     再减去详情面板就什么都不剩了。 */
-  .dshm-shell { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
-  .dshm-shell > * { min-width: 0; }
-  .dshm-drawer[data-open='false'] { width: 56px; }
-  .dshm-drawer[data-open='true'] { width: min(88vw, 340px); }
-  .dshm-details { width: min(100vw, 460px); }
-  .dshm-details[data-open='false'] {
-    transform: translateX(100%); pointer-events: none; visibility: hidden;
+/* ── A1 侧栏展开时变**全屏浮层**，不再挤压主区 ──────────────────────
+ *
+ * 这是手机端最要紧的一条。真机实测（viewport 412 CSS px）：
+ *
+ *   [data-slot=root] > *            display:grid
+ *     ├─ 折叠态  grid-template-columns: 56px 356px 0px   ← 56px 图标 rail，正常
+ *     └─ 展开态  grid-template-columns: 280px 132px 0px ← 主区只剩 132px！
+ *
+ * 132px 意味着标题竖排成「Into the Unkno wn」、输入框被压成一个窄条。
+ * 所以展开态下必须把侧栏**移出栅格**并盖住整个视口：
+ *   · 主区恢复满宽（浮层不再参与分配）
+ *   · 折叠态（rail）完全不受影响，所以只匹配「展开」——
+ *     判据是 frame 上的 `data-sidebar-collapsed`：
+ *     **展开时该属性是「不存在」而不是 "false"**（实测确认），
+ *     所以展开态 = :not([data-sidebar-collapsed])
+ */
+@media (max-width: 760px) {
+  [data-slot='root'] > :not([data-sidebar-collapsed]) {
+    /* 内联 style 优先级高于样式表，必须 !important 才压得住 */
+    grid-template-columns: minmax(0, 1fr) 0px 0px !important;
   }
-  .dshm-scrim[data-open='true'] { background: rgb(15 23 42 / 40%); }
+  [data-slot='root'] > :not([data-sidebar-collapsed]) [data-slot='sidebar'] > * {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    /* 低于 DSH 自己的弹窗层：审批/提问卡片必须还能盖在它上面 */
+    z-index: 60;
+    display: flex !important;
+    flex-direction: column;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;   /* 滚到底不把底下主区一起带走 */
+  }
+}
 
-  /* A2 输入 16px —— iOS Safari 低于它会**自动放大**，页面跳走。
-     关掉缩放（user-scalable=no）是错的，那会破坏无障碍。 */
-  textarea, input, select, [contenteditable='true'] { font-size: 16px !important; }
+/* ── A2 输入 16px ──────────────────────────────────────────────────
+ * iOS Safari 低于 16px 会**自动放大**且不还原，页面跳走。
+ * 关掉缩放（user-scalable=no）是错的 —— 那会破坏无障碍。 */
+@media (max-width: 760px) {
+  textarea, input, select, [contenteditable='true'] {
+    font-size: 16px !important;
+  }
+  [data-composer-input] { font-size: 16px !important; }
+}
 
-  /* A3 触控目标 ≥48px */
-  [data-disclosure-row] { min-height: 48px; touch-action: manipulation; }
-  [data-disclosure-row] > * { min-width: 0; overflow-wrap: anywhere; }
-  [role='radio'], [role='checkbox'] { min-height: 48px; touch-action: manipulation; }
-  header button { min-width: 44px; min-height: 44px; }
+/* ── A3 触控目标 ≥48px ────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  [data-slot='sidebar'] button,
+  [data-slot='conversation.header'] button {
+    min-height: 48px;
+    touch-action: manipulation;
+  }
+  [role='radio'], [role='checkbox'], [role='treeitem'] {
+    min-height: 48px;
+    touch-action: manipulation;
+  }
+}
 
-  /* A4 宽内容横向滚。overflow-wrap:anywhere 救不了代码 ——
-     折行就毁了对齐。 */
+/* ── A4 宽内容横向滚 ────────────────────────────────────────────────
+ * overflow-wrap:anywhere 救不了代码 —— 折行就毁了对齐。 */
+@media (max-width: 760px) {
   table, pre, [data-code-block-content], [data-json-root-row] {
-    display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   table { width: max-content; min-width: 100%; }
-
-  /* A5 长文本不撑破容器 */
-  [data-path-label], [data-ref-chip] { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-  img, video, canvas, svg { max-width: 100%; height: auto; }
-
-  /* A6 视口高度用 dvh（键盘弹起时 vh 不变 → 输入框被盖） */
-  .dshm-shell { height: 100dvh; min-height: 100dvh; }
 }
 
-/* A7 安全区 */
-@media (max-width: 900px) {
-  .dshm-drawer, .dshm-details { padding-top: env(safe-area-inset-top); }
-  .dshm-main {
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
+/* ── A5 长文本不撑破容器 ──────────────────────────────────────────── */
+@media (max-width: 760px) {
+  [data-slot='conversation.session'] * { min-width: 0; max-width: 100%; }
+  [data-path-label], [data-ref-chip] {
+    min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+  }
+  img, video, canvas, svg { max-width: 100%; height: auto; }
+}
+
+/* ── A6 视口高度用 dvh（软键盘弹起时 vh 不变 → 输入框被盖住） ────── */
+@media (max-width: 760px) {
+  [data-slot='root'] > * {
+    height: 100dvh;
+    min-height: 100dvh;
   }
 }
 
-/* A8 diff 改纵向堆叠：390dp 放不下并排 diff，每栏不到 190dp */
-@media (max-width: 900px) {
+/* ── A7 安全区 ────────────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  [data-slot='sidebar'] > * {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  [data-slot='conversation.input.dock'] {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ── A8 diff 改纵向堆叠：390dp 放不下并排 diff，每栏不到 190dp ────── */
+@media (max-width: 760px) {
   [data-diff] { display: flex; flex-direction: column; min-width: 0; }
   [data-diff] > * { min-width: 0; max-width: 100%; overflow-x: auto; }
   [data-diff] [data-line-numbers] { display: none; }
 }
 
-/* A9 终端输出限 12px（下限是 12，再小不可读） */
-@media (max-width: 900px) {
-  [data-terminal] {
-    max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
-    font-size: 12px; line-height: 1.45;
-  }
-}
-
-/* A10 减少动态效果（无障碍硬要求） */
+/* ── A9 减少动态效果（无障碍硬要求） ──────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .dshm-drawer, .dshm-details, .dshm-scrim, .dshm-drawer > *, .dshm-main,
-  .qx-drawer, .qx-sheet, .qx-scrim {
-    transition: none !important; animation: none !important;
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
   }
-}
-
-/* A11 横屏兜底：dsh-mobile 的唯一断点是 900px，把平板竖屏与折叠屏
-       展开态都按手机处理了。横屏手机有 800+dp，三栏真的放得下。 */
-@media (min-width: 640px) and (max-width: 900px) and (orientation: landscape) {
-  .dshm-shell { grid-template-columns: 56px minmax(0, 1fr); }
-  .dshm-details { width: min(50vw, 420px); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -112,204 +174,7 @@
 }
 .qx-layer * { box-sizing: border-box; }
 
-/* B1 遮罩：40% 而不是 50%（深遮罩让 343px 抽屉像浮层） */
-.qx-scrim {
-  position: absolute; inset: 0;
-  background: rgb(15 23 42 / 40%);
-  pointer-events: auto;
-  animation: qx-fade 180ms ease-out;
-}
-@keyframes qx-fade { from { opacity: 0 } to { opacity: 1 } }
-
-/* B2 ☰ 按钮：56px 见方（超过 48dp 下限），半透明 */
-.qx-toggle {
-  position: absolute;
-  top: calc(env(safe-area-inset-top) + 8px);
-  left: 8px;
-  width: 56px; height: 56px;
-  border: 1px solid rgba(255, 255, 255, .14);
-  border-radius: 14px;
-  background: rgb(18 22 29 / .88);
-  backdrop-filter: blur(8px);
-  color: #e8edf2;
-  font-size: 22px; line-height: 1;
-  pointer-events: auto;
-  cursor: pointer;
-  touch-action: manipulation;
-  display: flex; align-items: center; justify-content: center;
-}
-.qx-toggle:active { background: rgb(26 32 41 / .95); }
-
-/* B3 抽屉：全屏覆盖（390dp 下半屏只剩 195px，放不下工作区名） */
-.qx-drawer {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  background: #0b0e13;
-  pointer-events: auto;
-  animation: qx-slide-l 220ms cubic-bezier(.22, 1, .36, 1);
-}
-@keyframes qx-slide-l {
-  from { transform: translateX(-8px); opacity: .94 }
-  to { transform: translateX(0); opacity: 1 }
-}
-
-.qx-d-head {
-  flex: 0 0 auto;
-  display: flex; align-items: center;
-  padding: calc(env(safe-area-inset-top) + 12px) 12px 10px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, .07);
-}
-.qx-d-title { font-size: 20px; font-weight: 650; letter-spacing: -.2px; }
-.qx-d-x {
-  margin-left: auto;
-  width: 40px; height: 40px;
-  border: 0; background: transparent;
-  color: #9aa7b4; font-size: 18px;
-  pointer-events: auto; cursor: pointer; touch-action: manipulation;
-}
-
-.qx-d-tools {
-  flex: 0 0 auto;
-  display: flex; gap: 8px;
-  padding: 10px 16px;
-}
-.qx-d-btn {
-  flex: 1; padding: 10px 0;
-  border: 1px solid rgba(255, 255, 255, .14);
-  border-radius: 10px;
-  background: #1a2029; color: #e8edf2;
-  font-size: 14px; font-weight: 600;
-  cursor: pointer; touch-action: manipulation;
-}
-
-.qx-d-list {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  padding-bottom: 8px;
-}
-
-/* B4 工作区分组头 —— 48dp 触控目标 */
-.qx-d-ws {
-  display: flex; align-items: center; gap: 8px;
-  width: 100%;
-  min-height: 48px;
-  padding: 8px 16px;
-  border: 0;
-  background: #12161d;
-  border-bottom: 1px solid rgba(255, 255, 255, .05);
-  color: #e8edf2;
-  text-align: left;
-  cursor: pointer; touch-action: manipulation;
-}
-.qx-d-ws-name {
-  font-size: 15px; font-weight: 620;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0;
-}
-.qx-d-ws-meta {
-  margin-left: auto; flex: 0 0 auto;
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: #72818f;
-  font-variant-numeric: tabular-nums;
-}
-.qx-d-ws-pending { color: #ffc24b; font-weight: 700; }
-/* 「稀疏 N」要弱化 —— 它是常态（52.8%），不该看起来像警告 */
-.qx-d-ws-sparse { color: #4a5560; }
-
-.qx-d-more {
-  padding: 10px 16px 10px 20px;
-  font-size: 12px; color: #72818f;
-}
-.qx-d-empty { padding: 20px 16px; font-size: 14px; color: #9aa7b4; }
-
-.qx-d-foot {
-  flex: 0 0 auto;
-  display: flex; flex-wrap: wrap; gap: 6px;
-  padding: 10px 16px calc(env(safe-area-inset-bottom) + 12px);
-  border-top: 1px solid rgba(255, 255, 255, .07);
-  font-size: 11px; color: #72818f;
-  font-variant-numeric: tabular-nums;
-}
-/* 「无法确认」用中性灰偏亮 —— 不是警告色（它常出现），
-   但也不能藏起来（否定断言律要求可见） */
-.qx-d-unknown { color: #9aa7b4; }
-
-/* B5 会话行 —— 66dp 起，触控目标够 */
-.qx-s-row {
-  display: flex; align-items: stretch; gap: 10px;
-  width: 100%;
-  min-height: 66px;
-  padding: 10px 14px 10px 0;
-  border: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, .055);
-  background: transparent;
-  color: #e8edf2;
-  text-align: left;
-  cursor: pointer; touch-action: manipulation;
-}
-.qx-s-row:active { background: rgba(255, 255, 255, .03); }
-
-/* 信号轨：出血到屏幕左缘，不是内缩装饰条。
-   四重编码：粗细 + 虚实 + 位置 + 文字（颜色只是第四条）。 */
-.qx-s-rail { flex: 0 0 auto; width: 4px; border-radius: 0 2px 2px 0; align-self: stretch; }
-.qx-s-rail--run { background: #3ddc97; }
-.qx-s-rail--done { background: #7cc4ff; }
-.qx-s-rail--weak { background: #737c87; }
-.qx-s-rail--sparse { background: #2a323c; }
-.qx-s-rail--wait {
-  background: repeating-linear-gradient(180deg, #ffc24b 0 6px, transparent 6px 11px);
-}
-.qx-s-row--pending { background: rgba(255, 194, 75, .05); }
-
-.qx-s-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.qx-s-head { display: flex; align-items: baseline; gap: 8px; }
-.qx-s-title {
-  flex: 1; min-width: 0;
-  font-size: 15px; line-height: 20px; font-weight: 560; letter-spacing: -.1px;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.qx-s-age {
-  flex: 0 0 auto;
-  font-size: 11px; color: #72818f;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 第二行：agent 最近做了什么（满行）/ 还没有发过消息（稀疏行） */
-.qx-s-act {
-  font-size: 13px; line-height: 18px; color: #9aa7b4;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* 稀疏行的第二行要**弱一点** —— 它是常态不是异常 */
-.qx-s-sparse { color: #6b7885; font-style: normal; }
-
-.qx-s-meta {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: #72818f;
-  white-space: nowrap; overflow: hidden;
-  font-variant-numeric: tabular-nums;
-}
-.qx-s-st { font-weight: 700; letter-spacing: .2px; flex: 0 0 auto; }
-/* 状态词：每一态都有**可见中文**，不靠颜色单独表意 */
-.qx-s-st--run { color: #3ddc97; }
-.qx-s-st--wait { color: #ffc24b; }
-.qx-s-st--done { color: #7cc4ff; }
-.qx-s-st--weak { color: #737c87; }
-.qx-s-st--unclear { color: #737c87; }
-
-.qx-s-chip {
-  border: 1px solid rgba(255, 255, 255, .12);
-  border-radius: 6px; padding: 1px 5px;
-  color: #72818f;
-}
-/* 上下文 >65% 才转琥珀 —— 阈值依据实测 p90=53.2% */
-.qx-s-ctx { margin-left: auto; flex: 0 0 auto; }
-.qx-s-ctx--hi { color: #ffc24b; font-weight: 700; }
-
-/* B6 「看全文」入口 —— 挂在 DSH 自己的工具行末尾 */
+/* B7 「看全文」入口 —— 挂在 DSH 自己的工具行末尾 */
 .qx-full-btn {
   display: block; width: 100%;
   min-height: 44px;              /* 略小于 48：它在 DSH 的行内，不是主操作 */
@@ -381,12 +246,70 @@
   cursor: pointer; touch-action: manipulation;
 }
 
-/* B8 亮色主题：投影要浅，否则抽屉像浮层 */
+/* B8 我们加工 DSH 侧栏行时插入的提示条
+ * ------------------------------------------------------------------
+ * ⚠️ 这些是**插进 DSH 自己的行里**的子元素，不是替换它。
+ *    所以样式必须「安静」—— 不改行高、不加边框、不动配色体系，
+ *    否则会和 DSH 自己的 hover/selected 状态打架。
+ *
+ * 1. 稀疏行提示：说明「它不是坏了，是从未跑过」
+ *    —— 实测 208/394 (52.8%) 的会话 projections.values 只有 title，
+ *       DSH 侧栏无从判断，用户会以为加载失败。
+ * 2. 上下文占用：>50% 才显示（实测 p90=53.2%），>65% 转琥珀。
+ * 3. 待答：只给「真的有待答」的行加一个左侧提示条 ——
+ *    不可知（无 userQuestions 键但有轮次历史，实测 102 条）**不加**：
+ *    那是「不可知」，不是「待答」，加上去等于撒谎。
+ */
+.qx-hint-sparse {
+  display: block;
+  font-size: 11px;
+  line-height: 15px;
+  color: #6b7885;
+  font-style: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;   /* 不拦点击 —— 整行仍可点 */
+}
+
+.qx-hint-ctx {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: #9aa7b4;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--dsw-alias-bg-layer-1, #12161d) 24%);
+  padding-left: 10px;
+}
+.qx-hint-ctx--hi { color: #ffc24b; font-weight: 700; }
+
+/* 待答：左侧 3px 虚线条（虚实 = 第四重编码，不只靠颜色） */
+.qx-row--pending {
+  box-shadow: inset 3px 0 0 0 #ffc24b;
+}
+.qx-row--pending::after {
+  content: '待审批';
+  position: absolute;
+  left: 8px;
+  top: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffc24b;
+  pointer-events: none;
+}
+
+/* B9 亮色主题：只覆盖仍然存在的选择器。
+ * ⚠️ DSH 自己的变量体系在亮色下会变（`[data-ds-dark-theme]` 的有无），
+ *    所以我们**不给 DSH 的元素上自定义色** —— 那会与它的主题打架。
+ *    只处理我们自己的 sheet 与提示条。 */
 @media (prefers-color-scheme: light) {
-  .qx-drawer { background: #f7f9fb; color: #141a21; }
-  .qx-d-ws { background: #eff2f5; color: #141a21; border-bottom-color: rgba(0, 0, 0, .07); }
-  .qx-s-row { color: #141a21; border-bottom-color: rgba(0, 0, 0, .07); }
-  .qx-toggle { background: rgb(255 255 255 / .92); color: #141a21; border-color: rgba(0, 0, 0, .12); }
-  .qx-d-btn, .qx-sheet { background: #ffffff; color: #141a21; }
+  .qx-sheet { background: #ffffff; color: #141a21; }
   .qx-sheet-body { background: #f1f4f7; color: #141a21; }
+  .qx-sheet-x { color: #5a6672; }
+  .qx-sheet-copy { background: #eff2f5; color: #141a21; }
+  .qx-hint-sparse { color: #8b96a3; }
+  .qx-hint-ctx { color: #5a6672; }
 }

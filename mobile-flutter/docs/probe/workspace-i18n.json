@@ -1,0 +1,177 @@
+{
+  "_probe": {
+    "note": "DSH 工作区相关的原生 i18n 文案。手机端复刻分区时**必须用同一套措辞**，否则桌面写「未分组」手机写「其他会话」，用户会以为是两回事。",
+    "source": "probe_workspace_i18n.py",
+    "chunkBytes": 10600622
+  },
+  "i18n": {
+    "row.running": {
+      "en": "Running",
+      "zh": "运行中"
+    },
+    "row.preparing": {
+      "en": "Preparing tool call",
+      "zh": "正在准备调用"
+    },
+    "row.failed": {
+      "en": "Failed",
+      "zh": "失败"
+    },
+    "row.stopped": {
+      "en": "Stopped",
+      "zh": "已停止"
+    },
+    "row.input": {
+      "en": "IN",
+      "zh": "输入"
+    },
+    "row.output": {
+      "en": "OUT",
+      "zh": "输出"
+    },
+    "row.inspect": {
+      "en": "Inspect",
+      "zh": "查看"
+    },
+    "row.removeTitle": {
+      "en": "row.stopTitle",
+      "zh": "移除 Cordis 插件"
+    },
+    "row.updateTitle": {
+      "en": "row.runTitle",
+      "zh": "更新 Cordis 插件"
+    },
+    "row.defineTitle": {
+      "en": "Register Cordis Plugin",
+      "zh": "注册 Cordis 插件"
+    },
+    "row.runTitle": {
+      "en": "Run Cordis Plugin",
+      "zh": "运行 Cordis 插件"
+    },
+    "row.stopTitle": {
+      "en": "Stop Cordis Plugin",
+      "zh": "停止 Cordis 插件"
+    },
+    "menu.unarchiveSession": {
+      "en": "menu.archiveSession",
+      "zh": "取消归档"
+    },
+    "menu.unpinSession": {
+      "en": "menu.pinSession",
+      "zh": "取消置顶"
+    },
+    "group.ungrouped": {
+      "en": "Ungrouped",
+      "zh": "未分组"
+    },
+    "section.workspaces": {
+      "en": "Workspaces",
+      "zh": "工作区"
+    },
+    "section.sessions": {
+      "en": "Sessions",
+      "zh": "会话"
+    },
+    "menu.addWorkspace": {
+      "en": "Add workspace…",
+      "zh": "添加工作区…"
+    },
+    "menu.fork": {
+      "en": "Fork session",
+      "zh": "分叉会话"
+    },
+    "menu.archiveSession": {
+      "en": "Archive session",
+      "zh": "归档会话"
+    },
+    "menu.pinSession": {
+      "en": "Pin session",
+      "zh": "置顶会话"
+    },
+    "row.archived": {
+      "en": "Archived",
+      "zh": "已归档"
+    },
+    "row.pinned": {
+      "en": "Pinned",
+      "zh": "已置顶"
+    },
+    "section.add": {
+      "en": "Add",
+      "zh": "添加"
+    },
+    "section.commands": {
+      "en": "Commands",
+      "zh": "指令"
+    },
+    "row.title": {
+      "en": "Skill",
+      "zh": "加载技能"
+    },
+    "row.instructions": {
+      "en": "Instructions",
+      "zh": "说明"
+    },
+    "menu.userOnly": {
+      "en": "user-only",
+      "zh": "仅用户"
+    },
+    "section.files": {
+      "en": "Files & folders",
+      "zh": "文件与文件夹"
+    },
+    "section.subagents": {
+      "en": "Subagents",
+      "zh": "子智能体"
+    },
+    "row.collapseAria": {
+      "en": "row.expandAria",
+      "zh": "收起 {label} 的实时输出"
+    },
+    "section.live": {
+      "en": "Running",
+      "zh": "进行中"
+    },
+    "section.settledCount": {
+      "en": "Finished {count}",
+      "zh": "已结束 {count}"
+    },
+    "section.clear": {
+      "en": "Clear",
+      "zh": "清空"
+    },
+    "row.expandAria": {
+      "en": "Show live output of {label}",
+      "zh": "展开 {label} 的实时输出"
+    },
+    "menu.aria": {
+      "en": "Model and reasoning effort",
+      "zh": "模型与推理等级"
+    },
+    "menu.model": {
+      "en": "Model",
+      "zh": "模型"
+    },
+    "menu.effort": {
+      "en": "Effort",
+      "zh": "推理等级"
+    },
+    "section.betweenTurns": {
+      "en": "Between turns",
+      "zh": "轮次之间"
+    },
+    "group.message": {
+      "en": "Message",
+      "zh": "消息"
+    },
+    "group.step": {
+      "en": "Step {step}",
+      "zh": "第 {step} 步"
+    },
+    "group.compaction": {
+      "en": "Compaction {seq}",
+      "zh": "压缩 {seq}"
+    }
+  }
+}

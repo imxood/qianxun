@@ -1,0 +1,10 @@
+{
+  "_probe": {
+    "note": "从 dsh-api-workspace-controller 的 chunk 里抠出的 @Remote 注册名。猜 /api/workspace/list 全部 404 —— 命名空间不是 'workspace'。",
+    "source": "probe_workspace_endpoints.py"
+  },
+  "remoteRegistrations": {
+    "plugins/??@deepseek-ai/dsh-client-ui-open-in-app/client.js,@deepseek-ai/dsh-api-": [],
+    "plugins/??@deepseek-ai/dsh-client-ui-schedule/client.js,@deepseek-ai/dsh-client-": []
+  }
+}
