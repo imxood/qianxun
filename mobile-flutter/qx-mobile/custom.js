@@ -801,8 +801,8 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
       class: 'qx-menu-btn',
       type: 'button',
       'aria-label': '打开工作区',
-      text: '☰',
     })
+    btn.appendChild(el('i'))          // 图标本体，纯 CSS 画，见 custom.css A12
     btn.addEventListener('click', () => { openWorkspacePage() })
     slot.appendChild(btn)
 

@@ -249,8 +249,11 @@
  * 所以这是「DSH 自己留出来的空槽」，我们填一个按钮进去，
  * 既不用挪别人的元素，也不用新开一个会遮住顶栏的浮层。
  *
- * 样式跟着 DSH 的图标按钮走（44×44、居中、淡边框），
- * 但颜色只用 currentColor，不给 DSH 的元素上自定义色 —— 免得跟主题打架。
+ * 样式必须**跟 DSH 的图标按钮一模一样**，否则一眼就看出是外挂上去的。
+ *   第 5 版之前这里是个 1px 描边的大方块 + 字符「☰」，
+ *   在一排细线条图标里又重又突兀 —— 那正是「不专业」的观感来源。
+ *   现在改成：同样的 20×20 圆角方框 + 右侧一条竖分隔线，
+ *   尺寸、线宽、透明度都对齐 DSH 自己的侧栏图标。
  */
 .qx-menu-btn {
   display: inline-flex;
@@ -262,24 +265,38 @@
   /* ⚠️ align-self:start 不能省 ——
      [conversation.header.leading] 是 display:contents，按钮因此**直接**
      成了 header 栅格的子项，会被默认的 align-items:center 垂直居中。
-     而我们的顶栏有两行（96px 高），居中就把 ☰ 顶到了两行中间（y=34），
+     而我们的顶栏有三行，居中就把按钮顶到了行与行之间（y=34），
      和标题（y=10）对不齐。顶对齐才和标题同一基线。 */
   align-self: start;
-  margin: 10px 8px 0 2px;
-  border: 1px solid currentColor;
-  border-radius: 10px;
+  margin: 2px 4px 0 0;
+  border: 0;
   background: transparent;
   color: inherit;
-  opacity: .62;
-  font-size: 17px;
-  line-height: 1;
   cursor: pointer;
   touch-action: manipulation;
 }
-.qx-menu-btn:active { opacity: 1; }
-@media (prefers-color-scheme: dark) {
-  .qx-menu-btn { opacity: .55; }
+
+/* 图标本体：圆角方框 + 右侧竖分隔线（与 DSH 侧栏图标同一几何） */
+.qx-menu-btn i {
+  display: block;
+  position: relative;
+  width: 20px;
+  height: 20px;
+  border: 1.5px solid currentColor;
+  border-radius: 5px;
+  opacity: .72;
 }
+.qx-menu-btn i::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 12.5px;              /* 20px 的 5/8 处，与 DSH 图标分隔线同位 */
+  width: 1.5px;
+  background: currentColor;
+  border-radius: 1px;
+}
+.qx-menu-btn:active i { opacity: 1; }
 
 /* ── A13 被砍掉的横向行：换行，不省略 ──────────────────────────────
  * 标记由 custom.js 的 markClippedRows() 打（按「真的被截断」这个**行为**
