@@ -57,28 +57,40 @@
   /**
    * 调一个 DSH RPC。
    *
-   * ⚠️ 三个必须遵守的点（都是我在探针里踩过的）：
-   *  1. 信封是三层 `result.ok` / `result.value`，不是 `{ value }`。
+   * ⚠️ 四个必须遵守的点（都是实测踩过的）：
+   *  1. 信封里的 `method` 要写**全名** `session/list`，不是裸 `list`。
+   *     写裸名会得到
+   *     `method "list" does not match endpoint "session/list"`。
+   *  2. 结果信封是三层 `result.ok` / `result.value`，不是 `{ value }`。
    *     写错一层会「安静地得到 undefined」，然后界面上是一份空列表
    *     ——看起来像「部署上没有会话」，而真相是解包写错了。
-   *  2. `payload.args` 是唯一合法的键名。多数方法用参数名
-   *     （如 `session/page` 用 `{ address, throughSeq }`），
-   *     但 `session/list` 恰好用 `_request`。
-   *  3. `requestId`（session/prompt）由**服务端去重**，同一 id 重试安全。
+   *  3. **args 内部还有一层 `request`。**
+   *     正确：`{ args: { request: { …实际参数… } } }`
+   *     错误：`{ args: { …实际参数… } }` → 得到
+   *       `missing "request"; unexpected "address", …`
+   *     **唯一例外是 `session/list`**，它的参数键恰好叫 `_request`，
+   *     且是平铺的：`{ args: { _request: {} } }`。
+   *  4. `requestId`（session/prompt）由**服务端去重**，同一 id 重试安全。
    *     错一次会产生两条轮次，不可逆。
    *
+   * @param {string} namespace 例如 'session'
+   * @param {string} method 例如 'list'
+   * @param {object} args **内层**参数（不要自己包 request，本函数会包）
+   * @param {string} [argsKey] args 里的键名。默认 'request'；
+   *        `session/list` 要传 '_request'。
    * @returns {Promise<unknown>} result.value
    * @throws  {Error} RPC 返回 ok:false，或网络失败
    */
-  async function rpc(namespace, method, args) {
+  async function rpc(namespace, method, args, argsKey) {
+    const key = argsKey || 'request'
     const res = await window.fetch(`/api/${namespace}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request',
         rpcId: `qx-m${++rpcSeq}`,
-        method,
-        payload: { args },
+        method: `${namespace}/${method}`,   // ⚠️ 全名，不是裸 method
+        payload: { args: { [key]: args } },
       }),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
@@ -92,9 +104,25 @@
     return result.value
   }
 
-  /** session/list。⚠️ 参数键是 `_request` 不是 `request`。 */
+  /**
+   * `session/list`。⚠️ 它是**唯一**平铺的方法，参数键叫 `_request`。
+   */
   function listSessions() {
-    return rpc('session', 'list', { _request: {} })
+    return rpc('session', 'list', {}, '_request')
+  }
+
+  /**
+   * `session/page`。⚠️ `throughSeq` 是**游标**不是任意上限 ——
+   * 填 `2**31-1` 会得到
+   * `session page through seq 2147483647 is past cursor 13487`。
+   * 真实值取自 `projections.asOfSeq`。
+   */
+  function pageSession(sessionId, asOfSeq, maxMessages) {
+    return rpc('session', 'page', {
+      address: { kind: 'session', sessionId },
+      throughSeq: asOfSeq,
+      maxMessages: maxMessages || 50,
+    })
   }
 
   // ══════════════════════════════════════════════════════════════════
