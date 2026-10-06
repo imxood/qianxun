@@ -170,3 +170,60 @@ TLS 固定 + 配对 + WebView 宿主。
 它依赖 `handleNativePair` 与 `access.pair()` 的实现细节。
 **Shell 3 的第一件事就是把它验掉** —— 在那之前，方案 B 是「设计上成立」
 而非「已验证成立」。
+
+---
+
+## 7. 能否改用千寻自己的远程网关（23090）？—— **不能，实测否**
+
+这个问题值得单独记，因为若能成立，壳层能省掉**一整套** TLS 固定与四层认证。
+
+### 7.1 实测（`scripts/probe_gateway_vs_mobile_access.py`）
+
+```
+[1] 网关根页面（不带 token）  401 text/plain
+[2] 网关根页面（带 qx_token） 200，37635 字节
+      提到 dshMobile: False                     ← 致命
+      script: plugins/??@deepseek-ai/dsh-client-modules/client.js
+      script: ./assets/index-5SrrfWpU.js
+      script: /qx-mobile/bootstrap.js
+[3] 网关上的 mobile-access 路由
+      /mobile-access/custom.js   404
+      /mobile-access/custom.css  404
+      /api/mobile-access/devices 200 {"devices":[]}
+      /qx-gate                    401
+```
+
+### 7.2 判读：两条独立的插件加载路径
+
+| 现象 | 说明 |
+|---|---|
+| 根页面**没有** `dshMobile` | **L3 没有挂载点**。`mobile.js` 无处可注册 |
+| `/mobile-access/custom.js` **404** | 插件的定制文件端点**不存在**于这条路 |
+| `/api/mobile-access/devices` **200** | 插件**确实在网关这条路上装着**（`devices: []` 说明还没配对） |
+
+**前两条与第三条放在一起，才是完整信息**：
+
+> 插件的 **Host 侧能力**（设备管理 API）网关看得到；
+> 插件的 **Client 侧能力**（`window.dshMobile` 注入 + `mobile-access` HTTPS 端点）
+> 网关**看不到**。
+
+所以它们是**两条不同的加载路径**：
+- 网关 23090 是 DSH 自己的远程服务，插件以普通 bundle 身份参与（于是有 `/api/mobile-access/*`）
+- mobile-access 3443 是插件**自己起的一个独立 HTTPS 服务**（`gateway.ts:888` `server.listen`），
+  它同时负责注入 `window.dshMobile`（`client.ts:84-89`）与托管 `custom.js`
+
+### 7.3 结论
+
+**网关那条路跑不了 L3。** 方案 B 必须走 `https://<ip>:3443`。
+
+这意味着壳层**必须**做：
+1. 自签 CA 的**精确 Origin 固定**（不是装进系统信任库 —— 见 §5）
+2. `native-pair` 配对 + `renew` 续期
+3. 三层 cookie 注入（session / csrf / device）
+4. 原生请求手动带 `x-dsh-mobile-csrf` 头
+
+**这四件恰好就是 `dsh-mobile` 的 Android 壳已经做好的事**
+（`PinnedTls.kt` / `NativeAuthClient.kt` / `DeviceCredentialStore.kt`）。
+照抄它们是对的，**不是偷懒**——那 23 个 Kotlin 文件 + 16 个测试文件
+就是这几件事的成品实现。
+
