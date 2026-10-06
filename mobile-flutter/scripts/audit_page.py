@@ -59,22 +59,32 @@ JS = r"""
   out.info.visibleNodes = vis.length;
 
   // 1. 横向溢出：任何比视口宽的可滚动容器都要能滚，撑破页面的不行
-  //    ⚠️ **必须跳过「横向可滚祖先」里的元素**。实测踩过：
-  //    表格 TD/TH 全部报「超出视口 53px」，但那张表自己 288px 宽、
-  //    放在 x=32（右边缘 320 < 359），而且 overflow-x:auto、内容超 92px
-  //    —— 那是**正确**的横向滚动，不是缺陷。
-  //    漏掉这一步就会去「修」一个根本没问题的地方。
-  const inScroller = (el) => {
+  //    ⚠️ 两种祖先都要跳过，否则会把「根本没问题的布局」报成 high：
+  //
+  //    (a) 横向**可滚**祖先 —— 实测踩过：
+  //        表格 TD/TH 全报「超出视口 53px」，但那张表 288px 放在 x=32
+  //        （右边缘 320 < 359），且 overflow-x:auto、内容超 92px
+  //        —— 那是**正确**的横向滚动。
+  //
+  //    (b) **裁剪**祖先 —— 实测踩过：
+  //        工作区页打开时 DSH 渲染的 headerBlank / headerCorner 落在
+  //        x=379 之后（视口 359），报 3 个 high。但它们被祖先 overflow
+  //        裁掉，用户**根本看不见**，而页面宽仍是 359、无横向滚动。
+  //        按画面逐条核对过，没有任何视觉破损。
+  //
+  //    漏掉这两步，就会去「修」一个根本不存在的问题。
+  const ancestorHandles = (el) => {
     let n = el.parentElement;
     while (n && n !== document.body) {
       const cs = getComputedStyle(n);
-      if ((cs.overflowX === 'auto' || cs.overflowX === 'scroll')) return true;
+      if (cs.overflowX === 'auto' || cs.overflowX === 'scroll') return 'scroll';
+      if (cs.overflowX === 'hidden' || cs.overflowX === 'clip') return 'clip';
       n = n.parentElement;
     }
-    return false;
+    return null;
   };
   for (const { el, cs, r } of vis) {
-    if (inScroller(el)) continue;
+    if (ancestorHandles(el)) continue;
     if (r.right > VW + 2 && r.width <= VW + 2) {
       add('overflow-right', 'high',
           `元素右边缘超出视口 ${Math.round(r.right - VW)}px`, el);
@@ -177,9 +187,16 @@ JS = r"""
 def run() -> dict:
     tmp = ROOT / ".tmp" / "_audit.js"
     tmp.write_text(JS, encoding="utf-8")
+    cmd = [sys.executable, str(CDP)]
+    # 支持 --serial <序列号>，这样同一套审查既能跑真机也能跑模拟器。
+    # 不加的话默认 emulator-5554 —— 而模拟器很容易被调成与真机一致，
+    # 很容易让人忘了自己其实在看替身。
+    if "--serial" in sys.argv:
+        i = sys.argv.index("--serial")
+        cmd += ["--serial", sys.argv[i + 1]]
+    cmd += ["eval", "--file", str(tmp)]
     proc = subprocess.run(
-        [sys.executable, str(CDP), "eval", "--file", str(tmp)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
     )
     tail = [ln for ln in proc.stdout.strip().splitlines() if ln.strip().startswith("{")]
     if not tail:

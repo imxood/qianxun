@@ -561,6 +561,35 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
   // ══════════════════════════════════════════════════════════════════
 
   /**
+   * 找 DSH 侧栏的「展开 / 收起」按钮。
+   *
+   * ⚠️⚠️ **文案随 DSH 的界面语言变，这是一条真机上才暴露的坑：**
+   *   模拟器上 DSH 是英文，按钮 aria-label = `Open sidebar` / `Collapse sidebar`，
+   *   真机（中文）上是 `打开侧边栏` / `收起侧边栏`。
+   *   只认英文的话，在真机上点 ☰ **完全没反应** ——
+   *   而且界面上看不出任何异常，最容易误判成「按钮没插进去」。
+   *   （这一条是同一批里第二个「模拟器正常、真机坏了」的坑，
+   *     第一个是 CDP 连错 WebView。）
+   *
+   * 所以两种语言都认，且都找不到时**退回侧栏里的第一个按钮** ——
+   * 折叠态侧栏的第一个按钮按设计就是切换键。
+   */
+  function findSidebarToggle(collapsed) {
+    const want = collapsed
+      ? ['打开侧边栏', 'open sidebar']
+      : ['收起侧边栏', 'collapse sidebar', 'close sidebar']
+    const buttons = doc.querySelectorAll(
+      '[data-slot="sidebar"] button, [data-slot="sidebar"] [role="button"]')
+    for (let i = 0; i < buttons.length; i += 1) {
+      const label = (buttons[i].getAttribute('aria-label') || '').toLowerCase()
+      for (let k = 0; k < want.length; k += 1) {
+        if (label.indexOf(want[k].toLowerCase()) !== -1) return buttons[i]
+      }
+    }
+    return buttons.length ? buttons[0] : null
+  }
+
+  /**
    * 真机实测（412px）：点会话**确实会跳转**（标题变成新会话名），
    * 但侧栏**不会自动收起** —— 而窄屏下侧栏是全屏浮层，
    * 于是用户点完会话看到的还是菜单，永远进不去对话。
@@ -569,7 +598,7 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
    * 「选完就收起」在桌面没有意义（并排显示），它当然不会做。
    *
    * 做法：捕获阶段监听 click，命中**会话行**（data-row-key 以 session: 开头）
-   * 就延迟一帧后点 DSH 自己的「Collapse sidebar」按钮 ——
+   * 就延迟一帧后点 DSH 自己的收起按钮 ——
    * 不自己改 DOM 状态，那会和它的内部状态机打架。
    *
    * 只在窄屏做：宽屏下侧栏是并排的，收起它反而是帮倒忙。
@@ -588,14 +617,8 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
       win.setTimeout(() => {
         const frame = doc.querySelector('[data-slot="root"] > *')
         if (!frame || frame.hasAttribute('data-sidebar-collapsed')) return
-        const buttons = doc.querySelectorAll('[data-slot="sidebar"] button')
-        for (let i = 0; i < buttons.length; i += 1) {
-          const label = buttons[i].getAttribute('aria-label') || ''
-          if (label.toLowerCase().indexOf('collapse sidebar') !== -1) {
-            buttons[i].click()
-            return
-          }
-        }
+        const btn = findSidebarToggle(false)
+        if (btn) btn.click()
       }, 60)
     }
     doc.addEventListener('click', state.onRowPicked, true)
@@ -696,11 +719,60 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
       if (cs.display !== 'block' && cs.display !== 'flex') continue
       // 阈值从 55% 降到 45%：实测文件链接 193/359 = 53.8%，
       // 差一点点就被 55% 挡在门外 —— 阈值卡太紧会漏掉真正该补的元素。
-      if (r.width < vw * 0.45) continue
+      let wideEnough = r.width >= vw * 0.45
+      if (!wideEnough) {
+        // 宽度不够时还有一条更准的结构判据：**父容器高度 ≈ 自己高度**，
+        // 说明这个按钮就是整行（转录里工具/步骤的折叠行标题，实测
+        // 「已读取文件」151×15、「已搜索代码并读取文件」151×15）。
+        // 正文里的行内链接不会命中 —— 它的父容器是整段文字，
+        // 高度远大于链接本身，给它补 44px 会把段落撑开。
+        const p = el.parentElement
+        const ph = p ? p.getBoundingClientRect().height : 0
+        if (ph && Math.abs(ph - r.height) <= 3) wideEnough = true
+      }
+      if (!wideEnough) continue
       if (r.height >= 44) continue
       el.setAttribute('data-qx-short-tap', '1')
       el.style.setProperty('min-height', '44px', 'important')
     }
+
+    // 消息下方那排图标按钮（复制/重试/…）实测只有 24–27px 宽，
+    // 但它们**间距只有 40px** —— 补到 44 会互相重叠，
+    // 那是把「点不准」换成「点错地方」。所以取不重叠的 32×40。
+    //
+    // ⚠️ 宽度 < 8 的要跳过：实测有个 `R_Yw7q_frame` 是 1×44 的按钮，
+    //    那是 DSH 的分隔/占位元素，不是可点的控件。
+    const session = doc.querySelector('[data-slot="conversation.session"]')
+    if (!session) return
+    for (const el of session.querySelectorAll('button')) {
+      const r = el.getBoundingClientRect()
+      if (r.width < 8 || r.width >= 32) continue
+      if (r.height < 20) continue
+      el.setAttribute('data-qx-narrow-tap', '1')
+      el.style.setProperty('min-width', '32px', 'important')
+      el.style.setProperty('min-height', '40px', 'important')
+    }
+  }
+
+  /**
+   * 工作区页打开时把 ☰ 藏掉。
+   *
+   * ⚠️ 真机实测（359dp）：侧栏展开后 DSH 会把对话顶栏换成
+   *    `headerBlank`，我们放在 leading 空槽里的 ☰ 被顶到 **x=381** ——
+   *    视口只有 359，**整整 66px 在屏幕外**，一次审查报出 5 个 high 级溢出。
+   *
+   * 而且它那时**本来就没用**：工作区页自带收起键（顶栏右侧那个 ▣）。
+   * 所以直接藏掉是双赢 —— 少一次误触，也不再溢出。
+   *
+   * 判据用 `data-sidebar-collapsed` 的有无（展开时该属性被移除），
+   * 与 CSS A10 是同一套语义。
+   */
+  function syncMenuButton() {
+    const btn = doc.querySelector('.qx-menu-btn')
+    if (!btn) return
+    const frame = doc.querySelector('[data-slot="root"] > *')
+    const expanded = frame ? !frame.hasAttribute('data-sidebar-collapsed') : false
+    btn.style.setProperty('display', expanded ? 'none' : '', 'important')
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -756,13 +828,10 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
    *   里的 dsh.workspace.view.v5 都会对不上）。
    */
   function openWorkspacePage() {
-    const buttons = doc.querySelectorAll('[data-slot="sidebar"] button, [data-slot="sidebar"] [role="button"]')
-    for (let i = 0; i < buttons.length; i += 1) {
-      const label = buttons[i].getAttribute('aria-label') || ''
-      if (label.toLowerCase().indexOf('open sidebar') !== -1) {
-        buttons[i].click()
-        return true
-      }
+    const btn = findSidebarToggle(true)
+    if (btn) {
+      btn.click()
+      return true
     }
     return false
   }
@@ -792,6 +861,7 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     markClippedRows()
     markTinyText()
     markShortTapRows()
+    syncMenuButton()
   }
   // 头 6 秒每 300ms 扫一次 —— 覆盖 DSH 插件异步加载那段窗口，
   // 否则用户会在弹窗消失前先摸到屏幕。
@@ -830,16 +900,18 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     for (let i = 0; i < leftovers.length; i += 1) leftovers[i].remove()
     const pendingRows = doc.querySelectorAll('.qx-row--pending')
     for (let i = 0; i < pendingRows.length; i += 1) pendingRows[i].classList.remove('qx-row--pending')
-    const marks = doc.querySelectorAll('[data-qx-clipped], [data-qx-tiny], [data-qx-short-tap], [data-qx-inline-tap]')
+    const marks = doc.querySelectorAll('[data-qx-clipped], [data-qx-tiny], [data-qx-short-tap], [data-qx-inline-tap], [data-qx-narrow-tap]')
     for (let i = 0; i < marks.length; i += 1) {
       marks[i].removeAttribute('data-qx-clipped')
       marks[i].removeAttribute('data-qx-tiny')
       marks[i].removeAttribute('data-qx-short-tap')
       marks[i].removeAttribute('data-qx-inline-tap')
+      marks[i].removeAttribute('data-qx-narrow-tap')
       marks[i].style.removeProperty('padding-top')
       marks[i].style.removeProperty('padding-bottom')
       marks[i].style.removeProperty('font-size')
       marks[i].style.removeProperty('min-height')
+      marks[i].style.removeProperty('min-width')
     }
     if (layer) { layer.remove(); layer = null }
     for (const node of doc.querySelectorAll('[data-qx-sheet]')) node.remove()

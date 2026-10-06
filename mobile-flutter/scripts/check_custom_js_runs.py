@@ -461,6 +461,40 @@ console.log('PASS register 收到的是函数');
   }
   console.log('PASS ☰ 落在顶栏空槽，点击走 DSH 自己的 Open sidebar');
 
+  // ── 侧栏切换按钮：**中文** aria-label（真机上的真实值）──────────────
+  // ⚠️ 这条是补上一个真机才暴露的 bug：模拟器上 DSH 是英文，
+  //    `Open sidebar` 能匹配上，所以闸门一直是绿的；
+  //    真机上同一个按钮叫「打开侧边栏」，点 ☰ **完全没反应**，
+  //    而界面上看不出任何异常。
+  //    所以闸门必须用中文 label 跑一遍，否则这个 bug 还会再犯。
+  const zhOpen = makeEl('button');
+  zhOpen.setAttribute('aria-label', '打开侧边栏');
+  let zhClicked = 0;
+  zhOpen.addEventListener('click', () => { zhClicked += 1; });
+  sel.sidebarButtons = () => [zhOpen];
+  mountedMenu[0].click();
+  if (zhClicked !== 1) {
+    console.log('FAIL 中文 aria-label「打开侧边栏」的按钮没被点到（zhClicked=' + zhClicked + '）');
+    process.exit(1);
+  }
+  console.log('PASS 中文 aria-label「打开侧边栏」也能点到（模拟器英文、真机中文）');
+
+  const zhCollapse = makeEl('button');
+  zhCollapse.setAttribute('aria-label', '收起侧边栏');
+  let zhCollapsed = 0;
+  zhCollapse.addEventListener('click', () => { zhCollapsed += 1; });
+  sel.sidebarButtons = () => [zhCollapse];
+  frame.removeAttribute('data-sidebar-collapsed');       // 展开态
+  const onClick2 = document.__l && document.__l.click;
+  if (!onClick2) { console.log('FAIL 监听被摘掉了'); process.exit(1); }
+  onClick2({ target: rowBBB });
+  for (const fn of pendingTimeouts.splice(0)) fn();
+  if (zhCollapsed !== 1) {
+    console.log('FAIL 中文「收起侧边栏」没有被点到（zhCollapsed=' + zhCollapsed + '）');
+    process.exit(1);
+  }
+  console.log('PASS 中文「收起侧边栏」也能点到（选完会话自动收起）');
+
   // ── 窄屏排版两道标记 ──────────────────────────────────────────────
   // 这两道是「按行为找元素」，所以替身必须能造出对应的坏元素，
   // 否则闸门永远走「一切正常」那条分支 —— 绿得像没这回事。
