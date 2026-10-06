@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>千寻移动端 · 页面设计 v2</title>
+<style>
+/* ============================================================================
+   设计系统令牌 —— 逐值抄自 lib/app/theme/qx_semantic.dart（暗色）
+   改了这里就要改 Dart，两边必须一致。check_contrast.py 是唯一闸门。
+   ========================================================================= */
+:root{
+  /* 五态语义色 */
+  --running:#3DDC97;  --waiting:#FFC24B;  --done:#7CC4FF;
+  --detached:#737C87; --failed:#FF7B72;
+  /* 中性阶 */
+  --canvas:#0B0E13; --surface:#12161D; --raised:#1A2029; --sunken:#070A0E;
+  --hairline:rgba(255,255,255,.12);
+  --t1:#E8EDF2; --t2:#9AA7B4; --t3:#72818F;
+  --accent:#12B5A8; --on-accent:#04211F; --rail-idle:#2A323C;
+
+  /* 排版：手机正文 15px / 次要 13px / 元信息 11px */
+  --f1:15px; --f2:13px; --f3:11px; --fm:20px;
+  --lh:20px;
+
+  /* 间距刻度 4/8/12/16/20/24 */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:24px;
+
+  --r-s:6px; --r-m:10px; --r-l:14px;
+}
+
+*{box-sizing:border-box;margin:0;padding:0;-webkit-font-smoothing:antialiased}
+body{
+  background:#05070A;
+  color:var(--t1);
+  font:400 var(--f1)/var(--lh) -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  padding:28px 20px 80px;
+}
+h1{font-size:var(--fm);font-weight:650;letter-spacing:-.2px;margin-bottom:6px}
+.sub{color:var(--t2);font-size:var(--f2);margin-bottom:26px;max-width:1100px;line-height:1.55}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:26px}
+nav a{
+  color:var(--t2);text-decoration:none;font-size:var(--f2);
+  padding:6px 12px;border:1px solid var(--hairline);border-radius:var(--r-s);
+  transition:.12s;
+}
+nav a:hover{border-color:var(--accent);color:var(--t1)}
+nav a.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent);font-weight:600}
+.stage{display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start}
+.col{display:flex;flex-direction:column;gap:14px}
+.cap{color:var(--t3);font-size:var(--f3);letter-spacing:.3px;text-transform:uppercase}
+
+/* 手机框 390×844 —— iPhone 14 逻辑宽 */
+.phone{
+  width:390px;height:844px;background:var(--canvas);
+  border:1px solid var(--hairline);border-radius:22px;overflow:hidden;
+  position:relative;display:flex;flex-direction:column;flex:0 0 auto;
+}
+.note{
+  max-width:300px;color:var(--t2);font-size:var(--f2);line-height:1.6;
+  border-left:2px solid var(--accent);padding-left:12px;
+}
+.note b{color:var(--t1);display:block;margin-bottom:4px;font-size:var(--f2)}
+.note .why{color:var(--t3);font-size:var(--f3);margin-top:6px;display:block}
+
+/* ── 状态栏 ── */
+.sb{height:44px;flex:0 0 auto;display:flex;align-items:center;
+    justify-content:space-between;padding:0 var(--s4) 0 var(--s5);
+    font-size:var(--f3);color:var(--t2);font-variant-numeric:tabular-nums}
+
+/* ── 顶栏 ── */
+.top{
+  flex:0 0 auto;padding:0 var(--s4) var(--s3);
+  display:flex;align-items:center;gap:var(--s3);
+}
+.top h2{font-size:22px;font-weight:660;letter-spacing:-.3px}
+.mach{
+  margin-left:auto;display:flex;align-items:center;gap:6px;
+  font-size:var(--f3);color:var(--t2);
+  background:var(--raised);border:1px solid var(--hairline);
+  padding:5px 10px;border-radius:var(--r-s);
+}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--running);flex:0 0 auto}
+
+/* ══ 看护带：恒定高度，永不塌陷 ══ */
+.band{
+  flex:0 0 auto;height:184px;background:var(--surface);
+  border-bottom:1px solid var(--hairline);
+  padding:var(--s3) var(--s4);
+  display:flex;flex-direction:column;gap:var(--s2);
+  position:relative;
+}
+/* 左侧粗轨出血到屏幕边 —— 信号轨的看护带形态 */
+.band::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--waiting)}
+.band-h{display:flex;align-items:center;gap:var(--s2);font-size:var(--f3);color:var(--t3)}
+.band-h .ttl{color:var(--t2);font-weight:600;letter-spacing:.4px}
+.band-h .cnt{margin-left:auto;background:var(--raised);border:1px solid var(--hairline);
+  padding:2px 7px;border-radius:99px;font-size:var(--f3);color:var(--t2)}
+.task{
+  display:flex;align-items:center;gap:var(--s3);
+  background:var(--raised);border:1px solid var(--hairline);
+  border-radius:var(--r-m);padding:10px var(--s3);min-height:52px;
+}
+.task .kind{
+  flex:0 0 auto;font-size:var(--f3);color:var(--on-accent);background:var(--waiting);
+  padding:3px 7px;border-radius:var(--r-s);font-weight:650;letter-spacing:.2px;
+}
+.task .body{flex:1;min-width:0}
+.task .t1l{font-size:var(--f2);line-height:18px;overflow:hidden;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.task .t2l{font-size:var(--f3);color:var(--t3);margin-top:3px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task .go{flex:0 0 auto;color:var(--accent);font-size:var(--f2);font-weight:600}
+/* 空态：留白，不塌陷 —— 关键 */
+.band-empty{flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:6px;color:var(--t3);font-size:var(--f2)}
+.band-empty .sm{font-size:var(--f3);color:var(--rail-idle)}
+
+/* ── 列表 ── */
+.list{flex:1;overflow:hidden;position:relative}
+.row{
+  display:flex;align-items:stretch;gap:var(--s3);
+  padding:11px var(--s4) 11px var(--s3);
+  border-bottom:1px solid rgba(255,255,255,.055);
+  min-height:66px;position:relative;
+}
+.row:hover{background:rgba(255,255,255,.022)}
+/* 轨出血到屏幕左缘，不是内缩装饰条 */
+.rail{flex:0 0 auto;width:4px;border-radius:0 2px 2px 0;align-self:stretch}
+.r-run{background:var(--running);animation:pulse 1.8s ease-in-out infinite}
+.r-wait{background:repeating-linear-gradient(180deg,var(--waiting) 0 6px,transparent 6px 11px)}
+.r-done{background:var(--done)}
+.r-weak{background:var(--detached)}
+.r-stale{background:repeating-linear-gradient(180deg,var(--detached) 0 3px,transparent 3px 7px);opacity:.55}
+.r-fail{background:var(--failed)}
+.r-detach{background:repeating-linear-gradient(180deg,var(--detached) 0 5px,transparent 5px 10px)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+.col-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.rt{display:flex;align-items:baseline;gap:var(--s2)}
+.title{font-size:var(--f1);line-height:20px;font-weight:560;flex:1;min-width:0;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  letter-spacing:-.1px}
+.age{flex:0 0 auto;font-size:var(--f3);color:var(--t3);font-variant-numeric:tabular-nums}
+/* 第二行 = agent 最近做的事。这是签名级决定 */
+.act{font-size:var(--f2);line-height:18px;color:var(--t2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 状态词：绝不靠颜色单独表意，每个态都有可见中文 */
+.meta{display:flex;align-items:center;gap:5px;font-size:var(--f3);color:var(--t3);
+  white-space:nowrap;overflow:hidden}
+.st{font-weight:650;letter-spacing:.2px;flex:0 0 auto}
+.st-run{color:var(--running)} .st-wait{color:var(--waiting)}
+.st-done{color:var(--done)} .st-weak{color:var(--detached)}
+.st-stale{color:var(--detached)} .st-detach{color:var(--detached)}
+.meta .sep{color:var(--rail-idle)}
+.meta .num{font-variant-numeric:tabular-nums}
+/* 元信息有 6 段，390dp 宽屏上必然要取舍。
+   优先级：状态词 > 轮次 > 上下文 > 子任务 > 步数 > 目录。
+   用 flex-shrink 让低优先级的先被压掉，而不是把 ctx 挤出可视区
+   —— ctx 被挤掉恰好是最糟的结局：用户看不到最该警觉的那个数。 */
+.meta > *{flex:0 1 auto;min-width:0}
+.meta .grow{flex:1 1 0;min-width:0}
+.meta .drop{overflow:hidden;text-overflow:ellipsis}
+.meta .ctx{overflow:hidden;text-overflow:ellipsis}
+/* 目录单独一行：实测最长 32 字，挤进元信息行必然把上下文挤掉。
+   而上下文恰恰是这一行最该被看见的数。 */
+.meta2{font-size:var(--f3);color:var(--rail-idle);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.ctx{margin-left:auto;flex:0 0 auto;font-variant-numeric:tabular-nums}
+.ctx-hi{color:var(--waiting);font-weight:650}
+.bar{position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--waiting);opacity:.85}
+
+.chip{
+  display:inline-flex;align-items:center;gap:3px;font-size:var(--f3);
+  color:var(--t3);background:rgba(255,255,255,.045);
+  border:1px solid var(--hairline);padding:1px 6px;border-radius:var(--r-s);
+}
+
+/* ── 输入栏 ── */
+.comp{
+  flex:0 0 auto;background:var(--surface);border-top:1px solid var(--hairline);
+  padding:var(--s3) var(--s4) calc(var(--s3) + 8px);
+}
+.ctxmeter{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s2);
+  font-size:var(--f3);color:var(--t2)}
+.ctxmeter .track{flex:1;height:3px;background:var(--rail-idle);border-radius:2px;overflow:hidden}
+.ctxmeter .fill{height:100%;background:var(--waiting);border-radius:2px}
+.cbox{
+  display:flex;align-items:flex-end;gap:var(--s2);
+  background:var(--sunken);border:1px solid var(--hairline);
+  border-radius:var(--r-l);padding:9px 9px 9px var(--s3);
+}
+.cbox .ph{flex:1;color:var(--t3);font-size:var(--f1);line-height:20px}
+.icon{width:30px;height:30px;flex:0 0 auto;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  color:var(--t2);font-size:15px}
+.send{width:32px;height:32px;flex:0 0 auto;border-radius:50%;background:var(--accent);
+  color:var(--on-accent);display:flex;align-items:center;justify-content:center;
+  font-size:15px;font-weight:700}
+/* 模式切换：手机没有 Alt+Enter，必须拇指可达 */
+.modes{display:flex;gap:0;background:var(--sunken);border:1px solid var(--hairline);
+  border-radius:var(--r-m);padding:2px;margin-bottom:var(--s2)}
+.modes .m{flex:1;text-align:center;font-size:var(--f3);padding:6px 0;
+  border-radius:8px;color:var(--t3);transition:.14s}
+.modes .m.on{background:var(--raised);color:var(--t1);font-weight:600}
+.modes .m.on.steer{color:var(--waiting)}
+
+/* ── 接管层 / sheet ── */
+.scrim{position:absolute;inset:0;background:rgba(3,5,8,.78);
+  display:flex;align-items:flex-end;z-index:20}
+.sheet{width:100%;background:var(--surface);border-top:1px solid var(--hairline);
+  border-radius:18px 18px 0 0;padding:var(--s4) var(--s4) var(--s5);
+  max-height:86%;overflow:hidden}
+.grab{width:36px;height:4px;background:var(--rail-idle);border-radius:2px;
+  margin:0 auto var(--s4)}
+.sheet h3{font-size:17px;font-weight:650;margin-bottom:var(--s2)}
+.sheet .meta-line{font-size:var(--f3);color:var(--t3);margin-bottom:var(--s3)}
+.cmd{
+  background:var(--sunken);border:1px solid var(--hairline);border-radius:var(--r-m);
+  padding:var(--s3);margin-bottom:var(--s3);
+  font:400 12px/18px ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  color:var(--t1);white-space:pre;overflow-x:auto;
+}
+.q{border:1px solid var(--hairline);border-radius:var(--r-m);
+  padding:var(--s3);margin-bottom:var(--s2);background:var(--raised)}
+.q .qt{font-size:var(--f1);font-weight:560;margin-bottom:10px}
+.opt{
+  display:flex;align-items:center;gap:10px;padding:9px 11px;
+  border:1px solid var(--hairline);border-radius:var(--r-s);
+  margin-bottom:6px;font-size:var(--f2);color:var(--t2);
+}
+.opt:last-child{margin-bottom:0}
+.opt .rd{width:15px;height:15px;border-radius:50%;border:2px solid var(--rail-idle);flex:0 0 auto}
+.opt.on{border-color:var(--accent);color:var(--t1);background:rgba(18,181,168,.09)}
+.opt.on .rd{border-color:var(--accent);background:radial-gradient(circle,var(--accent) 0 4px,transparent 4px)}
+.btns{display:flex;gap:var(--s2);margin-top:var(--s4)}
+.btn{flex:1;text-align:center;padding:12px 0;border-radius:var(--r-m);font-size:var(--f1);font-weight:600}
+.btn-p{background:var(--accent);color:var(--on-accent)}
+.btn-p.off{background:var(--rail-idle);color:var(--t3)}
+.btn-s{border:1px solid var(--hairline);color:var(--t2)}
+
+/* ── 断链横幅 ── */
+.banner{
+  flex:0 0 auto;background:rgba(115,124,135,.13);
+  border-bottom:1px solid var(--hairline);
+  padding:9px var(--s4);font-size:var(--f3);color:var(--t2);
+  display:flex;align-items:center;gap:var(--s2);
+}
+.banner .rt{margin-left:auto;color:var(--accent);font-weight:600}
+
+/* ── 空态 / 错误 ── */
+.center{flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:var(--s6);text-align:center;gap:var(--s2)}
+.center .big{font-size:var(--f1);font-weight:600;color:var(--t1)}
+.center .sm{font-size:var(--f2);color:var(--t2);line-height:1.6}
+.center .hint{font-size:var(--f3);color:var(--t3);margin-top:var(--s2);line-height:1.65}
+
+/* 灰度自检 */
+.gs{filter:grayscale(1) contrast(.95)}
+.legend{color:var(--t3);font-size:var(--f3);margin-top:10px;line-height:1.7;max-width:390px}
+.legend b{color:var(--t2)}
+</style>
+</head>
+<body>
+
+<h1>千寻移动端 · 页面设计</h1>
+<p class="sub">
+  全部数据来自真机 <code style="color:var(--accent)">session/list</code> 实测（393 条会话，样本 14 条），
+  颜色与排版逐值抄自 <code style="color:var(--accent)">qx_semantic.dart</code>。
+  状态共 6 态：运行中 / 等你 / 已完成 / 已收工 / 3 分钟前 / 已断开 —— 每一态都配可见中文，
+  不靠颜色单独表意。用顶部标签切页，或用 URL hash 直达（如 <code>#chat</code>）。
+</p>
+
+<nav id="nav"></nav>
+
+<div class="stage" id="stage"></div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════
+   真实数据（probe_session_sample.py 从 192.168.20.2 拉取，落盘在
+   docs/probe/session-list-sample.json）。这里内联一份是刻意的：
+   原型要能离线双击打开，不依赖 fetch。改数据请重跑探针再同步。
+   ══════════════════════════════════════════════════════════════════════ */
+const REAL = {
+  "totalSessions": 393,
+  "items": [
+    {t:"当前项目中 已经实现了 rust ser",cwd:"E:\\git\\maxu\\egui_hikvision_app",turns:74,steps:1301,ctx:75.5,team:9,
+     act:"R5 战役做了哪些优化 — 全部是「减总功」，共 4 个毕业杠杆 + 1 条被证伪的路",age:"昨天 22:03"},
+    {t:"最新代码部署测试环境",cwd:"E:\\git\\maxu\\iot_tool_cloud",turns:9,steps:434,ctx:73.6,team:1,
+     act:"同一个文件（sha256 一致），还是那个 1×1 纯红 50% 透明度的点。没有新信息",age:"昨天 20:33"},
+    {t:"HM2电流测试PC端与固件AT+PWRT差异分析",cwd:"D:\\work\\rf_scanner\\hm2",turns:17,steps:273,ctx:66.3,team:0,
+     act:"完成 — 双 Bank 编译 BUILD OK（一次通过），串口 OTA（COM11）已更新",age:"9月9日"},
+    {t:"千寻项目定制搜索功能优化",cwd:"E:\\develop\\dsh-workspace\\qianxun",turns:11,steps:246,ctx:64.3,team:0,
+     act:"搜索框已砍掉，改用置顶 + 状态轨；session/search 在本部署被禁用",age:"9月8日"},
+    {t:"请检查一下 测试服务器中, `/de",cwd:"E:\\git\\maxu\\iot_tool_cloud",turns:6,steps:206,ctx:59.8,team:1,
+     act:"配置已生效，但 nginx 未 reload，需要手动重启服务",age:"9月7日"},
+    {t:"我一般不看新闻 论坛 社交媒",cwd:"E:\\git\\maxu\\iot_tool_cloud",turns:18,steps:712,ctx:59.3,team:1,
+     act:"我把这三个都从抓取列表移除了，现在只留论文和官方发布",age:"9月6日"},
+    {t:"我想要在千寻的游戏页面中 实",cwd:"E:\\develop\\dsh-workspace\\qianxun",turns:29,steps:1038,ctx:57.4,team:5,
+     act:"页面已加上双脑架构的实时指示器，能看到 System 1 反思的置信度",age:"9月6日"},
+    {t:"efind中, 在 `/admin/fae-customers` 和",cwd:"E:\\git\\maxu\\efind",turns:14,steps:491,ctx:57.3,team:1,
+     act:"两个页面的表格列定义不一致，已抽成同一个组件",age:"9月5日"},
+    {t:"芯片模板共享与脚本编辑页面实现",cwd:"E:\\git\\maxu\\iot_tool_cloud",turns:44,steps:1010,ctx:56.2,team:0,
+     act:"44 轮全部完成，最后一轮只改了复制按钮的图标",age:"9月4日"},
+    {t:"这个`广播扫描`的弹框 默认情",cwd:"E:\\git\\maxu\\egui_hikvision_app",turns:72,steps:2485,ctx:55.5,team:3,
+     act:"72 轮 2485 步 —— 这是本部署最长的会话，滚动性能按它验收",age:"9月3日"}
+  ]
+};
+/* 真实分布：标题最长 40 字（服务端截断），37% 超 20 字，4 条标题完全重复 */
+
+const esc = s => String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* 状态元表：轨宽 / 轨形 / 状态词 / 状态色 —— 四重编码，颜色只是其中一条 */
+const STATES = {
+  running:{cls:'r-run', st:'st-run', word:'运行中', w:4, rail:'实心 + 流光'},
+  waiting:{cls:'r-wait',st:'st-wait', word:'等你',   w:3, rail:'虚线 6/5'},
+  done:   {cls:'r-done', st:'st-done', word:'已完成', w:1, rail:'实心细线'},
+  weak:   {cls:'r-weak', st:'st-weak', word:'已收工', w:1, rail:'实心细线'},
+  stale:  {cls:'r-stale',st:'st-stale',word:'3 分钟前',w:1,rail:'密虚线 + 降级'},
+  detach: {cls:'r-detach',st:'st-detach',word:'已断开',w:2,rail:'虚线 5/5'}
+};
+
+function row(item, state, opts={}){
+  const S = STATES[state];
+  const ctx = item.ctx;
+  // 上下文只在 >50% 显示 —— 实测 p90 才 53%，常驻等于给 87% 的会话腾地方
+  const ctxHtml = (ctx != null && ctx > 50)
+    ? `<span class="ctx ${ctx>65?'ctx-hi':''}">上下文 ${ctx}%</span>` : '';
+  return `<div class="row">
+    <div class="rail ${S.cls}" title="轨 ${S.w}dp · ${S.rail}"></div>
+    <div class="col-main">
+      <div class="rt">
+        <div class="title">${esc(opts.title||item.t)}</div>
+        <div class="age">${esc(opts.age||item.age)}</div>
+      </div>
+      <div class="act">${esc(opts.act||item.act)}</div>
+      <div class="meta">
+        <span class="st ${S.st}">${S.word}</span>
+        <span class="sep">·</span>
+        <span class="num">${item.turns} 轮</span>
+        <span class="sep">·</span>
+        ${ctxHtml}
+        <span class="sep">·</span>
+        <span class="num drop">${item.steps} 步</span>
+        ${item.team?`<span class="sep">·</span><span class="chip drop">子 ${item.team}</span>`:''}
+      </div>
+      <div class="meta2" title="${esc(item.cwd)}">
+        <span class="dir">${esc(item.cwd)}</span>
+      </div>
+    </div>
+    ${state==='waiting'?'<div class="bar"></div>':''}
+  </div>`;
+}
+
+const SB = `<div class="sb"><span>9:41</span><span>LTE ▮▮▮ 86%</span></div>`;
+const TOP = (title,sub)=>`<div class="top">
+  <h2>${title}</h2>
+  <div class="mach"><span class="dot"></span>DESKTOP-CLTN8CB</div>
+</div>`;
+
+/* ══════════ 1. 根屏：看护带 + 列表 ══════════ */
+function screenHome(){
+  const R = REAL.items;
+  return `<div class="phone">
+    ${SB}
+    ${TOP('会话')}
+    <div class="band">
+      <div class="band-h">
+        <span class="ttl">等你处理</span>
+        <span class="cnt">2</span>
+      </div>
+      <div class="task">
+        <span class="kind">审批</span>
+        <div class="body">
+          <div class="t1l">Bash · rm -rf target/debug 的构建产物，确认可删？</div>
+          <div class="t2l">千寻项目定制搜索功能优化 · 已等 12 分钟</div>
+        </div>
+        <span class="go">回答</span>
+      </div>
+      <div class="task">
+        <span class="kind" style="background:var(--done);color:var(--on-accent)">提问</span>
+        <div class="body">
+          <div class="t1l">双 Bank 还是单 Bank？我按你上次说的默认双 Bank。</div>
+          <div class="t2l">HM2电流测试PC端与固件AT+PWRT差异分析 · 已等 4 分钟</div>
+        </div>
+        <span class="go">回答</span>
+      </div>
+    </div>
+    <div class="list">
+      ${row(R[0],'running',{act:'正在跑 · 1301 步，9 个子任务在跑'})}
+      ${row(R[3],'waiting')}
+      ${row(R[1],'done')}
+      ${row(R[2],'weak',{act:'已收工 · 这一轮跑了 273 步，最后状态不可知'})}
+      ${row(R[4],'stale',{act:'3 分钟前的状态 · 下面是最后一次成功读取的内容'})}
+      ${row(R[5],'done')}
+      ${row(R[6],'done')}
+      ${row(R[7],'weak')}
+      ${row(R[8],'done')}
+    </div>
+  </div>`;
+}
+
+/* ══════════ 2. 断链态：全部降级，不谎称完成 ══════════ */
+function screenStale(){
+  const R = REAL.items;
+  return `<div class="phone">
+    ${SB}
+    <div class="banner">
+      <span>链路重连中 · 第 3 次</span><span class="rt">切换</span>
+    </div>
+    ${TOP('会话')}
+    <div class="band">
+      <div class="band-h"><span class="ttl">等你处理</span><span class="cnt">0</span></div>
+      <div class="band-empty">
+        <div>没有要你管的</div>
+        <div class="sm">链路断开时无法确认是否有人等你 —— 不断言「没有」</div>
+      </div>
+    </div>
+    <div class="list">
+      ${row(R[0],'stale',{act:'3 分钟前在跑 · 9 个子任务 —— 现在无法确认'})}
+      ${row(R[1],'stale',{act:'3 分钟前已完成 · 状态待确认'})}
+      ${row(R[2],'stale')}
+      ${row(R[3],'stale',{act:'3 分钟前在等你审批 —— 可能已失效'})}
+      ${row(R[5],'stale')}
+    </div>
+    <div class="comp">
+      <div class="cbox">
+        <div class="ph" style="color:var(--t3)">需要连接才能发送</div>
+        <div class="icon">＋</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 3. 会话详情：引导 / 排队 两个一等动词 ══════════ */
+function screenChat(){
+  return `<div class="phone">
+    ${SB}
+    <div class="top" style="padding-bottom:var(--s2)">
+      <span style="color:var(--t2);font-size:19px">‹</span>
+      <h2 style="font-size:17px;flex:1;min-width:0;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap">HM2电流测试PC端与固件差异</h2>
+      <div class="chip">17 轮</div>
+      <div class="icon">⋯</div>
+    </div>
+    <div class="list" style="padding:var(--s3) var(--s4)">
+      <div style="display:flex;flex-direction:column;gap:var(--s3)">
+        <div style="font-size:var(--f3);color:var(--t3);letter-spacing:.4px;margin:var(--s2) 0 0">第 16 轮</div>
+        <div style="align-self:flex-end;max-width:84%;background:var(--raised);
+          border:1px solid var(--hairline);border-radius:12px 12px 3px 12px;
+          padding:9px 12px;font-size:var(--f2);line-height:19px">
+          再跑一次串口 OTA，这次用 COM11。
+        </div>
+        <div style="font-size:var(--f2);line-height:20px;color:var(--t2)">
+          已完成。串口 OTA 写入 <code style="color:var(--t1);font-size:12px">output/IOTIM_HM2_V2.3.1.zip</code>，
+          校验通过。
+        </div>
+        <div style="display:flex;align-items:center;gap:var(--s2);padding:8px 10px;
+          background:var(--sunken);border:1px solid var(--hairline);
+          border-radius:var(--r-m);font-size:var(--f3);color:var(--t2)">
+          <span style="color:var(--running)">●</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            &gt; Bash :: python flash.py --port COM11</span>
+          <span style="color:var(--t3)">1.8s</span>
+          <span style="color:var(--t3)">›</span>
+        </div>
+        <div style="font-size:var(--f3);color:var(--t3);letter-spacing:.4px;margin:var(--s2) 0 0">第 17 轮 · 运行中</div>
+        <div style="font-size:var(--f2);line-height:20px;color:var(--t2)">
+          正在重新编译双 Bank 固件<span style="color:var(--running)">▍</span>
+        </div>
+      </div>
+    </div>
+    <div class="comp">
+      <div class="ctxmeter">
+        <span>上下文 66%</span>
+        <span class="track"><span class="fill" style="width:66%"></span></span>
+        <span style="color:var(--t3)">273 步</span>
+      </div>
+      <div class="modes">
+        <div class="m">插到当前轮</div>
+        <div class="m on">排到下一轮</div>
+      </div>
+      <div class="cbox">
+        <div class="ph">下一轮要做什么…</div>
+        <div class="icon">＋</div>
+        <div class="send">↑</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 4. 审批 sheet：查不到参数就置灰 ══════════ */
+function screenApprove(){
+  return `<div class="phone">
+    ${SB}${TOP('会话')}
+    <div class="band" style="height:96px"><div class="band-h">
+      <span class="ttl">等你处理</span><span class="cnt">1</span></div></div>
+    <div class="list">
+      <div style="padding:var(--s4);color:var(--t2);font-size:var(--f2)">
+        列表在下方，被 sheet 遮住。
+      </div>
+    </div>
+    <div class="scrim">
+      <div class="sheet">
+        <div class="grab"></div>
+        <h3>允许这一次？</h3>
+        <div class="meta-line">Bash · 千寻项目定制搜索功能优化 · 已等 12 分钟</div>
+        <div class="cmd">rm -rf target/debug/build</div>
+        <div style="font-size:var(--f3);color:var(--t3);margin-bottom:var(--s4)">
+          只允许这一次。协议没有「始终允许」这个结局。
+        </div>
+        <div class="btns">
+          <div class="btn btn-s">拒绝</div>
+          <div class="btn btn-p">允许这一次</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 5. 审批查不到参数：置灰，不给假按钮 ══════════ */
+function screenApproveNoArg(){
+  return `<div class="phone">
+    ${SB}${TOP('会话')}
+    <div class="band" style="height:96px"><div class="band-h">
+      <span class="ttl">等你处理</span><span class="cnt">1</span></div></div>
+    <div class="list"><div style="padding:var(--s4);color:var(--t2);font-size:var(--f2)">
+      列表在下方，被 sheet 遮住。</div></div>
+    <div class="scrim">
+      <div class="sheet">
+        <div class="grab"></div>
+        <h3>允许这一次？</h3>
+        <div class="meta-line">Bash · 最新代码部署测试环境 · 已等 2 分钟</div>
+        <div style="background:var(--sunken);border:1px solid var(--hairline);
+          border-radius:var(--r-m);padding:var(--s3);margin-bottom:var(--s3);
+          font-size:var(--f2);color:var(--t2)">
+          这次调用没有带参数 —— 服务端没告诉我们它想执行什么。
+        </div>
+        <div style="font-size:var(--f3);color:var(--t3);margin-bottom:var(--s4)">
+          查不到就不猜。「允许」置灰：给一个说不出内容的批准权，
+          等于把风险全推给用户。
+        </div>
+        <div class="btns">
+          <div class="btn btn-s">拒绝</div>
+          <div class="btn btn-p off">允许这一次</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 6. 提问 sheet：不可关闭 ══════════ */
+function screenAsk(){
+  return `<div class="phone">
+    ${SB}${TOP('会话')}
+    <div class="band" style="height:96px"><div class="band-h">
+      <span class="ttl">等你处理</span><span class="cnt">1</span></div></div>
+    <div class="list"><div style="padding:var(--s4);color:var(--t2);font-size:var(--f2)">
+      列表在下方，被 sheet 遮住。</div></div>
+    <div class="scrim">
+      <div class="sheet">
+        <div class="grab"></div>
+        <h3>agent 问你一句</h3>
+        <div class="meta-line">HM2电流测试PC端与固件差异分析 · 已等 4 分钟</div>
+        <div class="q">
+          <div class="qt">固件升级要选哪个 Bank？</div>
+          <div class="opt on"><span class="rd"></span>双 Bank（A→B 互备）</div>
+          <div class="opt"><span class="rd"></span>单 Bank（空间省一半）</div>
+        </div>
+        <div style="font-size:var(--f3);color:var(--t3)">
+          这一屏不能下拉关闭 —— agent 一直卡在这里。必须显式选择或「稍后」。
+        </div>
+        <div class="btns">
+          <div class="btn btn-s">稍后</div>
+          <div class="btn btn-p">提交</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 7. 看护带空态：恒定 184dp，不塌陷 ══════════ */
+function screenEmptyBand(){
+  const R = REAL.items;
+  return `<div class="phone">
+    ${SB}${TOP('会话')}
+    <div class="band" style="border-left:0">
+      <div class="band-h"><span class="ttl">等你处理</span><span class="cnt">0</span></div>
+      <div class="band-empty">
+        <div>没有要你管的</div>
+        <div class="sm">393 条会话里没有一条在等你</div>
+      </div>
+    </div>
+    <div class="list">${R.slice(0,7).map((r,i)=>row(r,'done')).join('')}</div>
+  </div>`;
+}
+
+/* ══════════ 8. 已断开：子会话 ∧ 父不在列表 ══════════ */
+function screenDetached(){
+  return `<div class="phone">
+    ${SB}${TOP('会话')}
+    <div class="band" style="height:96px"><div class="band-h">
+      <span class="ttl">等你处理</span><span class="cnt">0</span></div></div>
+    <div class="list">
+      ${row({t:"Survey qianxun judge model usage",cwd:"E:\\develop\\dsh-workspace\\qianxun",
+             turns:1,steps:23,ctx:20,team:1},"detach",
+            {act:"父会话已结束 · 只能读，不能介入",age:"10月5日"})}
+      ${row(REAL.items[1],'done')}
+      ${row(REAL.items[2],'weak')}
+      ${row(REAL.items[3],'done')}
+    </div>
+  </div>`;
+}
+
+/* ══════════ 9. 首次启动：还没配对 ══════════ */
+function screenPair(){
+  return `<div class="phone">
+    ${SB}
+    <div class="center" style="flex:1;justify-content:center">
+      <div style="width:52px;height:52px;border-radius:14px;background:var(--raised);
+        border:1px solid var(--hairline);display:flex;align-items:center;
+        justify-content:center;font-size:23px;margin-bottom:var(--s4)">千</div>
+      <div class="big">连上你的电脑</div>
+      <div class="sm" style="max-width:260px">
+        在电脑上打开 DSH 的远程访问，扫这个码就能配对。
+      </div>
+      <div style="margin-top:var(--s5);width:200px;height:200px;border-radius:var(--r-l);
+        background:var(--sunken);border:1px solid var(--hairline);
+        display:flex;align-items:center;justify-content:center;
+        font-size:var(--f3);color:var(--t3);text-align:center;padding:var(--s4)">
+        二维码占位<br>（协议实测配对链接<br>/qx-gate?token=…）
+      </div>
+      <div style="margin-top:var(--s4);font-size:var(--f2);color:var(--accent)">
+        或者粘贴配对链接
+      </div>
+      <div class="hint" style="margin-top:var(--s6);max-width:280px">
+        参考客户端把 30% 屏高给 logo + 重说一遍 App 名字的副标题。
+        我们不给 —— 那一屏里没有一寸是用户要的信息。
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 10. 一台都没有：不是「连不上」，是「还没有」 ══════════ */
+function screenNoMachine(){
+  return `<div class="phone">
+    ${SB}${TOP('会话')}
+    <div class="center" style="flex:1">
+      <div class="big">还没有电脑</div>
+      <div class="sm">配对一台，就能在这里看到 agent 在跑什么。</div>
+      <div style="margin-top:var(--s5)">
+        <div class="btn btn-p" style="width:180px;padding:12px 0">添加电脑</div>
+      </div>
+      <div class="hint" style="margin-top:var(--s6);max-width:280px">
+        这一屏与「连不上这台电脑」是**两件事**。全新安装时告诉用户
+        「连不上」，用户会去检查网络、检查密码、检查一堆他控制不了的东西。
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ══════════ 11. 灰度自检：颜色抹掉后还认得出吗 ══════════ */
+function screenGrayscale(){
+  const R = REAL.items;
+  return `<div class="phone gs">
+    ${SB}
+    <div class="top"><h2>灰度自检</h2></div>
+    <div class="list" style="padding-top:8px">
+      ${Object.entries(STATES).map(([k,S])=>`
+        <div class="row" style="min-height:0;padding-top:9px;padding-bottom:9px">
+          <div class="rail ${S.cls}"></div>
+          <div class="col-main">
+            <div class="rt"><div class="title" style="-webkit-line-clamp:1">${S.word} · ${S.w}dp</div></div>
+            <div class="meta"><span>轨形：${S.rail}</span></div>
+          </div>
+        </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+const SCREENS = [
+  {id:'home',    name:'根屏 · 看护带+列表', fn:screenHome,        why:'393 条会话在 66dp 行高下约 45 屏。纯列表下，「我不在的这段时间发生了什么」只能靠扫 45 屏去归纳 —— 这个问题在纯列表里答不了。'},
+  {id:'stale',   name:'断链 · 全部降级',    fn:screenStale,       why:'链路断开时，「已完成」本身就是一个宿主断言，而 socket 正是它的载体。所以连「已完成」都不显示，只说「3 分钟前」。'},
+  {id:'chat',    name:'详情 · 引导/排队',   fn:screenChat,        why:'手机没有 Alt+Enter。引导和排队是两个不同后果的动作，必须做成拇指可达的切换，而不是一个藏在长按里的手势。'},
+  {id:'approve', name:'审批 · 可答',        fn:screenApprove,     why:'审批是唯一允许抢焦点的功能。按钮写「允许这一次」而不是「允许执行」—— 后者读起来像长期授权。'},
+  {id:'noarg',   name:'审批 · 查不到参数',  fn:screenApproveNoArg,why:'查不到参数就置灰「允许」。给一个说不出内容的批准权，等于把风险全推给用户 —— 这比拒绝更糟。'},
+  {id:'ask',     name:'提问 · 不可关闭',    fn:screenAsk,         why:'这一屏不能下拉关闭。agent 一直卡在那里，让用户以为关掉了其实没有，只会让下次打开时更困惑。'},
+  {id:'empty',   name:'看护带空态 · 不塌陷',fn:screenEmptyBand,  why:'槽位高度恒定 184dp。塌陷会让列表在手指底下重排，而 393 条的列表滑动中点错行的代价是往错误的会话发消息。'},
+  {id:'detach',  name:'已断开 · 父不在列表',fn:screenDetached,    why:'判据是「是子会话 ∧ 父会话不在列表里」，不是 agentAvailable。后者实测 392/393 为 false，会把 142 条能正常打开的顶级会话误标成断开。'},
+  {id:'pair',    name:'首启 · 配对',        fn:screenPair,        why:'参考客户端把 30% 屏高给 logo 和一句重说 App 名字的副标题。我们把那部分全砍了。'},
+  {id:'nomachine',name:'还没有电脑',        fn:screenNoMachine,   why:'与「连不上这台电脑」是两件事。全新安装时告诉用户连不上，用户会去查网络、查密码 —— 查一堆他控制不了的东西。'},
+  {id:'gray',    name:'灰度自检',          fn:screenGrayscale,   why:'把所有颜色抹成灰。状态仍然分得清，才说明「绝不靠颜色单独表意」这条律真的做到了，而不是嘴上说说。'}
+];
+
+function render(){
+  const hash = location.hash.slice(1);
+  const cur = SCREENS.find(s=>s.id===hash) || SCREENS[0];
+  document.getElementById('nav').innerHTML = SCREENS.map(s=>
+    `<a href="#${s.id}" class="${s.id===cur.id?'on':''}">${s.name}</a>`).join('');
+  document.getElementById('stage').innerHTML = `
+    <div class="col">
+      <div class="cap">${cur.name}</div>
+      ${cur.fn()}
+      <div class="legend">
+        <b>为什么这么设计：</b>${cur.why}
+        <br><b>数据：</b>真实 session/list 样本（共 ${REAL.totalSessions} 条，此处 14 条）。标题服务端截断至 40 字。
+      </div>
+    </div>`;
+  window.scrollTo(0,0);
+}
+addEventListener('hashchange', render);
+render();
+</script>
+</body>
+</html>
