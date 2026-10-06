@@ -1,0 +1,36 @@
+{
+  "_probe": {
+    "note": "projections.values 字段数的**全量**实测。05 §0.2.3 写的「20 个」来自单条样本，实际是 {1, 18, 19, 20} 四种 —— 客户端必须按缺字段处理，且**不能把「缺」当成「零」**。",
+    "source": "probe_projection_fields.py",
+    "totalSessions": 394,
+    "sessionsWithValues": 394
+  },
+  "fieldCountDistribution": {
+    "1": 208,
+    "18": 65,
+    "19": 37,
+    "20": 84
+  },
+  "fieldPresence": {
+    "contextPressure": 186,
+    "contextBreakdown": 186,
+    "imageLimits": 186,
+    "permissions": 186,
+    "agentTeam": 121,
+    "inbox": 186,
+    "todos": 186,
+    "plan": 186,
+    "goal": 186,
+    "modelSelection": 186,
+    "subagentCatalog": 186,
+    "subagent": 186,
+    "subagentTiming": 186,
+    "sessionListMetadata": 186,
+    "sessionStats": 186,
+    "tokenUsage": 186,
+    "turnOutline": 186,
+    "userQuestions": 84,
+    "title": 394
+  },
+  "fieldsNeverSeen": []
+}

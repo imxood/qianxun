@@ -78,34 +78,101 @@ final interactionControllerProvider =
 | **`session/search` 在本部署被禁用** | `openAt "never"` | **搜索框是死功能，必须砍掉** |
 | RPC 参数信封 `{"args":{"request":{…}}}` | `session/list` 例外用 `_request` | 已落地，见 README §2.2.1 |
 
-#### 0.2.3 一条 `session/list` 里我们**还没读**的投影字段
+#### 0.2.3 `projections.values` 的字段**按签名分组**，不是固定结构
 
-`docs/probe/session-list-item.json` 显示 `projections.values` 有 **20 个字段**
-（此前本文记为 19，**漏了 `contextPressure`** —— 而它恰好是上下文百分比
-唯一能给分母的字段）。我们的客户端只读了 5 个。数据一直都在，只是没人接：
+`docs/probe/session-list-item.json`（单条样本）显示 `projections.values` 有
+**20 个字段**。**那只是四个签名之一，占 21.3%。**
 
-| 字段 | 形状 | 用途 | 我们的状态 |
+全量实测（`scripts/probe_projection_signatures.py`，394 条，
+证据落盘在 `docs/probe/projection-signatures.json`）：
+
+| 签名 | 条数 | 占比 | 特征 |
 |---|---|---|---|
-| `contextPressure` | `{pressureTokens, projectedTokens, contextWindow}` | **上下文百分比的唯一权威口径**（只有它给分母） | ❌ 未读。**这是 C10 阈值的唯一数据源** |
-| `contextBreakdown` | `{messageTokens, systemTokens, toolsTokens}` | 分段图例（System/Tools/Messages）**仅定性** | ❌ 未读。⚠️ 三段求和 **≠** `pressureTokens`（实测差 15.7–28.1%，**两个口径不可互换**） |
-| `imageLimits` | `{maxImageBytes: 20MB, maxImagesPerMessage: 20, maxMessageImageBytes: 200MB, mediaTypes: [png,jpeg,webp,gif], maxImageDimension: 8192}` | **服务端下发的附件硬限制** | ❌ 未读。**我们的附件功能一个都没校验** |
-| `permissions` | `{currentValue}` | 输入栏权限档位 | ❌ 未读 |
-| `agentTeam` | `{members:[{id,name,phase,role}], tasks:[]}` | 子 agent 树；`phase: active` | ❌ 未读（只用作归属判据） |
-| `inbox` | `{next-step: [], next-turn: []}` | **待发队列**（`updateQueue` 的数据源） | ❌ 未读 |
-| `todos` | `null`（本条为空） | 待办清单 | ❌ 未读 |
-| `plan` | `{active, pending}` | 计划状态 | ❌ 未读 |
-| `goal` | `null` | 目标 | ❌ 未读 |
-| `modelSelection` | `{lastUsed:{model,provider,reasoningEffort}, next:{…}}` | 当前模型 | ❌ 未读 |
-| `subagentCatalog` / `subagent` / `subagentTiming` | `[]` / … / `{lastTurnCompleted, settledMs}` | 子 agent | ❌ 未读 |
-| `sessionListMetadata` | `{blank, lastPromptAt}` | 列表排序/空态判据 | ❌ 未读 |
-| `imageLimits` 之外 | — | — | — |
+| **只有 `title`** | **208** | **52.8%** | 无 `sessionStats` / `turnOutline` / `contextPressure` |
+| 20 字段 | 84 | 21.3% | 全套，含 `userQuestions` + `agentTeam` |
+| 18 字段 | 65 | 16.5% | 缺 `agentTeam` + `userQuestions` |
+| 19 字段 | 37 | 9.4% | 缺 `userQuestions` |
 
-> ⚠️ **`imageLimits` 是最紧急的一条**：用户可以挂一张 50MB 的 PNG，
-> 客户端不拦，服务端拒，用户看到的是一条英文协议错误。把这份限制接进
-> 附件入口（含超限时**明确说清**是多大），是 Batch 4 的必做项。
+字段出现率（分母 394）：
 
-第 1、2 条关掉了 01 与 03 各自标记的**头号风险**：产品在「哪条会话在等你」这件事上
-从「我们猜它卡住了」变成「**它告诉我它卡住了**」。
+```
+title              394 (100.0%)   ← 唯一恒在
+contextPressure    186 ( 47.2%)
+contextBreakdown   186 ( 47.2%)
+imageLimits        186 ( 47.2%)
+permissions        186 ( 47.2%)
+inbox / todos / plan / goal / modelSelection / subagent* / sessionStats
+/ tokenUsage / turnOutline      186 ( 47.2%)
+agentTeam          121 ( 30.7%)
+userQuestions       84 ( 21.3%)
+```
+
+⚠️ **这直接推翻了本文此前的两条说法：**
+
+1. **「有 20 个字段」是错的。** 真实分布是 {1, 18, 19, 20}，
+   **52.8% 的会话只有 `title` 一个字段**。此前那条结论来自单条样本，
+   而单条样本恰好落在最完整的那一组。
+
+2. **「缺字段」不等于「值为零」。** 208 条那组**没有** `contextPressure`
+   键 —— 不是 `contextPressure: null`，也不是 `{projectedTokens: 0}`，
+   是**键根本不存在**。客户端若按固定结构解析并给缺失值兜底 0，
+   会给 52.8% 的会话画出**假的「上下文 0%」**与**假的「已完成」**。
+
+   这与 `ImageLimits` 那条「缺失 ≠ 0」是同一类错误，此处影响面大得多。
+
+**正确解析规则（写进实现约束）：**
+
+| 现象 | 含义 | 绝不能 |
+|---|---|---|
+| 无 `contextPressure` | 这条会话**从未跑过一轮**（208 条那组 `sessionStats` 整个不存在） | 画成「上下文 0%」 |
+| 无 `sessionStats` | 同上 | 画成「0 轮 0 步」 |
+| 无 `turnOutline` | 从无用户消息 | 回显成「（无）」 |
+| 无 `userQuestions` | **不可知**，不是「没有待答」 | 断言「没有待答」（违反 §2.3 否定断言律） |
+| 无 `agentTeam` | 不是子 agent 编排的会话 | 画成「子任务 0」 |
+
+**对设计的影响：**
+
+- **列表行必须能应对「只有标题」**。208 条（52.8%）的第二行、
+  状态词之外的元信息、上下文条**全部无数据可显**。这意味着
+  列表行不是「信息都齐、只是要排版」，而是**一半以上的行是稀疏行**。
+- **C10 上下文门控的基数要改**：此前按 174/393（44%）算，
+  真实是 186/394（47.2%），**量级不变，结论不变**。
+- **「等你」的判据在 208 条那组上恒为假** —— 不是「没有待答」，
+  是「这条会话根本没在跑，不可能有待答」。这两者在界面上必须同形，
+  否则用户会以为某条会话坏了。
+
+> **教训（与此前「探针输出从未入库」同源，但更隐蔽）**：
+> 单条样本能证明「**存在**一个这样的字段」，不能证明「**每条都有**这个字段」。
+> 上一轮我把单条样本的字段数当成了协议常量 —— 这次的分布一跑出来就翻了。
+> 凡是要写进「按固定结构解析」的字段，必须在**全量**上验证存在率。
+
+**对列表行的直接影响（这是本次修订最实际的一条）**
+
+§0.2.3 的分布意味着 **52.8% 的会话行是稀疏行**。此前 §4 的行结构假定
+「标题 + 第二行 + 元信息」三段都有内容，实测不是：
+
+| 行段 | 稀疏组（208 条，52.8%）有什么 | 满组（84 条，21.3%）有什么 |
+|---|---|---|
+| 标题 | ✅ 有（`title` 100% 存在） | ✅ 有 |
+| 第二行 | ❌ **无 `turnOutline`** → 无素材 | ✅ 有 |
+| 元信息 · 轮次步数 | ❌ **无 `sessionStats`** | ✅ 有 |
+| 元信息 · 上下文 | ❌ **无 `contextPressure`** | ✅ 有 |
+| 元信息 · 子任务 | ❌ 无 `agentTeam` | ✅ 有 |
+| 状态词 | ✅ 有（由 `running` 推导，非投影字段） | ✅ 有 |
+
+所以**稀疏行不能渲染成「空行」**，那看起来像加载失败。它应该：
+
+```
+┌ ▎当前项目中 已经实现了 rust ser          昨天 22:03
+│ 还没有发过消息                          ← 唯一可选的第二行
+│ 空闲 · 3 天前                           ← 只有状态词
+└
+```
+
+⚠️ **不要**给稀疏行补「0 轮 · 0 步 · 上下文 0%」——
+那是**把「从未发生」说成「发生了但结果为零」**，与 §2.1 弱档同一个错误。
+
+
 
 ### 0.3 流式渲染的协议形状（已从源码确认，**不是靠抓帧猜的**）
 
@@ -151,7 +218,7 @@ Dart 展开器，并遵守 `revision` / `index` 严格 +1 与 `end.outcome` 权�
 | 状态 | 判定 | 语义色 | 非颜色通道 |
 |---|---|---|---|
 | **运行中** | `running == true` | 绿 | 轨上流光 + 活动行 |
-| **等你** | `projections.values.userQuestions.active` 非空 **或** 本地有未答 waterfall **或** 本地持久化的待答快照未过期（见 §12.1.3） | 琥珀 | 轨为虚线 + 行置顶 + 全大写中文标签 |
+| **等你** | `projections.values.userQuestions.active` **键存在**且非空 **或** 本地有未答 waterfall **或** 本地持久化的待答快照未过期（见 §12.1.3） | 琥珀 | 轨为虚线 + 行置顶 + 全大写中文标签 |
 | **已完成** | `running == false` —— 但**不是一个态，是三档**，见 §2.1 | 强档蓝 / 弱档**中性灰** / 不知档灰 | 轨 1dp 细线；不知档加降级轨 |
 | **已断开** | **是子会话 且 父会话不在当前列表里** | 中性灰 | 轨为**虚线段** |
 | **失败** | 不进列表（见下） | 赤 | 轨为实心 + 三角缺口 |
@@ -1136,6 +1203,17 @@ min 1.8% · p25 12.4% · 中位 23.7% · p75 38.2% · p90 53.2% · p99 73.6% · 
 
 降级阶梯（条 8 格 → 4 格 → `Ctx 87%` → 隐藏）与优先级序
 （**权限 > 上下文告警 > 模型 > 会话标题**）**保留不变**，照抄 MiniMax。
+
+> ⚠️ **分母口径修正（§0.2.3 修订后的影响）**：
+> 上表的「393 条 / 174 条带 contextPressure」是首轮探针的数字。
+> 修订后的全量实测是 **394 条 / 186 条（47.2%）**。
+> **量级不变 → 阈值结论不变**（p90 仍在 53% 附近）。
+> 但**基数的含义变了**：那 208 条「只有 title」的会话**没有**
+> `contextPressure` 键，它们不是「上下文 0%」，而是
+> **「从未跑过一轮，不存在上下文」**。所以：
+> 列表与 composer 里凡是读 `contextPressure` 的地方，
+> **缺失时必须整块不显示**（连 `<50%` 那条「不显示」的分支都不进），
+> 不得兜底成 0% 或 0/200k。
 
 > ⚠️ **百分比只能用 `projectedTokens / contextWindow`。**
 > `contextPressure` 里有两个数（`pressureTokens` 与 `projectedTokens`），

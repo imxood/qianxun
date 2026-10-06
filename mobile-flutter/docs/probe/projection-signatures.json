@@ -1,0 +1,186 @@
+{
+  "_probe": {
+    "note": "projections.values 的**字段签名**分组。05 §0.2.3 记的「20 个字段」只是 4 个签名之一（84/394 = 21.3%），且 52.8% 的会话只有 title。客户端必须按签名而非固定结构解析。",
+    "source": "probe_projection_signatures.py",
+    "totalSessions": 394
+  },
+  "signatures": [
+    {
+      "count": 208,
+      "fieldCount": 1,
+      "fields": [
+        "title"
+      ],
+      "absent": [
+        "contextPressure",
+        "contextBreakdown",
+        "imageLimits",
+        "permissions",
+        "agentTeam",
+        "inbox",
+        "todos",
+        "plan",
+        "goal",
+        "modelSelection",
+        "subagentCatalog",
+        "subagent",
+        "subagentTiming",
+        "sessionListMetadata",
+        "sessionStats",
+        "tokenUsage",
+        "turnOutline",
+        "userQuestions"
+      ],
+      "runningTrue": 0,
+      "origin": {
+        "None": 62,
+        "subagent": 146
+      },
+      "turnsRange": null,
+      "stepsRange": null,
+      "turnOutlineLengthRange": null,
+      "hasSubagentTiming": 0,
+      "lastTurnCompletedTrue": 0
+    },
+    {
+      "count": 84,
+      "fieldCount": 20,
+      "fields": [
+        "agentPreset",
+        "agentTeam",
+        "contextBreakdown",
+        "contextPressure",
+        "goal",
+        "imageLimits",
+        "inbox",
+        "modelSelection",
+        "permissions",
+        "plan",
+        "sessionListMetadata",
+        "sessionStats",
+        "subagent",
+        "subagentCatalog",
+        "subagentTiming",
+        "title",
+        "todos",
+        "tokenUsage",
+        "turnOutline",
+        "userQuestions"
+      ],
+      "absent": [],
+      "runningTrue": 0,
+      "origin": {
+        "None": 25,
+        "subagent": 59
+      },
+      "turnsRange": [
+        0,
+        74
+      ],
+      "stepsRange": [
+        0,
+        2485
+      ],
+      "turnOutlineLengthRange": [
+        0,
+        74
+      ],
+      "hasSubagentTiming": 84,
+      "lastTurnCompletedTrue": 52
+    },
+    {
+      "count": 65,
+      "fieldCount": 18,
+      "fields": [
+        "agentPreset",
+        "contextBreakdown",
+        "contextPressure",
+        "goal",
+        "imageLimits",
+        "inbox",
+        "modelSelection",
+        "permissions",
+        "plan",
+        "sessionListMetadata",
+        "sessionStats",
+        "subagent",
+        "subagentCatalog",
+        "subagentTiming",
+        "title",
+        "todos",
+        "tokenUsage",
+        "turnOutline"
+      ],
+      "absent": [
+        "agentTeam",
+        "userQuestions"
+      ],
+      "runningTrue": 0,
+      "origin": {
+        "None": 37,
+        "subagent": 28
+      },
+      "turnsRange": [
+        0,
+        77
+      ],
+      "stepsRange": [
+        0,
+        1853
+      ],
+      "turnOutlineLengthRange": [
+        0,
+        77
+      ],
+      "hasSubagentTiming": 65,
+      "lastTurnCompletedTrue": 28
+    },
+    {
+      "count": 37,
+      "fieldCount": 19,
+      "fields": [
+        "agentPreset",
+        "agentTeam",
+        "contextBreakdown",
+        "contextPressure",
+        "goal",
+        "imageLimits",
+        "inbox",
+        "modelSelection",
+        "permissions",
+        "plan",
+        "sessionListMetadata",
+        "sessionStats",
+        "subagent",
+        "subagentCatalog",
+        "subagentTiming",
+        "title",
+        "todos",
+        "tokenUsage",
+        "turnOutline"
+      ],
+      "absent": [
+        "userQuestions"
+      ],
+      "runningTrue": 0,
+      "origin": {
+        "subagent": 16,
+        "None": 21
+      },
+      "turnsRange": [
+        1,
+        32
+      ],
+      "stepsRange": [
+        2,
+        1038
+      ],
+      "turnOutlineLengthRange": [
+        1,
+        32
+      ],
+      "hasSubagentTiming": 37,
+      "lastTurnCompletedTrue": 15
+    }
+  ]
+}
