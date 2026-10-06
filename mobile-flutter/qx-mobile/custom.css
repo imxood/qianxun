@@ -1,0 +1,278 @@
+/*
+ * 千寻移动端 · 窄屏适配（custom.css）
+ * =============================================================================
+ * 部署到：<dsh_home>/mobile-access/custom.css
+ * 千寻网关在每个 DSH 页面 </head> 前注入 qx-mobile-bootstrap.js，
+ * 它会轮询 /qx-mobile/version，hash 变了就换本文件的 <link href>。
+ * 保存后**最多 5 秒自动生效**（bootstrap.js:15 VISIBLE_MS）。
+ *
+ * ============================== 硬约束 ==============================
+ * 下面每一条都来自 dsh-mobile/src/mobile-layout.ts —— 别人踩过坑写下的。
+ * 违反其中任何一条，表现都是「手机上看着不对但说不出哪里不对」。
+ *
+ *  1. 输入框 font-size 必须 ≥16px。低于 16px，iOS Safari 会**自动放大**，
+ *     用户打完字页面就跳走了。Android WebView 也可能出现同样行为。
+ *  2. 触控目标 ≥48px，radio/checkbox 尤其。
+ *  3. table / pre 必须横向滚（overflow-x:auto），否则撑破布局。
+ *  4. 长文本用 overflow-wrap:anywhere，不能让它把容器顶宽。
+ *  5. 用 dvh 而不是 vh —— vh 在移动端浏览器含地址栏时会算错。
+ *  6. safe-area 四周都要留白（刘海屏 / 手势条 / 曲面屏）。
+ *  7. prefers-reduced-motion 下全部关动画。这是无障碍硬要求。
+ *  8. 遮罩用 40% 而非 50% —— 桌面端习惯的更深的遮罩，会让
+ *     343px 的抽屉看起来像浮层而不是「拉开的一层」。
+ *  9. 细长内容用 dvh + max-height 双重兜底，不用固定像素。
+ *
+ * ============================== 选择器纪律 ==============================
+ * ⚠️ **绝对不要用 class 名。** DSH 的 class 是构建期哈希：
+ *    实测形如 hHd-Xa_panelRow / bhn1Oq_searchButton / YDXeBa_projectRow，
+ *    每次 DSH 构建都变。写进这里的 class 会在下次升级后静默失效。
+ *
+ * 只能用三类（清单见 docs/probe/dom-anchors.json，从 677KB bundle 实测）：
+ *   · data-* 属性  data-disclosure-row / data-diff / data-terminal /
+ *                   data-phase / data-running / data-expanded / data-side …
+ *   · role / aria-* role=tree/treeitem/tab/dialog、aria-expanded …
+ *   · 标签 + 结构   main / aside / nav / header / textarea / table / pre
+ */
+
+/* ── 1. 基础：竖屏断点下的容器收敛 ───────────────────────────────
+ * DSH 的 dsh-mobile 布局把侧栏压成 56px rail、展开 min(88vw,340px)，
+ * 详情面板 min(94vw,460px) 右滑，唯一断点 900px。
+ *
+ * 我们**不重写**它的布局（那是 L3 的 custom.js 该做的事），
+ * 这里只做「在手机视口内不崩」的兜底 —— L1 层。
+ */
+@media (max-width: 900px) {
+  /* 1.1 三栏在任何情况下都不允许并排。
+   * 390dp 减去 56px rail 剩 334dp，再减去详情面板就什么都不剩了。
+   * 桌面布局若漏了 max-width 媒体查询，这里是最后一道闸。 */
+  .dshm-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+  }
+  .dshm-shell > * { min-width: 0; }
+
+  /* 1.2 收起态的侧栏只留图标列 */
+  .dshm-drawer[data-open='false'] { width: 56px; }
+  /* 1.3 展开态不超 88vw —— 340px 上限在小屏上更紧，用 vw 更稳 */
+  .dshm-drawer[data-open='true'] { width: min(88vw, 340px); }
+
+  /* 1.4 详情面板在手机上等于全屏覆盖，关闭态完全移出视口 */
+  .dshm-details { width: min(100vw, 460px); }
+  .dshm-details[data-open='false'] {
+    transform: translateX(100%);
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  /* 1.5 遮罩 40%（见硬约束 8） */
+  .dshm-scrim[data-open='true'] { background: rgb(15 23 42 / 40%); }
+}
+
+/* ── 2. 输入：16px 是硬底线（硬约束 1）─────────────────────────
+ * 这一条最容易被忽略，后果最明显：用户点一下输入框，整个页面被放大，
+ * 打完字才发现布局全乱了，而且**不会报任何错**。
+ */
+@media (max-width: 900px) {
+  textarea,
+  input,
+  select,
+  [contenteditable='true'] {
+    /* 16px 不是设计选择，是 iOS 的行为阈值 */
+    font-size: 16px !important;
+  }
+
+  /* ⛔ 禁用：iOS 聚焦时自动放大。用 viewport meta 关掉是错的
+   * （user-scalable=no 会破坏无障碍），正确做法是把字号给够。 */
+}
+
+/* ── 3. 触控目标 ≥48px（硬约束 2）────────────────────────────── */
+@media (max-width: 900px) {
+  /* 单行披露行（`> Bash :: 一句话结论`）是最高频的点击目标 */
+  [data-disclosure-row] {
+    min-height: 48px;
+    /* 触屏上 click 会有 300ms 延迟与双击缩放，manipulation 关掉 */
+    touch-action: manipulation;
+  }
+
+  [data-disclosure-row] > * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  /* 单选/多选：48px 是 Apple HIG 与 Material 都认的下限 */
+  [role='radio'],
+  [role='checkbox'] {
+    min-height: 48px;
+    touch-action: manipulation;
+  }
+
+  /* 顶栏按钮：DSH 桌面是 28px，手机上点不准 */
+  header button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* ── 4. 宽内容横向滚（硬约束 3）─────────────────────────────────
+ * 转录里的表格、代码块、diff 都很宽。overflow-wrap:anywhere 救不了它们
+ * —— 那会把代码折行，而代码折行就等于毁掉对齐。必须横向滚。
+ */
+@media (max-width: 900px) {
+  table,
+  pre,
+  [data-code-block-content],
+  [data-json-root-row] {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 表格横向滚时，<table> 需要块级 + 自己滚动，
+   * 否则滚动的是整个页面（body），代码块就跟着一起跑了 */
+  table { width: max-content; min-width: 100%; }
+}
+
+/* ── 5. 长文本不撑破容器（硬约束 4）──────────────────────────── */
+@media (max-width: 900px) {
+  [data-disclosure-row] > *,
+  [data-path-label],
+  [data-ref-chip],
+  [class*='_body'] {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  /* 媒体元素永不超宽 —— 宽图会把整行撑宽，
+   * 于是「点行展开」永远点不准（点到了图的空白处） */
+  img,
+  video,
+  canvas,
+  svg {
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+/* ── 6. 视口高度用 dvh（硬约束 5）─────────────────────────────
+ * 软键盘弹起时，vh 不变而可视区变小 → 底部输入框被键盘盖住。
+ * dvh 跟随可视区变化。
+ */
+@media (max-width: 900px) {
+  .dshm-shell {
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+
+  /* composer 区域：键盘弹起时上移（配合 VisualViewport） */
+  [data-composer],
+  form:has(textarea) {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* ── 7. 安全区四周（硬约束 6）───────────────────────────────── */
+@media (max-width: 900px) {
+  .dshm-drawer,
+  .dshm-details {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  /* 主区域左右留白，避开曲面屏边缘 */
+  .dshm-main {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* 底部：输入框上方 + 系统手势条 */
+  .dshm-main > [data-bottom-bar],
+  footer {
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+  }
+}
+
+/* ── 8. diff 视图（硬约束 9 + data-diff 锚点）────────────────
+ * 桌面 diff 是左右分栏（deleted | added）。390dp 放不下并排 ——
+ * 每栏不到 190dp，代码行会被腰斩，完全不可读。
+ *
+ * 这里只做「能读」的兜底：改成纵向堆叠。真正的行级视图是
+ * custom.js 的活（L3-5），那是「改动行 + 2 行上下文」的精简版。
+ */
+@media (max-width: 900px) {
+  [data-diff] {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  [data-diff] > * {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 行号列在窄屏上价值低、成本高（占掉 ~28px） */
+  [data-diff] [data-line-numbers] {
+    display: none;
+  }
+}
+
+/* ── 9. 终端输出（data-terminal 锚点）─────────────────────────
+ * 实测最长会话 72 轮 / 2485 步，一次 rg 输出 2MB。
+ * 手机上**不能**预渲染全部 —— 会直接卡死。
+ * 这里只保证「已渲染的部分不撑破布局」；截断与虚拟化在 custom.js。
+ */
+@media (max-width: 900px) {
+  [data-terminal] {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    /* 终端等宽字在手机上略小才放得下，但不能低于 12px（可读性下限） */
+    font-size: 12px;
+    line-height: 1.45;
+  }
+}
+
+/* ── 10. 减少动态效果（硬约束 7，无障碍硬要求）───────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .dshm-drawer,
+  .dshm-details,
+  .dshm-scrim,
+  .dshm-drawer > *,
+  .dshm-main {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ── 11. 横屏与平板：≥900px 时恢复并排 ────────────────────────
+ * dsh-mobile 的唯一断点是 900px（mobile-layout.ts:45）。窄于它
+ * 一律按手机处理 —— 包括平板竖屏与折叠屏展开态。
+ *
+ * 那不是错，是它的取舍：我们这层**补一条横屏兜底**，
+ * 因为横屏手机有 800+dp 宽，三栏真的放得下。
+ */
+@media (min-width: 640px) and (max-width: 900px) and (orientation: landscape) {
+  .dshm-shell {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+  /* 横屏下详情面板不再全屏，改成右侧固定列 */
+  .dshm-details { width: min(50vw, 420px); }
+  .dshm-details[data-open='false'] { transform: translateX(100%); }
+}
+
+/* ── 12. 亮色主题下也别崩 ────────────────────────────────────
+ * DSH 有 light/dark 两套。我们不定义颜色（那是 custom.js 的
+ * surface 标记做的），但要保证两套下滚动条与选中态都可见。
+ */
+@media (prefers-color-scheme: light) {
+  .dshm-drawer,
+  .dshm-details {
+    /* 亮色下抽屉投影要更浅，否则像浮层 */
+    box-shadow: 0 8px 24px rgb(15 23 42 / 12%);
+  }
+  .dshm-scrim[data-open='true'] { background: rgb(15 23 42 / 32%); }
+}

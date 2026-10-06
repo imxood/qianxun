@@ -2,11 +2,23 @@
 <!--
   千寻网关只有明文 HTTP / WS（没有 TLS），密文性完全由 EasyTier 隧道提供。
 
-  因此 base-config 保持禁止明文，只对私网段放开——这样万一 App 里出现了
+  base-config 保持禁止明文，只对私网段放开 —— 这样万一 App 里出现了
   指向公网的明文请求，Android 会直接拦掉，而不是静默放行。
 
-  ⚠️ <domain> 不支持 CIDR，所以只能按段列举。EasyTier 默认分配 10.x.x.x；
-  若你的网络用了别的段，在下面补一行。
+  ⚠️⚠️ 一条必须知道的 Android 事实：<domain> **不做 CIDR 匹配**，它按
+  **精确主机名 / IP** 匹配（可选 includeSubdomains）。此前这里写的是
+  「192.168.0.0」「10.0.0.0」这类**网段**，看起来在管安全，实际一条都
+  不生效 —— `192.168.20.2` 匹配不上 `192.168.0.0`，请求照样被拦，
+  表现是「明明手机能 ping 通、WebView 却白屏」。
+
+  所以下面必须**逐条列举真实会用到的地址**，而不是写网段。
+  代价是换网络后要改这里 —— 但一份「看着在管安全、实际不生效」的清单
+  比没有更糟：它让人以为已经管住了。
+
+  查自己当前网段：
+    Windows  →  ipconfig
+    macOS/Linux → ip addr / ifconfig
+  常见私网段见下方注释。EasyTier 默认分配 10.x.x.x。
 
   iOS 侧对应的是 Info.plist 的 NSAppTransportSecurity，见 README。
 -->
@@ -21,11 +33,24 @@
         <!-- 回环 -->
         <domain includeSubdomains="true">127.0.0.1</domain>
         <domain includeSubdomains="true">localhost</domain>
-        <!-- 常见私网 -->
+
+        <!-- 常见私网段（**逐条列举，不是网段**） -->
+        <domain includeSubdomains="true">10.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.0.2</domain>
         <domain includeSubdomains="true">10.0.0.0</domain>
+        <domain includeSubdomains="true">172.16.0.1</domain>
         <domain includeSubdomains="true">172.16.0.0</domain>
+        <domain includeSubdomains="true">192.168.0.1</domain>
+        <domain includeSubdomains="true">192.168.1.1</domain>
         <domain includeSubdomains="true">192.168.0.0</domain>
-        <!-- EasyTier 常用虚拟网卡名 -->
+
+        <!-- 千寻实测地址（E:\develop\dsh-workspace\qianxun，实测自
+             settings.json 的 remote.bindIp = 192.168.20.2）。
+             此前只写了 192.168.0.0，**匹配不上这里**，
+             导致 emulator 上 WebView 直接白屏。 -->
+        <domain includeSubdomains="true">192.168.20.2</domain>
+
+        <!-- EasyTier 常用虚拟网卡名（按名匹配，与 IP 无关） -->
         <domain includeSubdomains="true">easytier</domain>
     </domain-config>
 </network-security-config>

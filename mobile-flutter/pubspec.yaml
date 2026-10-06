@@ -32,6 +32,8 @@ dependencies:
   # 应用私有目录，用于落盘日志与临时导出文件。
   path_provider: ^2.1.5
   file_picker: ^11.0.3
+  webview_flutter: ^4.14.1
+  cookie_jar: ^4.0.9
 
 dev_dependencies:
   flutter_test:
