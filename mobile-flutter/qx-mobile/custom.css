@@ -159,6 +159,52 @@
   }
 }
 
+/* ── A10 顶栏重排：标题不再被挤成 57px ────────────────────────────
+ *
+ * 实测（412px 视口，cdp_webview.py 量）：
+ *     HEADER  display:grid  cols="0px 308.19px"
+ *     第一行同时装着：
+ *         NAV "Session hierarchy"（标题）        x=76  w=57  ← 只剩 57px！
+ *         BUTTON "Agent Team"                     x=143 w=44
+ *         BUTTON "Open in File Explorer"          x=208 w=44
+ *         BUTTON "More ways to open"              x=252 w=44
+ *         BUTTON "More actions"                   x=304 w=44
+ *         BUTTON "Open right sidebar"             x=356 w=44
+ *     第二行：tablist（Chat / Trajectory）
+ *
+ * 57px 放不下「最新代码部署测试环境」—— 三个字就没了，剩下全是省略号。
+ * 桌面端这一行是宽裕的，手机端必须重排。
+ *
+ * ⚠️ **只重排，不删功能。** 按钮一个都不删，标题也不截断，只是让它换行。
+ *    纯 CSS，不碰 DSH 的 DOM 与事件。
+ *
+ * ── 为什么用「换行」而不是「order 交错」──
+ *   试过把中间层改成 display:contents，让 tablist 和按钮并到一行（2 行 96px），
+ *   看着更省高度。但**顶栏的 chip 随会话变**：
+ *     · 普通会话    标题 + 👥 + 📁📂 + ··· + ▣
+ *     · 开了团队的  标题 +「Agent Team」+「Standard mode」+ 📁📂 + ··· + ▣
+ *   order 那套要写死「第几个子级是什么」，换个会话就散架
+ *   （实测一换会话，按钮就跑到标题行上面去了）。
+ *   flex-wrap 不依赖元素个数 —— 有几个都成立，所以选它。
+ *
+ * 祖先链实测（别照着「看起来」写选择器 —— 我第一次就写错了）：
+ *     NAV(w=57) ← DIV(w=111, flex:1 1 0%) ← DIV(w=308) ← [slot=…header]
+ *     HEADER(display:grid) 的直接子级只有两个：那个 DIV(w=308) 与 tablist。
+ */
+@media (max-width: 760px) {
+  [data-slot='conversation.session.header'] > div:has(nav) {
+    flex-wrap: wrap !important;
+    align-items: center;
+    row-gap: 0;
+  }
+  /* 行 1：标题块独占一行（里面含标题与 Agent Team 之类的 chip）。
+     匹配「直接子级且含 nav」的那一层，不写死是第几个子元素。 */
+  [data-slot='conversation.session.header'] > div:has(nav) > *:has(nav) {
+    flex: 1 1 100% !important;
+    min-width: 0;
+  }
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * §B · 我们的覆盖层
  * ═══════════════════════════════════════════════════════════════════════ */

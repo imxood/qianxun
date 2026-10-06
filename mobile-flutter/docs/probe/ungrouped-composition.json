@@ -1,0 +1,82 @@
+{
+  "sessionTotal": 394,
+  "registry": {
+    "workspaceCount": 6,
+    "perWorkspace": {
+      "test_dsh": 24,
+      "hm2": 12,
+      "iot_tool_cloud": 71,
+      "qianxun": 26,
+      "egui_hikvision_app": 7,
+      "服务部署": 3
+    },
+    "claimed": 143,
+    "archivedSessionIds": 0,
+    "pinnedSessionIds": 0
+  },
+  "分桶": {
+    "registered": {
+      "count": 143,
+      "样例标题": [
+        "最新代码部署测试环境",
+        null,
+        "裁判模型项目对比分析",
+        "分析egui提交及工具影响"
+      ],
+      "样例sessionId": [
+        "session-776fc1e4-480b-4e49-82b7-f8ff63602092",
+        "session-3cd93161-8176-454d-b2a3-1dc6ee936fa5",
+        "session-c214c7f0-769b-4f55-8e91-492d7b4aac9c"
+      ],
+      "cwd分布": {
+        "E:\\git\\maxu\\iot_tool_cloud": 71,
+        "E:\\develop\\dsh-workspace\\qianxun": 26,
+        "E:\\tests\\test_dsh": 24,
+        "D:\\work\\rf_scanner\\hm2": 12
+      }
+    },
+    "unregistered_but_subagent": {
+      "count": 249,
+      "样例标题": [
+        "You are analyzing the local",
+        "你是独立验证员 (盲评: 你不知",
+        "你是独立验证员 (盲评: 你不知",
+        "你是独立验证员 (盲评: 你不知"
+      ],
+      "样例sessionId": [
+        "9de92e39-7fcc-4215-91ba-1a031729a7d4",
+        "7b0e46e5-d093-4d1d-82de-e6b9e7efb976",
+        "4b8e2b6a-9b72-412b-82a0-f642eeabe410"
+      ],
+      "cwd分布": {
+        "E:\\git\\maxu\\iot_tool_cloud": 121,
+        "E:\\git\\maxu\\egui_hikvision_app": 69,
+        "D:\\work\\rf_scanner\\hm2": 33,
+        "E:\\develop\\dsh-workspace\\qianxun": 26
+      }
+    },
+    "unregistered_and_not_subagent": {
+      "count": 2,
+      "样例标题": [
+        "<div class=\"container\"> <!-- ====== HEAD",
+        null
+      ],
+      "样例sessionId": [
+        "session-d09158b3-2a75-46c2-88d2-1ef3230effd5",
+        "session-938813e1-909d-42c7-b59e-898304f5a865"
+      ],
+      "cwd分布": {
+        "E:\\develop\\Games\\ai_test": 1,
+        "E:\\develop": 1
+      }
+    }
+  },
+  "origin分布": {
+    "None": 145,
+    "subagent": 249
+  },
+  "sessionId形态": {
+    "session-前缀": 145,
+    "裸 uuid": 249
+  }
+}
