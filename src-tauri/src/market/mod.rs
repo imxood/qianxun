@@ -238,8 +238,26 @@ pub async fn market_remove(app: AppHandle, name: String) -> Result<()> {
     outcome
 }
 
-// ---- 内部 ----
+/// 取消钉版：只把条目移出 `settings.plugins.pinned`，不碰 bundles 与
+/// node_modules（卸盘是 `market_remove` 的活）。
+///
+/// 为什么需要它：正常卸载会顺带 unpin，所以清单与 profile 天然一致。但插件
+/// 若被绕过千寻摘掉（手工删目录、agent 直接改盘、换机还原对账后清包），清单
+/// 就会留下**僵尸条目**——profile 里没有，UI 的卸载按钮也够不着，而「同步
+/// 清单」会照着记录把它按版本装回来。这是唯一能清理它的入口。
+#[tauri::command]
+pub fn market_unpin(app: AppHandle, name: String) -> Result<()> {
+    let _busy = claim_busy()?;
+    ensure_not_safe_mode(&app)?;
+    crate::settings::update(&app, |settings| settings.plugins.unpin(&name))?;
+    app.state::<crate::AppState>()
+        .harness
+        .supervisor
+        .note(Stream::Stdout, format!("[插件] 已取消钉版：{name}"));
+    Ok(())
+}
 
+// ---- 内部 ----
 fn profile_dir(app: &AppHandle, settings: &Settings) -> Result<std::path::PathBuf> {
     let dir = harness::dsh_home(app, settings)
         .join("profiles")

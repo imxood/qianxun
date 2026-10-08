@@ -356,6 +356,7 @@ pub fn run() {
             market::market_installed,
             market::market_install,
             market::market_remove,
+            market::market_unpin,
             market::market_sync_pinned,
             remote::commands::remote_interfaces,
             remote::commands::remote_status,

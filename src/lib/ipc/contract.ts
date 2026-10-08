@@ -94,6 +94,7 @@ export const IPC_COMMANDS = [
   'market_installed',
   'market_install',
   'market_remove',
+  'market_unpin',
   'market_sync_pinned',
   'remote_interfaces',
   'remote_status',

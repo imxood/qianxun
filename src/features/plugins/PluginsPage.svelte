@@ -300,6 +300,20 @@
     syncError = '';
   }
 
+  /** 取消钉版（不卸盘）。僵尸钉版的唯一清理入口。 */
+  async function unpin(name: string): Promise<void> {
+    working = name;
+    error = '';
+    try {
+      await call('market_unpin', { name });
+      await settings.load();
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      working = null;
+    }
+  }
+
   /** 从系统浏览器打开插件主页（GitHub 等）。 */
   function httpsLink(link: string): boolean {
     return /^https?:\/\//iu.test(link);
@@ -318,6 +332,16 @@
   function installedHere(name: string): MarketInstalled | undefined {
     return installed.find((entry) => entry.name === name);
   }
+
+  /**
+   * 僵尸钉版：清单里有、profile 里没装。正常卸载会顺带 unpin，所以这类条目
+   * 只可能来自绕过千寻的改盘（手工删目录 / agent / 还原对账后清包）。
+   * 不清掉的话「同步清单」会照记录把插件装回来——已装列表里又没有它，
+   * 用户连卸载按钮都够不着，只能在这里清。
+   */
+  const pinnedMissing = $derived(
+    (settings.current?.plugins.pinned ?? []).filter((entry) => !installedHere(entry.name)),
+  );
 
   // 推荐基础列表：分类 + 关键词本地过滤 + 排序（不含兼容性筛选）。
   const featuredBase = $derived.by(() => {
@@ -494,6 +518,40 @@
       </div>
     </div>
   </li>
+{/snippet}
+
+{#snippet zombiePins()}
+  <!-- 僵尸钉版：清单有、profile 没装。不清掉，「同步清单」会把它装回来，
+       而已装列表里没有它 → 卸载按钮够不着。 -->
+  {#if pinnedMissing.length > 0}
+    <div
+      class="mb-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"
+      data-testid="pinned-missing"
+    >
+      <p class="mb-2 text-warning">
+        清单里有 {pinnedMissing.length} 个插件当前未安装（点「同步清单」会按记录装回来）：
+      </p>
+      <ul class="space-y-1.5">
+        {#each pinnedMissing as entry (entry.name)}
+          <li class="flex items-center justify-between gap-2">
+            <span class="min-w-0 truncate">
+              <span class="font-medium">{entry.name}</span>
+              <span class="ml-1 font-mono text-muted">{entry.version}</span>
+            </span>
+            <button
+              class="shrink-0 rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-accent-soft hover:text-fg disabled:opacity-40"
+              disabled={working !== null || syncing || frozen}
+              title={frozen ? '安全模式中：插件变更已冻结' : '只从清单移除，不装也不卸'}
+              data-testid="unpin"
+              onclick={() => void unpin(entry.name)}
+            >
+              {working === entry.name ? '处理中…' : '取消钉版'}
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
 {/snippet}
 
 <section class="flex h-full min-h-0 flex-col">
@@ -689,6 +747,7 @@
             {syncing ? '同步中…' : '同步清单'}
           </button>
         </div>
+        {@render zombiePins()}
       </div>
       <p class="py-12 text-center text-sm text-muted">
         {installedLoading ? '读取中…' : '尚未安装插件'}
@@ -710,6 +769,7 @@
             {syncing ? '同步中…' : '同步清单'}
           </button>
         </div>
+        {@render zombiePins()}
         {#if frozen}
           <!-- 安全模式冻结（08 设计 §11.3-4） -->
           <p
