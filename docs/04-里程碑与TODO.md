@@ -347,6 +347,147 @@ V0.5.1 仅同锚点内的 alpha 递增（`0.1.6-alpha.1` → `0.1.6-alpha.2`）�
 - [ ] 插件市场真机验收（推荐目录拉取 + 安装 → 重启 DSH 生效 → 卸载）
 - [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
 
+## V0.8 · 千寻 0.8 适配锚点切换（DSH 0.2.1）
+
+**目标**：DSH 适配锚点由 `0.2.0` 切到 `0.2.1`（当前钉 `0.2.1-alpha.1`，上游
+tag `dsh-v0.2.1-alpha.1`），千寻版本号 `0.7.0` → `0.8.0`。锚点代号映射：
+`0.8` ↔ `0.2.1`（ADR-015，手工约定）。
+
+### 上游这一版的变更（2026-10-03 发布）
+
+- 新增实验性 Claude Code Mods 兼容层、「让 Agent 创建插件」、可选 DevTools
+  组合包、`--public-url`（带路径前缀的反代入口）
+- 自动化任务改为 Web 内置；提醒工具按模式提供（极简模式/子代理不可用）
+- **破坏性**：移除运行时 invariant 插件及各包 `./invariant` 导出
+- **破坏性**：输入区统计扩展拆为 `activity` / `usage` 两个入口
+- 子路径插件不再读独立 `package.json`，显示文本/图标走子路径导出
+- 桌面端默认改系统分配端口（规避 Windows 保留端口范围）
+
+### 依赖树实测（npm registry diff，2026-10-07）
+
+- `@deepseek-ai/dsh-experimental-schedule-bundle` **在 0.2.1-alpha.1 未再发布**
+  （npm 最后一版是 `0.2.0-rc.2`），调度改为 Web 内置的 `dsh-schedule` +
+  `dsh-tool-schedule` + `dsh-client-ui-schedule`。**现存用户 profile 的 bundles
+  列表里正挂着这个包**（`~/.qianxun/dsh-home/profiles/web/package.json`），升级后
+  成为悬空条目——要么 DSH 自动清理，要么复现 modsearch 当年那条
+  `cannot resolve profile bundle` 警告。上真机第一件事就是看这条。
+- `@deepseek-ai/dsh-client-connection` 0.2.0-rc.2 → 0.2.1-alpha.1：千寻回环代理的
+  鉴权契约面。**已探针实测未变**（见下）。
+- `./invariant` 导出移除：全仓 grep 无引用（含 `plugins/decision-laya`），无影响。
+- `@qianxun/decision-laya` 走 root 导出（`.`），不涉及「子路径插件不再读 package.json」。
+- `@liustack/modsearch` 早已从 profile 卸载（settings 里的 `plugins.pinned` 只是钉版
+  记录，不强制安装），`stats` → `activity`/`usage` 拆分打不到它。
+
+### 隔离探针实测（`.tmp/dsh-0.2.1-probe`，2026-10-07）
+
+用与 `install.rs` 完全相同的 pnpm 参数装 0.2.1-alpha.1，用 supervisor 的启动契约
+（`--profile web --no-open --host 127.0.0.1 --port N` + `DSH_HOME`/`DSH_DESKTOP`/
+`QIANXUN_VERSION`）拉起：
+
+| 契约项 | 结果 |
+| --- | --- |
+| 安装 | ✅ 14.6s，`allowBuilds` 白名单命中（node-pty / koffi / protobufjs / subprocess-local 全跑完） |
+| 就绪行 | ✅ 仍是 `dsh web: http://127.0.0.1:17999/?token=…`，`readiness::parse` 原样吃下 |
+| cookie 兑换 | ✅ `GET {ready_url}` → `303` + `set-cookie: dsh-auth-…`，前缀常量仍有效 |
+| 鉴权强制 | ✅ 带 cookie 过 401 落到路由（404），不带 cookie 直接 401 |
+| 页面引导 | ✅ `__DSH_BOOT__` 正常，条目含新增的 `dsh-client-ui-schedule` |
+
+结论：**千寻依赖的那几条外部契约全部未变**。余下风险只在 DOM 层
+（mobile-access `custom.js` 注入）与千寻自身 UI，需要真机过一遍。
+
+### 上线后发现的两处问题与修复
+
+用户装完新版本后反馈了安装日志里的 `npm warn allow-scripts` 噪音，顺带把上一节
+那两个「真发现」一并结清。两处都是同一类毛病：**功能在某条路径下是通的，但用户
+既没有干净的反馈，也没有入口去收拾它**。
+
+#### 1. npm 11.17 的 install-script 门禁噪音
+
+用户贴的安装日志里有 4 行：
+
+```
+npm warn allow-scripts @pnpm/exe@11.7.0 has no allow-scripts config in the project
+npm warn allow-scripts @pnpm/exe@11.7.0 has no allow-scripts config in the project
+npm warn allow-scripts @pnpm/win-x64@11.7.0 has no allow-scripts config in the project
+```
+
+含义是 npm 11.17 新装了 install-script 白名单门禁：`@pnpm/exe` 有
+`preinstall: node setup.js`（从 `@pnpm/win-x64` 平台包取二进制做 SEA 注入），而项目
+清单里没有对应的 `allowScripts` 条目。**实测默认是「警告但照跑」**——pnpm.exe 照样
+落地 98MB 且 `--version` 正常，所以这是噪音而非故障；但它出现在用户可见的安装日志里
+就像坏了，而且 npm 还留着 `--strict-allow-scripts` 把警告变硬错，真到那天 pnpm 会
+静默不落位。
+
+npm 给的补救是让用户敲 `npm approve-scripts`——桌面上没人会敲。CLI flag 也不通：
+`npm install --allow-scripts=@pnpm/exe` 在 project-scoped 安装下被 npm 直接拒
+（*"not allowed in project-scoped installs"*），它要求写进清单或 `.npmrc`。
+
+所以在 `install::ensure_pnpm_tool` 里、npm 安装之前先把条目合进
+`<pnpm_tool_dir>/package.json` 的 `allowScripts`（`crate::atomic::write`）：键取
+`PNPM_SPEC` 的包名部分（`@pnpm/exe`，不带版本，`PNPM_SPEC` 升版不用同步改键），
+已就位就不碰文件，清单缺失或损坏就当空的重建，写失败只记 warn——顶多回到有 warn 的
+现状，不该拦住一次本来能成功的安装。
+
+顺带修正了 `PNPM_SPEC` 上那段已经不成立的注释（原写「exe 直接在 tarball 里——
+没有 install 脚本」；11.7.0 恰恰带 preinstall）。
+
+**真机验证**（debug 环境 `%USERPROFILE%\.qianxun_dev`，2026-10-08）：从
+0.2.0-rc.2 升到 0.2.1-alpha.1，装完 allow-scripts 相关日志 **0 行**（升级前同一
+条路径是 4 行），`<pnpm_tool_dir>/package.json` 落成
+`{"allowScripts":{"@pnpm/exe":true},"dependencies":{"@pnpm/exe":"^11.7.0"}}`，
+npm 装完保留了该字段，pnpm 走 pnpm 11.7.0 正常落位。
+
+#### 2. 僵尸钉版没有清理入口
+
+`settings.plugins.pinned` 里挂着 `@liustack/modsearch@5.10.3`，插件早已从 profile
+里卸载（当初绕过 `market_remove` 从磁盘上摘的，所以没走 unpin）。问题在于它清不掉：
+
+- 已装列表只按 `deployed_version` 列条目，这个插件不在其中 → 没有卸载按钮；
+- 清单区只显示一个**数量**，不列条目；
+- 而 `market_sync_pinned` 会照 `pinned` 记录把它按版本装回来。
+
+原先只能停掉千寻、用脚本改 `settings.json` 顶上（`.tmp\unpin-modsearch.ps1`），
+并且必须校验目标之外的字节没被动过——因为 `settings::update` 是整份从内存快照回写
+（settings.rs:703），运行中改盘会被无声覆盖回去。
+
+补了两件事：
+
+- **`market::market_unpin`**：只做 `settings.plugins.unpin`，不碰 bundles 与
+  node_modules（卸盘是 `market_remove` 的活）；同样受 busy 锁与安全模式冻结约束，
+  成功后往 supervisor 记一行。
+- **插件页「已安装」tab**：新增 `pinnedMissing` 派生量 = 清单里有、profile 里没装的
+  条目，以警示块逐条列出并给「取消钉版」按钮（`data-testid="unpin"`），两个 tab 分支
+  都渲染。
+
+**真机验证**（同一个 debug 环境，2026-10-08）：在 dev settings 里种了同名僵尸钉版
+当夹具 → 区块按预期出现（`@liustack/modsearch 5.10.3` + 按钮）→ 点「取消钉版」→
+区块消失、dev `settings.json` 的 `pinned` 变空数组、日志留下
+`[插件] 已取消钉版：@liustack/modsearch`。
+
+### 落地项
+
+- [ ] `install::PINNED_VERSION` 由 `0.2.0-rc.2` 升到 `0.2.1-alpha.1` ✅（代码侧）
+- [ ] 千寻版本号 `0.7.0` → `0.8.0` ✅（包元数据：root / tauri / mobile / Cargo.lock / mobile lockfile / iOS MARKETING_VERSION / Android versionName）
+- [ ] install / market 单元测试通过（兼容判定对 alpha 钉版「原样 + 去预发布」双形态宽松语义已覆盖：`0.2.1-alpha.1` 与 `0.2.1` 双试）
+- [ ] Rust 全量 `cargo fmt` + `clippy -D warnings` + `test` ✅（431 passed / 0 failed / 6 ignored，含新增的两条白名单单测）
+- [ ] 前端 `svelte-check` ✅（0 error）、`vitest` ✅（297 passed）、资产校验 ✅
+- [ ] 前端 `prettier` / `eslint` ❌ **分支既有欠账，非本次引入**：`mobile-flutter/`
+  下 `scripts/probe_dom_structure.js` 用 Python 式 `"""` 开头（prettier/eslint 都解析
+  不了）、`qx-mobile/custom.js` 与 `.tmp/probe_*.js` 有 unused var，共 27 error。
+  发版前要么把那批探针挪出 lint 范围，要么修成合法 JS。
+- [x] **npm allow-scripts 门禁消噪** ✅（代码 + 真机都过了）：见上节第 1 条。
+- [ ] DSH `0.2.1-alpha.1` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装→重启→卸载
+- [ ] **mobile-access 回归**（最脆的一环：`custom.js` 靠注入 DOM 进 DSH 页面，
+  DSH web UI 一改就碎）——`window.qxMobile.register` 仍被调用 + 真机窄屏排版
+- [ ] pinned 插件 `@liustack/modsearch@5.10.3` 在 0.2.1 上验证（`stats` → `activity`/`usage` 拆分会打到它）
+- [x] **僵尸钉版的清理入口** ✅（代码 + 真机都过了）：新增 `market::market_unpin`
+      与插件页「取消钉版」按钮（见上节第 2 条）。生产 `.qianxun\settings.json` 里
+      那条 `@liustack/modsearch@5.10.3` **仍未清**——它只能由用户在跑着的千寻里点
+      按钮（`settings::update` 会把运行期间的外部改动整份覆盖回去），等这版发出去
+      之后在插件页点一下即可。备用的 `.tmp\unpin-modsearch.ps1` 脚本作废。
+- [ ] 桌面端端口策略交叉验证：千寻固定 `dsh.port`（17300）与上游「系统分配端口」不冲突
+- [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
+
 ## 里程碑间的纪律
 
 1. 任何里程碑开工前，先读 `03-编码规范`，门禁脚本必须已在跑；
