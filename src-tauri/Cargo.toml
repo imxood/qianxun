@@ -16,6 +16,7 @@ members = [
     "crates/laya-engine",
     "crates/laya-cli",
     "crates/laya-server",
+    "crates/qx-server",
 ]
 
 [lib]
@@ -37,6 +38,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset",
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 情报出刊读 DSH 的 cordis.patch.yml / .credentials.yaml（docs/17 §7.4）。
+serde_yaml = "0.9"
 thiserror = "2"
 # 日志时间戳。只要 clock（本地时间），其余特性关闭以控制依赖面。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

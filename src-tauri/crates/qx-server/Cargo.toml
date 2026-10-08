@@ -1,0 +1,46 @@
+[package]
+name = "qx-server"
+version = "0.1.0"
+edition = "2021"
+description = "千寻服务端：统一角色化端点 /qx-ws、边缘鉴权、舰队、治理与 SQLite 状态（docs/19）"
+
+[lib]
+name = "qx_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qx-server"
+path = "src/main.rs"
+
+[dependencies]
+# 边缘 HTTP/WS：与主工程同版本（axum 0.8 ws）
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+] }
+# 千寻侧出站隧道客户端（ws:// 与 wss://）；TLS feature 为主工程待补项，这里先带上
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# 隧道流上的 HTTP：http1 客户端（边缘→实例）与服务（实例端 serve Router，含 upgrades）
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "server", "server-auto", "tokio"] }
+http-body-util = "0.1"
+tower = "0.5"
+# 状态层（docs/19 §6）：bundled 自包含编译，云端无系统 SQLite 依赖
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+yamux = "0.6"
+# yamux 走 futures::io，hyper 走 tokio::io——compat 双向适配
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
+rand = "0.8"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "test-util"] }
