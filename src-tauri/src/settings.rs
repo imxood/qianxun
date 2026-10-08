@@ -30,6 +30,15 @@ fn default_port() -> u16 {
     17300
 }
 
+/// 旧 llama-server Qwen 方案（Qwen3.5-9B）的默认端口，2026-10-04 随方案
+/// 移除；settings 迁移以它为旧形状标志（见 migrate 的 qwen 段）。
+const LEGACY_LLAMA_SERVER_PORT: u16 = 17230;
+
+/// Qwen3.8 引擎配置的规范路径：部署方案（另一会话）已把配置迁到
+/// D:\AI\Strata 并做硬件校准，E:\git\ai\Strata 下的同名文件是过时副本、
+/// 不再修改——千寻的默认值必须指向 D 盘这份。
+pub const DEFAULT_QWEN_CONFIG: &str = "D:\\AI\\Strata\\strata-iq2_xs.json";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePreference {
@@ -341,6 +350,8 @@ pub struct Settings {
     pub hotkeys: HotkeysSettings,
     pub notes: NotesSettings,
     pub remote: crate::remote::RemoteSettings,
+    /// 千寻服务端（docs/19）：单地址连接，instanceToken 不入备份。
+    pub server: crate::remote::ServerSettings,
     /// 插件清单（08 设计 §2）：装成功的 name@version，随备份包走。
     pub plugins: PluginsSettings,
     /// 工具管理（R001）：Moli 无头浏览器。
@@ -373,27 +384,35 @@ impl Default for LayaSettings {
     }
 }
 
-/// QWen 本地推理服务的启动配置（环境页手动启停）。
-/// OpenAI 兼容服务（vLLM/llama.cpp server 等）：状态以端口探活为准。
+/// Qwen3.8-Flash-Next 本地模型服务（Strata 引擎）的启动配置（环境页手动启停）。
+/// 部署方案见 `D:\AI\Strata\部署方案.md`：程序本体在 `E:\git\ai\Strata`（含
+/// 自带 .venv 与 serve/server.py），模型数据在 `D:\AI\Strata\data`；服务为
+/// OpenAI/Anthropic 兼容，状态以端口探活为准。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct QwenSettings {
-    /// 服务可执行文件绝对路径（必填；空 = 未配置）。
-    pub server_exe: String,
-    /// 启动参数（按空白分词原样透传，如 `serve -m qwen3.5.gguf --port 8000`）。
-    pub args: String,
-    /// 回环监听端口（探活用）。
+    /// Strata 程序本体目录（含 `.venv\Scripts\python.exe` 与
+    /// `serve\server.py`）；空 = 未配置。
+    pub strata_home: String,
+    /// 引擎配置：绝对路径，或相对 strata_home 的文件名（空 =
+    /// [`DEFAULT_QWEN_CONFIG`]，即 IQ2_XS 量化 / 262144 上下文 / 视觉 /
+    /// 硬件校准的当前生效档，由部署方案会话维护）。
+    pub config: String,
+    /// 回环监听端口（探活用）。23661 避开 8080 等通用端口，且与
+    /// Laya(10230)/DSH(17300) 错开；DSH 侧 strata-local provider 与
+    /// mario 双脑的探活/调用均指向此端口。
     pub port: u16,
 }
 
 impl Default for QwenSettings {
     fn default() -> Self {
         Self {
-            server_exe: String::new(),
-            args: String::new(),
-            // 8080 太通用易撞；17230 与 Laya(10230)/DSH(17300) 错开。
-            // 千寻启动时若参数缺 --port 会自动追加，保证与探活端口一致。
-            port: 17230,
+            // 部署方案固定的程序本体目录（模型路径已写进引擎配置 json，无需单独配置）。
+            strata_home: String::from("E:\\git\\ai\\Strata"),
+            // 规范配置在 D:\AI\Strata（校准后的事实源）；E 盘同名文件是过时副本。
+            config: String::from(DEFAULT_QWEN_CONFIG),
+            // 23661：避开通用端口冲突；旧的 llama-server 方案(17230)已移除。
+            port: 23661,
         }
     }
 }
@@ -406,7 +425,7 @@ pub struct ToolsSettings {
     pub moli: MoliSettings,
     /// Laya 决策引擎（环境页配置与启动控制）。
     pub laya: LayaSettings,
-    /// QWen 本地推理服务（环境页手动启停）。
+    /// Qwen3.8-Flash-Next 本地模型服务（Strata 引擎，环境页手动启停）。
     pub qwen: QwenSettings,
 }
 
@@ -423,6 +442,7 @@ impl Default for Settings {
             hotkeys: HotkeysSettings::default(),
             notes: NotesSettings::default(),
             remote: crate::remote::RemoteSettings::default(),
+            server: crate::remote::ServerSettings::default(),
             plugins: PluginsSettings::default(),
             tools: ToolsSettings::default(),
         }
@@ -664,6 +684,14 @@ fn migrate(mut settings: Settings) -> Settings {
     {
         settings.remote.port = current_default;
     }
+    // Qwen 环境：旧 llama-server 方案（Qwen3.5-9B @ :17230）已于 2026-10-04
+    // 整体移除，换 Strata 引擎（Qwen3.8-Flash-Next）。旧形状没有独立标志，
+    // 以持久化的旧默认端口 17230 为准：命中即整段重置为 Strata 默认——
+    // serde 只对缺失字段给默认值，留着旧 17230 会压过新默认 23661，
+    // 指向一个永久死端口；strata_home/config 用户未配置过，重置无损。
+    if settings.tools.qwen.port == LEGACY_LLAMA_SERVER_PORT {
+        settings.tools.qwen = QwenSettings::default();
+    }
     settings
 }
 
@@ -785,6 +813,41 @@ mod tests {
         // rename_all + default 序列化仍会写出全部字段，但读取端兼容）。
         let text = to_text(&settings);
         assert!(text.contains("defaultEngine"));
+    }
+
+    #[test]
+    fn qwen段旧llama_server方案迁移到strata默认() {
+        // 旧形状（serverExe/args/port=17230）整体重置为 Strata 默认：
+        // 旧服务与端口已随方案移除，serde 只对缺失字段给默认，持久化的
+        // 17230 会压过新默认 23661，必须在迁移里显式重置。
+        let settings = parse(
+            r#"{"tools": {"qwen": {
+                "serverExe": "D:\\AI\\llama\\llama-server.exe",
+                "args": "-m Qwen3.5-9B-Q6_K.gguf",
+                "port": 17230
+            }}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.tools.qwen, QwenSettings::default());
+        assert_eq!(settings.tools.qwen.port, 23661);
+        // 同层 laya 段不受牵连。
+        assert_eq!(settings.tools.laya, LayaSettings::default());
+    }
+
+    #[test]
+    fn qwen段非旧标志端口原样保留() {
+        // 只有旧默认端口 17230 视为旧形状标志；用户显式配置的新方案端口
+        // （如改过的 23662）不得被迁移重置。
+        let settings = parse(
+            r#"{"tools": {"qwen": {
+                "strataHome": "E:\\git\\ai\\Strata",
+                "config": "strata-iq2_xs.json",
+                "port": 23662
+            }}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.tools.qwen.strata_home, "E:\\git\\ai\\Strata");
+        assert_eq!(settings.tools.qwen.port, 23662);
     }
 
     #[test]

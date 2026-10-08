@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::error::{Error, Result};
-use crate::remote::{self, gateway::GatewayHandle, RemoteDevice};
+use crate::remote::{self, gateway::GatewayHandle, online::OnlineHandle, RemoteDevice};
 
 /// 网关运行态：Some = 监听中。锁内持 JoinHandle，停机经 shutdown 通道。
 /// `sync_lock`：sync 全程互斥——DSH 就绪与设置保存可能并发触发两次
@@ -14,6 +14,9 @@ use crate::remote::{self, gateway::GatewayHandle, RemoteDevice};
 #[derive(Default)]
 pub struct RemoteState {
     pub running: Mutex<Option<GatewayHandle>>,
+    /// 服务端在线客户端（docs/19）：与网关生命周期分离（指纹独立），
+    /// 配置变化只重连隧道、不重启网关。
+    pub online: Mutex<Option<OnlineHandle>>,
     pub sync_lock: tokio::sync::Mutex<()>,
 }
 
@@ -390,6 +393,74 @@ pub async fn sync(app: AppHandle) {
             crate::logging::log("warn", &format!("网关启动失败：{cause}"));
         }
     }
+    // 服务端隧道客户端：独立指纹（docs/19 v5.2 §12.3）——配置变化只重连
+    // 隧道，不牵连网关；未配置时内部自停。
+    remote::online::sync(&app);
+}
+
+// ---- 服务端域 IPC（docs/19 v5.2 §12.3）----
+
+/// 服务端连接状态（远程页「服务器」区块）。
+#[tauri::command]
+pub fn server_status(app: AppHandle) -> remote::online::OnlineStatus {
+    remote::online::status(&app)
+}
+
+/// 配置服务端连接（url/实例凭据）。写入 settings 后由 sync 重连。
+/// 校验：非空时 url 必须是 ws:// 或 wss:// 开头且带 host。
+#[tauri::command]
+pub async fn server_configure(
+    app: AppHandle,
+    url: String,
+    instance_id: String,
+    instance_token: String,
+) -> Result<()> {
+    let url = url.trim().to_owned();
+    let instance_id = instance_id.trim().to_owned();
+    let instance_token = instance_token.trim().to_owned();
+    let empty = url.is_empty() && instance_id.is_empty() && instance_token.is_empty();
+    if !empty {
+        if !(url.starts_with("ws://") || url.starts_with("wss://")) {
+            return Err(Error::Remote("地址必须以 ws:// 或 wss:// 开头".into()));
+        }
+        if remote::online::expected_host(&url).is_none() {
+            return Err(Error::Remote("地址缺少主机名".into()));
+        }
+        if instance_id.is_empty() || instance_token.is_empty() {
+            return Err(Error::Remote("实例 ID 与凭据需同时填写".into()));
+        }
+    }
+    crate::settings::update(&app, |settings| {
+        settings.server = remote::ServerSettings {
+            url,
+            instance_id,
+            instance_token,
+        };
+    })?;
+    sync(app).await;
+    Ok(())
+}
+
+/// 申请一次性配对码（经隧道向服务端请求）。
+#[tauri::command]
+pub async fn server_pair_create(app: AppHandle) -> Result<remote::online::PairOffer> {
+    remote::online::request_pair_code(&app)
+        .await
+        .map_err(Error::Remote)
+}
+
+/// 服务端设备清单（fresh 优先，失败退缓存）。
+#[tauri::command]
+pub async fn server_device_list(app: AppHandle) -> Vec<qx_server::protocol::DeviceInfo> {
+    remote::online::device_list(&app).await
+}
+
+/// 吊销服务端设备。
+#[tauri::command]
+pub async fn server_device_revoke(app: AppHandle, device_id: String) -> Result<()> {
+    remote::online::revoke_device(&app, &device_id)
+        .await
+        .map_err(Error::Remote)
 }
 
 #[cfg(test)]
@@ -406,10 +477,7 @@ mod tests {
         // 配对 URL 只带一次性 code，不带长期 token（docs/18 A4）。
         let code = remote::gateway::global_pair_codes().issue(&token);
         let url = remote::gateway::pair_url_with_code("10.144.3.2", 17400, &code);
-        assert_eq!(
-            url,
-            format!("http://10.144.3.2:17400/qx-gate?code={code}")
-        );
+        assert_eq!(url, format!("http://10.144.3.2:17400/qx-gate?code={code}"));
         assert!(!url.contains(&token), "配对 URL 不得内嵌长期 token");
         let id = remote::gateway::new_device_id();
         assert!(id.starts_with("dev-"));

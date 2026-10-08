@@ -18,11 +18,39 @@
 pub mod commands;
 pub mod gateway;
 pub mod mobile_ui;
+pub mod online;
 
 pub use mobile_ui::MobileUi;
 
 /// 网关内共用的小响应构造器（移动层与桌面外壳层都从这里拿）。
 pub(crate) use mobile_ui::text_response;
+
+/// RouterHandle（docs/19 §3.3 / 评审 #2）：网关每次重建发布最新 Router，
+/// 隧道端（online.rs）每条 yamux 流取当前版本服务——设备配对/吊销/DSH revive
+/// 不会让隧道拿着过期快照（「撤销即时生效」的前提）。
+pub fn router_handle() -> &'static arc_swap::ArcSwap<axum::Router> {
+    static HANDLE: std::sync::OnceLock<arc_swap::ArcSwap<axum::Router>> =
+        std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| arc_swap::ArcSwap::from_pointee(fallback_router()))
+}
+
+/// 边缘盖章密钥（docs/19 §4.3）：进程级随机，经隧道 edge.auth 上报给服务端；
+/// 服务端转发请求时盖 X-QX-Edge，网关用它识别「经边缘鉴权的请求」。
+pub fn edge_secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| qx_server::crypto::random_hex(32))
+}
+
+/// 网关未就绪时的占位 Router（503）——隧道先于网关建立时流不至于悬空。
+fn fallback_router() -> axum::Router {
+    use axum::routing::any;
+    axum::Router::new().fallback(any(|| async {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "网关尚未就绪（等待 DSH/设置同步）",
+        )
+    }))
+}
 
 /// 已配对设备（settings.json remote 域持久化）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -72,4 +100,17 @@ impl Default for RemoteSettings {
             devices: Vec::new(),
         }
     }
+}
+
+/// 服务端域设置（docs/19 v5.2 §12.3）：一个地址字段，scheme 即加密语义。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ServerSettings {
+    /// 服务端地址：`ws://127.0.0.1:23100`（本机/局域网）或 `wss://<域名>`（云端）。
+    /// 空 = 未配置（不连接）。
+    pub url: String,
+    /// 实例身份（admin add-instance 预置；fail-closed）。
+    pub instance_id: String,
+    /// 实例凭据（32 字节 hex；**不入备份**，见 backup 过滤）。
+    pub instance_token: String,
 }

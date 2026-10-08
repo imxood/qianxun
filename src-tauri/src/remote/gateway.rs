@@ -159,6 +159,9 @@ pub async fn start(
         .route("/{*rest}", any(handler))
         .route("/", any(handler))
         .with_state(state.clone());
+    // 发布到 RouterHandle（docs/19 §3.3）：隧道端每流取最新版本——
+    // 配对/吊销/DSH revive 后 sync 重建网关时会再次发布新表。
+    super::router_handle().store(std::sync::Arc::new(app.clone()));
 
     // 可选绑局域网——**绑定失败不拖累回环**：EasyTier 这类虚拟网卡晚于
     // 千寻启动、中途掉线是常态（os error 10049 曾让整个网关起不来，
@@ -410,6 +413,8 @@ fn origin_allowed(origin: &str) -> bool {
 }
 
 /// 局域网鉴权：cookie（常规与 WS 升级请求都带）优先，query 兜底。
+/// 服务端入口的第三条通路：边缘盖章头（X-QX-Edge/Device）——边缘已完成
+/// 设备鉴权并结构性剥离入站伪造（docs/19 §4.3），常数时间比对进程密钥。
 fn authorized(state: &GatewayState, query: &str, headers: &HeaderMap) -> bool {
     let cookie_token = headers
         .get(axum::http::header::COOKIE)
@@ -424,7 +429,22 @@ fn authorized(state: &GatewayState, query: &str, headers: &HeaderMap) -> bool {
     } else {
         query_param(query, "token")
     };
-    state.token_valid(&token)
+    state.token_valid(&token) || edge_stamped(headers)
+}
+
+/// 边缘盖章识别：X-QX-Device 非空 + X-QX-Edge 与进程密钥常数时间一致。
+fn edge_stamped(headers: &HeaderMap) -> bool {
+    let device = headers
+        .get("x-qx-device")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if device.is_empty() {
+        return false;
+    }
+    headers
+        .get("x-qx-edge")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|secret| constant_time_eq(secret.as_bytes(), super::edge_secret().as_bytes()))
 }
 
 fn response_with_cookie(token: &str) -> Response<Body> {

@@ -101,6 +101,11 @@ export const IPC_COMMANDS = [
   'remote_pair',
   'remote_revoke',
   'remote_self_check',
+  'server_status',
+  'server_configure',
+  'server_pair_create',
+  'server_device_list',
+  'server_device_revoke',
   'sync_status',
   'sync_init',
   'sync_pull',
@@ -282,6 +287,8 @@ export interface Settings {
   hotkeys: HotkeysSettings;
   notes: NotesSettings;
   remote: RemoteSettings;
+  /** 千寻服务端（docs/19）：token 不入备份，server_configure 独占写入。 */
+  server: ServerSettings;
   /** 插件清单（08 设计 §2）。 */
   plugins: PluginsSettings;
   /** 工具管理（R001）：Moli 无头浏览器。 */
@@ -989,6 +996,14 @@ export interface RemoteSettings {
   devices: RemoteDevice[];
 }
 
+/** 服务端域设置（docs/19）：单地址 + 实例凭据（token 不入备份）。 */
+export interface ServerSettings {
+  /** `ws://host:port` 或 `wss://域名`；空 = 未配置。 */
+  url: string;
+  instanceId: string;
+  instanceToken: string;
+}
+
 // ---------------------------------------------------------------------------
 // plugins（插件清单，08 设计 §2）
 // ---------------------------------------------------------------------------
@@ -1025,6 +1040,38 @@ export interface SelfCheck {
   ok: boolean;
   detail: string;
   latencyMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// server_*（千寻服务端，docs/19）
+// ---------------------------------------------------------------------------
+
+/** server_status 返回：服务端隧道连接状态。 */
+export interface ServerStatus {
+  /** off / connecting / online / backoff / invalid_config */
+  state: string;
+  url: string;
+  instanceId: string;
+  detail: string | null;
+  devices: ServerDevice[];
+  lastPair: ServerPairOffer | null;
+}
+
+/** 服务端级已配对设备（DeviceSnapshot 条目）。 */
+export interface ServerDevice {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastSeenAt: number;
+  revoked: boolean;
+}
+
+/** server_pair_create 返回：一次性配对码（5 分钟有效）。 */
+export interface ServerPairOffer {
+  code: string;
+  expiresAt: number;
+  /** 手机直接可开的配对页地址。 */
+  pairUrl: string;
 }
 
 // ---------------------------------------------------------------------------

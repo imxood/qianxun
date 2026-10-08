@@ -153,6 +153,21 @@ fn collect_backup_files(data_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// 把 settings.json 的 `server.instanceToken` 置空（其余原样保留）。
+/// 解析失败时原样返回——备份域不因设置文件损坏而失败（还原后重载会报）。
+fn strip_server_token(payload: &[u8]) -> Result<Vec<u8>> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return Ok(payload.to_vec());
+    };
+    if let Some(server) = value.get_mut("server").and_then(|v| v.as_object_mut()) {
+        server.insert("instanceToken".into(), serde_json::json!(""));
+        let pretty = serde_json::to_vec_pretty(&value)
+            .map_err(|cause| Error::Backup(format!("settings 序列化失败：{cause}")))?;
+        return Ok(pretty);
+    }
+    Ok(payload.to_vec())
+}
+
 fn collect_dir(dir: &Path, prefix: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
     if depth > MAX_WALK_DEPTH {
         return Err(Error::Backup(format!(
@@ -221,6 +236,13 @@ fn write_archive(
             .join("/");
         let payload = fs::read(&source)
             .map_err(|cause| Error::Backup(format!("读取 {} 失败：{cause}", relative.display())))?;
+        // settings.json 出包前剥掉服务端实例凭据（docs/19 v5.2：凭据绑定
+        // 单机，备份还原到别的机器不得带走 token；url/实例 ID 保留便于迁移）。
+        let payload = if relative == &PathBuf::from(SETTINGS_ENTRY) {
+            strip_server_token(&payload)?
+        } else {
+            payload
+        };
         writer
             .start_file(name, options)
             .map_err(|cause| Error::Backup(format!("写入备份包失败：{cause}")))?;
@@ -674,6 +696,22 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn 备份剥离服务端实例凭据() {
+        let settings = br#"{"theme":"dark","server":{"url":"wss://r.example.com","instanceId":"i1","instanceToken":"secret-token"}}"#;
+        let stripped = strip_server_token(settings).expect("剥离成功");
+        let text = std::str::from_utf8(&stripped).expect("UTF-8");
+        assert!(
+            text.contains("\"instanceToken\": \"\""),
+            "token 必须置空：{text}"
+        );
+        assert!(text.contains("wss://r.example.com"), "url 保留便于迁移");
+        assert!(text.contains("\"instanceId\": \"i1\""), "实例 ID 保留");
+        // 无 server 段的旧设置原样通过。
+        let plain = br#"{"theme":"dark"}"#;
+        assert_eq!(strip_server_token(plain).expect("原样通过"), plain.to_vec());
     }
 
     #[test]

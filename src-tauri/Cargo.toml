@@ -86,6 +86,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 tokio-tungstenite = "0.30"
 futures-util = "0.3"
+# 服务端隧道（docs/19）：千寻作为纯客户端接入 qx-server——transport::connect +
+# tunnel::serve_stream/HostAssert 复用 crate 全套载体与协议。
+qx-server = { path = "crates/qx-server" }
+yamux = "0.6"
+tokio-util = { version = "0.7", features = ["compat"] }
+# RouterHandle：网关每次重建发布最新 Router，隧道端每流取当前版本。
+arc-swap = "1"
 # 网卡枚举（绑定地址选择 + EasyTier 识别）。
 if-addrs = "0.13"
 # grep 结果的 glob 过滤（M2 深化）：glob→正则。fff 自用版本不外露。

@@ -158,6 +158,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4619,6 +4628,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 name = "qianxun"
 version = "0.8.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "base64 0.23.1",
  "chrono",
@@ -4634,6 +4644,7 @@ dependencies = [
  "log",
  "node-runtime",
  "proc-guard",
+ "qx-server",
  "rand 0.8.8",
  "regex",
  "reqwest 0.12.28",
@@ -4651,12 +4662,14 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tokio-util",
  "trash",
  "url",
  "webview2-com",
  "windows-core 0.61.2",
  "windows-sys 0.60.2",
  "xcap",
+ "yamux",
  "zip",
 ]
 
