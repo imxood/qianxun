@@ -50,11 +50,15 @@ pub(super) const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// cordis-plugin-group），npm 的解析要么组合爆炸要么丢 peer；pnpm 的
 /// auto-install-peers 是唯一被验证可正确装出运行时的路线。
 ///
-/// 统一走原生 `@pnpm/exe` 发行（用户指示 2026-09-14）：exe 直接在
-/// tarball 里——没有 install 脚本（不吃 npm allow-scripts 门禁）、不依赖
-/// tarball 内的 cjs 入口、也不需要 node 解释器。版本钉死 11.7.0（实测
-/// 验证版本，与 ADR-015 同哲学；pnpm@latest 已漂到 12，其 JS 包改走
-/// install 脚本落位 exe，恰好撞上门禁，入口必缺失——教训见 git log）。
+/// 统一走原生 `@pnpm/exe` 发行（用户指示 2026-09-14）：不依赖 tarball 内的
+/// cjs 入口、也不需要 node 解释器。版本钉死 11.7.0（实测验证版本，与 ADR-015
+/// 同哲学；pnpm@latest 已漂到 12，其 JS 包改走 install 脚本落位 exe，入口必
+/// 缺失——教训见 git log）。
+///
+/// 注意 11.7.0 **确实带 install 脚本**：`preinstall: node setup.js` 从
+/// `@pnpm/<平台>-<架构>` 平台包取二进制做 SEA 注入（darwin-x64 那条分支还专门
+/// 注了 Node SEA 会毁掉 Mach-O 的坑）。所以 npm 11.17 的 allow-scripts 门禁会
+/// 点名它——消噪办法见 `allow_tool_scripts`。
 pub const PNPM_SPEC: &str = "@pnpm/exe@11.7.0";
 
 /// pnpm 构建脚本白名单：DSH 运行时需要这些原生/生成步骤真正执行
@@ -355,6 +359,63 @@ where
     .await
 }
 
+/// `PNPM_SPEC` 里的包名部分（`@pnpm/exe@11.7.0` → `@pnpm/exe`）。白名单键取它，
+/// 免得 `PNPM_SPEC` 与门禁白名单两处各写一份字符串。
+fn pnpm_package_name() -> Option<&'static str> {
+    PNPM_SPEC.rsplit_once('@').map(|(name, _version)| name)
+}
+
+/// 把 `@pnpm/exe` 写进 npm 的 install-script 白名单，消掉安装日志里那串
+/// `npm warn allow-scripts`。
+///
+/// 门禁语义（实测 2026-10-08，npm 11.17.0 + Node 24.19）：默认是**警告但照跑**
+/// ——pnpm.exe 照样落地 98MB 且 `--version` 正常，所以这纯属噪音。可它出现在
+/// 用户可见的安装日志里会像故障，而 npm 提示的 `npm approve-scripts` 是让用户
+/// 去敲的命令，桌面上没人会敲。另一半风险是 npm 留了 `--strict-allow-scripts`
+/// （把警告变硬错），哪天默认转严格，pnpm 就会静默不落位。
+///
+/// CLI flag 走不通：`npm install --allow-scripts=@pnpm/exe` 在 project-scoped
+/// 安装下被 npm 直接拒（"not allowed in project-scoped installs"），它要求写进
+/// 工具目录的 package.json 或 .npmrc。实测 `allowScripts` 字段有效，且 npm 装完
+/// 会保留这个字段（不会冲掉）。
+///
+/// 键用不带版本的形式（`@pnpm/exe` 而不是 `@pnpm/exe@11.7.0`）：实测同样有效，
+/// 且 `PNPM_SPEC` 升版时不用同步改键。写不进去不能阻断安装——顶多回到有 warn
+/// 的现状。
+fn allow_tool_scripts(tool_dir: &Path) -> std::io::Result<()> {
+    let Some(name) = pnpm_package_name() else {
+        return Ok(());
+    };
+    let path = tool_dir.join("package.json");
+    // npm 自己生成的 manifest 读不动就当空的：这个目录只归 pnpm 自举用，
+    // npm 下次安装照样会把自己的 dependencies 写回来。
+    let mut manifest: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({ "private": true }));
+    {
+        let object = manifest.as_object_mut().expect("刚过滤过对象");
+        let allowed = object
+            .entry("allowScripts")
+            .or_insert_with(|| serde_json::json!({}));
+        if !allowed.is_object() {
+            *allowed = serde_json::json!({});
+        }
+        allowed
+            .as_object_mut()
+            .expect("刚归一成对象")
+            .insert(name.to_owned(), serde_json::Value::Bool(true));
+    }
+    let body = serde_json::to_vec_pretty(&manifest)
+        .map_err(|cause| std::io::Error::new(std::io::ErrorKind::InvalidData, cause))?;
+    // 内容没变就别碰文件：每次安装都重写一遍只会无谓地动 mtime。
+    if std::fs::read(&path).is_ok_and(|current| current == body) {
+        return Ok(());
+    }
+    crate::atomic::write(&path, &body)
+}
+
 /// 确保 pnpm 工具就位，且每次安装都刷新到 registry 最新版。
 /// 工具目录整体不属于安装事务：它只含 pnpm 自身，坏了删掉重装即可。
 /// 刷新失败而已有旧 pnpm 时回落复用（离线/镜像抖动不该阻塞整个 DSH
@@ -370,6 +431,14 @@ where
             plan.pnpm_tool_dir.display()
         ))
     })?;
+    // 门禁白名单要先于 npm 落位（见 allow_tool_scripts）。失败只记 warn：
+    // 白名单是整洁问题，不该拦住一次本来能成功的安装。
+    if let Err(cause) = allow_tool_scripts(&plan.pnpm_tool_dir) {
+        report(
+            Stream::Stderr,
+            format!("[安装] 写入 pnpm 脚本白名单失败（只影响日志整洁）：{cause}"),
+        );
+    }
     let refreshed = run_with_limits(
         plan.pnpm_tool_command(),
         report.clone(),
@@ -669,10 +738,16 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        check_installed, check_installed_at_version, entry_of, install_spec, npm_cli_candidates,
-        recover_interrupted_install, remove_dir_if_exists, runtime_complete,
-        runtime_matches_pinned, runtime_version, InstallPlan, PACKAGE, PINNED_VERSION, PNPM_SPEC,
+        allow_tool_scripts, check_installed, check_installed_at_version, entry_of, install_spec,
+        npm_cli_candidates, pnpm_package_name, recover_interrupted_install, remove_dir_if_exists,
+        runtime_complete, runtime_matches_pinned, runtime_version, InstallPlan, PACKAGE,
+        PINNED_VERSION, PNPM_SPEC,
     };
+
+    /// 被测的白名单键（`@pnpm/exe`）。
+    fn pnpm_pkg() -> &'static str {
+        pnpm_package_name().expect("PNPM_SPEC 应为 name@version 形态")
+    }
 
     fn write_runtime(root: &Path, version: Option<&str>) {
         if let Some(version) = version {
@@ -716,6 +791,71 @@ mod tests {
                 .expect("bin")
                 .join("../lib/node_modules/npm/bin/npm-cli.js")
         ));
+    }
+
+    #[test]
+    fn pnpm脚本白名单写进工具清单且不覆盖其他字段() {
+        let root = scratch("allow-scripts");
+        fs::create_dir_all(&root).expect("tool dir");
+        // npm 首装后留下的样子：带 dependencies，缺 allowScripts。
+        fs::write(
+            root.join("package.json"),
+            r#"{ "dependencies": { "@pnpm/exe": "^11.7.0" } }"#,
+        )
+        .expect("manifest");
+
+        allow_tool_scripts(&root).expect("写入白名单");
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("package.json")).expect("read"))
+                .expect("json");
+        assert_eq!(manifest["allowScripts"][pnpm_pkg()], true);
+        // npm 自己写的依赖声明不能被踩掉
+        assert_eq!(manifest["dependencies"][pnpm_pkg()], "^11.7.0");
+        // 键不带版本：PNPM_SPEC 升版不必同步改白名单
+        let keys = manifest["allowScripts"]
+            .as_object()
+            .expect("对象")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec![pnpm_pkg().to_owned()]);
+
+        // 内容不变时不该再动文件（mtime 比内容更难察觉）
+        let first = fs::metadata(root.join("package.json"))
+            .expect("meta")
+            .modified()
+            .expect("mtime");
+        allow_tool_scripts(&root).expect("二次写入");
+        let second = fs::metadata(root.join("package.json"))
+            .expect("meta")
+            .modified()
+            .expect("mtime");
+        assert_eq!(first, second);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pnpm脚本白名单能从缺失或损坏的清单恢复() {
+        let root = scratch("allow-scripts-bad");
+        fs::create_dir_all(&root).expect("tool dir");
+
+        allow_tool_scripts(&root).expect("无清单时新建");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("package.json")).expect("read"))
+                .expect("json");
+        assert_eq!(manifest["allowScripts"][pnpm_pkg()], true);
+        assert_eq!(manifest["private"], true);
+
+        fs::write(root.join("package.json"), "{ 这不是 JSON").expect("写坏");
+        allow_tool_scripts(&root).expect("坏清单也要能恢复");
+        let repaired: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("package.json")).expect("read"))
+                .expect("json");
+        assert_eq!(repaired["allowScripts"][pnpm_pkg()], true);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
