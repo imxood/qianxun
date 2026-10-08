@@ -292,7 +292,12 @@
   const serverDevices = $derived((serverStatus?.devices ?? []).filter((d) => !d.revoked));
 </script>
 
-<svelte:window onfocus={() => { void refresh(); void refreshServer(); }} />
+<svelte:window
+  onfocus={() => {
+    void refresh();
+    void refreshServer();
+  }}
+/>
 
 <section class="mx-auto w-full max-w-2xl space-y-4">
   <h1 class="qx-page-title">远程</h1>
@@ -392,8 +397,8 @@
       {/if}
     </div>
     <p class="text-xs leading-5 text-muted">
-      接入千寻服务端（云服务器或局域网内另一台机器）后，手机在任意网络都能访问本机——
-      无需 EasyTier 组网。地址形如 <span class="font-mono">wss://relay.example.com</span> 或
+      接入千寻服务端（云服务器或局域网内另一台机器）后，手机在任意网络都能访问本机—— 无需 EasyTier
+      组网。地址形如 <span class="font-mono">wss://relay.example.com</span> 或
       <span class="font-mono">ws://192.168.1.5:23100</span>。
     </p>
     <label class="block space-y-1 text-sm">
@@ -454,13 +459,13 @@
           <p class="font-mono text-lg tracking-widest text-fg">{serverPair.code}</p>
           <p class="break-all font-mono text-xs text-muted">{serverPair.pairUrl}</p>
           <div class="flex gap-2">
-            <button class="qx-btn qx-btn-outline qx-btn-sm" onclick={() => void copyServerPairLink()}>
+            <button
+              class="qx-btn qx-btn-outline qx-btn-sm"
+              onclick={() => void copyServerPairLink()}
+            >
               复制链接
             </button>
-            <button
-              class="qx-btn qx-btn-ghost qx-btn-sm"
-              onclick={() => (serverPair = null)}
-            >
+            <button class="qx-btn qx-btn-ghost qx-btn-sm" onclick={() => (serverPair = null)}>
               完成
             </button>
           </div>
@@ -597,7 +602,8 @@
 <ConfirmDialog
   open={serverRevokeName !== null}
   title="删除服务器设备"
-  message="删除后该设备在所有实例上的访问都会断开，需重新配对。确定删除「{serverRevokeName ?? ''}」？"
+  message="删除后该设备在所有实例上的访问都会断开，需重新配对。确定删除「{serverRevokeName ??
+    ''}」？"
   confirmLabel="删除"
   danger
   onconfirm={() => void revokeServerDevice()}
