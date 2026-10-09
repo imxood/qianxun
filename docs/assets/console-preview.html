@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>千寻中继控制台 · 产品设计预览（高保真静态稿）</title>
+<style>
+:root{
+  --bg:#0B0F17; --surface:#111826; --surface2:#1B2336; --border:#263043; --border-strong:#475569;
+  --fg:#F8FAFC; --muted:#94A3B8; --accent:#22C55E; --accent-fg:#0B0F17;
+  --info:#3B82F6; --warn:#F59E0B; --danger:#EF4444; --offline:#64748B;
+  --r-ctl:8px; --r-card:12px; --r-pill:999px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+button{cursor:pointer}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums}
+a{color:var(--info);text-decoration:none}
+
+/* ===== 预览切换器（非产品 UI，仅本静态稿用）===== */
+.preview-bar{position:fixed;left:0;right:0;bottom:0;z-index:99;display:flex;gap:6px;justify-content:center;
+  padding:10px;background:rgba(11,15,23,.85);backdrop-filter:blur(12px);border-top:1px solid var(--border)}
+.preview-bar button{border:1px solid var(--border);background:var(--surface);color:var(--muted);
+  padding:6px 14px;border-radius:var(--r-pill);font-size:12px}
+.preview-bar button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
+.page{display:none;min-height:100vh;padding-bottom:72px}
+.page.on{display:block}
+
+/* ===== 状态点 ===== */
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;margin-right:8px}
+.dot.on{background:var(--accent);animation:breathe 2s ease-in-out infinite}
+.dot.off{background:var(--offline)} .dot.warn{background:var(--warn)} .dot.err{background:var(--danger)}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.dot{animation:none}}
+
+/* ===== 登录页 ===== */
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
+.login-card{width:min(92vw,380px);background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+.brand-logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#22C55E,#0EA5E9);
+  display:flex;align-items:center;justify-content:center;color:#fff}
+.login-card h1{font-size:18px;margin:14px 0 4px}
+.login-card .sub{color:var(--muted);font-size:13px;margin:0 0 22px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+.field input{width:100%;padding:11px 12px;border-radius:var(--r-ctl);border:1px solid var(--border);
+  background:var(--bg);color:var(--fg);font-size:15px;outline:none;transition:border-color .15s}
+.field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(34,197,94,.15)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:var(--r-ctl);
+  font-size:14px;font-weight:600;padding:11px 18px;transition:filter .15s}
+.btn:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{filter:brightness(1.1)}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-ghost:hover{color:var(--fg);border-color:var(--border-strong)}
+.btn-sm{padding:7px 12px;font-size:13px}
+.btn-danger{background:transparent;color:var(--danger);border:1px solid rgba(239,68,68,.4)}
+.btn-danger:hover{background:rgba(239,68,68,.1)}
+.login-card .btn-primary{width:100%;margin-top:6px}
+.login-foot{margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--muted);text-align:center}
+.login-error{display:flex;gap:8px;align-items:center;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);
+  color:#FCA5A5;border-radius:var(--r-ctl);padding:9px 12px;font-size:13px;margin-bottom:14px}
+.lock-note{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px;margin-top:14px;justify-content:center}
+
+/* ===== 控制台外壳 ===== */
+.shell{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+.side{background:var(--surface);border-right:1px solid var(--border);padding:16px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
+.side .brand{padding:4px 8px 16px}
+.side nav{display:flex;flex-direction:column;gap:2px}
+.side nav a{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--r-ctl);
+  color:var(--muted);font-size:13.5px;font-weight:500}
+.side nav a svg{width:16px;height:16px;flex:none}
+.side nav a:hover{color:var(--fg);background:var(--surface2)}
+.side nav a.on{color:var(--fg);background:var(--surface2);box-shadow:inset 2px 0 0 var(--accent)}
+.side .foot{margin-top:auto;padding:10px 8px 0;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted)}
+.main{padding:24px 28px;max-width:1180px}
+.pagehead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
+.pagehead h1{font-size:20px;margin:0 0 2px}
+.pagehead .desc{color:var(--muted);font-size:13px}
+.liveness{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);
+  border:1px solid var(--border);border-radius:var(--r-pill);padding:5px 12px;background:var(--surface)}
+.liveness .dot{margin:0;width:7px;height:7px}
+
+/* ===== 卡片/网格 ===== */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card)}
+.grid{display:grid;gap:16px}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.kpi{padding:16px}
+.kpi .label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.kpi .value{font-size:28px;font-weight:600;margin-top:6px}
+.kpi .delta{font-size:12px;margin-top:4px}
+.split{grid-template-columns:2fr 1fr}
+@media (max-width:900px){.split{grid-template-columns:1fr}.shell{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;align-items:center;overflow-x:auto}.side nav{flex-direction:row}.side .foot{display:none}}
+
+/* ===== 表格 ===== */
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{font-size:12px;font-weight:500;color:var(--muted);text-align:left;padding:10px 16px;background:var(--surface2)}
+th:first-child{border-radius:8px 0 0 8px} th:last-child{border-radius:0 8px 8px 0}
+td{padding:11px 16px;border-top:1px solid var(--border)}
+tr:hover td{background:rgba(27,35,54,.5)}
+tr.row-off td{color:var(--offline)}
+tr.row-off .cell-sub{color:#5B6779}
+tr.row-off:hover td{background:rgba(27,35,54,.35)}
+.cell-main{font-weight:500}
+.cell-sub{font-size:12px;color:var(--muted);margin-top:1px}
+.right{ text-align:right}
+.tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;border-radius:var(--r-pill);
+  padding:3px 10px;border:1px solid var(--border);color:var(--muted)}
+.tag.ok{color:var(--accent);border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08)}
+.tag.warn{color:var(--warn);border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08)}
+.tag.off{color:var(--offline)}
+.revoked{text-decoration:line-through;color:var(--muted)}
+
+/* ===== 弹层（配对）===== */
+.overlay{position:fixed;inset:0;background:rgba(7,10,16,.6);backdrop-filter:blur(6px);
+  display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
+.modal{width:min(94vw,440px);background:var(--surface);border:1px solid var(--border-strong);
+  border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.modal header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
+.modal header h2{font-size:15px;margin:0}
+.modal .body{padding:20px}
+.pair-qr{display:flex;gap:20px;align-items:center}
+.pair-qr img{width:148px;height:148px;border-radius:12px;background:#fff;padding:8px;flex:none}
+.pair-code{font-size:24px;letter-spacing:5px;font-weight:600;background:var(--bg);
+  border:1px dashed var(--border-strong);border-radius:10px;padding:10px;text-align:center;margin-top:12px}
+.pair-url{font-size:11.5px;color:var(--muted);word-break:break-all;margin-top:8px}
+.pair-tips{margin-top:14px;font-size:12.5px;color:var(--muted);line-height:1.7}
+.pair-tips b{color:var(--fg);font-weight:500}
+.countdown{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn);margin-top:12px}
+.modal footer{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border)}
+
+/* ===== 图表（纯 CSS 柱状示意）===== */
+.bars{display:flex;align-items:flex-end;gap:4px;height:120px;padding:0 4px}
+.bars span{flex:1;background:linear-gradient(180deg,rgba(34,197,94,.9),rgba(34,197,94,.25));border-radius:3px 3px 0 0;min-height:2px}
+.bars span.b{background:linear-gradient(180deg,rgba(59,130,246,.85),rgba(59,130,246,.2))}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px}
+.legend i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:5px}
+
+/* ===== 审计时间线 ===== */
+.timeline{padding:6px 0}
+.tl-item{display:flex;gap:12px;padding:10px 16px;border-top:1px solid var(--border);font-size:13px}
+.tl-item:first-child{border-top:0}
+.tl-time{color:var(--muted);font-size:12px;width:120px;flex:none}
+.tl-badge{width:76px;flex:none;font-size:11px;border-radius:var(--r-pill);text-align:center;padding:2px 0}
+.tl-ok{background:rgba(34,197,94,.1);color:var(--accent)} .tl-fail{background:rgba(239,68,68,.1);color:var(--danger)}
+.tl-info{background:rgba(59,130,246,.1);color:var(--info)}
+.empty{padding:36px 16px;text-align:center;color:var(--muted);font-size:13px}
+.empty svg{width:28px;height:28px;opacity:.5;margin-bottom:8px}
+
+/* ===== 治理条 ===== */
+.gov-row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--border);font-size:13px}
+.gov-row:first-child{border-top:0}
+.meter{flex:1;height:6px;border-radius:3px;background:var(--surface2);overflow:hidden}
+.meter i{display:block;height:100%;border-radius:3px;background:var(--accent)}
+.meter i.w{background:var(--warn)}
+</style>
+</head>
+<body>
+
+<!-- ============ P1 登录页 ============ -->
+<section class="page on" id="p-login">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="brand"><div class="brand-logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </div><div style="font-weight:600">千寻中继</div></div>
+      <h1>登录控制台</h1>
+      <p class="sub">管理你的设备、实例与访问策略</p>
+      <div class="login-error" role="alert">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
+        用户名或密码不正确（剩余 4 次尝试）
+      </div>
+      <div class="field"><label for="u">用户名</label><input id="u" autocomplete="username" value="manager"></div>
+      <div class="field"><label for="p">密码</label><input id="p" type="password" autocomplete="current-password" value="········"></div>
+      <button class="btn btn-primary">登录</button>
+      <div class="lock-note">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 118 0v4"/></svg>
+        连续 5 次失败将锁定 15 分钟 · 密码由服务器 CLI 重置
+      </div>
+      <div class="login-foot">手机配对新设备？<a href="#">打开配对页 →</a></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ P2 仪表盘 ============ -->
+<section class="page" id="p-dash">
+ <div class="shell">
+  <aside class="side">
+    <div class="brand"><div class="brand-logo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div><div style="font-weight:600">千寻中继</div></div>
+    <nav>
+      <a class="on" href="#" onclick="return go('p-dash')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>仪表盘</a>
+      <a href="#" onclick="return go('p-inst')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="4" width="20" height="8" rx="1.5"/><rect x="2" y="14" width="20" height="6" rx="1.5"/><path d="M6 8h.01M6 17h.01"/></svg>实例</a>
+      <a href="#" onclick="return go('p-dev')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg>设备</a>
+      <a href="#" onclick="return go('p-audit')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>审计</a>
+      <a href="#" onclick="return go('p-gov')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V5M4 19h16"/><path d="M7 15l3-4 3 3 4-6"/></svg>治理</a>
+    </nav>
+    <div class="foot">
+      <div>v0.2.0 · 单节点</div>
+      <div style="margin-top:4px">agent.auto.iotim.com</div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="pagehead">
+      <div><h1>仪表盘</h1><div class="desc">全局健康一览——实例可达性、设备活跃与流量形态</div></div>
+      <div class="liveness"><span class="dot on"></span>live · 3s 自动刷新</div>
+    </div>
+    <div class="grid kpis">
+      <div class="card kpi"><div class="label"><span class="dot on"></span>在线实例</div>
+        <div class="value">2<span style="font-size:15px;color:var(--muted)"> / 3</span></div>
+        <div class="delta" style="color:var(--muted)">书房主机 · 笔记本在线；实验室离线 26 分钟</div></div>
+      <div class="card kpi"><div class="label">活跃设备（1h）</div>
+        <div class="value">2</div><div class="delta" style="color:var(--accent)">我的手机 · iPad mini</div></div>
+      <div class="card kpi"><div class="label">中转流量（24h）</div>
+        <div class="value">1.4<span style="font-size:15px;color:var(--muted)"> GiB</span></div>
+        <div class="delta" style="color:var(--muted)">interactive 61% · page 30% · bulk 9%</div></div>
+      <div class="card kpi"><div class="label">被限流请求（24h）</div>
+        <div class="value">37</div><div class="delta" style="color:var(--warn)">全部为 bulk 降级，interactive 0 次</div></div>
+    </div>
+    <div class="grid split" style="margin-top:16px">
+      <div class="card" style="padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div style="font-weight:600;font-size:14px">流量形态（近 24 小时 · 每小时）</div>
+          <div class="legend" style="margin:0"><span><i style="background:#22C55E"></i>interactive</span><span><i style="background:#3B82F6"></i>page/bulk</span></div>
+        </div>
+        <div class="bars">
+          <span style="height:30%"></span><span style="height:45%"></span><span class="b" style="height:20%"></span>
+          <span style="height:55%"></span><span style="height:70%"></span><span style="height:62%"></span>
+          <span class="b" style="height:35%"></span><span style="height:48%"></span><span style="height:85%"></span>
+          <span class="b" style="height:50%"></span><span style="height:66%"></span><span style="height:90%"></span>
+          <span style="height:74%"></span><span class="b" style="height:28%"></span><span style="height:52%"></span>
+          <span style="height:40%"></span><span class="b" style="height:18%"></span><span style="height:58%"></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px"><span>00:00</span><span>08:00</span><span>16:00</span><span>现在</span></div>
+      </div>
+      <div class="card" style="padding:16px">
+        <div style="font-weight:600;font-size:14px;margin-bottom:10px">最近事件</div>
+        <div class="timeline" style="padding:0">
+          <div class="tl-item"><span class="tl-time mono">19:42:05</span><span class="tl-badge tl-ok">配对</span><span>新设备「我的手机」已配对</span></div>
+          <div class="tl-item"><span class="tl-time mono">19:38:11</span><span class="tl-badge tl-fail">登录失败</span><span>IP 203.0.113.7 · 用户名错误</span></div>
+          <div class="tl-item"><span class="tl-time mono">19:01:44</span><span class="tl-badge tl-info">实例</span><span>实验室主机 下线（心跳超时）</span></div>
+          <div class="tl-item"><span class="tl-time mono">18:55:02</span><span class="tl-badge tl-ok">登录</span><span>manager 登录成功</span></div>
+        </div>
+        <a href="#" onclick="return go('p-audit')" style="font-size:12.5px">查看全部审计 →</a>
+      </div>
+    </div>
+  </main>
+ </div>
+</section>
+
+<!-- ============ P3 实例 ============ -->
+<section class="page" id="p-inst">
+ <div class="shell"><aside class="side"></aside><main class="main" style="grid-column:2">
+  <div class="pagehead">
+    <div><h1>实例</h1><div class="desc">跑着千寻桌面壳的 PC——主动出站连接，无需开防火墙端口</div></div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span class="liveness"><span class="dot on"></span>live · 3s</span>
+      <button class="btn btn-ghost btn-sm">＋ 预置实例</button>
+    </div>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th style="width:34%">实例</th><th>版本</th><th>连接</th><th class="right">流量（1h）</th><th class="right">治理</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td><div style="display:flex;align-items:center"><span class="dot on"></span><div><div class="cell-main">书房主机</div><div class="cell-sub mono">pc-f5692e40 · DESKTOP-CLTN8CB</div></div></div></td>
+          <td><div class="cell-main">0.9.2</div><div class="cell-sub">DSH 0.2.1</div></td>
+          <td><div class="cell-main">3 小时 12 分</div><div class="cell-sub mono">RetryManager · 退避 0.5s</div></td>
+          <td class="right mono">486 MiB</td>
+          <td class="right"><span class="tag ok">正常</span></td>
+          <td class="right"><button class="btn btn-ghost btn-sm">详情</button></td>
+        </tr>
+        <tr>
+          <td><div style="display:flex;align-items:center"><span class="dot on"></span><div><div class="cell-main">出差笔记本</div><div class="cell-sub mono">pc-a1b2c3d4 · LAPTOP-XPS</div></div></div></td>
+          <td><div class="cell-main">0.9.2</div><div class="cell-sub">DSH 0.2.1</div></td>
+          <td><div class="cell-main">26 分钟</div><div class="cell-sub mono">重连 2 次</div></td>
+          <td class="right mono">51 MiB</td>
+          <td class="right"><span class="tag warn">bulk 受限</span></td>
+          <td class="right"><button class="btn btn-ghost btn-sm">详情</button></td>
+        </tr>
+        <tr class="row-off">
+          <td><div style="display:flex;align-items:center"><span class="dot off"></span><div><div class="cell-main">实验室主机</div><div class="cell-sub mono">pc-99aa88bb · LAB-01</div></div></div></td>
+          <td><div class="cell-main">0.9.1</div><div class="cell-sub">DSH 0.2.0</div></td>
+          <td><div class="cell-main">离线</div><div class="cell-sub">最后在线 26 分钟前</div></td>
+          <td class="right mono">—</td>
+          <td class="right"><span class="tag off">离线</span></td>
+          <td class="right"><button class="btn btn-ghost btn-sm">详情</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="color:var(--muted);font-size:12.5px;margin-top:12px">预置实例后，在对应 PC 的千寻「远程 → 服务器」区块填入 ID 与凭据即可上线。</p>
+ </main></div>
+</section>
+
+<!-- ============ P4 设备 + 配对弹层 ============ -->
+<section class="page" id="p-dev">
+ <div class="shell"><aside class="side"></aside><main class="main" style="grid-column:2">
+  <div class="pagehead">
+    <div><h1>设备</h1><div class="desc">服务器级凭据——可访问你的全部实例，删除立即断开</div></div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span class="liveness"><span class="dot on"></span>live · 3s</span>
+      <button class="btn btn-primary btn-sm" onclick="pairOpen(true)">＋ 新增设备</button>
+    </div>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th style="width:30%">设备</th><th>配对时间</th><th>最后活跃</th><th>来源 IP</th><th></th></tr></thead>
+      <tbody>
+        <tr><td><div style="display:flex;align-items:center"><span class="dot on"></span><div><div class="cell-main">我的手机</div><div class="cell-sub mono">dev-3f2a · iPhone · Safari</div></div></div></td>
+          <td class="mono">10-09 19:42</td><td>刚刚</td><td class="mono">116.233.58.43</td>
+          <td class="right"><button class="btn btn-danger btn-sm">吊销</button></td></tr>
+        <tr><td><div style="display:flex;align-items:center"><span class="dot warn"></span><div><div class="cell-main">iPad mini</div><div class="cell-sub mono">dev-91cc · iPad · Safari</div></div></div></td>
+          <td class="mono">10-08 22:10</td><td>14 分钟前</td><td class="mono">116.233.58.43</td>
+          <td class="right"><button class="btn btn-danger btn-sm">吊销</button></td></tr>
+        <tr><td><div class="revoked" style="display:flex;align-items:center"><span class="dot off"></span><div><div class="cell-main revoked">旧手机</div><div class="cell-sub mono">dev-77d1</div></div></div></td>
+          <td class="mono">09-30 08:15</td><td>—</td><td class="mono">—</td>
+          <td class="right"><button class="btn btn-ghost btn-sm">彻底移除</button></td></tr>
+      </tbody>
+    </table>
+  </div>
+ </main></div>
+ <!-- 配对弹层 -->
+ <div class="overlay" id="pair-overlay" style="display:none" role="dialog" aria-modal="true" aria-label="新增设备配对">
+   <div class="modal">
+     <header><h2>新增设备</h2><button class="btn btn-ghost btn-sm" onclick="pairOpen(false)" aria-label="关闭">✕</button></header>
+     <div class="body">
+       <div class="pair-qr">
+         <img src="data:image/png;base64,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" alt="配对二维码：手机扫码打开配对页" width="148" height="148">
+         <div style="flex:1">
+           <div style="font-size:13px;color:var(--muted);line-height:1.8"><b style="color:var(--fg)">方式一</b>：手机扫码<br><b style="color:var(--fg)">方式二</b>：手机浏览器打开链接，输入配对码</div>
+           <div class="pair-code mono">E5D3F4CC5008</div>
+         </div>
+       </div>
+       <div class="pair-url mono">https://agent.auto.iotim.com/qx-pair?code=E5D3F4CC5008</div>
+       <div class="pair-tips">配对码 <b>5 分钟内一次性有效</b>；兑换成功后该设备获得独立凭据，可随时在此吊销。配对成功会在这里实时提示。</div>
+       <div class="countdown"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>有效期剩余 <span class="mono" id="cd">04:37</span></div>
+     </div>
+     <footer><button class="btn btn-ghost btn-sm" onclick="pairOpen(false)">稍后再说</button><button class="btn btn-primary btn-sm" onclick="pairOpen(false)">完成</button></footer>
+   </div>
+ </div>
+</section>
+
+<!-- ============ P5 审计 ============ -->
+<section class="page" id="p-audit">
+ <div class="shell"><aside class="side"></aside><main class="main" style="grid-column:2">
+  <div class="pagehead">
+    <div><h1>审计</h1><div class="desc">登录、配对、设备进出——全量留痕，不可篡改</div></div>
+    <div style="display:flex;gap:8px">
+      <select class="btn btn-ghost btn-sm" style="appearance:none"><option>全部事件</option><option>登录</option><option>配对</option><option>设备</option><option>实例</option></select>
+      <button class="btn btn-ghost btn-sm">导出 CSV</button>
+    </div>
+  </div>
+  <div class="card timeline">
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 19:42:05</span><span class="tl-badge tl-ok">pair.ok</span><span>新设备「我的手机」配对成功，来源 <span class="mono">116.233.58.43</span></span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 19:41:52</span><span class="tl-badge tl-ok">pair.create</span><span>manager 经控制台签发配对码</span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 19:38:11</span><span class="tl-badge tl-fail">login.fail</span><span>登录失败 · 用户名 <span class="mono">root</span> · 来源 <span class="mono">203.0.113.7</span></span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 19:38:07</span><span class="tl-badge tl-fail">login.fail</span><span>登录失败 · 用户名 <span class="mono">admin</span> · 来源 <span class="mono">203.0.113.7</span></span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 19:37:59</span><span class="tl-badge tl-fail">login.fail</span><span>登录失败 · 用户名 <span class="mono">test</span> · 来源 <span class="mono">203.0.113.7</span>（连续失败已达 3/5，触发速率告警）</span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 19:01:44</span><span class="tl-badge tl-info">instance</span><span>实验室主机 下线（心跳静默 60s）</span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 18:55:02</span><span class="tl-badge tl-ok">login.ok</span><span>manager 登录成功 · 来源 <span class="mono">116.233.58.43</span></span></div>
+    <div class="tl-item"><span class="tl-time mono">2026-10-09 18:54:20</span><span class="tl-badge tl-info">device.enter</span><span>iPad mini 建立会话（凭据换 Cookie）</span></div>
+  </div>
+ </main></div>
+</section>
+
+<!-- ============ P6 治理 ============ -->
+<section class="page" id="p-gov">
+ <div class="shell"><aside class="side"></aside><main class="main" style="grid-column:2">
+  <div class="pagehead">
+    <div><h1>治理</h1><div class="desc">三类流量的准入与整形——interactive 永不被牺牲，bulk 最先让路</div></div>
+    <span class="liveness"><span class="dot on"></span>live · 3s</span>
+  </div>
+  <div class="grid" style="grid-template-columns:1fr 1fr">
+    <div class="card">
+      <div style="padding:14px 16px;font-weight:600;font-size:14px;border-bottom:1px solid var(--border)">分类水位（当前）</div>
+      <div class="gov-row"><span style="width:96px;flex:none;color:var(--muted)">interactive</span><div class="meter"><i style="width:24%"></i></div><span class="mono" style="flex:none">4 / 16</span></div>
+      <div class="gov-row"><span style="width:96px;flex:none;color:var(--muted)">page</span><div class="meter"><i class="w" style="width:68%"></i></div><span class="mono" style="flex:none">27 / 40</span></div>
+      <div class="gov-row"><span style="width:96px;flex:none;color:var(--muted)">bulk 并发</span><div class="meter"><i style="width:100%"></i></div><span class="mono" style="flex:none">2 / 2</span></div>
+      <div class="gov-row"><span style="width:96px;flex:none;color:var(--muted)">带宽/实例</span><div class="meter"><i style="width:41%"></i></div><span class="mono" style="flex:none">0.8 / 2 MiB/s</span></div>
+      <div class="gov-row"><span style="width:96px;flex:none;color:var(--muted)">带宽/全局</span><div class="meter"><i class="w" style="width:72%"></i></div><span class="mono" style="flex:none">2.9 / 4 MiB/s</span></div>
+    </div>
+    <div class="card">
+      <div style="padding:14px 16px;font-weight:600;font-size:14px;border-bottom:1px solid var(--border)">降级序（压力时）</div>
+      <div style="padding:16px;font-size:13px;color:var(--muted);line-height:2">
+        <div><span class="tag off">1</span> &nbsp;bulk → 503 + Retry-After（最先让路）</div>
+        <div><span class="tag warn">2</span> &nbsp;page → 令牌桶排队 ≤1s，超时 503</div>
+        <div><span class="tag ok">3</span> &nbsp;interactive → <b style="color:var(--fg)">永不主动断开</b>（SSE/WS 会话优先）</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">压力解除自动恢复，无需人工干预。</div>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px;padding:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-weight:600;font-size:14px">24 小时 · 按实例×类</div>
+      <button class="btn btn-ghost btn-sm">查看 /metrics</button>
+    </div>
+    <table>
+      <thead><tr><th>实例</th><th>interactive 放行</th><th>page 放行</th><th>bulk 放行</th><th>被限流</th><th class="right">字节</th></tr></thead>
+      <tbody>
+        <tr><td class="cell-main">书房主机</td><td class="mono">1,204</td><td class="mono">8,455</td><td class="mono">63</td><td class="mono" style="color:var(--warn)">21</td><td class="right mono">486 MiB</td></tr>
+        <tr><td class="cell-main">出差笔记本</td><td class="mono">312</td><td class="mono">1,982</td><td class="mono">14</td><td class="mono" style="color:var(--warn)">16</td><td class="right mono">51 MiB</td></tr>
+      </tbody>
+    </table>
+  </div>
+ </main></div>
+</section>
+
+<script>
+function go(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  document.getElementById(id).classList.add('on');
+  document.querySelectorAll('.preview-bar button').forEach(b=>b.classList.toggle('on', b.dataset.target===id));
+  window.scrollTo(0,0); return false;
+}
+function pairOpen(open){document.getElementById('pair-overlay').style.display=open?'flex':'none';}
+document.querySelectorAll('.preview-bar button').forEach(b=>b.addEventListener('click',()=>go(b.dataset.target)));
+</script>
+
+<div class="preview-bar" role="navigation" aria-label="预览页面切换">
+  <button class="on" data-target="p-login">登录页</button>
+  <button data-target="p-dash">仪表盘</button>
+  <button data-target="p-inst">实例</button>
+  <button data-target="p-dev">设备（含配对弹层）</button>
+  <button data-target="p-audit">审计</button>
+  <button data-target="p-gov">治理</button>
+</div>
+</body>
+</html>
