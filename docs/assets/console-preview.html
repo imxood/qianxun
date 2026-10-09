@@ -405,17 +405,6 @@ tr.row-off:hover td{background:rgba(27,35,54,.35)}
  </main></div>
 </section>
 
-<script>
-function go(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
-  document.getElementById(id).classList.add('on');
-  document.querySelectorAll('.preview-bar button').forEach(b=>b.classList.toggle('on', b.dataset.target===id));
-  window.scrollTo(0,0); return false;
-}
-function pairOpen(open){document.getElementById('pair-overlay').style.display=open?'flex':'none';}
-document.querySelectorAll('.preview-bar button').forEach(b=>b.addEventListener('click',()=>go(b.dataset.target)));
-</script>
-
 <div class="preview-bar" role="navigation" aria-label="预览页面切换">
   <button class="on" data-target="p-login">登录页</button>
   <button data-target="p-dash">仪表盘</button>
@@ -426,3 +415,14 @@ document.querySelectorAll('.preview-bar button').forEach(b=>b.addEventListener('
 </div>
 </body>
 </html>
+
+<script>
+function go(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  document.getElementById(id).classList.add('on');
+  document.querySelectorAll('.preview-bar button').forEach(b=>b.classList.toggle('on', b.dataset.target===id));
+  window.scrollTo(0,0); return false;
+}
+function pairOpen(open){document.getElementById('pair-overlay').style.display=open?'flex':'none';}
+document.querySelectorAll('.preview-bar button').forEach(b=>b.addEventListener('click',()=>go(b.dataset.target)));
+</script>
