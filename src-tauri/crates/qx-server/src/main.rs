@@ -35,7 +35,8 @@ fn print_usage() {
   qx-server admin import-device   --data DIR --name NAME [--token TOKEN]
   qx-server admin add-user        --data DIR --name NAME [--password PASS]
   qx-server admin list-users      --data DIR
-  qx-server admin reset-password  --data DIR --name NAME [--password PASS]",
+  qx-server admin reset-password  --data DIR --name NAME [--password PASS]
+  qx-server admin rename-user     --data DIR --from OLD --to NEW",
         qx_server::version()
     );
 }
@@ -276,6 +277,27 @@ fn run_admin(args: &[String]) -> i32 {
                 Ok(()) => {
                     println!("新 password = {password}（旧会话已全部吊销）");
                     0
+                }
+                Err(cause) => {
+                    eprintln!("{cause}");
+                    1
+                }
+            }
+        }
+        "rename-user" => {
+            let (Some(old), Some(new)) = (flag_value(rest, "--from"), flag_value(rest, "--to"))
+            else {
+                eprintln!("--from 与 --to 均必填");
+                return 2;
+            };
+            match db.rename_user(&old, &new) {
+                Ok(()) => {
+                    println!("{old} 已改名为 {new}（行 id 未变，已有会话继续有效）");
+                    0
+                }
+                Err(cause) if cause == "unknown_user" => {
+                    eprintln!("没有叫 {old} 的用户");
+                    1
                 }
                 Err(cause) => {
                     eprintln!("{cause}");

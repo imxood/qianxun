@@ -823,6 +823,30 @@ impl Db {
         Ok(())
     }
 
+    /// 改名。行 id 不变，所以**已有会话不失效**——改的是登录名，不是身份。
+    /// 用改名而不是「删了重建」：删了重建会换一个 user id，
+    /// 登录记录（audit 里带 user 的那些）也就对不上人了。
+    pub fn rename_user(&self, old: &str, new: &str) -> Result<(), String> {
+        let conn = self.lock();
+        let updated = conn
+            .execute(
+                "UPDATE users SET name = ?2 WHERE name = ?1",
+                params![old, new],
+            )
+            .map_err(|e| {
+                // users.name 上有 UNIQUE，重名要走人话而不是 SQLITE_CONSTRAINT。
+                if e.to_string().contains("UNIQUE") {
+                    format!("用户 {new} 已存在")
+                } else {
+                    e.to_string()
+                }
+            })?;
+        if updated == 0 {
+            return Err("unknown_user".into());
+        }
+        Ok(())
+    }
+
     /// 校验用户名+密码（argon2 verify；用户不存在也做一次哑校验防时序探测）。
     pub fn verify_login(&self, name: &str, password: &str) -> Option<String> {
         let row: Option<(String, String)> = {
@@ -988,6 +1012,45 @@ mod tests {
         db.reset_password("admin", "new-password").expect("改密");
         assert_eq!(db.validate_session(&session2), None);
         assert!(db.verify_login("admin", "new-password").is_some());
+    }
+
+    #[test]
+    fn 改名换的是登录名不是身份() {
+        let db = db();
+        let id = db.add_user("manager", "old-password").expect("预置");
+        let user_id = db.verify_login("manager", "old-password").expect("登录");
+        assert_eq!(id, user_id);
+        let session = db.create_session(&user_id, "127.0.0.1");
+
+        db.rename_user("manager", "maxu").expect("改名");
+
+        // 登录名换了，密码没换：旧名字登不进去，新名字进得去。
+        assert!(db.verify_login("manager", "old-password").is_none());
+        assert!(db.verify_login("maxu", "old-password").is_some());
+        // 行 id 没动，所以已登录的会话继续有效——这是「改名」与「删了重建」的关键差别。
+        assert_eq!(db.validate_session(&session), Some(user_id));
+        assert_eq!(db.users().len(), 1);
+        assert_eq!(db.users()[0].0, id, "行 id 不该变");
+    }
+
+    #[test]
+    fn 改名的两种失败都说人话() {
+        let db = db();
+        db.add_user("manager", "p").expect("预置");
+        db.add_user("maxu", "p").expect("预置");
+
+        // 重名：撞 users.name 的 UNIQUE，但对外不能甩一句 SQLITE_CONSTRAINT。
+        let clash = db.rename_user("manager", "maxu").expect_err("重名应失败");
+        assert!(clash.contains("已存在"), "实际是：{clash}");
+        // 源用户不存在。
+        assert_eq!(
+            db.rename_user("ghost", "who")
+                .expect_err("应为 unknown_user"),
+            "unknown_user"
+        );
+        // 两次失败都没把行弄乱。
+        let names: Vec<String> = db.users().into_iter().map(|(_, name, _)| name).collect();
+        assert_eq!(names, vec!["manager".to_string(), "maxu".to_string()]);
     }
 
     #[test]
