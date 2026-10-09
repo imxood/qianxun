@@ -72,8 +72,13 @@ struct Edge {
 }
 
 async fn start_edge() -> Edge {
+    start_edge_with(Duration::from_secs(60)).await
+}
+
+/// 起一条回环边缘，静默窗口由调用方指定（毫秒级，便于测心跳续期）。
+async fn start_edge_with(silence: Duration) -> Edge {
     let db = Arc::new(Db::open_in_memory().expect("内存库"));
-    let hub = Hub::new(db.clone(), GovConfig::default());
+    let hub = Hub::with_silence(db.clone(), GovConfig::default(), silence);
     let state = Arc::new(EdgeState {
         hub,
         public_host: PUBLIC_HOST.into(),
@@ -556,6 +561,93 @@ async fn 实例离线返回502() {
         StatusCode::BAD_GATEWAY,
         "cookie 指向未连接实例 → 502"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 心跳续期_有心跳的实例不该被踢() {
+    // 静默窗口 300ms，心跳每 100ms 一个（窗口的 1/3），总共跑 4 倍窗口。
+    //
+    // 回归的是这么个 bug：静默判定原先写成一个固定 ticker，每 60s 无条件
+    // 断链且从不因收到帧而续期，于是心跳再勤也照样整分钟掉一次线，
+    // 线上表现为实例在控制台 1/1 与 0/1 之间来回跳。
+    let silence = Duration::from_millis(300);
+    let edge = start_edge_with(silence).await;
+    let token = register_instance(&edge.db, "i-hb", "心跳机").await;
+    let mut instance = fake_instance(&edge, "i-hb", "心跳机", &token, None).await;
+
+    // 先吃掉 welcome。
+    match tokio::time::timeout(silence, instance.ctrl_rx.recv())
+        .await
+        .expect("welcome 不该超时")
+    {
+        Some(Frame::Welcome { .. }) => {}
+        other => panic!("第一帧应是 welcome，实际 {other:?}"),
+    }
+
+    let beat = silence / 3;
+    let mut beats = 0usize;
+    let deadline = tokio::time::Instant::now() + silence * 4;
+    while tokio::time::Instant::now() < deadline {
+        instance.ctrl_tx.send(Frame::Ping).await.expect("发心跳");
+        beats += 1;
+        match tokio::time::timeout(beat * 3, instance.ctrl_rx.recv()).await {
+            Ok(Some(Frame::Pong)) => {}
+            Ok(Some(Frame::Welcome { .. })) => {}
+            // 控制通道被关 = 服务端主动踢了这条连接，正是那个 bug 的表现。
+            Ok(Some(other)) => panic!("第 {beats} 轮收到意外帧：{other:?}"),
+            Ok(None) => panic!("第 {beats} 个心跳前连接就被踢了：静默续期没生效"),
+            Err(_) => panic!("第 {beats} 个心跳没等到 pong：链路已经断了"),
+        }
+    }
+
+    assert!(beats >= 8, "心跳次数太少，没覆盖住窗口：{beats}");
+    let fleet = edge.state.hub.fleet();
+    assert!(
+        fleet.iter().any(|i| i.id == "i-hb" && i.online),
+        "有心跳的实例应仍然在线，实际 {fleet:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 静默超时_不心跳的实例会被踢() {
+    // 与上一个测试配对：确认续期不是把超时整个关掉了——
+    // 真的一直不说话，窗口一过照样得断。
+    let silence = Duration::from_millis(300);
+    let edge = start_edge_with(silence).await;
+    let token = register_instance(&edge.db, "i-quiet", "哑巴机").await;
+    let mut instance = fake_instance(&edge, "i-quiet", "哑巴机", &token, None).await;
+
+    let _ = tokio::time::timeout(silence, instance.ctrl_rx.recv())
+        .await
+        .expect("welcome 不该超时");
+
+    // 一个窗口之后就该被清理掉。
+    let start = tokio::time::Instant::now();
+    match tokio::time::timeout(silence * 6, instance.ctrl_rx.recv()).await {
+        Ok(Some(Frame::Welcome { .. })) => panic!("还在发帧"),
+        Ok(_) | Err(_) => {}
+    }
+    assert!(
+        start.elapsed() >= silence,
+        "踢得太早：{:?}ms 窗口却 {:?}ms 就断了",
+        silence.as_millis(),
+        start.elapsed().as_millis()
+    );
+
+    // 等 hub 完成注销。
+    for _ in 0..40 {
+        if !edge
+            .state
+            .hub
+            .fleet()
+            .iter()
+            .any(|i| i.id == "i-quiet" && i.online)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("静默超时后实例仍挂在 hub 上");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

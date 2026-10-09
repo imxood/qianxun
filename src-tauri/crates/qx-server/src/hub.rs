@@ -38,6 +38,9 @@ pub struct Hub {
     db: Arc<Db>,
     gov: Arc<Governance>,
     inner: Mutex<HubInner>,
+    /// 静默判定窗口。抽成字段是为了让测试能用毫秒级窗口验证续期语义，
+    /// 而不必让整个测试套件跑满 60s。
+    heartbeat_silence: Duration,
 }
 
 struct HubInner {
@@ -54,6 +57,11 @@ pub enum OpenError {
 
 impl Hub {
     pub fn new(db: Arc<Db>, gov_config: GovConfig) -> Arc<Self> {
+        Self::with_silence(db, gov_config, HEARTBEAT_SILENCE)
+    }
+
+    /// 测试用：把静默窗口调成毫秒级，免得整条会话都要跑满 60s。
+    pub fn with_silence(db: Arc<Db>, gov_config: GovConfig, window: Duration) -> Arc<Self> {
         Arc::new(Self {
             db,
             gov: Governance::new(gov_config),
@@ -61,6 +69,7 @@ impl Hub {
                 online: HashMap::new(),
                 generation: 0,
             }),
+            heartbeat_silence: window,
         })
     }
 
@@ -298,16 +307,24 @@ pub async fn run_instance_session(hub: Arc<Hub>, channels: TunnelChannels) {
         .await;
 
     // 3) 会话循环。
-    let mut silence = tokio::time::interval(HEARTBEAT_SILENCE);
-    silence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    silence.tick().await; // interval 首个 tick 立即完成，跳过后再进入 select。
+    //
+    // 静默判定的是「距上一次收到任何帧多久」，不是「连了多久」。
+    // 这里每轮循环重建一个 timeout，续期就自然发生了；早先写成一个
+    // 60s 固定 ticker（`silence.tick()`，且从不 reset），于是无论有没有
+    // 流量都在整 60s 处断链——心跳每 20s 照发也救不回来，实测线上实例
+    // 稳定地每分钟掉线一次、概览页在 1/1 与 0/1 之间来回跳。
+    let silence = hub.heartbeat_silence;
     loop {
         tokio::select! {
             // 抢占击杀：被新连接替换时立即退出。
             () = kill.notified() => break,
-            frame = ctrl_rx.recv() => {
-                let Some(frame) = frame else { break };
+            frame = tokio::time::timeout(silence, ctrl_rx.recv()) => {
                 match frame {
+                    // 真静默：整整一个 HEARTBEAT_SILENCE 没有任何帧。
+                    Err(_elapsed) => break,
+                    // 控制通道关闭。
+                    Ok(None) => break,
+                    Ok(Some(frame)) => match frame {
                     Frame::Ping => {
                         if ctrl_tx.send(Frame::Pong).await.is_err() {
                             break;
@@ -348,6 +365,7 @@ pub async fn run_instance_session(hub: Arc<Hub>, channels: TunnelChannels) {
                     // 其余帧（device 侧/未用）忽略：向前兼容。
                     _ => {}
                 }
+                }
             }
             stream = connection.next_stream() => {
                 match stream {
@@ -356,7 +374,6 @@ pub async fn run_instance_session(hub: Arc<Hub>, channels: TunnelChannels) {
                     Err(_cause) => break,
                 }
             }
-            _ = silence.tick() => break,
         }
     }
 
