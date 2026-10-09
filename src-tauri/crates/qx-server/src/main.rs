@@ -126,6 +126,11 @@ fn run_serve(args: &[String]) -> i32 {
             return 1;
         }
     };
+    // 没嵌进前端要在启动日志里说，而不是让人对着一个空控制台找原因
+    // （/qx-pair 与 /qx-fleet 不受影响，它们是手写零构建页）。
+    if !qx_server::assets::embedded() {
+        eprintln!("注意：控制台资产未嵌入，/console 与 /login 返回 503；请先 `pnpm build:console` 再重编译 qx-server");
+    }
     runtime.block_on(async move {
         let listener = match tokio::net::TcpListener::bind(flags.bind).await {
             Ok(listener) => listener,

@@ -11,11 +11,16 @@ export default tseslint.config(
       'node_modules/',
       // agent 探针/临时脚本（AGENTS 约定：.tmp 不入门禁、可随时清空）。
       '.tmp/',
+      // 各子包自己的 .tmp/（同样的约定，不只仓库根有）。
+      '**/.tmp/',
       'src-tauri/target/',
       'src-tauri/gen/',
       'src-tauri/src/',
       // 内置联网搜索包：自带 biome 工具链与独立测试，不并外壳 lint。
       'packages/websearch/',
+      // 控制台构建产物（内嵌进 qx-server 二进制，不是源码）。
+      'packages/console-web/dist/',
+      'packages/console-web/dist-gz/',
       // Android 构建产物与生成物（RN 模板生成）：非外壳源码，不 lint。
       'mobile/android/build/',
       'mobile/android/.gradle/',
@@ -53,6 +58,13 @@ export default tseslint.config(
     // DSH Host 插件跑在宿主 Node 进程里（fetch/process 等 Node 全局合法），
     // 与外壳（WebView/browser globals）分区声明。
     files: ['plugins/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
+    // 子包里的构建脚本（跑在 Node 里的 .mjs）：fs/spawnSync/process 合法。
+    files: ['packages/*/scripts/**/*.mjs'],
     languageOptions: {
       globals: { ...globals.node },
     },

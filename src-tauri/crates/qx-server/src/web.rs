@@ -120,14 +120,36 @@ pub fn router(state: Arc<EdgeState>) -> Router {
         .route("/qx-fleet", get(fleet_page))
         .route("/api/fleet", get(fleet_api))
         // ---- 管理面（/console，预置用户登录，docs/19 v5.5）----
-        .route("/login", get(login_page))
-        .route("/console", get(console_page))
+        // 壳与静态产物由内嵌资产提供（docs/20 §7.4）；/qx-pair 永久零构建。
+        .route("/login", get(crate::assets::serve_index))
+        .route("/console", get(crate::assets::serve_index))
+        .route("/console/", get(crate::assets::serve_index))
+        .route("/console/assets/{*path}", get(crate::assets::serve_asset))
         .route("/console/api/login", post(console_login))
         .route("/console/api/logout", post(console_logout))
         .route("/console/api/me", get(console_me))
+        .route("/console/api/overview", get(console_overview))
+        .route("/console/api/audit", get(console_audit))
+        .route("/console/api/audit.csv", get(console_audit_csv))
         .route("/console/api/devices", get(console_devices))
         .route("/console/api/devices/pair", post(console_pair_issue))
-        .route("/console/api/devices/revoke", post(console_device_revoke))
+        .route("/console/api/devices/pair/status", get(console_pair_status))
+        .route(
+            "/console/api/devices/revoke-all",
+            post(console_device_revoke_all),
+        )
+        .route(
+            "/console/api/devices/{id}/revoke",
+            post(console_device_revoke),
+        )
+        .route(
+            "/console/api/devices/{id}/restore",
+            post(console_device_restore),
+        )
+        .route(
+            "/console/api/devices/{id}/rotate",
+            post(console_device_rotate),
+        )
         .route("/console/api/fleet", get(console_fleet))
         .route("/i/{iid}", get(instance_entry))
         .route("/i/{iid}/", get(instance_entry))
@@ -137,12 +159,51 @@ pub fn router(state: Arc<EdgeState>) -> Router {
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<EdgeState>) -> Result<(), String> {
+    let flusher = state.clone();
+    let service = router(state);
     axum::serve(
         listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        service.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        spawn_metrics_flusher(flusher);
+        futures_util::future::pending::<()>().await
+    })
     .await
     .map_err(|cause| cause.to_string())
+}
+
+/// 计量落库节奏（docs/20 §4.3）。热路径只往内存里累加，这里每分钟搬一次到
+/// SQLite 小时桶——单连接互斥的库里，让每个反代请求写一行会直接变成瓶颈。
+/// 进程退出时未落库的计量随内存一起丢：24h 图表少最后一分钟不影响判断。
+fn spawn_metrics_flusher(state: Arc<EdgeState>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        ticker.tick().await; // 第一次立即返回：不必先空等一分钟。
+        loop {
+            ticker.tick().await;
+            let pending = state.hub.governance().drain_pending();
+            if pending.is_empty() {
+                continue;
+            }
+            let bucket = hour_bucket(crate::db::unix_now());
+            let rows: Vec<crate::db::MetricRow> = pending
+                .into_iter()
+                .map(|item| crate::db::MetricRow {
+                    bucket,
+                    instance_id: item.instance,
+                    device_id: item.device.unwrap_or_else(|| "-".to_owned()),
+                    class: item.class.as_str().to_owned(),
+                    bytes: item.bytes,
+                    rejected: item.rejected,
+                    shed: item.shed,
+                })
+                .collect();
+            if let Err(cause) = state.hub.db().flush_metrics(&rows) {
+                eprintln!("计量落库失败（{cause}）——本分钟计量丢失");
+            }
+        }
+    });
 }
 
 // ---- 基础 ----
@@ -494,26 +555,76 @@ async fn console_me(State(state): State<Arc<EdgeState>>, headers: HeaderMap) -> 
     }
 }
 
+/// 小时桶起点（本地时区的自然小时，对齐 SQLite 里的 bucket 列）。
+fn hour_bucket(at: i64) -> i64 {
+    at.div_euclid(3600) * 3600
+}
+
+/// 设备页一次给全（docs/20 §4.2 的「一个事实只出现一次」）：会话、24h 流量、
+/// 占配额、凭据都在这一个响应里——3 秒轮询下拆成多个端点没有理由。
 async fn console_devices(State(state): State<Arc<EdgeState>>, headers: HeaderMap) -> Response {
     if session_auth(&state, &headers).is_none() {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
-    let devices: Vec<serde_json::Value> = state
+    let db = state.hub.db();
+    let since_bucket = hour_bucket(crate::db::unix_now() - 24 * 3600);
+    let total: i64 = db.device_bytes_24h(since_bucket).values().sum();
+    let fleet: std::collections::HashMap<String, String> = state
         .hub
-        .db()
-        .devices()
+        .fleet()
+        .into_iter()
+        .map(|item| (item.id, item.name))
+        .collect();
+    let live = state.hub.governance().live_sessions();
+
+    let devices: Vec<serde_json::Value> = db
+        .device_rows()
         .into_iter()
         .map(|row| {
+            // 桶形：24 项按「距今第几小时」摆位，缺桶补 0（不跳格）。
+            let shape = dense_24(&db.device_traffic_24h(&row.id, since_bucket), since_bucket);
+            let bytes24h: i64 = shape.iter().sum();
+            let sessions: Vec<serde_json::Value> = live
+                .iter()
+                .filter(|session| session.device.as_deref() == Some(row.id.as_str()))
+                .map(|session| {
+                    json!({
+                        "instanceId": session.instance,
+                        "instanceName": fleet.get(&session.instance).cloned().unwrap_or_else(|| session.instance.clone()),
+                        "class": session.class.as_str(),
+                        "seconds": session.seconds,
+                        "bytesPerSec": session.bytes.checked_div(session.seconds.max(1)).unwrap_or(0),
+                    })
+                })
+                .collect();
             json!({
                 "id": row.id,
                 "name": row.name,
                 "createdAt": row.created_at,
                 "lastSeenAt": row.last_seen_at,
                 "revoked": row.revoked,
+                "lastIp": row.last_ip,
+                "bytes24h": bytes24h,
+                "share": if total > 0 { bytes24h as f64 / total as f64 } else { 0.0 },
+                "shape": shape,
+                "sessions": sessions,
+                "credential": {
+                    "hint": row.credential_hint.unwrap_or_else(|| "—".to_owned()),
+                    "issuedAt": row.credential_issued_at,
+                    "expiresAt": row.credential_expires_at,
+                },
             })
         })
         .collect();
     Json(json!({ "devices": devices })).into_response()
+}
+
+/// 把稀疏的 (bucket, bytes) 摊成连续 24 根柱子（从旧到新）。
+fn dense_24(rows: &[(i64, i64)], since_bucket: i64) -> Vec<i64> {
+    let mut map: std::collections::HashMap<i64, i64> = rows.iter().copied().collect();
+    (0..24)
+        .map(|offset| map.remove(&(since_bucket + offset * 3600)).unwrap_or(0))
+        .collect()
 }
 
 async fn console_pair_issue(State(state): State<Arc<EdgeState>>, headers: HeaderMap) -> Response {
@@ -522,10 +633,7 @@ async fn console_pair_issue(State(state): State<Arc<EdgeState>>, headers: Header
     }
     match state.hub.db().create_pair_code("console") {
         Ok((code, expires_at)) => {
-            state
-                .hub
-                .db()
-                .audit("pair.console_create", None, None, "{}");
+            // 审计由 create_pair_code 自己写（detail 带 via=console），路由不再补一条。
             let pair_url = format!(
                 "{}://{}/qx-pair?code={code}",
                 state.public_proto, state.public_host
@@ -537,25 +645,107 @@ async fn console_pair_issue(State(state): State<Arc<EdgeState>>, headers: Header
     }
 }
 
-async fn console_device_revoke(
+/// 配对弹层的状态机（docs/20 §4.4）：pending → used → expired 全部由库里那
+/// 一条码记录推导，前端不自己猜——重开页面也不会判错。
+async fn console_pair_status(
     State(state): State<Arc<EdgeState>>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     if session_auth(&state, &headers).is_none() {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
-    let Some(device_id) = body.get("deviceId").and_then(|value| value.as_str()) else {
-        return (StatusCode::BAD_REQUEST, "deviceId 必填").into_response();
+    let Some(code) = params.get("code").map(String::as_str) else {
+        return (StatusCode::BAD_REQUEST, "code 必填").into_response();
     };
-    if state.hub.db().revoke_device(device_id).is_err() {
-        return (StatusCode::NOT_FOUND, "设备不存在").into_response();
+    use crate::db::PairState;
+    let body = match state.hub.db().pair_state(code) {
+        PairState::Pending { expires_at } => json!({
+            "status": "pending",
+            "deviceName": serde_json::Value::Null,
+            "expiresAt": expires_at,
+        }),
+        PairState::Used { device_name } => json!({
+            "status": "used",
+            "deviceName": device_name,
+            "expiresAt": crate::db::unix_now(),
+        }),
+        PairState::Expired => json!({
+            "status": "expired",
+            "deviceName": serde_json::Value::Null,
+            "expiresAt": crate::db::unix_now(),
+        }),
+        PairState::Unknown => {
+            return (StatusCode::NOT_FOUND, "配对码不存在").into_response();
+        }
+    };
+    Json(body).into_response()
+}
+
+/// 吊销单台设备。只翻标志位，因此「撤销」在实现上成立（docs/20 §4.4）。
+async fn console_device_revoke(
+    State(state): State<Arc<EdgeState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
-    state
-        .hub
-        .db()
-        .audit("device.console_revoke", None, Some(device_id), "{}");
-    Json(json!({ "ok": true })).into_response()
+    match state.hub.db().revoke_device(&id, "console") {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(cause) => (StatusCode::NOT_FOUND, cause).into_response(),
+    }
+}
+
+/// 恢复设备（撤销的逆操作，语义上同一个标志位）。
+async fn console_device_restore(
+    State(state): State<Arc<EdgeState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    match state.hub.db().restore_device(&id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(cause) => (StatusCode::NOT_FOUND, cause).into_response(),
+    }
+}
+
+/// 批量吊销：不可撤销，所以前端不给撤销按钮，只给红色常驻条（docs/20 §4.10）。
+async fn console_device_revoke_all(
+    State(state): State<Arc<EdgeState>>,
+    headers: HeaderMap,
+) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    match state.hub.db().revoke_all_devices() {
+        Ok(revoked) => Json(json!({ "revoked": revoked })).into_response(),
+        Err(cause) => (StatusCode::INTERNAL_SERVER_ERROR, cause).into_response(),
+    }
+}
+
+/// 轮换设备凭据：新明文只在这里回一次，库里仍只存哈希。
+async fn console_device_rotate(
+    State(state): State<Arc<EdgeState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    match state.hub.db().rotate_device_token(&id) {
+        Ok((token, issued_at, expires_at)) => Json(json!({
+            // token 只此一次可见：前端展示后就不再有第二次机会。
+            "token": token,
+            "hint": crate::db::credential_hint(&token),
+            "issuedAt": issued_at,
+            "expiresAt": expires_at,
+        }))
+        .into_response(),
+        Err(cause) => (StatusCode::NOT_FOUND, cause).into_response(),
+    }
 }
 
 async fn console_fleet(State(state): State<Arc<EdgeState>>, headers: HeaderMap) -> Response {
@@ -565,12 +755,228 @@ async fn console_fleet(State(state): State<Arc<EdgeState>>, headers: HeaderMap) 
     Json(json!({ "instances": state.hub.fleet() })).into_response()
 }
 
-async fn login_page() -> Response {
-    axum::response::Html(LOGIN_HTML).into_response()
+/// 概览一页（docs/20 §4.3）：KPI、水位、实例表、24h 流量形状。
+async fn console_overview(State(state): State<Arc<EdgeState>>, headers: HeaderMap) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    let db = state.hub.db();
+    let now = crate::db::unix_now();
+    let since_bucket = hour_bucket(now - 24 * 3600);
+    let fleet = state.hub.fleet();
+    let levels = state.hub.governance().snapshot_levels();
+    let buckets = db.traffic_buckets(since_bucket);
+    let (throttled, interactive_throttled) = db.throttle_24h(since_bucket);
+
+    let mut interactive = vec![0i64; 24];
+    let mut other = vec![0i64; 24];
+    for (bucket, interactive_bytes, other_bytes) in buckets {
+        let offset = ((bucket - since_bucket) / 3600) as usize;
+        if offset < 24 {
+            interactive[offset] = interactive_bytes;
+            other[offset] = other_bytes;
+        }
+    }
+    let bytes24h: i64 = interactive.iter().sum::<i64>() + other.iter().sum::<i64>();
+    let live = state.hub.governance().live_sessions();
+    let instances: Vec<serde_json::Value> = fleet
+        .iter()
+        .map(|item| {
+            let level = levels.iter().find(|level| level.instance == item.id);
+            // 设备关联来自在途会话：这台实例此刻正被哪些设备用着。
+            let mut ids: Vec<String> = live
+                .iter()
+                .filter(|session| session.instance == item.id)
+                .filter_map(|session| session.device.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            json!({
+                "id": item.id,
+                "name": item.name,
+                "online": item.online,
+                "version": serde_json::Value::Null,
+                "connectedFor": serde_json::Value::Null,
+                "devices": ids,
+                "bytes1h": db.instance_bytes_1h(&item.id, hour_bucket(now)),
+                "status": match (item.online, level) {
+                    (false, _) => "offline",
+                    // 有在途 bulk 或带宽桶快见底 = 「受限」（docs/20 §4.3）。
+                    (true, Some(level)) if level.bulk > 0 || level.bw < 0.2 => "limited",
+                    _ => "ok",
+                },
+            })
+        })
+        .collect();
+
+    let caps = state.hub.governance().caps();
+    let waterline = json!({
+        "interactive": {
+            "level": levels.iter().map(|level| level.interactive).sum::<usize>(),
+            "cap": caps.interactive,
+        },
+        "page": {
+            "level": levels.iter().map(|level| level.page).sum::<usize>(),
+            "cap": caps.page,
+        },
+        "bulk": {
+            "level": levels.iter().map(|level| level.bulk).sum::<usize>(),
+            "cap": caps.bulk,
+        },
+        "bandwidth": {
+            // 带宽用「已用百分比」而不是字节：M2 没有时间序列的字节语义，
+            // 但桶的余量是实时事实（docs/20 §4.3）。
+            "level": (levels
+                .iter()
+                .map(|level| 1.0 - level.bw)
+                .fold(0.0f64, f64::max) * 100.0)
+                .round() as i64,
+            "cap": 100,
+        },
+    });
+
+    Json(json!({
+        "kpi": {
+            "instancesOnline": fleet.iter().filter(|item| item.online).count(),
+            "instancesTotal": fleet.len(),
+            "instancesOfflineFor": serde_json::Value::Null,
+            "activeDevices": db.devices().iter().filter(|device| !device.revoked).count(),
+            "bytes24h": bytes24h,
+            "throttled24h": throttled,
+            "interactiveThrottled24h": interactive_throttled,
+        },
+        "waterline": waterline,
+        "instances": instances,
+        "traffic": { "interactive": interactive, "other": other },
+        "generatedAt": now,
+    }))
+    .into_response()
 }
 
-async fn console_page() -> Response {
-    axum::response::Html(CONSOLE_HTML).into_response()
+/// 审计页：游标翻页（比 OFFSET 稳——翻页期间有新事件也不会错位）。
+async fn console_audit(
+    State(state): State<Arc<EdgeState>>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    const PAGE: usize = 60;
+    let rows = state.hub.db().audit_query(
+        params.get("type").map(String::as_str),
+        params
+            .get("from")
+            .and_then(|value| value.parse::<i64>().ok()),
+        params
+            .get("cursor")
+            .and_then(|value| value.parse::<i64>().ok()),
+        PAGE + 1,
+    );
+    let next_cursor = if rows.len() > PAGE {
+        rows.get(PAGE - 1)
+            .map(|row| row.id)
+            .map(|id| id.to_string())
+    } else {
+        None
+    };
+    let events: Vec<serde_json::Value> = rows
+        .iter()
+        .take(PAGE)
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "at": row.at,
+                "event": row.event,
+                "instanceId": row.instance_id,
+                "deviceId": row.device_id,
+                "detail": serde_json::from_str::<serde_json::Value>(&row.detail_json)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+        })
+        .collect();
+    Json(json!({ "events": events, "nextCursor": next_cursor })).into_response()
+}
+
+/// CSV 导出：一次最多 5000 行（够审一次，又不至于把浏览器撑死）。
+async fn console_audit_csv(
+    State(state): State<Arc<EdgeState>>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if session_auth(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    let rows = state.hub.db().audit_query(
+        params.get("type").map(String::as_str),
+        params
+            .get("from")
+            .and_then(|value| value.parse::<i64>().ok()),
+        None,
+        5000,
+    );
+    let mut out = String::from("time,event,instance,device,detail\n");
+    for row in rows.iter().rev() {
+        out.push_str(&format!(
+            "{},{},{},{},{}\n",
+            csv_field(&format_iso(row.at)),
+            csv_field(&row.event),
+            csv_field(row.instance_id.as_deref().unwrap_or("")),
+            csv_field(row.device_id.as_deref().unwrap_or("")),
+            csv_field(&row.detail_json)
+        ));
+    }
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/csv; charset=utf-8"),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("attachment; filename=\"audit.csv\""),
+            ),
+        ],
+        out,
+    )
+        .into_response()
+}
+
+/// CSV 字段转义：引号/逗号/换行任一出现就整体加引号（Excel 会拒绝别的写法）。
+fn csv_field(value: &str) -> String {
+    if value.contains(['"', ',', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+fn format_iso(at: i64) -> String {
+    // 审计导出要能直接进 Excel：不引 chrono，用 civil_from_days 手算 UTC。
+    let days = at.div_euclid(86400);
+    let secs = at.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// 天 → 民用日期（Howard Hinnant 的算法）。
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 // ---- 实例入口：设 cookie 后回根（docs/19 §3.1）----
@@ -643,6 +1049,11 @@ async fn proxy(
         return (StatusCode::UNAUTHORIZED, "未配对设备").into_response();
     };
     state.hub.db().touch_device(&device.id);
+    // 来源 IP 只在变化时写库（反代热路径，见 db::touch_device_from 的注释）。
+    state
+        .hub
+        .db()
+        .touch_device_from(&device.id, &client_ip(&parts.headers, &peer));
     let Some(iid) = cookie_value(&parts.headers, "qx_iid") else {
         return Redirect::to("/qx-fleet").into_response();
     };
@@ -659,7 +1070,13 @@ async fn proxy(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let class = Class::of_request(is_upgrade, body_len);
-    let guard = match state.hub.governance().admit(&iid, class).await {
+    // 归因到设备：设备页的 24h 流量 / 占配额 / 当前会话都从这里来（docs/20 §4.2）。
+    let guard = match state
+        .hub
+        .governance()
+        .admit(&iid, Some(device.id.as_str()), class)
+        .await
+    {
         Ok(guard) => guard,
         Err(Reject::Busy { retry_after_secs }) => {
             return (
@@ -972,111 +1389,3 @@ async function load(){
 }
 load();setInterval(load,10000);
 </script></body></html>"#;
-
-const LOGIN_HTML: &str = r##"<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 · 千寻服务端</title><style>
-body{font-family:system-ui;margin:0;background:#0f1115;color:#e6e8ee;display:flex;min-height:100vh;align-items:center;justify-content:center}
-.card{background:#171a21;border:1px solid #262b36;border-radius:14px;padding:28px;width:min(92vw,360px)}
-h1{font-size:18px;margin:0 0 6px} p{color:#8b93a7;font-size:13px;margin:6px 0 18px}
-input{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #2c3240;background:#0f1115;color:#e6e8ee;font-size:16px;margin-bottom:10px}
-button{width:100%;padding:12px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:16px}
-.err{color:#f87171;font-size:13px;min-height:18px}
-</style></head><body><div class="card">
-<h1>千寻服务端</h1><p>登录以管理设备与实例</p>
-<input id="u" placeholder="用户名" autocomplete="username">
-<input id="p" type="password" placeholder="密码" autocomplete="current-password">
-<div class="err" id="err"></div>
-<button onclick="go()">登录</button>
-<p class="hint" style="margin-top:14px">手机配对新设备？<a href="/qx-pair" style="color:#2563eb">打开配对页</a></p>
-<script>
-async function go(){try{
- const r=await fetch('/console/api/login',{method:'POST',headers:{'content-type':'application/json'},
-   body:JSON.stringify({username:document.getElementById('u').value.trim(),password:document.getElementById('p').value})});
- const data=await r.json().catch(()=>({}));
- if(!r.ok){document.getElementById('err').textContent=(data&&data.error)||'登录失败';return;}
- location.href='/console';
-}catch(e){document.getElementById('err').textContent='网络错误';}}
-document.getElementById('p').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
-</script></div></body></html>"##;
-
-const CONSOLE_HTML: &str = r##"<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>控制台 · 千寻服务端</title><style>
-body{font-family:system-ui;margin:0;background:#0f1115;color:#e6e8ee}
-.wrap{max-width:560px;margin:0 auto;padding:24px 16px}
-h1{font-size:18px} .hint{color:#8b93a7;font-size:13px}
-nav{display:flex;gap:8px;margin:14px 0}
-nav button{padding:8px 18px;border:1px solid #2c3240;border-radius:10px;background:#171a21;color:#e6e8ee;font-size:14px;cursor:pointer}
-nav button.on{background:#2563eb;border-color:#2563eb;color:#fff}
-nav .sp{flex:1}
-.item{display:flex;justify-content:space-between;align-items:center;background:#171a21;border:1px solid #262b36;border-radius:12px;padding:14px 16px;margin:10px 0}
-.dot{width:10px;height:10px;border-radius:50%;margin-right:10px;background:#3fb950;flex:none}
-.dot.off{background:#6e7681}
-.name{flex:1} .meta{color:#8b93a7;font-size:12px}
-.del{border:0;background:transparent;color:#f87171;cursor:pointer;font-size:13px;padding:6px 10px;border-radius:8px}
-.primary{padding:10px 18px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}
-.code{font-family:ui-monospace,monospace;font-size:26px;letter-spacing:4px;background:#0f1115;border:1px dashed #2c3240;border-radius:10px;padding:14px;text-align:center;margin:10px 0}
-a{color:#2563eb}
-</style></head><body><div class="wrap">
-<h1>控制台</h1><p class="hint">舰队与设备治理（会话 30 天内有效）</p>
-<nav><button id="tab-fleet" onclick="tab('fleet')">舰队</button><button id="tab-dev" onclick="tab('dev')">设备</button><span class="sp"></span><button onclick="logout()">退出</button></nav>
-<div id="fleet"><div id="flist"><p class="hint">加载中…</p></div></div>
-<div id="dev" style="display:none">
- <div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 10px">
-   <span class="hint">服务器级设备（所有实例共用）</span>
-   <button class="primary" onclick="issuePair()">新增设备</button>
- </div>
- <div id="pairbox" style="display:none">
-   <p class="hint">一次性配对码（5 分钟内有效）——手机打开链接或输入码：</p>
-   <div class="code" id="pcode"></div>
-   <p class="hint" style="word-break:break-all"><a id="purl" href="#">配对链接</a></p>
- </div>
- <div id="dlist"><p class="hint">加载中…</p></div>
-</div>
-</div><script>
-async function api(path,opts){const r=await fetch(path,Object.assign({headers:{'content-type':'application/json'}},opts||{}));
- if(r.status===401){location.href='/login';throw new Error('未登录');}
- return r;}
-function tab(which){
- document.getElementById('fleet').style.display=which==='fleet'?'':'none';
- document.getElementById('dev').style.display=which==='dev'?'':'none';
- document.getElementById('tab-fleet').className=which==='fleet'?'on':'';
- document.getElementById('tab-dev').className=which==='dev'?'on':'';
- if(which==='fleet')loadFleet();else loadDevices();
-}
-async function loadFleet(){try{
- const r=await api('/console/api/fleet');const data=await r.json();
- const list=document.getElementById('flist');list.innerHTML='';
- for(const it of data.instances){
-  const div=document.createElement('div');div.className='item';
-  div.innerHTML='<span class="dot'+(it.online?'':' off')+'"></span><span class="name">'+it.name+
-   '<div class="meta">'+(it.qianxun||'')+(it.dsh?' · DSH '+it.dsh:'')+'</div></span><span class="meta">'+(it.online?'在线':'离线')+'</span>';
-  list.appendChild(div);
- }
- if(!data.instances.length)list.innerHTML='<p class="hint">暂无实例（在服务端预置并让千寻连接）</p>';
-}catch(e){}}
-async function loadDevices(){try{
- const r=await api('/console/api/devices');const data=await r.json();
- const list=document.getElementById('dlist');list.innerHTML='';
- for(const d of data.devices){
-  const div=document.createElement('div');div.className='item';
-  const date=new Date(d.createdAt*1000).toLocaleDateString();
-  div.innerHTML='<span class="name">'+d.name+(d.revoked?'（已删除）':'')+'<div class="meta">'+date+' · '+(d.lastSeenAt?new Date(d.lastSeenAt*1000).toLocaleString():'从未在线')+'</div></span>';
-  if(!d.revoked){const b=document.createElement('button');b.className='del';b.textContent='删除';
-   b.onclick=async()=>{if(!confirm('删除后该设备全部访问立即断开，需重新配对。确定？'))return;
-     await api('/console/api/devices/revoke',{method:'POST',body:JSON.stringify({deviceId:d.id})});loadDevices();};
-   div.appendChild(b);}
-  list.appendChild(div);
- }
- if(!data.devices.length)list.innerHTML='<p class="hint">还没有设备——点「新增设备」生成配对码</p>';
-}catch(e){}}
-async function issuePair(){try{
- const r=await api('/console/api/devices/pair',{method:'POST'});const data=await r.json();
- document.getElementById('pairbox').style.display='';
- document.getElementById('pcode').textContent=data.code;
- const a=document.getElementById('purl');a.href=data.pairUrl;a.textContent=data.pairUrl;
-}catch(e){}}
-async function logout(){try{await api('/console/api/logout',{method:'POST'});}catch(e){}location.href='/login';}
-tab('fleet');setInterval(()=>{loadFleet();loadDevices();},10000);
-</script></body></html>"##;

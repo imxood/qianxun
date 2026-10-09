@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    // 控制台自己一份 tsconfig：根配置只 include 桌面端的 src/**，
+    // 而 packages/console-web 是第二个前端包（docs/20 §7.4）。
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "vite.config.ts",
+    "../../packages/console-web/scripts/**/*.mjs"
+  ]
+}

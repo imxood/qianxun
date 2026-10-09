@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# 控制台的预压缩产物：pnpm build:console 每次都会重生成，跟 dist/ 一样是构建物。
+packages/console-web/dist-gz/
 src-tauri/target/
 src-tauri/gen/
 *.log

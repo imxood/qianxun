@@ -22,6 +22,38 @@ pub struct InstanceRow {
     pub last_seen_at: i64,
 }
 
+/// 一条审计事件（控制台审计页与 CSV 导出共用）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditRow {
+    pub id: i64,
+    pub at: i64,
+    pub instance_id: Option<String>,
+    pub device_id: Option<String>,
+    pub event: String,
+    pub detail_json: String,
+}
+
+/// 一条待落库的小时桶（聚合后写入，UPSERT 累加）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetricRow {
+    pub bucket: i64,
+    pub instance_id: String,
+    pub device_id: String,
+    pub class: String,
+    pub bytes: u64,
+    pub rejected: u64,
+    pub shed: u64,
+}
+
+/// 配对码状态（控制台弹层状态机，docs/20 §4.9）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PairState {
+    Pending { expires_at: i64 },
+    Used { device_name: Option<String> },
+    Expired,
+    Unknown,
+}
+
 /// 设备（手机等消费端）的注册记录；token 只存哈希。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceRow {
@@ -31,6 +63,35 @@ pub struct DeviceRow {
     pub created_at: i64,
     pub last_seen_at: i64,
     pub revoked: bool,
+    /// 最近一次带鉴权的来源 IP（控制台「来源 IP」列）。
+    pub last_ip: Option<String>,
+    pub credential_issued_at: Option<i64>,
+    pub credential_expires_at: Option<i64>,
+    /// 掩码后的凭据提示（`dv_abcd…wxyz`）；明文只在签发那刻可见。
+    pub credential_hint: Option<String>,
+}
+
+/// 设备凭据有效期：30 天（预览口径「签发至 11-08」）。
+pub const DEVICE_CREDENTIAL_TTL: i64 = 30 * 86400;
+
+/// 凭据前缀 + 掩码：让运维在两台机器的凭据列表里一眼认出同一枚。
+pub fn credential_hint(plain: &str) -> String {
+    let head: String = plain.chars().take(6).collect();
+    let tail: String = plain
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
+}
+
+/// 当前 Unix 秒。控制台层算 24h 窗口时要和库里 `at` 用同一口径，
+/// 所以它必须是模块级的自由函数，而不是挂在 `Db` 上的静态方法。
+pub fn unix_now() -> i64 {
+    now()
 }
 
 pub struct Db {
@@ -86,6 +147,26 @@ const MIGRATIONS: &[&str] = &[
         last_ip TEXT
     );
     CREATE INDEX idx_sessions_user ON sessions(user_id);",
+    // v3：控制台数据面（docs/20 §4）。设备补来源/凭据元数据，审计可查询，
+    // 流量按小时桶落库——概览的「24h」和设备行的「占配额」都从这里来。
+    "ALTER TABLE devices ADD COLUMN last_ip TEXT;
+    ALTER TABLE devices ADD COLUMN credential_issued_at INTEGER;
+    ALTER TABLE devices ADD COLUMN credential_expires_at INTEGER;
+    ALTER TABLE devices ADD COLUMN credential_hint TEXT;
+    ALTER TABLE pair_codes ADD COLUMN device_id TEXT;
+    CREATE INDEX idx_audit_at ON audit(at DESC);
+    CREATE TABLE metrics_hourly (
+        bucket INTEGER NOT NULL,
+        instance_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        class TEXT NOT NULL,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        rejected INTEGER NOT NULL DEFAULT 0,
+        shed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (bucket, instance_id, device_id, class)
+    );
+    CREATE INDEX idx_metrics_device ON metrics_hourly(device_id, bucket);
+    CREATE INDEX idx_metrics_bucket ON metrics_hourly(bucket);",
 ];
 
 fn now() -> i64 {
@@ -221,10 +302,20 @@ impl Db {
 
     pub fn add_device(&self, id: &str, name: &str, plain_token: &str) -> Result<(), String> {
         let hash = crypto::sha256_hex(plain_token.as_bytes());
+        let issued = now();
         self.lock()
             .execute(
-                "INSERT INTO devices (id, name, token_hash, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![id, name, hash, now()],
+                "INSERT INTO devices (id, name, token_hash, created_at, last_seen_at, \
+                 credential_issued_at, credential_expires_at, credential_hint) \
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5, ?6)",
+                params![
+                    id,
+                    name,
+                    hash,
+                    issued,
+                    issued + DEVICE_CREDENTIAL_TTL,
+                    credential_hint(plain_token)
+                ],
             )
             .map_err(|e| format!("设备写入失败：{e}"))?;
         Ok(())
@@ -269,7 +360,9 @@ impl Db {
         let conn = self.lock();
         let row = conn
             .query_row(
-                "SELECT id, name, token_hash, created_at, last_seen_at, revoked FROM devices WHERE token_hash = ?1",
+                "SELECT id, name, token_hash, created_at, last_seen_at, revoked, last_ip, \
+                 credential_issued_at, credential_expires_at, credential_hint \
+                 FROM devices WHERE token_hash = ?1",
                 params![hash],
                 |row| {
                     Ok(DeviceRow {
@@ -279,6 +372,10 @@ impl Db {
                         created_at: row.get(3)?,
                         last_seen_at: row.get(4)?,
                         revoked: row.get::<_, i64>(5)? != 0,
+                        last_ip: row.get(6)?,
+                        credential_issued_at: row.get(7)?,
+                        credential_expires_at: row.get(8)?,
+                        credential_hint: row.get(9)?,
                     })
                 },
             )
@@ -287,7 +384,38 @@ impl Db {
         row.filter(|device| !device.revoked)
     }
 
-    pub fn revoke_device(&self, id: &str) -> Result<(), String> {
+    /// 控制台用的完整设备行（含来源 IP 与凭据元数据）。
+    pub fn device_rows(&self) -> Vec<DeviceRow> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, token_hash, created_at, last_seen_at, revoked, last_ip, \
+                 credential_issued_at, credential_expires_at, credential_hint \
+                 FROM devices ORDER BY created_at",
+            )
+            .expect("列清单固定");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(DeviceRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    token_hash: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_seen_at: row.get(4)?,
+                    revoked: row.get::<_, i64>(5)? != 0,
+                    last_ip: row.get(6)?,
+                    credential_issued_at: row.get(7)?,
+                    credential_expires_at: row.get(8)?,
+                    credential_hint: row.get(9)?,
+                })
+            })
+            .expect("列清单固定");
+        rows.filter_map(Result::ok).collect()
+    }
+
+    /// 吊销单台设备。`via` 记进审计 detail，而不是让调用方再补一条
+    /// `device.console_revoke`——一个动作两条事件，审计列表读起来像出了两次事。
+    pub fn revoke_device(&self, id: &str, via: &str) -> Result<(), String> {
         let changed = self
             .lock()
             .execute("UPDATE devices SET revoked = 1 WHERE id = ?1", params![id])
@@ -295,7 +423,12 @@ impl Db {
         if changed == 0 {
             return Err(format!("设备 {id} 不存在"));
         }
-        self.audit("device.revoke", None, Some(id), "{}");
+        self.audit(
+            "device.revoke",
+            None,
+            Some(id),
+            &format!("{{\"via\":\"{via}\"}}"),
+        );
         Ok(())
     }
 
@@ -306,7 +439,234 @@ impl Db {
         );
     }
 
+    /// 记录来源 IP。IP 没变就不写：这是反代热路径（每个请求都会走到），
+    /// 「无变化 UPDATE」在 WAL 下也要写一页，收益却只有一处展示。
+    pub fn touch_device_from(&self, id: &str, ip: &str) {
+        let _ = self.lock().execute(
+            "UPDATE devices SET last_ip = ?2 WHERE id = ?1 AND (last_ip IS NULL OR last_ip <> ?2)",
+            params![id, ip],
+        );
+    }
+
+    /// 撤销吊销。
+    ///
+    /// 铁律（docs/20 §4.4/§4.10）：吊销只翻 `revoked` 标志位，**绝不**在这里
+    /// 轮换 token——一旦凭据被换掉，「撤销」在实现上就不成立了。这里的
+    /// 恢复也只是把标志位清回去，被吊销设备的下一次请求即重新生效。
+    pub fn restore_device(&self, id: &str) -> Result<(), String> {
+        let changed = self
+            .lock()
+            .execute(
+                "UPDATE devices SET revoked = 0 WHERE id = ?1 AND revoked = 1",
+                params![id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("设备 {id} 不存在或未被吊销"));
+        }
+        self.audit("device.restore", None, Some(id), "{}");
+        Ok(())
+    }
+
+    /// 批量吊销（控制台「吊销全部」，不可逆）。
+    pub fn revoke_all_devices(&self) -> Result<usize, String> {
+        let changed = self
+            .lock()
+            .execute("UPDATE devices SET revoked = 1 WHERE revoked = 0", [])
+            .map_err(|e| e.to_string())?;
+        self.audit("device.revoke_all", None, None, "{}");
+        Ok(changed)
+    }
+
+    /// 轮换设备凭据，返回明文（只此一次可见；库中仍只存哈希）。
+    pub fn rotate_device_token(&self, id: &str) -> Result<(String, i64, i64), String> {
+        let token = format!("dv_{}", crypto::random_hex(32));
+        let issued = now();
+        let expires = issued + DEVICE_CREDENTIAL_TTL;
+        let changed = self
+            .lock()
+            .execute(
+                "UPDATE devices SET token_hash = ?2, credential_issued_at = ?3, \
+                 credential_expires_at = ?4, credential_hint = ?5 WHERE id = ?1",
+                params![
+                    id,
+                    crypto::sha256_hex(token.as_bytes()),
+                    issued,
+                    expires,
+                    credential_hint(&token)
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("设备 {id} 不存在"));
+        }
+        self.audit("device.rotate", None, Some(id), "{}");
+        Ok((token, issued, expires))
+    }
+
+    // ---- 计量（小时桶；docs/20 §4.3） ----
+
+    /// 批量写桶。单事务，避免每条一次 fsync。
+    pub fn flush_metrics(&self, rows: &[MetricRow]) -> Result<usize, String> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO metrics_hourly (bucket, instance_id, device_id, class, bytes, rejected, shed) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     ON CONFLICT(bucket, instance_id, device_id, class) DO UPDATE SET \
+                       bytes = bytes + excluded.bytes, \
+                       rejected = rejected + excluded.rejected, \
+                       shed = shed + excluded.shed",
+                )
+                .expect("语句固定");
+            for row in rows {
+                stmt.execute(params![
+                    row.bucket,
+                    row.instance_id,
+                    row.device_id,
+                    row.class,
+                    row.bytes as i64,
+                    row.rejected as i64,
+                    row.shed as i64,
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(rows.len())
+    }
+
+    /// 某设备 24h 的小时桶字节数（老→新，(bucket, bytes) 升序）。
+    pub fn device_traffic_24h(&self, device_id: &str, since_bucket: i64) -> Vec<(i64, i64)> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT bucket, SUM(bytes) FROM metrics_hourly \
+                 WHERE device_id = ?1 AND bucket >= ?2 GROUP BY bucket ORDER BY bucket",
+            )
+            .expect("列清单固定");
+        let rows = stmt
+            .query_map(params![device_id, since_bucket], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("列清单固定");
+        rows.filter_map(Result::ok).collect()
+    }
+
+    /// 全站最近 N 个小时桶的（交互, 页面/批量）字节，按桶升序。
+    pub fn traffic_buckets(&self, since_bucket: i64) -> Vec<(i64, i64, i64)> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT bucket, \
+                   SUM(CASE WHEN class = 'interactive' THEN bytes ELSE 0 END), \
+                   SUM(CASE WHEN class != 'interactive' THEN bytes ELSE 0 END) \
+                 FROM metrics_hourly WHERE bucket >= ?1 GROUP BY bucket ORDER BY bucket",
+            )
+            .expect("列清单固定");
+        let rows = stmt
+            .query_map(params![since_bucket], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("列清单固定");
+        rows.filter_map(Result::ok).collect()
+    }
+
+    /// 24h 限流次数：(总计, 其中交互)。
+    pub fn throttle_24h(&self, since_bucket: i64) -> (i64, i64) {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT SUM(rejected + shed), \
+             SUM(CASE WHEN class = 'interactive' THEN rejected + shed ELSE 0 END) \
+             FROM metrics_hourly WHERE bucket >= ?1",
+            params![since_bucket],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map(|(total, interactive)| (total.max(0), interactive.max(0)))
+        .unwrap_or((0, 0))
+    }
+
+    /// 某实例最近 1 小时的字节数（概览「流量 · 1h」列）。
+    pub fn instance_bytes_1h(&self, instance_id: &str, since_bucket: i64) -> i64 {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT SUM(bytes) FROM metrics_hourly WHERE instance_id = ?1 AND bucket >= ?2",
+            params![instance_id, since_bucket],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+    }
+
+    /// 每台设备的 24h 合计（设备页「占配额」的分母与分子）。
+    pub fn device_bytes_24h(&self, since_bucket: i64) -> std::collections::HashMap<String, i64> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT device_id, SUM(bytes) FROM metrics_hourly \
+                 WHERE bucket >= ?1 GROUP BY device_id",
+            )
+            .expect("列清单固定");
+        let rows = stmt
+            .query_map(params![since_bucket], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("列清单固定");
+        rows.filter_map(Result::ok).collect()
+    }
+
     // ---- 配对码 ----
+
+    /// 按明文码查状态。已用的码回填 `device_id`，所以这里能给出设备名——
+    /// 状态机的终态要让操作者看见「配对成了哪台设备」。
+    pub fn pair_state(&self, code: &str) -> PairState {
+        let hash = crypto::sha256_hex(code.as_bytes());
+        let conn = self.lock();
+        let row: Option<(Option<i64>, i64, Option<String>)> = conn
+            .query_row(
+                "SELECT p.used_at, p.expires_at, p.device_id FROM pair_codes p \
+                 WHERE p.code_hash = ?1",
+                params![hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .expect("列清单固定");
+        let Some((used_at, expires_at, device_id)) = row else {
+            return PairState::Unknown;
+        };
+        if used_at.is_some() {
+            let name = device_id.and_then(|id| {
+                conn.query_row(
+                    "SELECT name FROM devices WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+            });
+            return PairState::Used { device_name: name };
+        }
+        if expires_at < now() {
+            return PairState::Expired;
+        }
+        PairState::Pending { expires_at }
+    }
+
+    /// 兑换成功后把新建的设备 id 回填到码上（状态机终态要能显示设备名）。
+    pub fn bind_pair_device(&self, code: &str, device_id: &str) {
+        let hash = crypto::sha256_hex(code.as_bytes());
+        let _ = self.lock().execute(
+            "UPDATE pair_codes SET device_id = ?2 WHERE code_hash = ?1",
+            params![hash, device_id],
+        );
+    }
 
     /// 上架一个一次性配对码；返回明文码（5 分钟时效）。
     /// 6 字节 = 48 bit（控制台/千寻发码后手机扫码为主路径，手输也可接受；
@@ -321,7 +681,12 @@ impl Db {
                 params![hash, issued_via, expires],
             )
             .map_err(|e| e.to_string())?;
-        self.audit("pair.create", None, None, "{}");
+        self.audit(
+            "pair.create",
+            None,
+            None,
+            &format!("{{\"via\":\"{issued_via}\"}}"),
+        );
         Ok((code, expires))
     }
 
@@ -373,6 +738,39 @@ impl Db {
             "INSERT INTO audit (at, instance_id, device_id, event, detail_json) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![now(), instance_id, device_id, event, detail_json],
         );
+    }
+
+    /// 审计查询：`kind` 按事件前缀过滤（login/pair/instance/device），
+    /// `before_id` 是游标（比偏移量稳：翻页期间有新事件插入也不会错位或跳行）。
+    pub fn audit_query(
+        &self,
+        kind: Option<&str>,
+        since: Option<i64>,
+        before_id: Option<i64>,
+        limit: usize,
+    ) -> Vec<AuditRow> {
+        let conn = self.lock();
+        let kind = kind.filter(|value| !value.is_empty());
+        let sql = "SELECT id, at, instance_id, device_id, event, detail_json FROM audit \
+                   WHERE (?1 IS NULL OR event LIKE ?1 || '%') \
+                     AND (?2 IS NULL OR at >= ?2) \
+                     AND (?3 IS NULL OR id < ?3) \
+                   ORDER BY id DESC LIMIT ?4";
+        let pattern = kind.map(|value| format!("{value}%"));
+        let mut stmt = conn.prepare(sql).expect("语句固定");
+        let rows = stmt
+            .query_map(params![pattern, since, before_id, limit as i64], |row| {
+                Ok(AuditRow {
+                    id: row.get(0)?,
+                    at: row.get(1)?,
+                    instance_id: row.get(2)?,
+                    device_id: row.get(3)?,
+                    event: row.get(4)?,
+                    detail_json: row.get(5)?,
+                })
+            })
+            .expect("列清单固定");
+        rows.filter_map(Result::ok).collect()
     }
 
     // ---- 管理面用户与会话（/console）----
@@ -620,8 +1018,133 @@ mod tests {
         let token = db.import_device("手机", None).expect("导入");
         let device = db.device_auth(&token).expect("有效");
         assert_eq!(device.name, "手机");
-        db.revoke_device(&device.id).expect("撤销");
+        db.revoke_device(&device.id, "test").expect("撤销");
         assert!(db.device_auth(&token).is_none(), "撤销即时生效");
+    }
+
+    /// 撤销必须可逆——这是控制台 5 秒撤销 toast 的前提（docs/20 §4.4）。
+    /// 曾经的实现是在撤销路径里轮换 token，那会让「撤销」在物理上不成立。
+    #[test]
+    fn 撤销只翻标志_恢复后原凭据重新生效() {
+        let db = db();
+        let token = db.import_device("手机", None).expect("导入");
+        let device = db.device_auth(&token).expect("有效");
+        db.revoke_device(&device.id, "test").expect("撤销");
+        assert!(db.device_auth(&token).is_none());
+        db.restore_device(&device.id).expect("恢复");
+        let back = db.device_auth(&token).expect("原凭据直接可用");
+        assert_eq!(back.token_hash, device.token_hash, "凭据没被动过");
+    }
+
+    #[test]
+    fn 批量吊销与凭据轮换() {
+        let db = db();
+        let first = db.import_device("甲", None).expect("导入");
+        let second = db.import_device("乙", None).expect("导入");
+        assert_eq!(db.revoke_all_devices().expect("批量"), 2);
+        assert!(db.device_auth(&first).is_none() && db.device_auth(&second).is_none());
+        // 幂等：再点一次没有可吊销的
+        assert_eq!(db.revoke_all_devices().expect("再吊销"), 0);
+        // 轮换后旧凭据失效、新凭据可用；库里仍只存哈希。
+        let id = db.device_rows()[0].id.clone();
+        db.restore_device(&id).expect("恢复");
+        let (plain, issued, expires) = db.rotate_device_token(&id).expect("轮换");
+        assert!(expires > issued);
+        assert!(db.device_auth(&plain).is_some());
+        let stored = db.device_rows()[0].credential_hint.clone();
+        assert!(stored.is_some(), "轮换后有掩码提示");
+        assert!(!stored.unwrap().contains(&plain[6..]), "提示不含明文");
+    }
+
+    #[test]
+    fn 计量按小时桶累加() {
+        let db = db();
+        let bucket = unix_now().div_euclid(3600) * 3600;
+        db.flush_metrics(&[
+            MetricRow {
+                bucket,
+                instance_id: "i1".into(),
+                device_id: "dev-a".into(),
+                class: "page".into(),
+                bytes: 1000,
+                rejected: 0,
+                shed: 0,
+            },
+            MetricRow {
+                bucket,
+                instance_id: "i1".into(),
+                device_id: "dev-a".into(),
+                class: "page".into(),
+                bytes: 500,
+                rejected: 2,
+                shed: 1,
+            },
+        ])
+        .expect("落库");
+        // 同一格累加，不是覆盖。
+        assert_eq!(db.device_bytes_24h(bucket - 3600).get("dev-a"), Some(&1500));
+        assert_eq!(db.instance_bytes_1h("i1", bucket), 1500);
+        assert_eq!(db.throttle_24h(bucket - 3600), (3, 0));
+        // 交互类的限流单独计数（概览的两条限流口径）。
+        db.flush_metrics(&[MetricRow {
+            bucket,
+            instance_id: "i1".into(),
+            device_id: "dev-a".into(),
+            class: "interactive".into(),
+            bytes: 10,
+            rejected: 4,
+            shed: 1,
+        }])
+        .expect("落库");
+        assert_eq!(db.throttle_24h(bucket - 3600), (8, 5));
+        // 桶形：只回有流量的桶，缺桶由 web 层的 dense_24 补 0（不跳格）。
+        db.flush_metrics(&[MetricRow {
+            bucket: bucket - 3600,
+            instance_id: "i1".into(),
+            device_id: "dev-a".into(),
+            class: "page".into(),
+            bytes: 7,
+            rejected: 0,
+            shed: 0,
+        }])
+        .expect("落库");
+        let shape = db.device_traffic_24h("dev-a", bucket - 2 * 3600);
+        assert_eq!(shape.len(), 2, "两格有流量");
+        assert_eq!(shape[0], (bucket - 3600, 7));
+    }
+
+    #[test]
+    fn 审计按前缀过滤与游标翻页() {
+        let db = db();
+        for event in ["login.ok", "login.fail", "pair.grant", "device.revoke"] {
+            db.audit(event, None, None, "{}");
+        }
+        let all = db.audit_query(None, None, None, 10);
+        assert_eq!(all.len(), 4, "默认按 id 倒序");
+        let logins = db.audit_query(Some("login"), None, None, 10);
+        assert_eq!(logins.len(), 2);
+        assert!(logins.iter().all(|row| row.event.starts_with("login")));
+        // 游标翻页：拿最后一条的 id 当游标，后面不该再有它自己。
+        let first_page = db.audit_query(None, None, None, 3);
+        let cursor = first_page.last().expect("至少 3 条").id;
+        let second_page = db.audit_query(None, None, Some(cursor), 3);
+        assert_eq!(second_page.len(), 1);
+        assert!(second_page.iter().all(|row| row.id < cursor));
+    }
+
+    #[test]
+    fn 配对码状态机四态() {
+        let db = db();
+        let (code, expires) = db.create_pair_code("console").expect("上架");
+        assert_eq!(
+            db.pair_state(&code),
+            PairState::Pending {
+                expires_at: expires
+            }
+        );
+        assert_eq!(db.pair_state("ZZZZZZ"), PairState::Unknown);
+        db.redeem_pair_code(&code).expect("兑换");
+        assert_eq!(db.pair_state(&code), PairState::Used { device_name: None });
     }
 
     #[test]
@@ -634,6 +1157,47 @@ mod tests {
         let (other, _) = db.create_pair_code("inst-1").unwrap();
         assert_ne!(code, other);
         assert_eq!(db.redeem_pair_code("FFFFFFFF"), Err("unknown"));
+    }
+
+    /// 一个动作只留一条审计。
+    ///
+    /// 曾经控制台发码/吊销各写两条（`pair.create` + `pair.console_create`），
+    /// 审计列表里一次点击读起来像出了两次事。来源改记在 detail 里，事件名只留
+    /// 一个——这条测试就是为了不让双写再回来。
+    #[test]
+    fn 一次动作只写一条审计() {
+        let db = db();
+        db.create_pair_code("console").expect("上架");
+        let code_events = db.audit_query(Some("pair"), None, None, 50);
+        assert_eq!(code_events.len(), 1, "发码只有一条：{code_events:?}");
+        assert_eq!(code_events[0].event, "pair.create");
+
+        let token = db.import_device("手机", None).expect("导入");
+        let device = db.device_auth(&token).expect("有效");
+        db.revoke_device(&device.id, "console").expect("吊销");
+        let revoke_events = db.audit_query(Some("device.revoke"), None, None, 50);
+        assert_eq!(revoke_events.len(), 1, "吊销只有一条：{revoke_events:?}");
+    }
+
+    #[test]
+    fn 审计带上来源() {
+        let db = db();
+        db.create_pair_code("console").expect("上架");
+        let token = db.import_device("手机", None).expect("导入");
+        let device = db.device_auth(&token).expect("有效");
+        db.revoke_device(&device.id, "console").expect("吊销");
+        let rows = db.audit_query(None, None, None, 10);
+        let created = rows.iter().find(|row| row.event == "pair.create").unwrap();
+        assert!(
+            created.detail_json.contains("\"via\":\"console\""),
+            "{}",
+            created.detail_json
+        );
+        let revoked = rows
+            .iter()
+            .find(|row| row.event == "device.revoke")
+            .unwrap();
+        assert!(revoked.detail_json.contains("\"via\":\"console\""));
     }
 
     #[test]

@@ -1,0 +1,218 @@
+/* 千寻服务端控制台 —— 设计 token 与组件层（docs/20 §3）。
+ *
+ * 与 docs/assets/console-preview.html 是同一套 token 的两种形态：预览是
+ * Tailwind 编译后的冻结基准，这里是输入端。改这里 → vite build → 二进制里的
+ * 控制台同步变化；改预览会让基准与实现漂移，所以预览已冻结。
+ */
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #0b0f17;
+  --color-surface: #111826;
+  --color-surface2: #1b2336;
+  --color-line: #263043;
+  --color-line-strong: #475569;
+  --color-fg: #f8fafc;
+  --color-muted: #94a3b8;
+  --color-accent: #22c55e;
+  --color-accent-fg: #0b0f17;
+  --color-info: #3b82f6;
+  --color-warn: #f59e0b;
+  --color-danger: #ef4444;
+  --color-offline: #64748b;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* 只有真正重复的组合才进 components 层（docs/20 §8），页面里只用 utility。 */
+@layer components {
+  .dot {
+    @apply inline-block h-2 w-2 shrink-0 rounded-full;
+  }
+  .dot-on {
+    background-color: var(--color-accent);
+    animation: 2s ease-in-out infinite breathe;
+  }
+  .dot-off {
+    background-color: var(--color-offline);
+  }
+  .dot-warn {
+    background-color: var(--color-warn);
+  }
+  @keyframes breathe {
+    0%,
+    to {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot-on {
+      animation: none;
+    }
+  }
+
+  /* 离线是状态不是错误：降饱和配色，文字对比度保持可读（docs/20 §5a）。 */
+  .row-off td {
+    color: var(--color-offline);
+  }
+  .row-off .cell-sub {
+    color: #5b6779;
+  }
+
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--color-fg);
+    outline-offset: 2px;
+  }
+
+  .card {
+    @apply rounded-xl border border-line bg-surface;
+  }
+  .pagehead {
+    @apply mb-[18px] flex items-center justify-between;
+  }
+  .pagehead h1 {
+    @apply text-[19px] font-semibold;
+  }
+  .live-pill {
+    @apply inline-flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-[5px] text-xs text-muted;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg py-[11px] text-sm font-semibold;
+    @apply px-[18px];
+  }
+  .btn-sm {
+    @apply px-3 py-[7px] text-[13px];
+  }
+  .btn-primary {
+    background-color: var(--color-accent);
+    color: var(--color-accent-fg);
+  }
+  .btn-primary:hover {
+    background-color: color-mix(in oklab, var(--color-accent) 90%, transparent);
+  }
+  .btn-ghost {
+    @apply border border-line bg-transparent text-muted;
+  }
+  .btn-ghost:hover {
+    color: var(--color-fg);
+  }
+  .btn-danger {
+    @apply border bg-transparent;
+    color: var(--color-danger);
+    border-color: color-mix(in oklab, var(--color-danger) 40%, transparent);
+  }
+  .btn-danger:hover {
+    background-color: color-mix(in oklab, var(--color-danger) 10%, transparent);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+  }
+
+  .tag {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted;
+  }
+  .tag-ok {
+    color: var(--color-accent);
+    background-color: color-mix(in oklab, var(--color-accent) 8%, transparent);
+    border-color: color-mix(in oklab, var(--color-accent) 35%, transparent);
+  }
+  .tag-warn {
+    color: var(--color-warn);
+    background-color: color-mix(in oklab, var(--color-warn) 8%, transparent);
+    border-color: color-mix(in oklab, var(--color-warn) 35%, transparent);
+  }
+  .tag-off {
+    color: var(--color-offline);
+  }
+
+  .cell-sub {
+    @apply mt-px text-xs text-muted;
+  }
+
+  table {
+    @apply w-full text-[13.5px];
+  }
+  th {
+    @apply whitespace-nowrap bg-surface2 px-3 py-2.5 text-left text-xs font-medium text-muted;
+  }
+  td {
+    @apply whitespace-nowrap border-t border-line px-3 py-[11px];
+  }
+  td.wrap {
+    white-space: normal;
+  }
+
+  .tl-item {
+    @apply flex items-center gap-3 border-t border-line px-4 py-2.5 text-[13px];
+  }
+  .tl-item:first-child {
+    border-top: 0;
+  }
+  .tl-time {
+    @apply w-[118px] shrink-0 font-mono text-xs text-muted tabular-nums;
+  }
+  /* 事件键是最长的一列（`device.console_revoke` 21 字符）：定宽 + 省略号，
+     不定宽的话它会画到右边的句子上，两段字叠在一起。 */
+  .tl-badge {
+    @apply w-[134px] shrink-0 truncate rounded-full py-0.5 text-center font-mono text-[11px];
+  }
+  .tl-ok {
+    color: var(--color-accent);
+    background-color: color-mix(in oklab, var(--color-accent) 10%, transparent);
+  }
+  .tl-fail {
+    color: var(--color-danger);
+    background-color: color-mix(in oklab, var(--color-danger) 10%, transparent);
+  }
+  .tl-info {
+    color: var(--color-info);
+    background-color: color-mix(in oklab, var(--color-info) 10%, transparent);
+  }
+
+  .gov-row {
+    @apply flex items-center gap-3 border-t border-line px-4 py-3 text-[13px];
+  }
+  .gov-row:first-child {
+    border-top: 0;
+  }
+  .meter {
+    @apply h-1.5 flex-1 overflow-hidden rounded-[3px];
+    background-color: var(--color-surface2);
+  }
+  .meter i {
+    @apply block h-full rounded-[3px];
+    background-color: var(--color-accent);
+  }
+  .meter i.w-warn {
+    background-color: var(--color-warn);
+  }
+
+  .bar {
+    @apply min-h-[2px] flex-1 rounded-t-[3px];
+    background-image: linear-gradient(
+      color-mix(in oklab, var(--color-accent) 90%, transparent),
+      color-mix(in oklab, var(--color-accent) 25%, transparent)
+    );
+  }
+  .bar-b {
+    background-image: linear-gradient(
+      color-mix(in oklab, var(--color-info) 85%, transparent),
+      color-mix(in oklab, var(--color-info) 20%, transparent)
+    );
+  }
+}

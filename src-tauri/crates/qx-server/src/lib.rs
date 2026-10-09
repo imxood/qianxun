@@ -6,8 +6,10 @@
 //! - `db`：rusqlite 状态层（实例/设备/配对码/审计，只存哈希，§6）
 //! - `hub`：在线注册表、抢占、配对、舰队、流路由
 //! - `governance`：流量分级 + 资源三轴 + 降级序（§5）
+//! - `assets`：内嵌控制台前端（docs/20 §7.4 决策 3），build.rs 生成资产表
 //! - `web`：边缘 HTTP/WS（§3）——边缘鉴权、cookie 路由、反代与 101 透传
 
+pub mod assets;
 pub mod crypto;
 pub mod db;
 pub mod governance;

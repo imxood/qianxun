@@ -202,8 +202,10 @@ impl Hub {
     pub fn redeem_pair(&self, code: &str, name: &str) -> Result<(String, String), String> {
         self.db.redeem_pair_code(code).map_err(str::to_owned)?;
         let device_id = format!("dev-{}", crypto::random_hex(6));
-        let token = crypto::random_hex(32);
+        let token = format!("dv_{}", crypto::random_hex(32));
         self.db.add_device(&device_id, name, &token)?;
+        // 回填码 → 设备，控制台的配对弹层才知道「配对成了哪台」。
+        self.db.bind_pair_device(code, &device_id);
         self.db.audit("pair.grant", None, Some(&device_id), "{}");
         self.notify_pair_granted(&device_id, name);
         Ok((device_id, token))
@@ -337,7 +339,7 @@ pub async fn run_instance_session(hub: Arc<Hub>, channels: TunnelChannels) {
                         let _ = ctrl_tx.send(Frame::DeviceSnapshot { devices: hub.db().devices() }).await;
                     }
                     Frame::DeviceRevoke { device_id } => {
-                        let _ = hub.db().revoke_device(&device_id);
+                        let _ = hub.db().revoke_device(&device_id, "instance");
                         let _ = ctrl_tx.send(Frame::DeviceSnapshot { devices: hub.db().devices() }).await;
                     }
                     Frame::FleetGet => {
@@ -365,6 +367,7 @@ pub async fn run_instance_session(hub: Arc<Hub>, channels: TunnelChannels) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::PairState;
 
     fn hub() -> Arc<Hub> {
         let db = Db::open_in_memory().expect("内存库");
@@ -387,8 +390,16 @@ mod tests {
         let (code, _) = hub.create_pair_offer("admin").expect("上架");
         let (device_id, token) = hub.redeem_pair(&code, "我的手机").expect("兑换");
         assert!(device_id.starts_with("dev-"));
-        assert_eq!(token.len(), 64);
+        // 设备凭据带 dv_ 前缀（控制台「凭据」列要能一眼认出是哪一枚）。
+        assert!(token.starts_with("dv_"), "设备 token 带 dv_ 前缀：{token}");
         assert!(hub.db().device_auth(&token).is_some());
         assert!(hub.redeem_pair(&code, "again").is_err(), "一次性");
+        // 码 → 设备回填：控制台的配对弹层要能显示「配对成了哪台」。
+        assert_eq!(
+            hub.db().pair_state(&code),
+            PairState::Used {
+                device_name: Some("我的手机".to_owned())
+            }
+        );
     }
 }

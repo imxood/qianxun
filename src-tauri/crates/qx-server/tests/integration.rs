@@ -937,17 +937,28 @@ async fn 控制台登录闭环与设备治理() {
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body).contains("测试手机"));
     let device_id = paired["deviceId"].as_str().unwrap_or_default().to_owned();
+    // 配对弹层的状态机：兑换后必须能查到「used + 设备名」（docs/20 §4.4）。
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        &format!("/console/api/devices/pair/status?code={code}"),
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pair_state: serde_json::Value = serde_json::from_slice(&body).expect("状态响应");
+    assert_eq!(pair_state["status"], "used");
+    assert_eq!(pair_state["deviceName"], "测试手机");
+
     let (status, _, _) = request_with_session(
         &client,
         &edge,
         "POST",
-        "/console/api/devices/revoke",
+        &format!("/console/api/devices/{device_id}/revoke"),
         &session,
-        Some(
-            serde_json::json!({"deviceId": device_id})
-                .to_string()
-                .into_bytes(),
-        ),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -965,6 +976,88 @@ async fn 控制台登录闭环与设备治理() {
         String::from_utf8_lossy(&body).contains("\"revoked\":true"),
         "吊销可见"
     );
+
+    // 恢复：同一枚凭据必须直接重新可用（撤销 toast 的前提）。
+    let (status, _, _) = request_with_session(
+        &client,
+        &edge,
+        "POST",
+        &format!("/console/api/devices/{device_id}/restore"),
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("\"revoked\":false"));
+
+    // 概览与审计：控制台另两页的数据面，一页一次请求。
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/overview",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let overview: serde_json::Value = serde_json::from_slice(&body).expect("概览响应");
+    assert!(overview["kpi"]["activeDevices"].as_i64().is_some());
+    assert!(overview["traffic"]["interactive"].as_array().is_some());
+
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/audit?type=pair",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let audit: serde_json::Value = serde_json::from_slice(&body).expect("审计响应");
+    let events = audit["events"].as_array().expect("事件数组");
+    assert!(!events.is_empty(), "配对事件已写入审计");
+    assert!(events.iter().all(|event| event["event"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("pair"))));
+
+    // CSV 导出与 JSON 同源。
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/audit.csv?type=pair",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).starts_with("time,event,instance,device,detail"));
+
+    // 内嵌控制台：没跑 build:console 时给 503 而不是空白 200（docs/20 §7.4）。
+    let (status, _, shell) =
+        request_with_session(&client, &edge, "GET", "/console", "", None).await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE,
+        "控制台要么可用要么明说没构建，得到 {status}"
+    );
+    if status == StatusCode::OK {
+        assert!(
+            String::from_utf8_lossy(&shell).contains("<div id=\"app\">"),
+            "内嵌壳是 SPA 入口"
+        );
+    }
 
     // 登出 → 会话失效。
     let (status, _, _) = request_with_session(
