@@ -115,6 +115,8 @@ pub fn router(state: Arc<EdgeState>) -> Router {
         .route("/qx-ws", any(qx_ws))
         .route("/qx-pair", get(pair_page))
         .route("/api/pair/submit", post(pair_submit))
+        // 手机凭据换 HttpOnly Cookie（会话入口；token 不落 URL/日志）。
+        .route("/api/enter", post(device_enter))
         .route("/qx-fleet", get(fleet_page))
         .route("/api/fleet", get(fleet_api))
         // ---- 管理面（/console，预置用户登录，docs/19 v5.5）----
@@ -252,6 +254,82 @@ async fn pair_submit(
 async fn pair_page(Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
     let code = params.get("code").cloned().unwrap_or_default();
     axum::response::Html(pair_html(&code)).into_response()
+}
+
+/// 手机会话入口：POST {token, iid?} → 校验设备 token → 换 HttpOnly Cookie。
+/// 配对页/舰队页在 JS 里调用——token 从不进 URL（避免泄漏进日志/Referer）。
+async fn device_enter(
+    State(state): State<Arc<EdgeState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let ip = client_ip(&headers, &addr);
+    let key = format!("enter:{ip}");
+    if let Err(retry_after) = state.limiter.check(&key) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, HeaderValue::from(retry_after))],
+            Json(json!({ "error": "尝试过于频繁" })),
+        )
+            .into_response();
+    }
+    let Some(token) = body.get("token").and_then(|value| value.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "token 必填" })),
+        )
+            .into_response();
+    };
+    let iid = body
+        .get("iid")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    match state.hub.db().device_auth(token) {
+        Some(device) => {
+            state.limiter.pass(&key);
+            state.hub.db().touch_device(&device.id);
+            state
+                .hub
+                .db()
+                .audit("device.enter", None, Some(&device.id), "{}");
+            let secure = if state.public_proto == "https" {
+                "; Secure"
+            } else {
+                ""
+            };
+            let mut cookies = vec![format!(
+                "qx_token={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=15552000{secure}"
+            )];
+            if !iid.is_empty() {
+                cookies.push(format!(
+                    "qx_iid={iid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{secure}"
+                ));
+            }
+            let mut response = Json(json!({ "ok": true, "deviceId": device.id })).into_response();
+            for cookie in cookies {
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    HeaderValue::from_str(&cookie).expect("enter cookie 构造"),
+                );
+            }
+            response
+        }
+        None => {
+            state.limiter.fail(&key);
+            state.hub.db().audit(
+                "device.enter_fail",
+                None,
+                None,
+                &format!("{{\"ip\":\"{ip}\"}}"),
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "无效设备凭据" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ---- 舰队（HTTP 投影 = fleet.get，docs/19 §4.5）----
@@ -558,7 +636,9 @@ async fn proxy(
     // 路由键：设备（服务器级）+ 目标实例（cookie）。
     let Some(device) = device_auth(&state, &parts.headers, query) else {
         if path == "/" {
-            return Redirect::to("/qx-pair").into_response();
+            // 域名门面：未认证访客一律先到登录页（管理面）；
+            // 手机配对入口在登录页页脚，避免把配对页当门面。
+            return Redirect::to("/login").into_response();
         }
         return (StatusCode::UNAUTHORIZED, "未配对设备").into_response();
     };
@@ -848,7 +928,8 @@ const data=await r.json();
 if(!r.ok){{document.getElementById('err').textContent=data.error||'配对失败';return;}}
 localStorage.setItem('qx_token',data.token);
 localStorage.setItem('qx_device',data.deviceId);
-location.href='/qx-fleet';
+try{{await fetch('/api/enter',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({{token:data.token}})}});}}catch(e){{}}
+ location.href='/qx-fleet';
 }}catch(e){{document.getElementById('err').textContent='网络错误';}}}}
 </script></div></body></html>"#
     )
@@ -870,24 +951,25 @@ h1{font-size:18px} .hint{color:#8b93a7;font-size:13px}
 <div id="list"><p class="hint">加载中…</p></div>
 <p class="hint"><a href="/qx-pair" style="color:#2563eb">重新配对</a></p>
 </div><script>
-async function load(){{
+async function load(){
  const token=localStorage.getItem('qx_token')||new URLSearchParams(location.search).get('token');
- if(!token){{location.href='/qx-pair';return;}}
+ if(!token){location.href='/login';return;}
+ try{await fetch('/api/enter',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:token})});}catch(e){}
  const r=await fetch('/api/fleet?token='+encodeURIComponent(token));
- if(r.status===401){{location.href='/qx-pair';return;}}
+ if(r.status===401){location.href='/login';return;}
  const data=await r.json();
  const list=document.getElementById('list');
  list.innerHTML='';
- for(const it of data.instances){{
+ for(const it of data.instances){
    const a=document.createElement('a');
    a.className='item'+(it.online?'':' off');
    a.href='/i/'+it.id+'/';
    a.innerHTML='<span class="dot'+(it.online?'':' off')+'"></span><span class="name">'+it.name+
      '<div class="meta">'+(it.qianxun||'')+(it.dsh?' · DSH '+it.dsh:'')+'</div></span>'+(it.online?'<span>进入 →</span>':'<span class="meta">离线</span>');
    list.appendChild(a);
- }}
+ }
  if(!data.instances.length)list.innerHTML='<p class="hint">暂无主机实例（先在服务端预置实例，再让千寻连接）</p>';
-}}
+}
 load();setInterval(load,10000);
 </script></body></html>"#;
 
@@ -906,6 +988,7 @@ button{width:100%;padding:12px;border:0;border-radius:10px;background:#2563eb;co
 <input id="p" type="password" placeholder="密码" autocomplete="current-password">
 <div class="err" id="err"></div>
 <button onclick="go()">登录</button>
+<p class="hint" style="margin-top:14px">手机配对新设备？<a href="/qx-pair" style="color:#2563eb">打开配对页</a></p>
 <script>
 async function go(){try{
  const r=await fetch('/console/api/login',{method:'POST',headers:{'content-type':'application/json'},

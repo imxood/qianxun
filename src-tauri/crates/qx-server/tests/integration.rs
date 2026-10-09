@@ -726,14 +726,73 @@ async fn 配对码错误与未配对访问() {
         .expect("发");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    // 未配对访问根路径 → 引导配对页。
+    // 未配对访问根路径 → 登录页（域名门面 = 管理面入口；配对入口在登录页页脚）。
     let (status, headers, _) = request(&client, &edge, "GET", "/", None, None, None).await;
     assert!(status.is_redirection(), "应重定向：{status}");
     assert!(headers
         .get(header::LOCATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .contains("/qx-pair"));
+        .contains("/login"));
+}
+
+/// 手机会话入口 /api/enter：设备 token → HttpOnly Cookie → 反代可用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 设备enter换cookie后反代通() {
+    let edge = start_edge().await;
+    let token = register_instance(&edge.db, "i1", "书房主机").await;
+    let mut instance = fake_instance(&edge, "i1", "书房主机", &token, None).await;
+    let client = http_client();
+    let device = pair_via_tunnel(&mut instance, &client, &edge).await;
+
+    // enter：token（+iid）→ 两条 HttpOnly cookie。
+    let (status, headers, body) = json_post(
+        &client,
+        &edge,
+        "/api/enter",
+        None,
+        serde_json::json!({"token": device, "iid": "i1"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "enter 响应：{body:?}");
+    let set_cookies: Vec<String> = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
+    assert!(set_cookies
+        .iter()
+        .any(|c| c.starts_with("qx_token=") && c.contains("HttpOnly")));
+    assert!(set_cookies.iter().any(|c| c.starts_with("qx_iid=i1")));
+
+    // 用换来的 cookie 直接反代（不再手拼 cookie）。
+    let cookie = set_cookies
+        .iter()
+        .map(|c| c.split(';').next().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let response = client
+        .request(
+            Request::builder()
+                .uri(format!("http://{}/hello", edge.addr))
+                .header(header::COOKIE, &cookie)
+                .body(axum::body::Body::empty())
+                .expect("请求"),
+        )
+        .await
+        .expect("发");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 无效 token → 401。
+    let (status, _, _) = json_post(
+        &client,
+        &edge,
+        "/api/enter",
+        None,
+        serde_json::json!({"token": "not-a-token"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
