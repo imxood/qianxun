@@ -25,6 +25,8 @@ tokio = { version = "1", features = [
 ] }
 # 千寻侧出站隧道客户端（ws:// 与 wss://）；TLS feature 为主工程待补项，这里先带上
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# wss 需要进程级 CryptoProvider（ring 后端；connect 前安装，否则 rustls panic）。
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # 隧道流上的 HTTP：http1 客户端（边缘→实例）与服务（实例端 serve Router，含 upgrades）
 hyper = { version = "1", features = ["http1", "client", "server"] }
@@ -41,6 +43,8 @@ tokio-util = { version = "0.7", features = ["compat"] }
 futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 rand = "0.8"
 sha2 = "0.10"
+# 管理面用户密码哈希（/console 登录）：argon2id，纯 Rust。
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "test-util"] }

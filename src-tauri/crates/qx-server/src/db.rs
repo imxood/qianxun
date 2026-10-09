@@ -70,6 +70,22 @@ const MIGRATIONS: &[&str] = &[
         detail_json TEXT
     );
     CREATE INDEX idx_devices_token ON devices(token_hash);",
+    // v2：管理面用户与会话（/console）。密码 argon2id 哈希；会话 token 只存哈希。
+    "CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        last_ip TEXT
+    );
+    CREATE INDEX idx_sessions_user ON sessions(user_id);",
 ];
 
 fn now() -> i64 {
@@ -293,8 +309,10 @@ impl Db {
     // ---- 配对码 ----
 
     /// 上架一个一次性配对码；返回明文码（5 分钟时效）。
+    /// 6 字节 = 48 bit（控制台/千寻发码后手机扫码为主路径，手输也可接受；
+    /// 配合 submit 限流 5 次/15min，在线爆破不可行）。
     pub fn create_pair_code(&self, issued_via: &str) -> Result<(String, i64), String> {
-        let code = crypto::random_hex(4).to_uppercase();
+        let code = crypto::random_hex(6).to_uppercase();
         let hash = crypto::sha256_hex(code.as_bytes());
         let expires = now() + 300;
         self.lock()
@@ -356,6 +374,180 @@ impl Db {
             params![now(), instance_id, device_id, event, detail_json],
         );
     }
+
+    // ---- 管理面用户与会话（/console）----
+
+    /// 预置用户（fail-closed：无默认账号）。密码 argon2id 哈希后入库；
+    /// 明文密码只在返回值里出现一次。
+    pub fn add_user(&self, name: &str, password: &str) -> Result<String, String> {
+        let id = format!("user-{}", crypto::random_hex(4));
+        let hash = hash_password(password)?;
+        self.lock()
+            .execute(
+                "INSERT INTO users (id, name, password_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![id, name, hash, now()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    /// 用户清单（无哈希）。
+    pub fn users(&self) -> Vec<(String, String, i64)> {
+        let conn = self.lock();
+        let mut stmt =
+            match conn.prepare("SELECT id, name, created_at FROM users ORDER BY created_at") {
+                Ok(stmt) => stmt,
+                Err(_) => return Vec::new(),
+            };
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// 改密：吊销该用户全部会话（旧会话立刻失效）。
+    pub fn reset_password(&self, name: &str, password: &str) -> Result<(), String> {
+        let hash = hash_password(password)?;
+        let conn = self.lock();
+        let updated = conn
+            .execute(
+                "UPDATE users SET password_hash = ?2 WHERE name = ?1",
+                params![name, hash],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("unknown_user".into());
+        }
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE name = ?1)",
+            params![name],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 校验用户名+密码（argon2 verify；用户不存在也做一次哑校验防时序探测）。
+    pub fn verify_login(&self, name: &str, password: &str) -> Option<String> {
+        let row: Option<(String, String)> = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT id, password_hash FROM users WHERE name = ?1",
+                params![name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .expect("列清单固定")
+        };
+        match row {
+            Some((id, hash)) if verify_password(password, &hash) => Some(id),
+            _ => {
+                // 哑校验：用户不存在时消耗等量时间，不泄露账号存在性。
+                let _ = verify_password(password, &dummy_hash());
+                None
+            }
+        }
+    }
+
+    /// 建会话：返回明文 token（只此一次）；库中只存 SHA-256。
+    /// 滑动过期 7 天 / 绝对上限 30 天。
+    pub fn create_session(&self, user_id: &str, ip: &str) -> String {
+        let token = crypto::random_hex(32);
+        let hash = crypto::sha256_hex(token.as_bytes());
+        let created = now();
+        self.lock()
+            .execute(
+                "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_seen_at, last_ip)
+                 VALUES (?1, ?2, ?3, ?4, ?3, ?5)",
+                params![hash, user_id, created, created + SESSION_ABSOLUTE_SECS, ip],
+            )
+            .expect("列清单固定");
+        token
+    }
+
+    /// 校验会话：有效则滑动续期，返回 user_id；否则 None。
+    pub fn validate_session(&self, token: &str) -> Option<String> {
+        let hash = crypto::sha256_hex(token.as_bytes());
+        let conn = self.lock();
+        let row: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT user_id, expires_at, last_seen_at FROM sessions WHERE token_hash = ?1",
+                params![hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .expect("列清单固定");
+        let (user_id, expires_at, last_seen_at) = row?;
+        let current = now();
+        if current >= expires_at {
+            let _ = conn.execute("DELETE FROM sessions WHERE token_hash = ?1", params![hash]);
+            return None;
+        }
+        // 滑动续期：距上次活跃超过半小时才写库（省写放大）。
+        if current - last_seen_at > 1800 {
+            let refreshed = (current + SESSION_SLIDING_SECS).min(expires_at);
+            let _ = conn.execute(
+                "UPDATE sessions SET last_seen_at = ?2, expires_at = ?3 WHERE token_hash = ?1",
+                params![hash, current, refreshed],
+            );
+        }
+        Some(user_id)
+    }
+
+    /// 登出（吊销单会话）。
+    pub fn delete_session(&self, token: &str) {
+        let hash = crypto::sha256_hex(token.as_bytes());
+        let _ = self
+            .lock()
+            .execute("DELETE FROM sessions WHERE token_hash = ?1", params![hash]);
+    }
+
+    /// 活跃会话数（监控用）。
+    pub fn session_count(&self) -> i64 {
+        self.lock()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// 测试钩子：把会话直接改成已过期。
+    #[cfg(test)]
+    pub(crate) fn expire_session_for_test(&self, token: &str) {
+        let hash = crypto::sha256_hex(token.as_bytes());
+        let _ = self.lock().execute(
+            "UPDATE sessions SET expires_at = 1 WHERE token_hash = ?1",
+            params![hash],
+        );
+    }
+}
+
+/// 会话滑动窗口与绝对上限（秒）。
+pub const SESSION_SLIDING_SECS: i64 = 7 * 24 * 3600;
+pub const SESSION_ABSOLUTE_SECS: i64 = 30 * 24 * 3600;
+
+/// 哑哈希（用户不存在时的等时校验靶）。
+fn dummy_hash() -> String {
+    use std::sync::OnceLock;
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY
+        .get_or_init(|| hash_password("timing-equalizer").expect("哑哈希生成"))
+        .clone()
+}
+
+fn hash_password(password: &str) -> Result<String, String> {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut rand::rngs::OsRng);
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| e.to_string())
+}
+
+fn verify_password(password: &str, hash: &str) -> bool {
+    use argon2::PasswordVerifier;
+    let Ok(parsed) = argon2::PasswordHash::new(hash) else {
+        return false;
+    };
+    argon2::Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -376,6 +568,38 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn 用户与会话往返() {
+        let db = db();
+        db.add_user("admin", "correct-horse").expect("预置用户");
+        assert_eq!(db.users().len(), 1);
+        // 正确密码 → Some(user_id)；错误/未知用户 → None。
+        assert!(db.verify_login("admin", "correct-horse").is_some());
+        assert!(db.verify_login("admin", "wrong").is_none());
+        assert!(db.verify_login("ghost", "whatever").is_none());
+        // 会话：建→验→登出→验失效。
+        let user_id = db.verify_login("admin", "correct-horse").unwrap();
+        let session = db.create_session(&user_id, "127.0.0.1");
+        assert_eq!(db.validate_session(&session), Some(user_id.clone()));
+        db.delete_session(&session);
+        assert_eq!(db.validate_session(&session), None);
+        // 改密 → 全部旧会话吊销。
+        let session2 = db.create_session(&user_id, "127.0.0.1");
+        db.reset_password("admin", "new-password").expect("改密");
+        assert_eq!(db.validate_session(&session2), None);
+        assert!(db.verify_login("admin", "new-password").is_some());
+    }
+
+    #[test]
+    fn 会话过期即失效() {
+        let db = db();
+        db.add_user("u", "p").expect("预置");
+        let user_id = db.verify_login("u", "p").unwrap();
+        let session = db.create_session(&user_id, "127.0.0.1");
+        db.expire_session_for_test(&session);
+        assert_eq!(db.validate_session(&session), None);
     }
 
     #[test]

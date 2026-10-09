@@ -24,6 +24,45 @@ use qx_server::web::{self, EdgeState};
 
 const PUBLIC_HOST: &str = "relay.example.com";
 
+/// 生产链路冒烟（部署验收用；默认跳过）：
+/// `QX_LIVE_URL=wss://host QX_LIVE_ID=… QX_LIVE_TOKEN=… cargo test live_真实服务器`
+/// 验证 TLS + 反代 + WS 升级 + hello/welcome + 预置凭据全链路（不发业务流量）。
+#[tokio::test]
+async fn live_真实服务器握手() {
+    let Ok(url) = std::env::var("QX_LIVE_URL") else {
+        eprintln!("[跳过] 未设 QX_LIVE_URL");
+        return;
+    };
+    let id = std::env::var("QX_LIVE_ID").expect("QX_LIVE_ID");
+    let token = std::env::var("QX_LIVE_TOKEN").expect("QX_LIVE_TOKEN");
+    let channels = transport::connect(&format!("{}/qx-ws", url.trim_end_matches('/')))
+        .await
+        .expect("连真实服务器（TLS+反代+WS 升级）");
+    let TunnelChannels {
+        ctrl_tx,
+        mut ctrl_rx,
+        ..
+    } = channels;
+    ctrl_tx
+        .send(Frame::Hello {
+            role: Role::Instance,
+            instance_id: Some(id),
+            instance_token: Some(token),
+            device_token: None,
+            meta: Some(InstanceMeta {
+                qianxun: "deploy-check".into(),
+                dsh: None,
+                hostname: Some("deploy-check".into()),
+            }),
+        })
+        .await
+        .expect("发 hello");
+    match tokio::time::timeout(Duration::from_secs(10), ctrl_rx.recv()).await {
+        Ok(Some(Frame::Welcome { .. })) => {}
+        other => panic!("welcome 未到达：{other:?}"),
+    }
+}
+
 // ---------- 公共设施 ----------
 
 struct Edge {
@@ -39,6 +78,7 @@ async fn start_edge() -> Edge {
         hub,
         public_host: PUBLIC_HOST.into(),
         public_proto: "https",
+        limiter: Arc::new(qx_server::web::AttemptLimiter::default()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -712,4 +752,286 @@ async fn 实例入口设cookie并重定向() {
         "cookie 应写入实例 id：{cookie}"
     );
     assert!(cookie.to_lowercase().contains("httponly"));
+}
+
+// ---------- 管理面 /console ----------
+
+/// 登录 → 会话 → 设备列表 → 发码 → 手机兑换 → 吊销 → 登出，全链闭环。
+#[tokio::test]
+async fn 控制台登录闭环与设备治理() {
+    let edge = start_edge().await;
+    edge.db.add_user("admin", "pass-123456").expect("预置用户");
+    let client = http_client();
+
+    // 未登录 → 401。
+    let (status, _, _) = request(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // 错密码 → 401（不泄露账号存在性）。
+    let (status, _, _) = json_post(
+        &client,
+        &edge,
+        "/console/api/login",
+        None,
+        serde_json::json!({"username": "admin", "password": "wrong"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // 正确登录 → 200 + 会话 cookie。
+    let (status, headers, _) = json_post(
+        &client,
+        &edge,
+        "/console/api/login",
+        None,
+        serde_json::json!({"username": "admin", "password": "pass-123456"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie_header = headers
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        cookie_header.starts_with("qx_session="),
+        "会话 cookie：{cookie_header}"
+    );
+    assert!(cookie_header.contains("HttpOnly"));
+    let session = cookie_header
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+
+    // 带会话取设备列表（空）。
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&body).contains("\"devices\":[]"),
+        "初始空列表"
+    );
+
+    // 发码：12 位大写 hex + 配对链接。
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "POST",
+        "/console/api/devices/pair",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let offered: serde_json::Value = serde_json::from_slice(&body).expect("发码响应");
+    let code = offered["code"].as_str().unwrap_or_default().to_owned();
+    assert_eq!(code.len(), 12, "48bit 码：{code}");
+    assert!(code
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || ch.is_ascii_uppercase()));
+    assert!(offered["pairUrl"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("/qx-pair?code="));
+
+    // 手机兑换该码 → 设备 token。
+    let (status, _, body) = json_post(
+        &client,
+        &edge,
+        "/api/pair/submit",
+        None,
+        serde_json::json!({"code": code, "name": "测试手机"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let paired: serde_json::Value = serde_json::from_slice(&body).expect("兑换响应");
+    let device_token = paired["token"].as_str().unwrap_or_default().to_owned();
+    assert!(!device_token.is_empty());
+
+    // 设备列表出现新设备；吊销后 revoked=true。
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("测试手机"));
+    let device_id = paired["deviceId"].as_str().unwrap_or_default().to_owned();
+    let (status, _, _) = request_with_session(
+        &client,
+        &edge,
+        "POST",
+        "/console/api/devices/revoke",
+        &session,
+        Some(
+            serde_json::json!({"deviceId": device_id})
+                .to_string()
+                .into_bytes(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&body).contains("\"revoked\":true"),
+        "吊销可见"
+    );
+
+    // 登出 → 会话失效。
+    let (status, _, _) = request_with_session(
+        &client,
+        &edge,
+        "POST",
+        "/console/api/logout",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// 登录爆破：5 次失败 → 锁定（正确密码也 429）。
+#[tokio::test]
+async fn 登录失败锁定() {
+    let edge = start_edge().await;
+    edge.db.add_user("admin", "pass-123456").expect("预置用户");
+    let client = http_client();
+    for _ in 0..5 {
+        let (status, _, _) = json_post(
+            &client,
+            &edge,
+            "/console/api/login",
+            None,
+            serde_json::json!({"username": "admin", "password": "wrong"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // 第 6 次：密码正确也 429（IP 键已锁）。
+    let (status, _, _) = json_post(
+        &client,
+        &edge,
+        "/console/api/login",
+        None,
+        serde_json::json!({"username": "admin", "password": "pass-123456"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// 配对码兑换爆破：5 次错码 → 第 6 次 429。
+#[tokio::test]
+async fn 配对兑换限流() {
+    let edge = start_edge().await;
+    let client = http_client();
+    for _ in 0..5 {
+        let (status, _, _) = json_post(
+            &client,
+            &edge,
+            "/api/pair/submit",
+            None,
+            serde_json::json!({"code": "DEADBEEF0000"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "错码本身是 403");
+    }
+    let (status, _, _) = json_post(
+        &client,
+        &edge,
+        "/api/pair/submit",
+        None,
+        serde_json::json!({"code": "DEADBEEF0000"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "第 6 次被限流");
+}
+
+/// JSON POST 帮手（Content-Type: application/json）。
+async fn json_post(
+    client: &HttpClient,
+    edge: &Edge,
+    path: &str,
+    session: Option<&str>,
+    payload: serde_json::Value,
+) -> (StatusCode, HeaderMap, Bytes) {
+    let body = payload.to_string().into_bytes();
+    request_with_session(
+        client,
+        edge,
+        "POST",
+        path,
+        session.unwrap_or(""),
+        Some(body),
+    )
+    .await
+}
+
+/// 带会话 cookie 的请求。
+async fn request_with_session(
+    client: &HttpClient,
+    edge: &Edge,
+    method: &str,
+    path: &str,
+    session: &str,
+    body: Option<Vec<u8>>,
+) -> (StatusCode, HeaderMap, Bytes) {
+    let builder = Request::builder()
+        .method(method)
+        .uri(format!("http://{}{path}", edge.addr))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, session);
+    let body = body.map(axum::body::Body::from).unwrap_or_default();
+    let response = client
+        .request(builder.body(body).expect("请求合法"))
+        .await
+        .expect("请求成功");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("读体")
+        .to_bytes();
+    (status, headers, bytes)
 }

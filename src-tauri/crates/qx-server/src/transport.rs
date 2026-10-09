@@ -99,7 +99,15 @@ pub fn from_axum_ws(socket: axum::extract::ws::WebSocket) -> TunnelChannels {
 }
 
 /// tungstenite 客户端（千寻出站连接）→ 隧道频道。
+///
+/// wss 场景必须先装进程级 CryptoProvider——rustls 无默认后端会直接 panic
+/// （首次调用装 ring，已装则幂等；本地 ws:// 测试踩不到，生产 wss 会）。
 pub async fn connect(url: &str) -> Result<TunnelChannels, String> {
+    static TLS_PROVIDER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    TLS_PROVIDER.get_or_init(|| {
+        // install_default 在已装时返回 Err——视为成功（幂等）。
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
     let (stream, _response) = tokio_tungstenite::connect_async(url)
         .await
         .map_err(|cause| format!("连接 {url} 失败：{cause}"))?;

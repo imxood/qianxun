@@ -32,7 +32,10 @@ fn print_usage() {
   qx-server admin list-instances  --data DIR
   qx-server admin rotate-token    --data DIR --id ID
   qx-server admin pair-create     --data DIR
-  qx-server admin import-device   --data DIR --name NAME [--token TOKEN]",
+  qx-server admin import-device   --data DIR --name NAME [--token TOKEN]
+  qx-server admin add-user        --data DIR --name NAME [--password PASS]
+  qx-server admin list-users      --data DIR
+  qx-server admin reset-password  --data DIR --name NAME [--password PASS]",
         qx_server::version()
     );
 }
@@ -114,6 +117,7 @@ fn run_serve(args: &[String]) -> i32 {
         hub,
         public_host,
         public_proto: flags.public_proto,
+        limiter: Arc::new(qx_server::web::AttemptLimiter::default()),
     });
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -218,6 +222,54 @@ fn run_admin(args: &[String]) -> i32 {
             match db.import_device(&name, flag_value(rest, "--token").as_deref()) {
                 Ok(token) => {
                     println!("设备已导入；token = {token}");
+                    0
+                }
+                Err(cause) => {
+                    eprintln!("{cause}");
+                    1
+                }
+            }
+        }
+        "add-user" => {
+            let Some(name) = flag_value(rest, "--name") else {
+                eprintln!("--name 必填");
+                return 2;
+            };
+            // 无默认密码：未显式给 --password 则随机生成并只打印一次。
+            let password =
+                flag_value(rest, "--password").unwrap_or_else(|| qx_server::crypto::random_hex(8));
+            match db.add_user(&name, &password) {
+                Ok(_id) => {
+                    println!("管理用户已预置（/console 登录用）");
+                    println!("  username = {name}");
+                    println!("  password = {password}");
+                    if flag_value(rest, "--password").is_none() {
+                        println!("（密码为随机生成，只显示这一次；忘记可用 reset-password 重置）");
+                    }
+                    0
+                }
+                Err(cause) => {
+                    eprintln!("{cause}");
+                    1
+                }
+            }
+        }
+        "list-users" => {
+            for (id, name, created) in db.users() {
+                println!("{id}\t{name}\tcreated={created}");
+            }
+            0
+        }
+        "reset-password" => {
+            let Some(name) = flag_value(rest, "--name") else {
+                eprintln!("--name 必填");
+                return 2;
+            };
+            let password =
+                flag_value(rest, "--password").unwrap_or_else(|| qx_server::crypto::random_hex(8));
+            match db.reset_password(&name, &password) {
+                Ok(()) => {
+                    println!("新 password = {password}（旧会话已全部吊销）");
                     0
                 }
                 Err(cause) => {
