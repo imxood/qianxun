@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, type AuditEvent } from '../lib/api';
+  import { describeEvent, eventTone, isFailure } from '../lib/audit';
   import { stamp } from '../lib/fmt';
   import { toast } from '../lib/toast.svelte';
 
@@ -28,7 +29,7 @@
   let fails = $state<Record<string, number>>({});
 
   function streakOf(event: AuditEvent): number | null {
-    if (!event.event.endsWith('.fail')) return null;
+    if (!isFailure(event.event)) return null;
     const key = `${event.event}|${event.deviceId ?? event.instanceId ?? ''}`;
     const current = fails[key];
     if (current == null) return null;
@@ -71,74 +72,6 @@
   });
 
   const liveSeconds = $derived(lastSync ? Math.floor((Date.now() - lastSync) / 1000) : 0);
-
-  function tone(event: AuditEvent): string {
-    if (event.event.endsWith('.fail')) return 'tl-fail';
-    if (event.event.startsWith('login.ok') || event.event.endsWith('.ok')) return 'tl-ok';
-    return 'tl-info';
-  }
-
-  /** 一句话说清「谁、做了什么、在哪」。
-   *
-   *  这张表按**服务端真实发出的事件名**写，不是按设想中的名字——曾经这里写着
-   *  `pair.ok` / `instance.up`，而服务端根本不发这两个，落到 default 就把
-   *  `pair.submit_ok` 之类的原始标识符直接印给了用户（docs/20 §4.5）。
-   *  detail 里没有的字段就不编，主体缺了就退到 id，再缺就写「设备」。 */
-  function describe(event: AuditEvent): string {
-    const detail = event.detail;
-    const who = (detail['name'] as string) ?? null;
-    const ip = (detail['ip'] as string) ?? null;
-    const tail = ip ? ` · ${ip}` : '';
-    const device = event.deviceId ?? '设备';
-    const instance = event.instanceId ?? '实例';
-    const via = (detail['via'] as string) ?? '';
-    // 同一个动作不写两条事件（db.rs 一次动作只写一条），来源记在 detail.via。
-    const where = via === 'console' ? '控制台' : via === 'instance' ? '实例' : '命令行';
-    switch (event.event) {
-      case 'login.ok':
-        return `${who ?? '用户'} 登录成功${tail}`;
-      case 'login.fail':
-        return `${who ?? '用户'} 密码错误${tail}`;
-      case 'login.locked':
-        return `${who ?? '用户'} 触发限流锁定${tail}`;
-      // 配对：发码、手机兑换、手机进场三段。
-      case 'pair.create':
-        return `${where}生成配对码`;
-      case 'pair.submit_ok':
-        return `${device} 兑换配对码成功${tail}`;
-      case 'pair.submit_fail':
-        return `配对码错误${tail}`;
-      case 'pair.locked':
-        return `配对提交触发限流锁定${tail}`;
-      case 'pair.grant':
-        return `${device} 已接入`;
-      // 实例
-      case 'instance.add':
-        return `${instance} 已登记`;
-      case 'instance.rotate':
-        return `${instance} 令牌已轮换`;
-      case 'instance.offline':
-        return `${instance} 掉线`;
-      // 设备
-      case 'device.enter':
-        return `${device} 建立连接${tail}`;
-      case 'device.enter_fail':
-        return `设备凭据无效${tail}`;
-      case 'device.revoke':
-        return `${device} 已被${where}吊销`;
-      case 'device.restore':
-        return `${device} 已恢复`;
-      case 'device.revoke_all':
-        return '吊销全部设备';
-      case 'device.rotate':
-        return `${device} 凭据已轮换`;
-      case 'device.import':
-        return `${device} 由命令行导入`;
-      default:
-        // 不认识的事件不编句子，但也不能装作不存在：原始键仍然可见、可搜索。
-        return `${event.event}（未分类事件）`;
-    }
-  }
 
   function exportCsv(): void {
     window.location.href = api.auditCsvUrl({ type: filter || undefined });
@@ -186,9 +119,9 @@
     {#each events as event (event.id)}
       <div class="tl-item">
         <span class="tl-time">{stamp(event.at)}</span>
-        <span class="tl-badge {tone(event)}" title={event.event}>{event.event}</span>
+        <span class="tl-badge {eventTone(event.event)}" title={event.event}>{event.event}</span>
         <span class="min-w-0 flex-1">
-          {describe(event)}
+          {describeEvent(event)}
           {#if streakOf(event)}（连续 {streakOf(event)}/5）{/if}
         </span>
       </div>
