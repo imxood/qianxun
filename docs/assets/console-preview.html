@@ -5,378 +5,401 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>千寻中继控制台 · 产品设计预览</title>
 <style>
-:root{
-  --bg:#0B0F17; --surface:#111826; --surface2:#1B2336; --border:#263043; --border-strong:#475569;
-  --fg:#F8FAFC; --muted:#94A3B8; --accent:#22C55E; --accent-fg:#0B0F17;
-  --info:#3B82F6; --warn:#F59E0B; --danger:#EF4444; --offline:#64748B;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
-button{cursor:pointer}
-.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums}
-
-/* 预览切换条（非产品 UI）*/
-.preview-bar{position:fixed;left:0;right:0;bottom:0;z-index:99;display:flex;gap:6px;justify-content:center;
-  padding:10px;background:rgba(11,15,23,.85);backdrop-filter:blur(12px);border-top:1px solid var(--border)}
-.preview-bar button{border:1px solid var(--border);background:var(--surface);color:var(--muted);
-  padding:6px 14px;border-radius:999px;font-size:12px}
-.preview-bar button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
-
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;margin-right:8px}
-.dot.on{background:var(--accent);animation:breathe 2s ease-in-out infinite}
-.dot.off{background:var(--offline)} .dot.warn{background:var(--warn)}
-@keyframes breathe{0%,100%{opacity:1}50%{opacity:.45}}
-@media (prefers-reduced-motion:reduce){.dot{animation:none}}
-
-/* 登录 */
-.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
-.login-card{width:min(92vw,360px);background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px}
-.brand{display:flex;align-items:center;gap:10px}
-.brand-logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#22C55E,#0EA5E9);
-  display:flex;align-items:center;justify-content:center;color:#fff}
-.login-card h1{font-size:18px;margin:18px 0 18px}
-.field{margin-bottom:14px}
-.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
-.field input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid var(--border);
-  background:var(--bg);color:var(--fg);font-size:15px;outline:none}
-.field input:focus{border-color:var(--accent)}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:8px;
-  font-size:14px;font-weight:600;padding:11px 18px}
-.btn-primary{background:var(--accent);color:var(--accent-fg)}
-.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
-.btn-sm{padding:7px 12px;font-size:13px}
-.btn-danger{background:transparent;color:var(--danger);border:1px solid rgba(239,68,68,.4)}
-.login-card .btn-primary{width:100%}
-.login-hint{margin-top:16px;font-size:12px;color:var(--muted);text-align:center;line-height:1.9}
-.login-hint a{color:var(--info);text-decoration:none}
-
-/* 控制台外壳（全部控制台页共享一个侧栏）*/
-.shell{display:grid;grid-template-columns:208px 1fr;min-height:100vh;padding-bottom:64px}
-.side{background:var(--surface);border-right:1px solid var(--border);padding:16px 12px;
-  position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
-.side nav{display:flex;flex-direction:column;gap:2px;margin-top:18px}
-.side nav a{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;
-  color:var(--muted);font-size:13.5px;text-decoration:none}
-.side nav a svg{width:16px;height:16px;flex:none}
-.side nav a:hover{color:var(--fg);background:var(--surface2)}
-.side nav a.on{color:var(--fg);background:var(--surface2);box-shadow:inset 2px 0 0 var(--accent)}
-.side nav a.exit{margin-top:10px;border-top:1px solid var(--border);border-radius:0;padding-top:10px}
-.side .foot{margin-top:auto;font-size:11.5px;color:var(--muted)}
-.main{padding:24px 28px;max-width:1120px}
-.pagehead{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
-.pagehead h1{font-size:19px;margin:0}
-.pagehead .desc{color:var(--muted);font-size:13px;margin-left:12px}
-.liveness{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);
-  border:1px solid var(--border);border-radius:999px;padding:5px 12px;background:var(--surface)}
-.liveness .dot{margin:0;width:7px;height:7px}
-
-/* 卡片 */
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
-.grid{display:grid;gap:16px}
-.kpis{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
-.kpi{padding:16px}
-.kpi .label{font-size:12px;color:var(--muted)}
-.kpi .value{font-size:26px;font-weight:600;margin-top:6px}
-.kpi .delta{font-size:12px;color:var(--muted);margin-top:4px}
-.kpi .delta.warn{color:var(--warn)} .kpi .delta.ok{color:var(--accent)}
-.split{grid-template-columns:2fr 1fr}
-@media (max-width:900px){.split{grid-template-columns:1fr}
-  .shell{grid-template-columns:1fr}
-  .side{position:static;height:auto;flex-direction:row;align-items:center;gap:12px}
-  .side nav{flex-direction:row;margin:0 0 0 auto;gap:4px;flex-wrap:wrap}
-  .side nav a{padding:8px 10px}
-  .side nav a svg{display:none}
-  .side nav a.exit{margin:0;border:0;padding:8px 10px}
-  .side .foot{display:none}
-  .main{padding:16px}}
-
-/* 表格 */
-table{width:100%;border-collapse:collapse;font-size:13.5px}
-th{font-size:12px;font-weight:500;color:var(--muted);text-align:left;padding:10px 16px;background:var(--surface2)}
-td{padding:11px 16px;border-top:1px solid var(--border)}
-tr:hover td{background:rgba(27,35,54,.5)}
-.cell-main{font-weight:500}
-.cell-sub{font-size:12px;color:var(--muted);margin-top:1px}
-.right{text-align:right}
-.tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;border-radius:999px;
-  padding:3px 10px;border:1px solid var(--border);color:var(--muted)}
-.tag.ok{color:var(--accent);border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08)}
-.tag.warn{color:var(--warn);border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08)}
-.tag.off{color:var(--offline)}
-tr.row-off td{color:var(--offline)} tr.row-off .cell-sub{color:#5B6779}
-
-/* 弹层 */
-.overlay{position:fixed;inset:0;background:rgba(7,10,16,.6);backdrop-filter:blur(6px);
-  display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
-.modal{width:min(94vw,400px);background:var(--surface);border:1px solid var(--border-strong);
-  border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
-.modal header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
-.modal header h2{font-size:15px;margin:0}
-.modal .body{padding:20px}
-.pair-qr{display:flex;gap:20px;align-items:center}
-.pair-qr img{width:140px;height:140px;border-radius:12px;background:#fff;padding:8px;flex:none}
-.pair-code{font-size:22px;letter-spacing:4px;font-weight:600;background:var(--bg);
-  border:1px dashed var(--border-strong);border-radius:10px;padding:8px;text-align:center;margin-top:10px}
-.pair-tips{margin-top:14px;font-size:12.5px;color:var(--muted)}
-.countdown{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn);margin-top:12px}
-.modal footer{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border)}
-
-/* 图表 */
-.bars{display:flex;align-items:flex-end;gap:4px;height:110px}
-.bars span{flex:1;background:linear-gradient(180deg,rgba(34,197,94,.9),rgba(34,197,94,.25));border-radius:3px 3px 0 0;min-height:2px}
-.bars span.b{background:linear-gradient(180deg,rgba(59,130,246,.85),rgba(59,130,246,.2))}
-.legend{display:flex;gap:14px;font-size:12px;color:var(--muted)}
-.legend i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:5px}
-
-/* 审计 */
-.tl-item{display:flex;gap:12px;padding:10px 16px;border-top:1px solid var(--border);font-size:13px}
-.tl-item:first-child{border-top:0}
-.tl-time{color:var(--muted);font-size:12px;width:118px;flex:none}
-.tl-badge{width:72px;flex:none;font-size:11px;border-radius:999px;text-align:center;padding:2px 0}
-.tl-ok{background:rgba(34,197,94,.1);color:var(--accent)} .tl-fail{background:rgba(239,68,68,.1);color:var(--danger)}
-.tl-info{background:rgba(59,130,246,.1);color:var(--info)}
-
-/* 治理 */
-.gov-row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--border);font-size:13px}
-.gov-row:first-child{border-top:0}
-.meter{flex:1;height:6px;border-radius:3px;background:var(--surface2);overflow:hidden}
-.meter i{display:block;height:100%;border-radius:3px;background:var(--accent)}
-.meter i.w{background:var(--warn)}
-
-.view{display:none}
-.view.on{display:block}
-.page{display:none}
-#p-login.on{display:flex}
-#p-console.on{display:grid}
+/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-border-style:solid;--tw-gradient-position:initial;--tw-gradient-from:#0000;--tw-gradient-via:#0000;--tw-gradient-to:#0000;--tw-gradient-stops:initial;--tw-gradient-via-stops:initial;--tw-gradient-from-position:0%;--tw-gradient-via-position:50%;--tw-gradient-to-position:100%;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-ordinal:initial;--tw-slashed-zero:initial;--tw-numeric-figure:initial;--tw-numeric-spacing:initial;--tw-numeric-fraction:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-backdrop-blur:initial;--tw-backdrop-brightness:initial;--tw-backdrop-contrast:initial;--tw-backdrop-grayscale:initial;--tw-backdrop-hue-rotate:initial;--tw-backdrop-invert:initial;--tw-backdrop-opacity:initial;--tw-backdrop-saturate:initial;--tw-backdrop-sepia:initial}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Consolas, monospace;--color-sky-500:oklch(68.5% .169 237.323);--color-white:#fff;--spacing:.25rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--font-weight-medium:500;--font-weight-semibold:600;--radius-sm:.25rem;--radius-lg:.5rem;--radius-xl:.75rem;--radius-2xl:1rem;--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-bg:#0b0f17;--color-surface:#111826;--color-surface2:#1b2336;--color-line:#263043;--color-line-strong:#475569;--color-fg:#f8fafc;--color-muted:#94a3b8;--color-accent:#22c55e;--color-accent-fg:#0b0f17;--color-info:#3b82f6;--color-warn:#f59e0b;--color-danger:#ef4444;--color-offline:#64748b}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}html{color-scheme:dark}body{background:var(--color-bg);color:var(--color-fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,PingFang SC,Microsoft YaHei,sans-serif;font-size:14px;line-height:1.5}}@layer components{.dot{height:calc(var(--spacing) * 2);width:calc(var(--spacing) * 2);border-radius:3.40282e38px;flex-shrink:0;display:inline-block}.dot-on{background-color:var(--color-accent);animation:2s ease-in-out infinite breathe}.dot-off{background-color:var(--color-offline)}.dot-warn{background-color:var(--color-warn)}@keyframes breathe{0%,to{opacity:1}50%{opacity:.45}}@media (prefers-reduced-motion:reduce){.dot-on{animation:none}}.row-off td{color:var(--color-offline)}.row-off .cell-sub{color:#5b6779}.focus-ring:focus-visible{outline:2px solid var(--color-fg);outline-offset:2px}.card{border-radius:var(--radius-xl);border-style:var(--tw-border-style);border-width:1px;border-color:var(--color-line);background-color:var(--color-surface)}.pagehead{justify-content:space-between;align-items:center;margin-bottom:18px;display:flex}.pagehead h1{--tw-font-weight:var(--font-weight-semibold);font-size:19px;font-weight:var(--font-weight-semibold)}.pagehead .desc{margin-left:calc(var(--spacing) * 3);color:var(--color-muted);font-size:13px}.live-pill{align-items:center;gap:calc(var(--spacing) * 2);border-style:var(--tw-border-style);border-width:1px;border-color:var(--color-line);background-color:var(--color-surface);padding-inline:calc(var(--spacing) * 3);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height));color:var(--color-muted);border-radius:3.40282e38px;padding-block:5px;display:inline-flex}.btn{justify-content:center;align-items:center;gap:calc(var(--spacing) * 2);border-radius:var(--radius-lg);font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height));--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold);padding-block:11px;padding-inline:18px;display:inline-flex}.btn-sm{padding-inline:calc(var(--spacing) * 3);padding-block:7px;font-size:13px}.btn-primary{background-color:var(--color-accent);color:var(--color-accent-fg)}.btn-primary:hover{background-color:#22c55ee6}@supports (color:color-mix(in lab, red, red)){.btn-primary:hover{background-color:color-mix(in oklab, var(--color-accent) 90%, transparent)}}.btn-ghost{border-style:var(--tw-border-style);border-width:1px;border-color:var(--color-line);color:var(--color-muted);background-color:#0000}.btn-ghost:hover{color:var(--color-fg)}.btn-danger{border-style:var(--tw-border-style);color:var(--color-danger);background-color:#0000;border-width:1px;border-color:#ef444466}.btn-danger:hover{background-color:#ef44441a}.tag{align-items:center;gap:calc(var(--spacing) * 1.5);border-style:var(--tw-border-style);border-width:1px;border-color:var(--color-line);padding-inline:calc(var(--spacing) * 2.5);padding-block:calc(var(--spacing) * .5);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height));color:var(--color-muted);border-radius:3.40282e38px;display:inline-flex}.tag-ok{color:var(--color-accent);background-color:#22c55e14;border-color:#22c55e59}.tag-warn{color:var(--color-warn);background-color:#f59e0b14;border-color:#f59e0b59}.tag-off{color:var(--color-offline)}.cell-sub{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height));color:var(--color-muted);margin-top:1px}table{width:100%;font-size:13.5px}th{background-color:var(--color-surface2);padding-inline:calc(var(--spacing) * 3);padding-block:calc(var(--spacing) * 2.5);text-align:left;font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height));--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium);white-space:nowrap;color:var(--color-muted)}td{border-top-style:var(--tw-border-style);border-top-width:1px;border-color:var(--color-line);padding-inline:calc(var(--spacing) * 3);white-space:nowrap;padding-block:11px}td.wrap{white-space:normal}.tl-item{align-items:center;gap:calc(var(--spacing) * 3);border-top-style:var(--tw-border-style);border-top-width:1px;border-color:var(--color-line);padding-inline:calc(var(--spacing) * 4);padding-block:calc(var(--spacing) * 2.5);font-size:13px;display:flex}.tl-item:first-child{border-top-style:var(--tw-border-style);border-top-width:0}.tl-time{width:118px;font-family:var(--font-mono);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height));color:var(--color-muted);--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);flex-shrink:0}.tl-compact .tl-time{width:38px}.tl-compact .tl-badge{width:auto;padding-inline:calc(var(--spacing) * 2)}.tl-badge{width:72px;padding-block:calc(var(--spacing) * .5);text-align:center;border-radius:3.40282e38px;flex-shrink:0;font-size:11px}.tl-ok{color:var(--color-accent);background-color:#22c55e1a}.tl-fail{color:var(--color-danger);background-color:#ef44441a}.tl-info{color:var(--color-info);background-color:#3b82f61a}.gov-row{align-items:center;gap:calc(var(--spacing) * 3);border-top-style:var(--tw-border-style);border-top-width:1px;border-color:var(--color-line);padding-inline:calc(var(--spacing) * 4);padding-block:calc(var(--spacing) * 3);font-size:13px;display:flex}.gov-row:first-child{border-top-style:var(--tw-border-style);border-top-width:0}.meter{height:calc(var(--spacing) * 1.5);background-color:var(--color-surface2);border-radius:3px;flex:1;overflow:hidden}.meter i{background-color:var(--color-accent);border-radius:3px;height:100%;display:block}.meter i.w-warn{background-color:var(--color-warn)}.bar{--tw-gradient-position:to bottom in oklab;background-image:linear-gradient(var(--tw-gradient-stops));--tw-gradient-from:#22c55ee6;border-top-left-radius:3px;border-top-right-radius:3px;flex:1;min-height:2px}@supports (color:color-mix(in lab, red, red)){.bar{--tw-gradient-from:color-mix(in oklab, var(--color-accent) 90%, transparent)}}.bar{--tw-gradient-to:#22c55e40}@supports (color:color-mix(in lab, red, red)){.bar{--tw-gradient-to:color-mix(in oklab, var(--color-accent) 25%, transparent)}}.bar{--tw-gradient-stops:var(--tw-gradient-via-stops,var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position))}.bar-b{--tw-gradient-from:#3b82f6d9}@supports (color:color-mix(in lab, red, red)){.bar-b{--tw-gradient-from:color-mix(in oklab, var(--color-info) 85%, transparent)}}.bar-b{--tw-gradient-to:#3b82f633}@supports (color:color-mix(in lab, red, red)){.bar-b{--tw-gradient-to:color-mix(in oklab, var(--color-info) 20%, transparent)}}.bar-b{--tw-gradient-stops:var(--tw-gradient-via-stops,var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position))}}@layer utilities{.fixed{position:fixed}.sticky{position:sticky}.inset-0{inset:0}.top-0{top:0}.right-5{right:calc(var(--spacing) * 5)}.bottom-5{bottom:calc(var(--spacing) * 5)}.z-40{z-index:40}.z-50{z-index:50}.my-\[18px\]{margin-block:18px}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mt-2\.5{margin-top:calc(var(--spacing) * 2.5)}.mt-3{margin-top:calc(var(--spacing) * 3)}.mt-3\.5{margin-top:calc(var(--spacing) * 3.5)}.mt-4{margin-top:calc(var(--spacing) * 4)}.mt-\[18px\]{margin-top:18px}.mt-auto{margin-top:auto}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-2{margin-right:calc(var(--spacing) * 2)}.mb-1\.5{margin-bottom:calc(var(--spacing) * 1.5)}.mb-2{margin-bottom:calc(var(--spacing) * 2)}.mb-3\.5{margin-bottom:calc(var(--spacing) * 3.5)}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-px{margin-bottom:1px}.ml-auto{margin-left:auto}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline-block{display:inline-block}.h-2{height:calc(var(--spacing) * 2)}.h-4{height:calc(var(--spacing) * 4)}.h-\[34px\]{height:34px}.h-\[46px\]{height:46px}.h-\[110px\]{height:110px}.h-\[140px\]{height:140px}.h-screen{height:100vh}.min-h-screen{min-height:100vh}.w-2{width:calc(var(--spacing) * 2)}.w-4{width:calc(var(--spacing) * 4)}.w-\[34px\]{width:34px}.w-\[72px\]{width:72px}.w-\[120px\]{width:120px}.w-\[140px\]{width:140px}.w-\[min\(92vw\,360px\)\]{width:min(92vw,360px)}.w-\[min\(94vw\,400px\)\]{width:min(94vw,400px)}.w-full{width:100%}.max-w-\[1120px\]{max-width:1120px}.flex-1{flex:1}.shrink-0{flex-shrink:0}.cursor-pointer{cursor:pointer}.appearance-none{appearance:none}.grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-cols-\[1fr_1fr_1fr\]{grid-template-columns:1fr 1fr 1fr}.grid-cols-\[2fr_1fr\]{grid-template-columns:2fr 1fr}.grid-cols-\[208px_1fr\]{grid-template-columns:208px 1fr}.grid-cols-\[repeat\(auto-fit\,minmax\(190px\,1fr\)\)\]{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.items-baseline{align-items:baseline}.items-center{align-items:center}.items-end{align-items:flex-end}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-center{justify-content:center}.justify-end{justify-content:flex-end}.gap-0\.5{gap:calc(var(--spacing) * .5)}.gap-1{gap:var(--spacing)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-2\.5{gap:calc(var(--spacing) * 2.5)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-3\.5{gap:calc(var(--spacing) * 3.5)}.gap-4{gap:calc(var(--spacing) * 4)}.gap-5{gap:calc(var(--spacing) * 5)}.gap-\[3px\]{gap:3px}.gap-x-5{column-gap:calc(var(--spacing) * 5)}.gap-x-8{column-gap:calc(var(--spacing) * 8)}.gap-y-1{row-gap:var(--spacing)}.overflow-hidden{overflow:hidden}.rounded-2xl{border-radius:var(--radius-2xl)}.rounded-\[9px\]{border-radius:9px}.rounded-\[10px\]{border-radius:10px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-sm{border-radius:var(--radius-sm)}.rounded-xl{border-radius:var(--radius-xl)}.border{border-style:var(--tw-border-style);border-width:1px}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-r{border-right-style:var(--tw-border-style);border-right-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-dashed{--tw-border-style:dashed;border-style:dashed}.border-danger\/45{border-color:#ef444473}@supports (color:color-mix(in lab, red, red)){.border-danger\/45{border-color:color-mix(in oklab, var(--color-danger) 45%, transparent)}}.border-line{border-color:var(--color-line)}.border-line-strong{border-color:var(--color-line-strong)}.bg-\[rgba\(7\,10\,16\,\.6\)\]{background-color:#070a1099}.bg-accent{background-color:var(--color-accent)}.bg-bg{background-color:var(--color-bg)}.bg-danger\/10{background-color:#ef44441a}@supports (color:color-mix(in lab, red, red)){.bg-danger\/10{background-color:color-mix(in oklab, var(--color-danger) 10%, transparent)}}.bg-info{background-color:var(--color-info)}.bg-surface{background-color:var(--color-surface)}.bg-surface2{background-color:var(--color-surface2)}.bg-white{background-color:var(--color-white)}.bg-gradient-to-br{--tw-gradient-position:to bottom right in oklab;background-image:linear-gradient(var(--tw-gradient-stops))}.from-accent{--tw-gradient-from:var(--color-accent);--tw-gradient-stops:var(--tw-gradient-via-stops,var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position))}.to-sky-500{--tw-gradient-to:var(--color-sky-500);--tw-gradient-stops:var(--tw-gradient-via-stops,var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position))}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.p-5{padding:calc(var(--spacing) * 5)}.p-8{padding:calc(var(--spacing) * 8)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.px-5{padding-inline:calc(var(--spacing) * 5)}.px-7{padding-inline:calc(var(--spacing) * 7)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-2\.5{padding-block:calc(var(--spacing) * 2.5)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.py-4{padding-block:calc(var(--spacing) * 4)}.py-6{padding-block:calc(var(--spacing) * 6)}.py-\[11px\]{padding-block:11px}.pb-16{padding-bottom:calc(var(--spacing) * 16)}.text-center{text-align:center}.text-left{text-align:left}.text-right{text-align:right}.font-mono{font-family:var(--font-mono)}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.text-\[11\.5px\]{font-size:11.5px}.text-\[13\.5px\]{font-size:13.5px}.text-\[13px\]{font-size:13px}.text-\[15px\]{font-size:15px}.text-\[22px\]{font-size:22px}.text-\[26px\]{font-size:26px}.leading-\[1\.9\]{--tw-leading:1.9;line-height:1.9}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-\[4px\]{--tw-tracking:4px;letter-spacing:4px}.text-accent{color:var(--color-accent)}.text-danger{color:var(--color-danger)}.text-fg{color:var(--color-fg)}.text-info{color:var(--color-info)}.text-muted{color:var(--color-muted)}.text-warn{color:var(--color-warn)}.text-white{color:var(--color-white)}.tabular-nums{--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)}.no-underline{text-decoration-line:none}.shadow-\[0_8px_24px_rgba\(0\,0\,0\,\.5\)\]{--tw-shadow:0 8px 24px var(--tw-shadow-color,#00000080);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-\[0_8px_24px_rgba\(0\,0\,0\,\.45\)\]{--tw-shadow:0 8px 24px var(--tw-shadow-color,#00000073);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-\[inset_2px_0_0_var\(--color-accent\)\]{--tw-shadow:inset 2px 0 0 var(--tw-shadow-color,var(--color-accent));box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.backdrop-blur-\[6px\]{--tw-backdrop-blur:blur(6px);-webkit-backdrop-filter:var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);backdrop-filter:var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,)}.outline-none{--tw-outline-style:none;outline-style:none}@media (hover:hover){.hover\:bg-surface2:hover{background-color:var(--color-surface2)}.hover\:bg-surface2\/35:hover{background-color:#1b233659}@supports (color:color-mix(in lab, red, red)){.hover\:bg-surface2\/35:hover{background-color:color-mix(in oklab, var(--color-surface2) 35%, transparent)}}.hover\:bg-surface2\/50:hover{background-color:#1b233680}@supports (color:color-mix(in lab, red, red)){.hover\:bg-surface2\/50:hover{background-color:color-mix(in oklab, var(--color-surface2) 50%, transparent)}}.hover\:text-fg:hover{color:var(--color-fg)}}.focus\:border-accent:focus{border-color:var(--color-accent)}@media not all and (min-width:900px){.max-\[900px\]\:static{position:static}.max-\[900px\]\:mt-0{margin-top:0}.max-\[900px\]\:ml-auto{margin-left:auto}.max-\[900px\]\:hidden{display:none}.max-\[900px\]\:h-auto{height:auto}.max-\[900px\]\:grid-cols-1{grid-template-columns:repeat(1,minmax(0,1fr))}.max-\[900px\]\:flex-row{flex-direction:row}.max-\[900px\]\:flex-wrap{flex-wrap:wrap}.max-\[900px\]\:items-center{align-items:center}.max-\[900px\]\:gap-1{gap:var(--spacing)}.max-\[900px\]\:gap-3{gap:calc(var(--spacing) * 3)}.max-\[900px\]\:border-0{border-style:var(--tw-border-style);border-width:0}.max-\[900px\]\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-\[900px\]\:py-2{padding-block:calc(var(--spacing) * 2)}.max-\[900px\]\:py-4{padding-block:calc(var(--spacing) * 4)}}}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-gradient-position{syntax:"*";inherits:false}@property --tw-gradient-from{syntax:"<color>";inherits:false;initial-value:#0000}@property --tw-gradient-via{syntax:"<color>";inherits:false;initial-value:#0000}@property --tw-gradient-to{syntax:"<color>";inherits:false;initial-value:#0000}@property --tw-gradient-stops{syntax:"*";inherits:false}@property --tw-gradient-via-stops{syntax:"*";inherits:false}@property --tw-gradient-from-position{syntax:"<length-percentage>";inherits:false;initial-value:0%}@property --tw-gradient-via-position{syntax:"<length-percentage>";inherits:false;initial-value:50%}@property --tw-gradient-to-position{syntax:"<length-percentage>";inherits:false;initial-value:100%}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-ordinal{syntax:"*";inherits:false}@property --tw-slashed-zero{syntax:"*";inherits:false}@property --tw-numeric-figure{syntax:"*";inherits:false}@property --tw-numeric-spacing{syntax:"*";inherits:false}@property --tw-numeric-fraction{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-backdrop-blur{syntax:"*";inherits:false}@property --tw-backdrop-brightness{syntax:"*";inherits:false}@property --tw-backdrop-contrast{syntax:"*";inherits:false}@property --tw-backdrop-grayscale{syntax:"*";inherits:false}@property --tw-backdrop-hue-rotate{syntax:"*";inherits:false}@property --tw-backdrop-invert{syntax:"*";inherits:false}@property --tw-backdrop-opacity{syntax:"*";inherits:false}@property --tw-backdrop-saturate{syntax:"*";inherits:false}@property --tw-backdrop-sepia{syntax:"*";inherits:false}
 </style>
 </head>
-<body>
+<body class="min-h-screen bg-bg text-fg">
 
-<!-- 登录页 -->
-<section class="login-wrap page on" id="p-login">
-  <div class="login-card">
-    <div class="brand"><div class="brand-logo">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-    </div><div style="font-weight:600">千寻中继</div></div>
-    <h1>登录控制台</h1>
-    <div class="field"><label for="u">用户名</label><input id="u" autocomplete="username" value="manager"></div>
-    <div class="field"><label for="p">密码</label><input id="p" type="password" autocomplete="current-password" value="········"></div>
-    <button class="btn btn-primary">登录</button>
-    <div class="login-hint">5 次失败锁定 15 分钟 · 密码由服务器重置<br>手机配对？<a href="#">打开配对页</a></div>
+<!-- 登录 -->
+<section id="p-login" class="hidden min-h-screen items-center justify-center p-4">
+  <div class="w-[min(92vw,360px)] rounded-2xl border border-line bg-surface p-8">
+    <div class="flex items-center gap-2.5">
+      <div class="flex h-[34px] w-[34px] items-center justify-center rounded-[9px] bg-gradient-to-br from-accent to-sky-500 text-white">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </div>
+      <div class="font-semibold">千寻中继</div>
+    </div>
+    <h1 class="my-[18px] text-lg font-semibold">登录控制台</h1>
+    <div class="mb-3.5">
+      <label for="u" class="mb-1.5 block text-xs text-muted">用户名</label>
+      <input id="u" autocomplete="username" value="manager" class="w-full rounded-lg border border-line bg-bg px-3 py-[11px] text-[15px] outline-none focus:border-accent">
+    </div>
+    <div class="mb-3.5">
+      <label for="p" class="mb-1.5 block text-xs text-muted">密码</label>
+      <input id="p" type="password" autocomplete="current-password" value="········" class="w-full rounded-lg border border-line bg-bg px-3 py-[11px] text-[15px] outline-none focus:border-accent">
+    </div>
+    <button class="btn btn-primary w-full focus-ring">登录</button>
+    <p class="mt-4 text-center text-xs leading-[1.9] text-muted">
+      5 次失败锁定 15 分钟 · 密码由服务器重置<br>
+      手机配对？<a href="#" class="text-info no-underline">打开配对页</a>
+    </p>
   </div>
 </section>
 
-<!-- 控制台外壳：侧栏共享，切页只换 main -->
-<div class="shell page" id="p-console">
-  <aside class="side">
-    <div class="brand"><div class="brand-logo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div><div style="font-weight:600">千寻中继</div></div>
-    <nav>
-      <a href="#" data-go="p-dash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>仪表盘</a>
-      <a href="#" data-go="p-inst"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="4" width="20" height="8" rx="1.5"/><rect x="2" y="14" width="20" height="6" rx="1.5"/><path d="M6 8h.01M6 17h.01"/></svg>实例</a>
-      <a href="#" data-go="p-dev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg>设备</a>
-      <a href="#" data-go="p-audit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>审计</a>
-      <a href="#" data-go="p-gov"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V5M4 19h16"/><path d="M7 15l3-4 3 3 4-6"/></svg>治理</a>
-      <a href="#" class="exit" id="nav-exit">退出</a>
-    </nav>
-    <div class="foot">v0.2.0 · agent.auto.iotim.com</div>
-  </aside>
-  <main class="main">
-
-    <!-- 仪表盘 -->
-    <div class="view on" id="p-dash">
-      <div class="pagehead">
-        <div style="display:flex;align-items:baseline"><h1>仪表盘</h1><span class="desc">实例 · 设备 · 流量</span></div>
-        <span class="liveness"><span class="dot on"></span>live · 3s</span>
+<!-- 控制台外壳（侧栏全页常在，切页只换 main） -->
+<div id="p-console" class="hidden min-h-screen grid-cols-[208px_1fr] pb-16 max-[900px]:grid-cols-1">
+  <aside class="sticky top-0 flex h-screen flex-col border-r border-line bg-surface px-3 py-4 max-[900px]:static max-[900px]:h-auto max-[900px]:flex-row max-[900px]:items-center max-[900px]:gap-3">
+    <div class="flex items-center gap-2.5">
+      <div class="flex h-[34px] w-[34px] items-center justify-center rounded-[9px] bg-gradient-to-br from-accent to-sky-500 text-white">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
       </div>
-      <div class="grid kpis">
-        <div class="card kpi"><div class="label"><span class="dot on"></span>在线实例</div>
-          <div class="value">2<span style="font-size:14px;color:var(--muted)"> / 3</span></div>
-          <div class="delta warn">实验室离线 26 分钟</div></div>
-        <div class="card kpi"><div class="label">活跃设备 · 1h</div>
-          <div class="value">2</div><div class="delta ok">我的手机 · iPad mini</div></div>
-        <div class="card kpi"><div class="label">流量 · 24h</div>
-          <div class="value">1.4<span style="font-size:14px;color:var(--muted)"> GiB</span></div>
-          <div class="delta">交互 61% · 页面 30% · 批量 9%</div></div>
-        <div class="card kpi"><div class="label">限流 · 24h</div>
-          <div class="value">37</div><div class="delta ok">交互 0 次</div></div>
-      </div>
-      <div class="grid split" style="margin-top:16px">
-        <div class="card" style="padding:16px">
-          <div style="display:flex;justify-content:space-between;margin-bottom:12px">
-            <b style="font-size:14px">流量 · 24h</b>
-            <div class="legend"><span><i style="background:#22C55E"></i>交互</span><span><i style="background:#3B82F6"></i>页面/批量</span></div>
-          </div>
-          <div class="bars">
-            <span style="height:30%"></span><span style="height:45%"></span><span class="b" style="height:20%"></span>
-            <span style="height:55%"></span><span style="height:70%"></span><span style="height:62%"></span>
-            <span class="b" style="height:35%"></span><span style="height:48%"></span><span style="height:85%"></span>
-            <span class="b" style="height:50%"></span><span style="height:66%"></span><span style="height:90%"></span>
-            <span style="height:74%"></span><span class="b" style="height:28%"></span><span style="height:52%"></span>
-            <span style="height:40%"></span><span class="b" style="height:18%"></span><span style="height:58%"></span>
-          </div>
-        </div>
-        <div class="card" style="padding:16px">
-          <b style="font-size:14px">最近事件</b>
-          <div style="margin-top:8px">
-            <div class="tl-item" style="border-top:0"><span class="tl-time mono">19:42</span><span class="tl-badge tl-ok">配对</span><span>我的手机 已配对</span></div>
-            <div class="tl-item"><span class="tl-time mono">19:38</span><span class="tl-badge tl-fail">登录失败</span><span class="mono">203.0.113.7</span></div>
-            <div class="tl-item"><span class="tl-time mono">19:01</span><span class="tl-badge tl-info">实例</span><span>实验室主机 下线</span></div>
-          </div>
-        </div>
-      </div>
+      <div class="font-semibold">千寻中继</div>
     </div>
+    <nav class="mt-[18px] flex flex-col gap-0.5 max-[900px]:mt-0 max-[900px]:ml-auto max-[900px]:flex-row max-[900px]:gap-1 max-[900px]:flex-wrap">
+      <a href="#" data-go="p-overview" class="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] text-muted no-underline hover:bg-surface2 hover:text-fg">
+        <svg class="h-4 w-4 shrink-0 max-[900px]:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>概览</a>
+      <a href="#" data-go="p-access" class="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] text-muted no-underline hover:bg-surface2 hover:text-fg">
+        <svg class="h-4 w-4 shrink-0 max-[900px]:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9.5 12l1.8 1.8L15 10"/></svg>设备</a>
+      <a href="#" data-go="p-audit" class="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] text-muted no-underline hover:bg-surface2 hover:text-fg">
+        <svg class="h-4 w-4 shrink-0 max-[900px]:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>审计</a>
+      <a href="#" id="nav-exit" class="mt-2.5 rounded-lg border-t border-line px-2.5 py-2.5 text-[13.5px] text-muted no-underline hover:bg-surface2 hover:text-fg max-[900px]:mt-0 max-[900px]:border-0 max-[900px]:py-2">退出</a>
+    </nav>
+    <div class="mt-auto text-[11.5px] text-muted max-[900px]:hidden">v0.2.0 · 自托管</div>
+  </aside>
 
-    <!-- 实例 -->
-    <div class="view" id="p-inst">
+  <main class="max-w-[1120px] px-7 py-6 max-[900px]:px-4 max-[900px]:py-4">
+
+    <!-- 概览：KPI + 实例 + 流量 + 事件 -->
+    <div id="v-overview" class="hidden">
       <div class="pagehead">
-        <div style="display:flex;align-items:baseline"><h1>实例</h1><span class="desc">连接中的 PC，无需开放端口</span></div>
-        <button class="btn btn-ghost btn-sm">＋ 预置实例</button>
+        <div class="flex items-baseline"><h1>概览</h1><span class="desc">在线与连接</span></div>
+        <span class="live-pill"><span class="dot dot-on"></span>live · 3s</span>
       </div>
-      <div class="card">
+
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-4">
+        <div class="card p-4">
+          <div class="text-xs text-muted"><span class="dot dot-on mr-2"></span>在线实例</div>
+          <div class="mt-1.5 text-[26px] font-semibold">2<span class="text-sm text-muted"> / 3</span></div>
+          <div class="mt-1 text-xs text-warn">实验室离线 26 分钟</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-muted">活跃设备 · 1h</div>
+          <div class="mt-1.5 text-[26px] font-semibold">2</div>
+          <div class="mt-1 text-xs text-accent">我的手机 · iPad mini</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-muted">流量 · 24h</div>
+          <div class="mt-1.5 text-[26px] font-semibold">1.4<span class="text-sm text-muted"> GiB</span></div>
+          <div class="mt-1 text-xs text-muted">交互 61% · 页面 30% · 批量 9%</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-muted">限流 · 24h</div>
+          <div class="mt-1.5 text-[26px] font-semibold">37</div>
+          <div class="mt-1 text-xs text-accent">交互 0 次</div>
+        </div>
+      </div>
+
+      <div class="mt-4 grid grid-cols-[2fr_1fr] items-start gap-4 max-[900px]:grid-cols-1">
+        <div class="card overflow-hidden">
+          <div class="flex items-center justify-between border-b border-line px-4 py-3">
+            <b class="text-sm">实例</b>
+            <button class="btn btn-ghost btn-sm">＋ 预置实例</button>
+          </div>
+          <table>
+            <thead><tr><th class="text-left">名称</th><th class="text-left">版本</th><th class="text-left">连接</th><th class="text-right">流量 · 1h</th><th class="text-right">治理</th><th></th></tr></thead>
+            <tbody>
+              <tr class="hover:bg-surface2/50">
+                <td class="wrap"><div class="flex items-center"><span class="dot dot-on mr-2"></span><div><div class="font-medium">书房主机</div><div class="cell-sub font-mono">pc-f5692e40</div></div></div></td>
+                <td class="text-muted">0.9.2</td><td>3 小时</td><td class="text-right font-mono tabular-nums">486 MiB</td>
+                <td class="text-right"><span class="tag tag-ok">正常</span></td><td class="text-right"><button class="btn btn-ghost btn-sm">详情</button></td>
+              </tr>
+              <tr class="hover:bg-surface2/50">
+                <td class="wrap"><div class="flex items-center"><span class="dot dot-on mr-2"></span><div><div class="font-medium">出差笔记本</div><div class="cell-sub font-mono">pc-a1b2c3d4</div></div></div></td>
+                <td class="text-muted">0.9.2</td><td>26 分钟</td><td class="text-right font-mono tabular-nums">51 MiB</td>
+                <td class="text-right"><span class="tag tag-warn">批量受限</span></td><td class="text-right"><button class="btn btn-ghost btn-sm">详情</button></td>
+              </tr>
+              <tr class="row-off hover:bg-surface2/35">
+                <td class="wrap"><div class="flex items-center"><span class="dot dot-off mr-2"></span><div><div class="font-medium">实验室主机</div><div class="cell-sub font-mono">pc-99aa88bb</div></div></div></td>
+                <td>0.9.1</td><td>离线 26 分钟</td><td class="text-right font-mono tabular-nums">—</td>
+                <td class="text-right"><span class="tag tag-off">离线</span></td><td class="text-right"><button class="btn btn-ghost btn-sm">详情</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="flex flex-col gap-4">
+          <div class="card p-4">
+            <div class="flex items-center justify-between">
+              <b class="text-sm">流量 · 24h</b>
+              <div class="flex gap-3.5 text-xs text-muted">
+                <span><i class="mb-px mr-1.5 inline-block h-2 w-2 rounded-sm bg-accent"></i>交互</span>
+                <span><i class="mb-px mr-1.5 inline-block h-2 w-2 rounded-sm bg-info"></i>页面/批量</span>
+              </div>
+            </div>
+            <div class="mt-3 flex h-[110px] items-end gap-1">
+              <span class="bar" style="height:30%"></span><span class="bar" style="height:45%"></span><span class="bar bar-b" style="height:20%"></span>
+              <span class="bar" style="height:55%"></span><span class="bar" style="height:70%"></span><span class="bar" style="height:62%"></span>
+              <span class="bar bar-b" style="height:35%"></span><span class="bar" style="height:48%"></span><span class="bar" style="height:85%"></span>
+              <span class="bar bar-b" style="height:50%"></span><span class="bar" style="height:66%"></span><span class="bar" style="height:90%"></span>
+              <span class="bar" style="height:74%"></span><span class="bar bar-b" style="height:28%"></span><span class="bar" style="height:52%"></span>
+              <span class="bar" style="height:40%"></span><span class="bar bar-b" style="height:18%"></span><span class="bar" style="height:58%"></span>
+            </div>
+          </div>
+          <div class="card p-4">
+            <b class="text-sm">最近事件</b>
+            <div class="tl-compact mt-2">
+              <div class="tl-item"><span class="tl-time">19:42</span><span class="tl-badge tl-ok">配对</span><span class="wrap">我的手机 已配对</span></div>
+              <div class="tl-item"><span class="tl-time">19:38</span><span class="tl-badge tl-fail">登录失败</span><span class="wrap font-mono">203.0.113.7</span></div>
+              <div class="tl-item"><span class="tl-time">19:01</span><span class="tl-badge tl-info">实例</span><span class="wrap">实验室主机 下线</span></div>
+              <div class="tl-item"><span class="tl-time">18:55</span><span class="tl-badge tl-ok">登录</span><span class="wrap">manager 成功</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mt-4 overflow-hidden">
+        <div class="flex items-center justify-between border-b border-line px-4 py-3">
+          <b class="text-sm">当前连接</b>
+          <span class="live-pill"><span class="dot dot-on"></span>live · 3s</span>
+        </div>
         <table>
-          <thead><tr><th style="width:36%">实例</th><th>版本</th><th>连接</th><th class="right">流量 · 1h</th><th class="right">状态</th><th></th></tr></thead>
+          <thead><tr><th class="text-left">设备</th><th class="text-left">→</th><th class="text-left">实例</th><th class="text-left">类别</th><th class="text-left">时长</th><th class="text-right">速率</th><th class="text-right">操作</th></tr></thead>
           <tbody>
-            <tr><td><div style="display:flex;align-items:center"><span class="dot on"></span><div><div class="cell-main">书房主机</div><div class="cell-sub mono">pc-f5692e40</div></div></div></td>
-              <td>0.9.2 · DSH 0.2.1</td><td>3 小时</td><td class="right mono">486 MiB</td>
-              <td class="right"><span class="tag ok">正常</span></td><td class="right"><button class="btn btn-ghost btn-sm">详情</button></td></tr>
-            <tr><td><div style="display:flex;align-items:center"><span class="dot on"></span><div><div class="cell-main">出差笔记本</div><div class="cell-sub mono">pc-a1b2c3d4</div></div></div></td>
-              <td>0.9.2 · DSH 0.2.1</td><td>26 分钟</td><td class="right mono">51 MiB</td>
-              <td class="right"><span class="tag warn">批量受限</span></td><td class="right"><button class="btn btn-ghost btn-sm">详情</button></td></tr>
-            <tr class="row-off"><td><div style="display:flex;align-items:center"><span class="dot off"></span><div><div class="cell-main">实验室主机</div><div class="cell-sub mono">pc-99aa88bb</div></div></div></td>
-              <td>0.9.1 · DSH 0.2.0</td><td>离线 26 分钟</td><td class="right mono">—</td>
-              <td class="right"><span class="tag off">离线</span></td><td class="right"><button class="btn btn-ghost btn-sm">详情</button></td></tr>
+            <tr class="hover:bg-surface2/50">
+              <td class="wrap"><div class="flex items-center"><span class="dot dot-on mr-2"></span><div><div class="font-medium">我的手机</div><div class="cell-sub font-mono">dev-3f2a</div></div></div></td>
+              <td class="text-muted">→</td><td class="wrap font-medium">书房主机</td><td><span class="tag tag-ok">交互</span></td>
+              <td>18 分钟</td><td class="text-right font-mono tabular-nums">1.2 MiB/s</td><td class="text-right"><button class="btn btn-danger btn-sm">断开</button></td>
+            </tr>
+            <tr class="hover:bg-surface2/50">
+              <td class="wrap"><div class="flex items-center"><span class="dot dot-on mr-2"></span><div><div class="font-medium">iPad mini</div><div class="cell-sub font-mono">dev-91cc</div></div></div></td>
+              <td class="text-muted">→</td><td class="wrap font-medium">书房主机</td><td><span class="tag">页面</span></td>
+              <td>14 分钟</td><td class="text-right font-mono tabular-nums">84 KiB/s</td><td class="text-right"><button class="btn btn-danger btn-sm">断开</button></td>
+            </tr>
+            <tr class="hover:bg-surface2/50">
+              <td class="wrap"><div class="flex items-center"><span class="dot dot-warn mr-2"></span><div><div class="font-medium">出差笔记本</div><div class="cell-sub font-mono">pc-a1b2c3d4</div></div></div></td>
+              <td class="text-muted">←</td><td class="wrap text-muted">（实例出站拉取）</td><td><span class="tag tag-warn">批量</span></td>
+              <td>26 分钟</td><td class="text-right font-mono tabular-nums">2.6 MiB/s</td><td class="text-right"><button class="btn btn-danger btn-sm">断开</button></td>
+            </tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- 设备 -->
-    <div class="view" id="p-dev">
+<!-- 设备：列表即入口，行内展开详情；治理折叠为区块 -->
+    <div id="v-access" class="hidden">
       <div class="pagehead">
-        <div style="display:flex;align-items:baseline"><h1>设备</h1><span class="desc">已配对的手机，吊销立即生效</span></div>
-        <div style="display:flex;gap:10px;align-items:center">
-          <button class="btn btn-danger btn-sm">丢失模式</button>
+        <div class="flex items-baseline"><h1>设备</h1><span class="desc">设备与配额</span></div>
+<div id="panic-bar" class="mb-4 hidden items-center gap-3 rounded-xl border border-danger/45 bg-danger/10 px-4 py-2.5 text-[13px]">
+  <svg width="14" height="14" class="shrink-0 text-danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 8v5M12 17h.01"/><path d="M10.3 3.9L2.5 17.5A2 2 0 004.2 20.5h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+  <b>丢失模式已开启</b><span class="text-muted">全部设备凭据失效，手机需重新配对</span>
+  <button class="btn btn-ghost btn-sm ml-auto" onclick="document.getElementById('panic-bar').classList.add('hidden');toast('已退出丢失模式',false)">退出</button>
+</div>
+        <div class="flex items-center gap-2.5">
+          <button class="btn btn-danger btn-sm" onclick="panic()">丢失模式</button>
           <button class="btn btn-primary btn-sm" onclick="pairOpen(true)">＋ 新增设备</button>
         </div>
       </div>
-      <div class="card">
+
+      <div class="card overflow-hidden">
         <table>
-          <thead><tr><th style="width:32%">设备</th><th>配对</th><th>最后活跃</th><th>来源 IP</th><th></th></tr></thead>
+          <thead><tr><th class="text-left">设备</th><th class="text-left">配对</th><th class="text-left">最后活跃</th><th class="text-left">来源 IP</th><th class="text-right">流量 · 1h</th><th class="text-left">水位</th><th></th></tr></thead>
+          <tbody id="dev-body">
+            <tr class="cursor-pointer hover:bg-surface2/50" onclick="toggleDev('d1', this)">
+              <td class="wrap"><div class="flex items-center"><span class="dot dot-on mr-2"></span><div><div class="font-medium">我的手机</div><div class="cell-sub font-mono">dev-3f2a · iPhone</div></div></div></td>
+              <td class="font-mono text-muted">10-09</td><td>刚刚</td><td class="font-mono text-muted">116.233.58.43</td>
+              <td class="text-right font-mono tabular-nums">612 MiB</td>
+              <td><div class="flex w-[120px] items-center gap-2"><div class="meter"><i style="width:24%"></i></div><span class="font-mono text-xs tabular-nums text-muted">24%</span></div></td>
+              <td class="text-right"><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();revoke('我的手机', this)">吊销</button></td>
+            </tr>
+            <tr class="dev-detail hidden" id="d1"><td colspan="7" class="bg-bg">
+              <div class="grid grid-cols-[1fr_1fr_1fr] gap-4 py-3 max-[900px]:grid-cols-1">
+                <div><div class="cell-sub mb-2">当前会话</div>
+                  <div class="text-[13px] leading-[1.9]"><div>→ 书房主机 · 交互 <span class="font-mono text-muted">18 分钟 · 1.2 MiB/s</span></div><div>→ 书房主机 · 页面 <span class="font-mono text-muted">14 分钟 · 84 KiB/s</span></div></div>
+                </div>
+                <div><div class="cell-sub mb-2">24h 流量</div>
+                  <div class="flex h-[46px] items-end gap-[3px]">
+                    <span class="bar" style="height:40%"></span><span class="bar" style="height:62%"></span><span class="bar bar-b" style="height:25%"></span>
+                    <span class="bar" style="height:78%"></span><span class="bar" style="height:55%"></span><span class="bar" style="height:90%"></span>
+                    <span class="bar bar-b" style="height:40%"></span><span class="bar" style="height:66%"></span><span class="bar" style="height:48%"></span>
+                  </div>
+                  <div class="cell-sub mt-1">交互 61% · 页面 30% · 批量 9%</div>
+                </div>
+                <div><div class="cell-sub mb-2">凭据</div>
+                  <div class="text-[13px] leading-[1.9]"><div>凭据 <span class="font-mono text-muted">dv_3f2a…8c91</span></div><div>签发 10-09 · 有效期至 11-08</div><div>可随时吊销，吊销即刻断开</div></div>
+                </div>
+              </div>
+            </td></tr>
+
+            <tr class="cursor-pointer hover:bg-surface2/50" onclick="toggleDev('d2', this)">
+              <td class="wrap"><div class="flex items-center"><span class="dot dot-warn mr-2"></span><div><div class="font-medium">iPad mini</div><div class="cell-sub font-mono">dev-91cc</div></div></div></td>
+              <td class="font-mono text-muted">10-08</td><td>14 分钟前</td><td class="font-mono text-muted">116.233.58.43</td>
+              <td class="text-right font-mono tabular-nums">48 MiB</td>
+              <td><div class="flex w-[120px] items-center gap-2"><div class="meter"><i class="w-warn" style="width:78%"></i></div><span class="font-mono text-xs tabular-nums text-muted">78%</span></div></td>
+              <td class="text-right"><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();revoke('iPad mini', this)">吊销</button></td>
+            </tr>
+            <tr class="dev-detail hidden" id="d2"><td colspan="7" class="bg-bg">
+              <div class="grid grid-cols-[1fr_1fr_1fr] gap-4 py-3 max-[900px]:grid-cols-1">
+                <div><div class="cell-sub mb-2">当前会话</div>
+                  <div class="text-[13px] leading-[1.9]"><div>→ 出差笔记本 · 页面 <span class="font-mono text-muted">14 分钟 · 210 KiB/s</span></div></div>
+                </div>
+                <div><div class="cell-sub mb-2">24h 流量</div>
+                  <div class="flex h-[46px] items-end gap-[3px]">
+                    <span class="bar bar-b" style="height:30%"></span><span class="bar" style="height:48%"></span><span class="bar" style="height:36%"></span>
+                    <span class="bar bar-b" style="height:55%"></span><span class="bar" style="height:42%"></span><span class="bar bar-b" style="height:28%"></span>
+                  </div>
+                  <div class="cell-sub mt-1">交互 12% · 页面 88%</div>
+                </div>
+                <div><div class="cell-sub mb-2">凭据</div>
+                  <div class="text-[13px] leading-[1.9]"><div>凭据 <span class="font-mono text-muted">dv_91cc…4b02</span></div><div>签发 10-08 · 有效期至 11-07</div></div>
+                </div>
+              </div>
+            </td></tr>
+
+            <tr class="row-off hover:bg-surface2/35">
+              <td class="wrap"><div class="flex items-center"><span class="dot dot-off mr-2"></span><div><div class="font-medium">iPad mini（旧的）</div><div class="cell-sub font-mono">dev-77b0</div></div></div></td>
+              <td>09-30</td><td>6 天前</td><td class="font-mono">—</td>
+              <td class="text-right font-mono tabular-nums">—</td><td></td>
+              <td class="text-right"><button class="btn btn-ghost btn-sm">清理</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card mt-4 overflow-hidden">
+        <div class="flex items-center justify-between border-b border-line px-4 py-3">
+          <b class="text-sm">流量水位</b>
+          <span class="live-pill"><span class="dot dot-on"></span>live · 3s</span>
+        </div>
+        <div class="grid grid-cols-2 gap-x-8 max-[900px]:grid-cols-1">
+          <div class="gov-row"><span class="w-[72px] text-muted">交互</span><div class="meter"><i style="width:24%"></i></div><span class="font-mono tabular-nums">4 / 16</span></div>
+          <div class="gov-row"><span class="w-[72px] text-muted">页面</span><div class="meter"><i class="w-warn" style="width:68%"></i></div><span class="font-mono tabular-nums">27 / 40</span></div>
+          <div class="gov-row"><span class="w-[72px] text-muted">批量</span><div class="meter"><i style="width:100%"></i></div><span class="font-mono tabular-nums">2 / 2</span></div>
+          <div class="gov-row"><span class="w-[72px] text-muted">带宽</span><div class="meter"><i class="w-warn" style="width:72%"></i></div><span class="font-mono tabular-nums">2.9 / 4 MiB/s</span></div>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-line px-4 py-2.5 text-xs text-muted">
+          <span>压力时</span>
+          <span>① 批量 → 限流</span><span>② 页面 → 排队 ≤1s</span><span class="text-accent">③ 交互 → 永不断</span>
+          <span class="ml-auto">解除后自动恢复</span>
+        </div>
+      </div>
+
+      <div class="card mt-4 overflow-hidden">
+        <div class="border-b border-line px-4 py-3"><b class="text-sm">24h · 按设备</b></div>
+        <table>
+          <thead><tr><th class="text-left">设备</th><th class="text-left">交互</th><th class="text-left">页面</th><th class="text-left">批量</th><th class="text-left">限流</th><th class="text-right">字节</th></tr></thead>
           <tbody>
-            <tr><td><div style="display:flex;align-items:center"><span class="dot on"></span><div><div class="cell-main">我的手机</div><div class="cell-sub mono">dev-3f2a · iPhone</div></div></div></td>
-              <td class="mono">10-09</td><td>刚刚</td><td class="mono">116.233.58.43</td>
-              <td class="right"><button class="btn btn-danger btn-sm">吊销</button></td></tr>
-            <tr><td><div style="display:flex;align-items:center"><span class="dot warn"></span><div><div class="cell-main">iPad mini</div><div class="cell-sub mono">dev-91cc</div></div></div></td>
-              <td class="mono">10-08</td><td>14 分钟前</td><td class="mono">116.233.58.43</td>
-              <td class="right"><button class="btn btn-danger btn-sm">吊销</button></td></tr>
+            <tr class="hover:bg-surface2/50"><td class="font-medium">我的手机</td><td class="font-mono tabular-nums">1,204</td><td class="font-mono tabular-nums">8,455</td><td class="font-mono tabular-nums">63</td><td class="font-mono tabular-nums text-warn">21</td><td class="text-right font-mono tabular-nums">612 MiB</td></tr>
+            <tr class="hover:bg-surface2/50"><td class="font-medium">iPad mini</td><td class="font-mono tabular-nums">108</td><td class="font-mono tabular-nums">1,506</td><td class="font-mono tabular-nums">12</td><td class="font-mono tabular-nums text-warn">16</td><td class="text-right font-mono tabular-nums">48 MiB</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
     <!-- 审计 -->
-    <div class="view" id="p-audit">
+    <div id="v-audit" class="hidden">
       <div class="pagehead">
-        <div style="display:flex;align-items:baseline"><h1>审计</h1><span class="desc">全部操作留痕</span></div>
-        <div style="display:flex;gap:8px">
-          <select class="btn btn-ghost btn-sm" style="appearance:none"><option>全部</option><option>登录</option><option>配对</option><option>实例</option></select>
+        <div class="flex items-baseline"><h1>审计</h1><span class="desc">留痕与导出</span></div>
+        <div class="flex gap-2">
+          <select class="btn btn-ghost btn-sm appearance-none"><option>全部</option><option>登录</option><option>配对</option><option>实例</option></select>
           <button class="btn btn-ghost btn-sm">导出</button>
         </div>
       </div>
-      <div class="card">
-        <div class="tl-item"><span class="tl-time mono">10-09 19:42:05</span><span class="tl-badge tl-ok">pair.ok</span><span>我的手机 配对成功 · <span class="mono">116.233.58.43</span></span></div>
-        <div class="tl-item"><span class="tl-time mono">10-09 19:38:11</span><span class="tl-badge tl-fail">login.fail</span><span><span class="mono">root</span> · <span class="mono">203.0.113.7</span>（连续 3/5）</span></div>
-        <div class="tl-item"><span class="tl-time mono">10-09 19:01:44</span><span class="tl-badge tl-info">instance</span><span>实验室主机 下线</span></div>
-        <div class="tl-item"><span class="tl-time mono">10-09 18:55:02</span><span class="tl-badge tl-ok">login.ok</span><span>manager 登录成功</span></div>
-      </div>
-    </div>
-
-    <!-- 治理 -->
-    <div class="view" id="p-gov">
-      <div class="pagehead">
-        <div style="display:flex;align-items:baseline"><h1>治理</h1><span class="desc">交互优先，批量让路</span></div>
-        <span class="liveness"><span class="dot on"></span>live · 3s</span>
-      </div>
-      <div class="grid split">
-        <div class="card">
-          <div style="padding:14px 16px;border-bottom:1px solid var(--border)"><b style="font-size:14px">水位</b></div>
-          <div class="gov-row"><span style="width:88px;color:var(--muted)">交互</span><div class="meter"><i style="width:24%"></i></div><span class="mono">4 / 16</span></div>
-          <div class="gov-row"><span style="width:88px;color:var(--muted)">页面</span><div class="meter"><i class="w" style="width:68%"></i></div><span class="mono">27 / 40</span></div>
-          <div class="gov-row"><span style="width:88px;color:var(--muted)">批量</span><div class="meter"><i style="width:100%"></i></div><span class="mono">2 / 2</span></div>
-          <div class="gov-row"><span style="width:88px;color:var(--muted)">带宽</span><div class="meter"><i class="w" style="width:72%"></i></div><span class="mono">2.9 / 4 MiB/s</span></div>
-        </div>
-        <div class="card" style="padding:16px">
-          <b style="font-size:14px">压力时</b>
-          <div style="margin-top:10px;font-size:13px;color:var(--muted);line-height:2.4">
-            <div><span class="tag off">1</span> 批量 → 限流</div>
-            <div><span class="tag warn">2</span> 页面 → 排队 ≤1s</div>
-            <div><span class="tag ok">3</span> 交互 → 永不断</div>
-            <div style="margin-top:8px;font-size:12px">压力解除自动恢复</div>
-          </div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:16px;padding:16px">
-        <b style="font-size:14px">24h · 按实例</b>
-        <table style="margin-top:8px">
-          <thead><tr><th>实例</th><th>交互</th><th>页面</th><th>批量</th><th>限流</th><th class="right">字节</th></tr></thead>
-          <tbody>
-            <tr><td class="cell-main">书房主机</td><td class="mono">1,204</td><td class="mono">8,455</td><td class="mono">63</td><td class="mono" style="color:var(--warn)">21</td><td class="right mono">486 MiB</td></tr>
-            <tr><td class="cell-main">出差笔记本</td><td class="mono">312</td><td class="mono">1,982</td><td class="mono">14</td><td class="mono" style="color:var(--warn)">16</td><td class="right mono">51 MiB</td></tr>
-          </tbody>
-        </table>
+      <div class="card overflow-hidden">
+        <div class="tl-item"><span class="tl-time">10-09 19:42:05</span><span class="tl-badge tl-ok">pair.ok</span><span>我的手机 配对成功 · <span class="font-mono text-muted">116.233.58.43</span></span></div>
+        <div class="tl-item"><span class="tl-time">10-09 19:38:11</span><span class="tl-badge tl-fail">login.fail</span><span><span class="font-mono">root</span> · <span class="font-mono text-muted">203.0.113.7</span>（连续 3/5）</span></div>
+        <div class="tl-item"><span class="tl-time">10-09 19:01:44</span><span class="tl-badge tl-info">instance</span><span>实验室主机 下线</span></div>
+        <div class="tl-item"><span class="tl-time">10-09 18:55:02</span><span class="tl-badge tl-ok">login.ok</span><span>manager 登录成功</span></div>
+        <div class="tl-item"><span class="tl-time">10-09 18:12:30</span><span class="tl-badge tl-info">instance</span><span>书房主机 上线</span></div>
+        <div class="tl-item"><span class="tl-time">10-09 17:44:07</span><span class="tl-badge tl-fail">pair.fail</span><span>配对码错误 · <span class="font-mono text-muted">116.233.58.43</span></span></div>
       </div>
     </div>
 
   </main>
 </div>
 
+<!-- 撤销提示（危险操作后置顶，可撤销） -->
+
+<div id="toast" class="fixed right-5 bottom-5 z-40 hidden items-center gap-3 rounded-xl border border-line-strong bg-surface2 px-4 py-2.5 text-[13px] shadow-[0_8px_24px_rgba(0,0,0,.5)]">
+  <span data-msg></span>
+  <button class="btn btn-ghost btn-sm hidden" data-undo onclick="this.closest('#toast').classList.add('hidden')">撤销</button>
+</div>
+
 <!-- 配对弹层 -->
-<div class="overlay" id="pair-overlay" style="display:none" role="dialog" aria-modal="true" aria-label="新增设备">
-  <div class="modal">
-    <header><h2>新增设备</h2><button class="btn btn-ghost btn-sm" onclick="pairOpen(false)" aria-label="关闭">✕</button></header>
-    <div class="body">
-      <div class="pair-qr">
-        <img src="data:image/png;base64,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" alt="配对二维码" width="140" height="140">
-        <div style="flex:1">
-          <div style="font-size:13px;color:var(--muted)">手机扫码，或打开链接输入配对码</div>
-          <div class="pair-code mono">E5D3F4CC5008</div>
+<div id="pair-overlay" class="fixed inset-0 z-50 hidden items-center justify-center bg-[rgba(7,10,16,.6)] p-4 backdrop-blur-[6px]" role="dialog" aria-modal="true" aria-label="新增设备">
+  <div class="w-[min(94vw,400px)] rounded-2xl border border-line-strong bg-surface shadow-[0_8px_24px_rgba(0,0,0,.45)]">
+    <header class="flex items-center justify-between border-b border-line px-5 py-4">
+      <h2 class="text-[15px] font-semibold">新增设备</h2>
+      <button class="btn btn-ghost btn-sm" onclick="pairOpen(false)" aria-label="关闭">✕</button>
+    </header>
+    <div class="p-5">
+      <div class="flex items-center gap-5">
+        <img src="data:image/png;base64,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" alt="配对二维码" width="140" height="140" class="h-[140px] w-[140px] shrink-0 rounded-xl bg-white p-2">
+        <div class="flex-1">
+          <div class="text-[13px] text-muted">手机扫码，或打开链接输入配对码</div>
+          <div class="mt-2.5 rounded-[10px] border border-dashed border-line-strong bg-bg p-2 text-center text-[22px] font-semibold tracking-[4px] font-mono">E5D3F4CC5008</div>
         </div>
       </div>
-      <div class="countdown"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="mono" id="cd">04:37</span> 后过期</div>
-      <div class="pair-tips">5 分钟内一次有效 · 成功后在此提示</div>
+      <div class="mt-3 flex items-center gap-2 text-xs text-warn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span class="font-mono tabular-nums" id="cd">04:37</span> 后过期
+      </div>
+      <p class="mt-3.5 text-xs text-muted">5 分钟内一次有效 · 成功后在此提示</p>
     </div>
-    <footer><button class="btn btn-primary btn-sm" onclick="pairOpen(false)">完成</button></footer>
+    <footer class="flex justify-end gap-2.5 border-t border-line px-5 py-3.5">
+      <button class="btn btn-primary btn-sm" onclick="pairOpen(false)">完成</button>
+    </footer>
   </div>
 </div>
 
-<div class="preview-bar" role="navigation" aria-label="预览页面切换">
-  <button class="on" data-target="p-login">登录页</button>
-  <button data-target="p-dash">仪表盘</button>
-  <button data-target="p-inst">实例</button>
-  <button data-target="p-dev">设备</button>
-  <button data-target="p-audit">审计</button>
-  <button data-target="p-gov">治理</button>
-</div>
-
 <script>
-const CONSOLE_IDS = ['p-dash','p-inst','p-dev','p-audit','p-gov'];
+const VIEWS = { 'p-overview': 'v-overview', 'p-access': 'v-access', 'p-audit': 'v-audit' };
 function go(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
-  if(CONSOLE_IDS.includes(id)){
-    document.getElementById('p-console').classList.add('on');
-    document.getElementById(id).classList.add('on');
-  }else{
-    document.getElementById(id).classList.add('on');
+  document.getElementById('pair-overlay').classList.add('hidden');
+  document.querySelectorAll('#v-overview, #v-access, #v-audit').forEach(v => v.classList.add('hidden'));
+  if (VIEWS[id]) {
+    document.getElementById('p-login').classList.add('hidden');
+    document.getElementById('p-login').classList.remove('flex');
+    document.getElementById('p-console').classList.remove('hidden');
+    document.getElementById('p-console').classList.add('grid');
+    document.getElementById(VIEWS[id]).classList.remove('hidden');
+  } else {
+    document.getElementById('p-console').classList.add('hidden');
+    document.getElementById('p-console').classList.remove('grid');
+    document.getElementById('p-login').classList.remove('hidden');
+    document.getElementById('p-login').classList.add('flex');
   }
-  document.querySelectorAll('.side nav a[data-go]').forEach(a=>a.classList.toggle('on',a.dataset.go===id));
-  document.querySelectorAll('.preview-bar button').forEach(b=>b.classList.toggle('on',b.dataset.target===id));
-  window.scrollTo(0,0);
+  document.querySelectorAll('aside nav a[data-go]').forEach(a => {
+    const on = a.dataset.go === id;
+    a.classList.toggle('bg-surface2', on);
+    a.classList.toggle('text-fg', on);
+    a.classList.toggle('shadow-[inset_2px_0_0_var(--color-accent)]', on);
+  });
+  window.scrollTo(0, 0);
 }
-function pairOpen(open){document.getElementById('pair-overlay').style.display=open?'flex':'none';}
-document.querySelectorAll('.preview-bar button').forEach(b=>b.addEventListener('click',()=>go(b.dataset.target)));
-document.querySelectorAll('.side nav a[data-go]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();go(a.dataset.go);}));
-document.getElementById('nav-exit').addEventListener('click',e=>{e.preventDefault();go('p-login');});
+function toggleDev(id, row){
+  const d = document.getElementById(id);
+  const open = d.classList.contains('hidden');
+  document.querySelectorAll('.dev-detail').forEach(x => x.classList.add('hidden'));
+  d.classList.toggle('hidden', !open);
+  row.setAttribute('aria-expanded', String(open));
+}
+let toastTimer = null;
+function toast(msg, undo){
+  const el = document.getElementById('toast');
+  el.querySelector('[data-msg]').textContent = msg;
+  const u = el.querySelector('[data-undo]');
+  u.classList.toggle('hidden', !undo);
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 5000);
+}
+function revoke(name){
+  toast('已吊销 ' + name + ' 的凭据，正在断开其连接', true);
+}
+function panic(){
+  document.getElementById('panic-bar').classList.remove('hidden');
+  toast('已进入丢失模式：全部设备凭据失效', true);
+}
+function pairOpen(open){
+  const el = document.getElementById('pair-overlay');
+  el.classList.toggle('hidden', !open);
+  el.classList.toggle('flex', open);
+}
+document.querySelectorAll('aside nav a[data-go]').forEach(a =>
+  a.addEventListener('click', e => { e.preventDefault(); go(a.dataset.go); }));
+document.getElementById('nav-exit').addEventListener('click', e => { e.preventDefault(); go('p-login'); });
+go('p-overview');
 </script>
 </body>
 </html>
