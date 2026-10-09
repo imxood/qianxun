@@ -55,7 +55,11 @@ export function describeEvent(event: AuditEventLike): string {
   const instance = event.instanceId ?? '实例';
   const via = (detail['via'] as string) ?? '';
   // 同一个动作只写一条事件（db.rs 一次动作只写一条），来源记在 detail.via。
-  const where = via === 'console' ? '控制台' : via === 'instance' ? '实例' : '命令行';
+  // **没有 via 就不说来源**。改名前写进去的 pair.create / device.revoke 带的是空
+  // detail，那些行其实多来自控制台（同一秒还配着一行 pair.console_create），
+  // 拿不到证据却写成「命令行」等于凭空指控用户。是上线看真实数据时才发现的。
+  const where =
+    via === 'console' ? '控制台' : via === 'instance' ? '实例' : via === 'cli' ? '命令行' : '';
 
   switch (event.event) {
     case 'login.ok':

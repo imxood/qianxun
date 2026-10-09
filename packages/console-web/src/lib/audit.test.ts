@@ -50,12 +50,25 @@ describe('审计事件词表', () => {
   });
 
   it('detail 缺字段时退到 id，再缺才写「设备」，不编造', () => {
-    expect(describeEvent(withEvent('device.revoke'))).toBe('设备 已被命令行吊销');
+    expect(describeEvent(withEvent('device.revoke'))).toBe('设备 已被吊销');
     expect(describeEvent(withEvent('device.revoke', { deviceId: 'dv_ab12' }))).toBe(
-      'dv_ab12 已被命令行吊销',
+      'dv_ab12 已被吊销',
     );
     expect(describeEvent(withEvent('instance.add', { instanceId: 'inst-1' }))).toBe(
       'inst-1 已登记',
+    );
+  });
+
+  it('没有 detail.via 就不说来源——宁可不说，也不凭空指控命令行', () => {
+    // 改名前写进去的 pair.create 带的是空 detail，线上看得到它们同一秒还配着一行
+    // pair.console_create，也就是多半来自控制台。曾经一律显示成「命令行生成配对码」。
+    expect(describeEvent(withEvent('pair.create', { detail: {} }))).toBe('生成配对码');
+    expect(describeEvent(withEvent('device.revoke', { deviceId: 'dv_ab12', detail: {} }))).toBe(
+      'dv_ab12 已被吊销',
+    );
+    // 凭空猜一个不认识的 via 也照样不说，而不是当成命令行。
+    expect(describeEvent(withEvent('pair.create', { detail: { via: 'who-knows' } }))).toBe(
+      '生成配对码',
     );
   });
 
