@@ -153,7 +153,7 @@ pub fn router(state: Arc<EdgeState>) -> Router {
         .route("/console/api/fleet", get(console_fleet))
         .route("/i/{iid}", get(instance_entry))
         .route("/i/{iid}/", get(instance_entry))
-        .route("/i/{iid}/{*rest}", get(instance_entry))
+        .route("/i/{iid}/{*rest}", get(instance_deep_entry))
         .fallback(any(proxy))
         .with_state(state)
 }
@@ -560,6 +560,19 @@ fn hour_bucket(at: i64) -> i64 {
     at.div_euclid(3600) * 3600
 }
 
+/// 24 根柱子的窗口起点：把**当前这一小时**算进去，一路数回 23 小时前。
+///
+/// 早先写成 `hour_bucket(now - 24*3600)` 配 `0..24` 的偏移，窗口实际是
+/// [now-24h, now-1h]——正在写的那个小时桶正好落在窗外。于是刚部署完、
+/// 库里已有真实流量时，控制台的 24h 曲线与 bytes24h 全是 0，要等下一个
+/// 整点才「突然」冒出来。
+///
+/// 起点按整点对齐而不是「24 小时前那一刻」，两者在 3 秒轮询下看不出差别，
+/// 但对齐后每根柱子都有稳定的含义。
+fn traffic_window_start(now: i64) -> i64 {
+    hour_bucket(now) - 23 * 3600
+}
+
 /// 设备页一次给全（docs/20 §4.2 的「一个事实只出现一次」）：会话、24h 流量、
 /// 占配额、凭据都在这一个响应里——3 秒轮询下拆成多个端点没有理由。
 async fn console_devices(State(state): State<Arc<EdgeState>>, headers: HeaderMap) -> Response {
@@ -567,7 +580,7 @@ async fn console_devices(State(state): State<Arc<EdgeState>>, headers: HeaderMap
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
     let db = state.hub.db();
-    let since_bucket = hour_bucket(crate::db::unix_now() - 24 * 3600);
+    let since_bucket = traffic_window_start(crate::db::unix_now());
     let total: i64 = db.device_bytes_24h(since_bucket).values().sum();
     let fleet: std::collections::HashMap<String, String> = state
         .hub
@@ -762,7 +775,7 @@ async fn console_overview(State(state): State<Arc<EdgeState>>, headers: HeaderMa
     }
     let db = state.hub.db();
     let now = crate::db::unix_now();
-    let since_bucket = hour_bucket(now - 24 * 3600);
+    let since_bucket = traffic_window_start(now);
     let fleet = state.hub.fleet();
     let levels = state.hub.governance().snapshot_levels();
     let buckets = db.traffic_buckets(since_bucket);
@@ -981,12 +994,16 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 // ---- 实例入口：设 cookie 后回根（docs/19 §3.1）----
 
-async fn instance_entry(axum::extract::Path(iid): axum::extract::Path<String>) -> Response {
+/// 种下 `qx_iid` cookie 并把浏览器送回 `target`。
+fn instance_entry_into(iid: &str, target: &str) -> Response {
     let cookie = format!("qx_iid={iid}; Path=/; HttpOnly; Max-Age=31536000; SameSite=Lax");
     (
         StatusCode::FOUND,
         [
-            (header::LOCATION, HeaderValue::from_static("/")),
+            (
+                header::LOCATION,
+                HeaderValue::from_str(target).expect("目标来自已校验的路径段"),
+            ),
             (
                 header::SET_COOKIE,
                 HeaderValue::from_str(&cookie).expect("iid 来自路径段"),
@@ -994,6 +1011,46 @@ async fn instance_entry(axum::extract::Path(iid): axum::extract::Path<String>) -
         ],
     )
         .into_response()
+}
+
+/// `/i/{iid}` 与 `/i/{iid}/`：单路径参数，回根（query 原样带过去）。
+///
+/// query 也要留着：桌面端 DSH Web 的地址形如 `/?token=…`，丢了等于
+/// 把链接分享出去后对方必然登不上。
+async fn instance_entry(
+    axum::extract::Path(iid): axum::extract::Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let target = match query {
+        Some(query) => format!("/?{query}"),
+        None => String::from("/"),
+    };
+    instance_entry_into(&iid, &target)
+}
+
+/// `/i/{iid}/{*rest}`：两个路径参数。
+///
+/// 这条早先和 `instance_entry` 共用一个处理器，而那个处理器只声明了
+/// `Path<String>`（一个参数）。axum 在**运行期**拒绝抽取：
+/// `Wrong number of path arguments for 'Path'. Expected 1 but got 2`
+/// ——深链接下的静态资源（`/i/{iid}/assets/*.js`）统统 500，页面拿不到
+/// JS/CSS；而首页不带 rest 段、走的另一条路由，所以「手机上打开没问题、
+/// 收藏的深链接全挂」这种组合能长期存活而不被发现。
+///
+/// 反过来也不能让单参数路由来用这个双参数签名（会变成 Expected 2 but got 1），
+/// 所以拆成两个处理器，共用 `instance_entry_into`。
+async fn instance_deep_entry(
+    axum::extract::Path((iid, rest)): axum::extract::Path<(String, String)>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    // 通配段不含前导斜杠。`/i/{iid}/设置` 要落到 `/设置` 而不是被踢回首页，
+    // 否则收藏的深链接等于失效；query 也要带过去（DSH Web 用 ?token= 鉴权）。
+    let mut target = format!("/{rest}");
+    if let Some(query) = query {
+        target.push('?');
+        target.push_str(&query);
+    }
+    instance_entry_into(&iid, &target)
 }
 
 // ---- 会话代理（数据面）----

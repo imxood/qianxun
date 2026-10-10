@@ -623,9 +623,10 @@ async fn 静默超时_不心跳的实例会被踢() {
 
     // 一个窗口之后就该被清理掉。
     let start = tokio::time::Instant::now();
-    match tokio::time::timeout(silence * 6, instance.ctrl_rx.recv()).await {
-        Ok(Some(Frame::Welcome { .. })) => panic!("还在发帧"),
-        Ok(_) | Err(_) => {}
+    if let Ok(Some(Frame::Welcome { .. })) =
+        tokio::time::timeout(silence * 6, instance.ctrl_rx.recv()).await
+    {
+        panic!("还在发帧");
     }
     assert!(
         start.elapsed() >= silence,
@@ -903,6 +904,141 @@ async fn 实例入口设cookie并重定向() {
         "cookie 应写入实例 id：{cookie}"
     );
     assert!(cookie.to_lowercase().contains("httponly"));
+}
+
+/// 回归：`/i/{iid}/{*rest}` 深链接曾整条 500。
+///
+/// 三条路由共用一个处理器，而处理器早先只声明 `Path<String>`（一个参数），
+/// axum 在运行期拒绝抽取两个参数的请求。首页因为不带 rest 段侥幸能用，
+/// 于是「手机上打开没问题、收藏的深链接全是 500」这种组合能长期存活。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 实例入口深链接不再500() {
+    let edge = start_edge().await;
+    let client = http_client();
+
+    for path in [
+        "/i/pc-1234",
+        "/i/pc-1234/",
+        "/i/pc-1234/assets/index.js",
+        "/i/pc-1234/qx-mobile/bootstrap.js",
+        "/i/pc-1234/a/b/c.css",
+    ] {
+        let (status, headers, _) = request(&client, &edge, "GET", path, None, None, None).await;
+        assert_eq!(
+            status,
+            StatusCode::FOUND,
+            "深链接 {path} 不该 500（got {status}）"
+        );
+        assert!(
+            headers
+                .get(header::SET_COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .contains("qx_iid=pc-1234"),
+            "{path} 应写入实例 cookie"
+        );
+    }
+}
+
+/// 深链接要落到对应路径，且 query 保留（DSH Web 靠 ?token= 鉴权）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 实例入口深链接保留路径与查询串() {
+    let edge = start_edge().await;
+    let client = http_client();
+
+    let cases = [
+        ("/i/pc-1234/assets/index.js", "/assets/index.js"),
+        ("/i/pc-1234/", "/"),
+        ("/i/pc-1234", "/"),
+        ("/i/pc-1234/?token=abc-123", "/?token=abc-123"),
+        ("/i/pc-1234/x/y?a=1&b=2", "/x/y?a=1&b=2"),
+    ];
+    for (path, want) in cases {
+        let (status, headers, _) = request(&client, &edge, "GET", path, None, None, None).await;
+        assert_eq!(status, StatusCode::FOUND, "{path} 应当重定向");
+        let location = headers
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(location, want, "{path} 的跳转目标不对");
+    }
+}
+
+/// 回归：24h 计量窗口差一格，**当前这一小时**的数据落在窗口外。
+///
+/// 早先 `since_bucket = hour_bucket(now - 24*3600)` 配 `0..24` 的偏移，
+/// 窗口实际是 [now-24h, now-1h]。刚部署完库里已有真实流量时，
+/// 控制台的 bytes24h 与 24 根柱子全是 0，非要等下一个整点才冒出来。
+///
+/// 这里造一条「当前小时桶」的行，再从真实的 console API 读回来断言它
+/// 必须被计入——测行为，而不是测那几行桶算术。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 计量窗口包含当前小时() {
+    let edge = start_edge().await;
+    edge.db.add_user("admin", "pass-123456").expect("预置用户");
+    edge.db
+        .add_device("dev-metric", "计量机", "dv_metric_token")
+        .expect("设备入库");
+    let client = http_client();
+
+    let current_bucket = qx_server::db::unix_now().div_euclid(3600) * 3600;
+    edge.db
+        .flush_metrics(&[qx_server::db::MetricRow {
+            bucket: current_bucket,
+            instance_id: "pc-1234".to_owned(),
+            device_id: "dev-metric".to_owned(),
+            class: "page".to_owned(),
+            bytes: 107_892,
+            rejected: 0,
+            shed: 0,
+        }])
+        .expect("计量落库");
+
+    let (status, headers, _) = json_post(
+        &client,
+        &edge,
+        "/console/api/login",
+        None,
+        serde_json::json!({"username": "admin", "password": "pass-123456"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session = headers
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(|raw| raw.split(';').next().unwrap_or("").to_owned())
+        .expect("会话 cookie");
+
+    let (status, _, body) = request_with_session(
+        &client,
+        &edge,
+        "GET",
+        "/console/api/devices",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let payload = String::from_utf8(body.to_vec()).expect("utf8");
+
+    assert!(
+        payload.contains("\"bytes24h\":107892"),
+        "当前小时的字节没被算进 bytes24h：{payload}"
+    );
+
+    // 24 根柱子要有 24 项、其中一根非零、且求和等于 bytes24h。
+    let at = payload.find("\"shape\":[").expect("设备带 shape 数组");
+    let tail = &payload[at + "\"shape\":[".len()..];
+    let end = tail.find(']').expect("shape 数组闭合");
+    let numbers: Vec<i64> = tail[..end]
+        .split(',')
+        .filter_map(|piece| piece.trim().parse::<i64>().ok())
+        .collect();
+    assert_eq!(numbers.len(), 24, "应有 24 根柱子，实际 {}", numbers.len());
+    assert!(
+        numbers.iter().sum::<i64>() == 107_892,
+        "柱子和应等于 bytes24h：{numbers:?}"
+    );
 }
 
 // ---------- 管理面 /console ----------
