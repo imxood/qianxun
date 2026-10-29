@@ -74,22 +74,59 @@ export type PipeDef = { col: number; height: number };
 export type BlockDef = { col: number; row: number };
 export type CoinDef = { col: number; row: number };
 export type GoombaDef = { col: number; row: number };
+export type KoopaDef = { col: number; row: number };
+/** ?块产出物:coin=一枚币;multi=连续吐币(踩一次出 8 枚,限时变 used);mushroom/flower=道具。 */
+export type QBlockItem = 'coin' | 'multi' | 'mushroom' | 'flower';
+export type QBlockDef = BlockDef & { item: QBlockItem };
+/** 食人花:绑定到某根管道(col 为管道左列),沿管口上下伸缩。 */
+export type PlantDef = { col: number };
 
 export type WorldData = {
   groundSpans: GroundSpan[];
   pipes: PipeDef[];
   bricks: BlockDef[];
-  qblocks: BlockDef[];
+  qblocks: QBlockDef[];
   coins: CoinDef[];
   goombas: GoombaDef[];
+  /** 乌龟(踩一下变壳,踢出去会滑行撞死其他敌人)。 */
+  koopas: KoopaDef[];
+  /** 食人花(从管口升降;马里奥贴近管子时不伸出)。 */
+  plants: PlantDef[];
   stairs: Array<{ col: number; height: number }>; // 单列台阶:占据 rows (13-height)..12
   flagCol: number;
+  /** 城堡左墙列(旗杆之后,通关走入即消失)。 */
+  castleCol: number;
   spawn: { col: number };
   timeLimit: number;
+  name: string;
 };
+
+/** 道具/敌人共用常量(与 PHYSICS 同源风格,集中一处便于单测锁定)。 */
+export const ITEMS = {
+  /** 蘑菇水平速度 px/tick(比 Goomba 慢,便于追)。 */
+  mushroomSpeed: 0.6,
+  /** 食人花伸出/缩回一个行程的 tick 数。 */
+  plantExtendTicks: 36,
+  plantHoldTicks: 48,
+  plantRetractTicks: 24,
+  /** 龟壳静止复活倒计时 tick(踩/踢后开始计时,归零复活)。 */
+  shellReviveTicks: 420,
+  /** 龟壳被踢后的滑行速度。 */
+  shellSpeed: 3.2,
+  /** 受伤后的无敌闪烁 tick。 */
+  invulnTicks: 96,
+  /** 变身(变大/变小)定格 tick。 */
+  growFreezeTicks: 40,
+  /** 连踩连击每级的加成基数(第 n 连 = COMBO_BASE × n)。 */
+  comboBase: 100,
+  comboMax: 8,
+  /** 旗杆下滑到底按时间奖励:每单位时间 = 50 分。 */
+  timeBonusPerUnit: 50,
+} as const;
 
 /** 1-1 布局(致敬复刻,自绘数据;坑 3 处:2/3/2 宽,均 ≤ RUN 跳距)。 */
 export const LEVEL_1_1: WorldData = {
+  name: '1-1',
   groundSpans: [
     { startCol: 0, endCol: 68 },
     { startCol: 71, endCol: 85 },
@@ -115,14 +152,14 @@ export const LEVEL_1_1: WorldData = {
     { col: 119, row: 5 },
   ],
   qblocks: [
-    { col: 16, row: 9 },
-    { col: 21, row: 9 },
-    { col: 23, row: 9 },
-    { col: 22, row: 5 },
-    { col: 78, row: 5 },
-    { col: 94, row: 9 },
-    { col: 106, row: 9 },
-    { col: 109, row: 9 },
+    { col: 16, row: 9, item: 'mushroom' },
+    { col: 21, row: 9, item: 'coin' },
+    { col: 23, row: 9, item: 'multi' },
+    { col: 22, row: 5, item: 'multi' },
+    { col: 78, row: 5, item: 'coin' },
+    { col: 94, row: 9, item: 'flower' },
+    { col: 106, row: 9, item: 'multi' },
+    { col: 109, row: 9, item: 'coin' },
   ],
   coins: [
     { col: 10, row: 12 },
@@ -153,6 +190,13 @@ export const LEVEL_1_1: WorldData = {
     { col: 182, row: 12 },
     { col: 190, row: 12 },
   ],
+  koopas: [
+    { col: 44, row: 12 },
+    { col: 92, row: 12 },
+    { col: 158, row: 12 },
+    { col: 194, row: 12 },
+  ],
+  plants: [{ col: 46 }, { col: 57 }],
   stairs: [
     // 中段:上 4 级 + 下 4 级(峰顶 2 瓦宽)
     { col: 134, height: 1 },
@@ -176,9 +220,139 @@ export const LEVEL_1_1: WorldData = {
     { col: 198, height: 1 },
   ],
   flagCol: 198,
+  castleCol: 202,
   spawn: { col: 3 },
   timeLimit: 300,
 };
+
+/**
+ * 1-2(第二关,全新布局):教学→组合→收尾三段式。
+ * 相对 1-1 的变化:坑更密(4 处)、连续高低管道、食人花 3 根、
+ * 空中浮砖带、乌龟 ×3、末段双阶 + 旗杆。
+ */
+export const LEVEL_1_2: WorldData = {
+  name: '1-2',
+  groundSpans: [
+    { startCol: 0, endCol: 40 },
+    { startCol: 44, endCol: 62 },
+    { startCol: 65, endCol: 77 },
+    { startCol: 80, endCol: 108 },
+    { startCol: 111, endCol: 145 },
+    { startCol: 148, endCol: 222 },
+  ],
+  pipes: [
+    { col: 20, height: 2 },
+    { col: 24, height: 3 },
+    { col: 29, height: 4 },
+    { col: 33, height: 2 },
+    { col: 52, height: 3 },
+    { col: 70, height: 4 },
+    { col: 88, height: 2 },
+    { col: 91, height: 3 },
+    { col: 94, height: 4 },
+    { col: 119, height: 4 },
+    { col: 122, height: 2 },
+    { col: 130, height: 3 },
+  ],
+  bricks: [
+    { col: 8, row: 9 },
+    { col: 10, row: 9 },
+    { col: 12, row: 9 },
+    { col: 11, row: 5 },
+    { col: 34, row: 9 },
+    { col: 36, row: 9 },
+    { col: 38, row: 9 },
+    { col: 96, row: 5 },
+    { col: 98, row: 5 },
+    { col: 100, row: 5 },
+    { col: 102, row: 5 },
+    { col: 114, row: 9 },
+    { col: 116, row: 9 },
+    { col: 136, row: 9 },
+    { col: 138, row: 9 },
+  ],
+  qblocks: [
+    { col: 9, row: 9, item: 'mushroom' },
+    { col: 11, row: 9, item: 'coin' },
+    { col: 12, row: 5, item: 'multi' },
+    { col: 37, row: 9, item: 'flower' },
+    { col: 56, row: 9, item: 'multi' },
+    { col: 58, row: 9, item: 'coin' },
+    { col: 97, row: 9, item: 'mushroom' },
+    { col: 99, row: 9, item: 'coin' },
+    { col: 100, row: 5, item: 'multi' },
+    { col: 117, row: 9, item: 'coin' },
+    { col: 139, row: 9, item: 'mushroom' },
+    { col: 160, row: 9, item: 'multi' },
+    { col: 162, row: 9, item: 'coin' },
+  ],
+  coins: [
+    { col: 5, row: 12 },
+    { col: 7, row: 12 },
+    { col: 41, row: 11 },
+    { col: 42, row: 10 },
+    { col: 63, row: 11 },
+    { col: 64, row: 10 },
+    { col: 78, row: 11 },
+    { col: 109, row: 10 },
+    { col: 110, row: 9 },
+    { col: 146, row: 11 },
+    { col: 147, row: 10 },
+    { col: 168, row: 9 },
+    { col: 169, row: 9 },
+    { col: 186, row: 8 },
+  ],
+  goombas: [
+    { col: 14, row: 12 },
+    { col: 36, row: 12 },
+    { col: 50, row: 12 },
+    { col: 74, row: 12 },
+    { col: 84, row: 12 },
+    { col: 104, row: 12 },
+    { col: 126, row: 12 },
+    { col: 152, row: 12 },
+    { col: 178, row: 12 },
+    { col: 196, row: 12 },
+  ],
+  koopas: [
+    { col: 18, row: 12 },
+    { col: 58, row: 12 },
+    { col: 106, row: 12 },
+    { col: 140, row: 12 },
+    { col: 186, row: 12 },
+  ],
+  plants: [{ col: 29 }, { col: 70 }, { col: 94 }],
+  stairs: [
+    { col: 152, height: 1 },
+    { col: 153, height: 2 },
+    { col: 154, height: 3 },
+    { col: 155, height: 4 },
+    { col: 156, height: 3 },
+    { col: 157, height: 2 },
+    { col: 158, height: 1 },
+    { col: 170, height: 1 },
+    { col: 171, height: 2 },
+    { col: 172, height: 3 },
+    { col: 173, height: 4 },
+    { col: 174, height: 5 },
+    { col: 175, height: 6 },
+    { col: 176, height: 4 },
+    { col: 177, height: 2 },
+    { col: 178, height: 1 },
+    { col: 198, height: 1 },
+  ],
+  flagCol: 198,
+  castleCol: 202,
+  spawn: { col: 3 },
+  timeLimit: 320,
+};
+
+/** 关卡注册表(GamesPage 下拉用)。 */
+export const LEVELS: Record<string, WorldData> = {
+  '1-1': LEVEL_1_1,
+  '1-2': LEVEL_1_2,
+};
+export const LEVEL_KEYS = Object.keys(LEVELS) as Array<keyof typeof LEVELS>;
 
 export type World = {
   data: WorldData;
@@ -219,6 +393,24 @@ function buildWorld(data: WorldData): World {
 }
 
 export const WORLD_1_1: World = buildWorld(LEVEL_1_1);
+export const WORLD_1_2: World = buildWorld(LEVEL_1_2);
+
+/** 关卡 key → World(GamesPage 切关用;未知 key 回退 1-1)。 */
+export const WORLDS: Record<string, World> = { '1-1': WORLD_1_1, '1-2': WORLD_1_2 };
+export function getWorld(key: string): World {
+  return WORLDS[key] ?? WORLD_1_1;
+}
+
+/** 某根管子的管口行(食人花升降的基准);非管道列回 GROUND_ROW。 */
+export function pipeTopRow(data: WorldData, col: number): number {
+  const p = data.pipes.find((q) => col === q.col || col === q.col + 1);
+  return p ? GROUND_ROW - p.height : GROUND_ROW;
+}
+
+/** 该列是否有管道(食人花才可生根)。 */
+export function isPipeCol(data: WorldData, col: number): boolean {
+  return data.pipes.some((q) => col === q.col || col === q.col + 1);
+}
 
 export function tileAt(world: World, px: number, py: number): number {
   const col = Math.floor(px / TILE);

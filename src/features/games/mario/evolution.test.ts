@@ -379,7 +379,7 @@ describe('经验沉淀 insights.md(docs/14 §6)', () => {
       subgoal: true,
       threatFormat: 'rows',
       progressStyle: 'full',
-      hintStyle: 'full',
+      hintStyle: DEFAULT_POLICY.obsHintStyle,
       instructionVariant: 'default',
       stateExtra: 'stallTicks',
     });
@@ -405,7 +405,8 @@ describe('消息设计沙箱(docs/15 §6.4)', () => {
       obsStateExtra: ['stallTicks', 'stallTicks', 'hacker', 'lastAction', 'heldTicks'],
     });
     expect(r.policy.obsThreatFormat).toBe('named');
-    expect(r.policy.obsHintStyle).toBe('full');
+    // 非法枚举回**当前默认**(terse,见 policy.ts 的实测理由),不是硬编码 'full'
+    expect(r.policy.obsHintStyle).toBe(DEFAULT_POLICY.obsHintStyle);
     expect(r.policy.obsStateExtra).toEqual(['stallTicks', 'lastAction']);
     expect(r.issues.length).toBe(3);
     const ok = sanitizePolicy({ obsThreatFormat: 'rows', obsInstructionVariant: 'concise' });

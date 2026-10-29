@@ -10,22 +10,22 @@ describe('mario driver 护栏', () => {
     d.configure({ mode: 'reflex' });
     const s = createGameState(WORLD_1_1);
     // 初始化 lastJump
-    d.held = { left: false, right: true, run: false, jump: false };
+    d.held = { left: false, right: true, run: false, jump: false, fire: false };
     d.inputFor(s, WORLD_1_1);
 
     // 拍 A 带跳、拍 B 决策换成 run_right(无跳),但仍在上升 → 延续 jump
-    d.held = { left: false, right: true, run: false, jump: true };
+    d.held = { left: false, right: true, run: false, jump: true, fire: false };
     s.mario.vy = -3;
     expect(d.inputFor(s, WORLD_1_1).jump).toBe(true);
-    d.held = { left: false, right: true, run: true, jump: false };
+    d.held = { left: false, right: true, run: true, jump: false, fire: false };
     s.mario.vy = -2;
     expect(d.inputFor(s, WORLD_1_1).jump).toBe(true);
     // 过顶(vy>0)→ 不再补,尊重新拍决策
-    d.held = { left: false, right: true, run: true, jump: false };
+    d.held = { left: false, right: true, run: true, jump: false, fire: false };
     s.mario.vy = 2;
     expect(d.inputFor(s, WORLD_1_1).jump).toBe(false);
     // 落地静止也不补
-    d.held = { left: false, right: true, run: false, jump: false };
+    d.held = { left: false, right: true, run: false, jump: false, fire: false };
     s.mario.vy = 0;
     expect(d.inputFor(s, WORLD_1_1).jump).toBe(false);
   });
@@ -39,6 +39,7 @@ describe('mario driver 护栏', () => {
       right: false,
       run: false,
       jump: false,
+      fire: false,
     });
   });
 

@@ -46,6 +46,16 @@ impl LayaAgent {
         })
     }
 
+    /// 实际加载的 ONNX 图文件名(量化版存在时会优先于 fp32)—— /health 用。
+    pub fn model_file(&self) -> &str {
+        self.engine.model_file()
+    }
+
+    /// 已生效的 intra-op 线程数(0 = ORT 取物理核数)。
+    pub fn intra_threads(&self) -> usize {
+        self.engine.intra_threads()
+    }
+
     fn prepare(
         &self,
         state: &Value,

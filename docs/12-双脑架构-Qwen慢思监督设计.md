@@ -1,25 +1,26 @@
 # 12 · 双脑架构:Qwen 慢思监督 × Laya 反射的完全本地自主游戏
 
 > 呼应 docs/11(马里奥实验室)。在 Laya(System 1 反射)+ 规划器(System 2 安全执行)
-> 之上,引入 `环境` 页已有的 **Qwen 本地推理服务**(llama.cpp `llama-server`,
-> OpenAI 兼容,默认 `127.0.0.1:17230`)作为 **System 2.5 慢思监督者**,
+> 之上,引入 `环境` 页已有的 **Qwen 本地推理服务**（Strata 引擎的 qwen3.8-flash-next,
+> OpenAI/Anthropic 兼容,默认 `127.0.0.1:23661`）作为 **System 2.5 慢思监督者**,
 > 并兼任 **离线分析师**——整条链路(反射/规划/慢思/复盘)全部本机闭环,零云端。
+> （历史:初版用 llama.cpp `llama-server` 跑 Qwen3.5-9B @ `:17230`,已移除。）
 
 ---
 
 ## 1. 现有基建盘点(零新增)
 
-| 已有能力          | 位置                                                                      | 双脑直接复用方式                                |
-| ----------------- | ------------------------------------------------------------------------- | ----------------------------------------------- |
-| llama-server 启停 | `src-tauri/src/tools/qwen.rs` MarioLab 状态 pill + 一键启动(`qwen_start`) |
-| OpenAI 兼容端点   | `POST /v1/chat/completions` @ `:17230`                                    | 监督者/分析师唯一调用面                         |
-| `/health` 探活    | 200=就绪,503=加载中                                                       | 前端 `call<QwenStatus>('qwen_status')` 即时显示 |
-| 配置              | `settings.tools.qwen{server_exe,args,port}`                               | 端口沿用 17230(与 Laya 10230/DSH 17300 错开)    |
-| EnvPage 管理界面  | `EnvPage.svelte`                                                          | 不动;游戏页只读状态 + 跳转提示                  |
-| 会话日志          | laya-server `/session/*` JSONL                                            | 监督者行、分析师报告同文件落盘                  |
+| 已有能力         | 位置                                                                                             | 双脑直接复用方式                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| Strata 服务启停  | `src-tauri/src/tools/qwen.rs`（python 跑 serve/server.py）MarioLab pill + 一键启动(`qwen_start`) |
+| OpenAI 兼容端点  | `POST /v1/chat/completions` @ `:23661`                                                           | 监督者/分析师唯一调用面                          |
+| `/health` 探活   | 200=就绪(载入中连接拒绝或非 200)                                                                 | 前端 `call<QwenStatus>('qwen_status')` 即时显示  |
+| 配置             | `settings.tools.qwen{strata_home,config,port}`                                                   | 端口 23661（避开通用端口;DSH strata-local 同源） |
+| EnvPage 管理界面 | `EnvPage.svelte`                                                                                 | 不动;游戏页只读状态 + 跳转提示                   |
+| 会话日志         | laya-server `/session/*` JSONL                                                                   | 监督者行、分析师报告同文件落盘                   |
 
 启动约定:两个服务均由**用户在 release 版「环境」页主动开启**;游戏页(含本设计
-全部 UI)一律只读探活(`:10230/health`、`:17230/health`),不调用
+全部 UI)一律只读探活(`:10230/health`、`:23661/health`),不调用
 `laya_start` / `qwen_start`——**debug 构建下尤其禁止**(侧车归 release 管理,
 重复 spawn 撞端口),详见 docs/11 §1.1。
 
@@ -62,7 +63,7 @@ Laya + 规划器自主运行(docs/11 的四模式照常),UI 给出"监督者未�
 
 ### 3.2 输入上下文(紧凑,总 prompt ≤ 1.5k token)
 
-系统提示固定为**稳定前缀**(命中 llama-server 前缀 KV 缓存,prefill 提速),
+系统提示固定为**稳定前缀**(命中服务端前缀 KV 缓存,prefill 提速),
 用户消息拼装:进度摘要 + 威胁表 + 规划器 waypoints + Laya 近窗统计
 (avg conf / escalation% / QPS)+ 近 3 次死亡归因 + 当前旋钮值。
 数据全部来自已有 JSONL 行与内存统计,不需要新的感知面。
@@ -91,7 +92,7 @@ Laya + 规划器自主运行(docs/11 的四模式照常),UI 给出"监督者未�
 
 ### 3.4 延迟工程(真机实测校准)
 
-实测环境:`Qwen3.5-9B-Q6_K` @ llama.cpp b11063,单槽,温度 0,探针 `.tmp/qwen-vision-bench.mjs`:
+实测环境（旧 llama-server 方案存档,现 Strata 方案未重跑）:`Qwen3.5-9B-Q6_K` @ llama.cpp b11063,单槽,温度 0,探针 `.tmp/qwen-vision-bench.mjs`:
 
 | 探针                         | 结果                                                 |
 | ---------------------------- | ---------------------------------------------------- |
@@ -133,7 +134,7 @@ Laya + 规划器自主运行(docs/11 的四模式照常),UI 给出"监督者未�
 ### 3.6 基准汇总:两脑延迟对照(真机)
 
 同一台机器,laya-server(`laya-rl-agent` @ laya-multilingual-onnx)与
-llama-server(Qwen3.5-9B-Q6_K)各自实测。探针:`.tmp/laya-bench.mjs`、
+llama-server(Qwen3.5-9B-Q6_K,旧方案存档)各自实测。探针:`.tmp/laya-bench.mjs`、
 `.tmp/qwen-bench3.mjs`(会话临时脚本,数据落 `.tmp/*-results.json`)。
 
 **Laya(/predict,各 5 次)**
@@ -306,7 +307,7 @@ Agent 侧工程纪律沿用仓库规范:`pnpm all:check`、Conventional Commits 
 | CPU-only 机器 Qwen 过慢     | 禁思考硬开关 + EWMA 降频至仅 on_death;超时熔断;游戏永不等 Qwen |
 | 输出不可解析                | json_schema(回退 GBNF/提示词约束)+ 宽松解析 + 丢弃即安全       |
 | 过度干预(旋钮抖动)          | 有界授权 + 频控 + before→after 全落盘可回放                    |
-| 与 Tetris 共用 17230 无冲突 | 端口已与 Laya/DSH 错开;游戏只读状态,启停权仍属环境页           |
+| 与 Tetris 共用 23661 无冲突 | 同一 Qwen 服务;游戏只读状态,启停权仍属环境页                   |
 | "假自主"(其实全靠规划器)    | 归因遥测:每局统计 L1/L1.5/L2 各自贡献占比,诚实呈现             |
 
 ## 9. 里程碑接入

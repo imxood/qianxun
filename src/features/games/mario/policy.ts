@@ -25,7 +25,7 @@ export type ObsExtraKey = (typeof OBS_EXTRA)[number];
 
 /** 字段静态性声明表(docs/15 §6.6 硬化②):类型 + 归属维度;含时间/条件语义的字段不得入表。 */
 export type FieldKind = 'number' | 'bool' | 'window' | 'enum' | 'extra-list';
-export type FieldDim = 'gate' | 'window' | 'obs-geometry' | 'message-design';
+export type FieldDim = 'gate' | 'window' | 'obs-geometry' | 'message-design' | 'search';
 export const FIELD_SPECS: Record<string, { kind: FieldKind; dim: FieldDim }> = {
   intervalMs: { kind: 'number', dim: 'gate' },
   gateExecute: { kind: 'number', dim: 'gate' },
@@ -37,6 +37,9 @@ export const FIELD_SPECS: Record<string, { kind: FieldKind; dim: FieldDim }> = {
   pipeWindow: { kind: 'window', dim: 'window' },
   goombaWindow: { kind: 'window', dim: 'window' },
   stairWindow: { kind: 'window', dim: 'window' },
+  searchHorizon: { kind: 'number', dim: 'search' },
+  searchTopK: { kind: 'number', dim: 'search' },
+  searchLookPx: { kind: 'number', dim: 'search' },
   obsProfileCols: { kind: 'number', dim: 'obs-geometry' },
   obsThreatsLookPx: { kind: 'number', dim: 'obs-geometry' },
   obsIncludePose: { kind: 'bool', dim: 'obs-geometry' },
@@ -69,6 +72,15 @@ export type PolicyProfile = {
   stairWindow: Window;
   /** 贴墙后撤时长 tick(10-60)。 */
   backoffTicks: number;
+  /**
+   * System 2 搜索(docs/16 §2):每个候选动作的 rollout 总时长 tick。
+   * 越大看得越远也越慢;调用频率 = 决策拍(autopilot 为每 tick,内部有 WeakMap 缓存)。
+   */
+  searchHorizon: number;
+  /** 送给 Laya 的候选动作数(2-5)。Laya 在 >20 选项时急剧退化,这里硬压住。 */
+  searchTopK: number;
+  /** 意图层前扫危险的距离 px(64-320)。 */
+  searchLookPx: number;
   /** 观测模式(docs/14 §4):profile 前瞻列数(8-24)。 */
   obsProfileCols: number;
   /** 观测模式:威胁清单前扫距离 px(96-288)。 */
@@ -100,13 +112,19 @@ export const DEFAULT_POLICY: PolicyProfile = {
   goombaWindow: [-8, 34],
   stairWindow: [-2, 10],
   backoffTicks: 26,
+  searchHorizon: 45,
+  searchTopK: 3,
+  searchLookPx: 176,
   obsProfileCols: 16,
   obsThreatsLookPx: 176,
   obsIncludePose: true,
   obsIncludeSubgoal: true,
   obsThreatFormat: 'named',
   obsProgressStyle: 'full',
-  obsHintStyle: 'full',
+  // 默认 terse 而非 full:实测(docs/16 §4.3)选项描述文本是 token 大头,
+  // 换 terse 省 ~11 token / 约 9ms。full 仍保留,供演化 agent 做
+  // "描述文本 vs 准确率"的消融——我们没有证据说 terse 更准或更不准。
+  obsHintStyle: 'terse',
   obsInstructionVariant: 'default',
   obsStateExtra: [],
 };
@@ -117,6 +135,9 @@ const BOUNDS = {
   gateEscalate: [0.02, 0.3],
   vetoDistPx: [6, 40],
   backoffTicks: [10, 60],
+  searchHorizon: [12, 90],
+  searchTopK: [2, 5],
+  searchLookPx: [64, 320],
   obsProfileCols: [8, 24],
   obsThreatsLookPx: [96, 288],
 } as const;
@@ -173,6 +194,9 @@ export function sanitizePolicy(raw: unknown): {
   num('backoffTicks');
   num('obsProfileCols');
   num('obsThreatsLookPx');
+  num('searchHorizon');
+  num('searchTopK');
+  num('searchLookPx');
   if (typeof src.vetoEnabled === 'boolean') out.vetoEnabled = src.vetoEnabled;
   if (typeof src.obsIncludePose === 'boolean') out.obsIncludePose = src.obsIncludePose;
   if (typeof src.obsIncludeSubgoal === 'boolean') out.obsIncludeSubgoal = src.obsIncludeSubgoal;
@@ -212,6 +236,9 @@ export function sanitizePolicy(raw: unknown): {
   // 观测几何量必须是整数(列数/像素)
   out.obsProfileCols = Math.round(out.obsProfileCols);
   out.obsThreatsLookPx = Math.round(out.obsThreatsLookPx);
+  out.searchLookPx = Math.round(out.searchLookPx);
+  out.searchHorizon = Math.round(out.searchHorizon);
+  out.searchTopK = Math.round(out.searchTopK);
   for (const [key, [lo, hi]] of Object.entries(WINDOW_BOUNDS)) {
     const v = src[key];
     if (!Array.isArray(v) || v.length !== 2) continue;

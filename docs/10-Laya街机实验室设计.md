@@ -3,6 +3,17 @@
 > 呼应 TypeSafe AI 的 JEV「Tetris Reflex Lab」(System 1 反射 × System 2 规划),
 > 用**我们自己的 Laya** 复刻同一架构。已落地为千寻「游戏」页的第一个游戏:
 > **Laya Reflex · 俄罗斯方块**。
+>
+> ⚠️ **2026-10-04 事实订正**(详见 [docs/16 §1](./16-马里奥v2与Laya推理提速.md)):
+>
+> 1. **JEV 从未开源**——它是 TypeSafe AI 的闭源托管 API,没有权重、没有 HF 仓库。
+>    **开源的是 Laya**(Convai Innovations,Apache-2.0)。所以"替代 JEV"实际等于
+>    "选一个开源平替",而 Laya 就是那一个,本项目的选型没有错。
+> 2. "Tetris Reflex Lab" 这个 demo 名称**查不到**。TypeSafe 官方 demo 是
+>    Doom / Wikiracing / 工单三例;社区有 "Jev Loses at Tetris 62.8%" 的视频。
+>    §1 的"截图逆向"表述本身是对的,但 demo 名称对不上。
+> 3. "Laya 碾压 Jev 近 20 倍"是**本地推理 vs 跨境云端往返**(M5 Pro 15.3ms vs
+>    298.1ms),同硬件口径是 **6–8 倍**。
 
 ## 1. JEV 是怎么实现的(截图逆向)
 
@@ -39,6 +50,11 @@ System 2 规划意图           动作概率分布(7 动作)            决策�
 | 游戏域置信度  | 96.8%(蒸馏过)      | **0.169(未蒸馏,OOD)**        | ⚠ 见 §4                |
 | 服务形态      | 本地引擎           | laya-server sidecar(已有)    | ✅ 零新增基建          |
 
+> 📌 **延迟一行已被 2026-10-05 的实测取代**(见 [docs/16 §4.4](./16-马里奥v2与Laya推理提速.md)):
+> 本机 i9-14900HX / fp32 / 8 线程实测,延迟 ≈ **17 ms 固定 + 0.5 ms/token**。
+> 棋盘长文本(≈220 token)在开启 ORT 三个开关后是 **141 ms**,不是 280 ms。
+> 马里奥关的完整 state 同样是 217 token / 141 ms。**int8 量化尚未兑现**。
+
 ## 3. 已落地架构(千寻「游戏」页)
 
 ```
@@ -72,6 +88,17 @@ System 2 规划意图           动作概率分布(7 动作)            决策�
 - Laya 实际玩的水平:能推进游戏但会堆出洞(未蒸馏的诚实表现)。
 
 ## 5. Phase 2 路线:让 Laya 真正会玩(蒸馏)
+
+> ⚠️ **2026-10-04 更新:蒸馏从"可选改进"升级为"前置条件"。**
+> 两条独立证据都指向同一个结论:
+>
+> - Laya **base** 权重在官方 benchmark 上是 0.362,低于 0.461 的多数类基线。
+>   model card 原话:_"Laya is a fast base to specialise, not a zero-shot decision engine."_
+>   宣传的 0.766 来自**在该 benchmark 训练集上微调过的 checkpoint**。
+> - Laya 自家仓库的中文飞书风格 benchmark:`laya-multilingual` **20/64 vs Jev 64/64**。
+>
+> 也就是说:当前 reflex 模式下 **System 1 从不真正"赢"**,100% 靠 System 2 兜底。
+> 这是诚实的现状,不是 bug;但要拿到"System 1 真的会玩",只能蒸馏。
 
 1. **数据**:求解器自对弈生成 10 万步 `(board_state, best_action)` 标注
    (JSONL,复用 laya-server /predict 的 questions 形状);

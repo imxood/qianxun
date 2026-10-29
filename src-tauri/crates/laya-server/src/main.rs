@@ -17,7 +17,9 @@ use std::time::Instant;
 fn main() {
     let mut model_dir = String::from("models/laya-onnx");
     let mut port: u16 = 10230;
-    let mut threads: u16 = 4;
+    // 默认 0 = 交给 ORT 取物理核数。桌面 sidecar 没有别的活可干,给满比
+    // 固定 4 线程快(本机 i9-14900HX 实测见 docs/16 §4)。
+    let mut threads: u16 = 0;
     let mut log_dir = String::from("logs");
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -58,6 +60,12 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // 实际生效的图文件(fp32 还是量化版)——量化版存在时会被自动优先选用。
+    // 必须 owned:后面 agent 会被 move 进 Arc。
+    let graph: String = agent.model_file().to_owned();
+    eprintln!(
+        "[laya-server] graph: {graph}  threads: {threads}  spinning: off  ftz: on  gelu: approx"
+    );
     eprintln!(
         "[laya-server] ready in {:.1}s, listening on http://{addr}",
         started.elapsed().as_secs_f32()
@@ -81,7 +89,11 @@ fn main() {
                 serde_json::json!({
                     "ok": true,
                     "model": "laya-rl-agent",
-                    "checkpoint": model_dir
+                    "checkpoint": model_dir,
+                    "graph": graph,
+                    "threads": if threads == 0 { "auto".to_string() } else { threads.to_string() },
+                    "spinning": false,
+                    "quantized": graph != "laya.onnx"
                 })
                 .to_string(),
             ),

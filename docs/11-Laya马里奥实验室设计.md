@@ -4,6 +4,13 @@
 > 这是 Laya 从**回合制**(俄罗斯方块)走向**实时控制**的第二块试金石——
 > 一旦 SENSE→DECIDE→ACT + 置信度门控在实时域成立,同一套运行时就能外推到
 > RPA / 桌面自动化 / 监控响应等真实领域。
+>
+> 📌 **本文档描述的是 v1(2026-10 初版)。v2 改造见
+> [docs/16 · 马里奥 v2 与 Laya 推理提速](./16-马里奥v2与Laya推理提速.md):**
+> 补齐变身/道具/龟壳/食人花/火球/通关序列 + 第二关 1-2;
+> **System 2 从"扫第一个危险 + 人工触发窗"换成 rollout 搜索**;
+> System 1 的 state 编码压到 165 token;ORT 三个 CPU 开关全开(实测 1.26×)。
+> 本文中"规划器(跳距可达表 + BFS)""触发窗启发式"等描述在 v2 中已被取代。
 
 ---
 
@@ -28,10 +35,11 @@
 ### 1.1 服务启动约定(release 启动,游戏页只读)
 
 laya-server 与 qwen-server 是**用户在 release 版「环境」页主动启动**的本地服务
-(实测环境:`:10230` laya-rl-agent、`:17230` Qwen3.5-9B-Q6_K):
+(实测环境:`:10230` laya-rl-agent、`:23661` Strata 引擎的 qwen3.8-flash-next;
+初版 `:17230` Qwen3.5-9B llama-server 方案已移除):
 
 - 游戏(GamesPage/MarioLab)对两个服务**只探测、不启动**:HTTP 探活
-  (`:10230/health`、`:17230/health`)+ 只读状态 pill;**debug 构建下绝不调用
+  (`:10230/health`、`:23661/health`)+ 只读状态 pill;**debug 构建下绝不调用
   `laya_start` / `qwen_start`**——侧车进程归 release 应用管理,debug 侧重复
   spawn 会撞端口且进程所有权混乱。
 - 服务未启动时:Laya/双脑相关模式入口置灰并提示「请在 release 版 · 环境页启动

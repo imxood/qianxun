@@ -9,7 +9,7 @@ import {
   type GameState,
   type Input,
 } from './engine';
-import { COLS, GROUND_ROW, JUMP, TILE, WORLD_1_1 } from './world1-1';
+import { COLS, GROUND_ROW, ITEMS, JUMP, TILE, WORLD_1_1, WORLD_1_2 } from './world1-1';
 
 function run(s: GameState, input: Input, ticks: number): void {
   for (let i = 0; i < ticks; i += 1) step(WORLD_1_1, s, input);
@@ -17,6 +17,15 @@ function run(s: GameState, input: Input, ticks: number): void {
 
 type Seg = [Partial<Input>, number];
 const I = (p: Partial<Input>): Input => ({ ...IDLE_INPUT, ...p });
+
+/** 清空所有敌人:让"道具/砖块"这类机制测试只测自己那一件事。 */
+function quietState(world = WORLD_1_1): GameState {
+  const s = createGameState(world);
+  for (const g of s.goombas) g.alive = false;
+  for (const k of s.koopas) k.alive = false;
+  for (const p of s.plants) p.dead = true;
+  return s;
+}
 
 describe('mario world 不变量', () => {
   it('所有坑宽 ≤ 助跑跳距(规划器可达性前提)', () => {
@@ -144,16 +153,120 @@ describe('mario engine', () => {
   });
 
   it('?块顶出金币:分数 +200、瓦片变 used', () => {
-    const s = createGameState();
-    s.mario.x = 16 * TILE + 8 - OXShift(); // 头对准 col16 的 ? 块
+    const s = quietState();
+    s.mario.x = 21 * TILE + 8 - OXShift(); // 头对准 col21 的 coin ? 块
     run(s, I({ jump: true }), 40);
-    const events: string[] = [];
-    void events;
     expect(s.score).toBe(200);
     expect(s.coinCount).toBe(1);
-    const b = s.blocks.get(16 * 32 + 9);
+    const b = s.blocks.get(21 * 32 + 9);
     expect(b?.used).toBe(true);
-    expect(solidAtPx(s, 16 * TILE + 8, 9 * TILE + 8)).toBe(true);
+    expect(solidAtPx(s, 21 * TILE + 8, 9 * TILE + 8)).toBe(true);
+  });
+
+  it('multi ?块连续吐币(8 枚上限)', () => {
+    const s = quietState();
+    s.mario.x = 23 * TILE + 8 - OXShift(); // col23 = multi
+    // 必须"跳一下 → 松手 → 再跳":jumpLatch 只在 input.jump=false 时清零
+    const hop = (): void => {
+      run(s, I({ jump: true }), 22);
+      run(s, IDLE_INPUT, 26);
+    };
+    hop();
+    expect(s.coinCount).toBe(1);
+    hop();
+    expect(s.coinCount).toBeGreaterThanOrEqual(2);
+    const b = s.blocks.get(23 * 32 + 9);
+    expect(b?.coinsLeft).toBeLessThan(8);
+    expect(b?.used).toBe(false); // 未吐完不变 used
+  });
+
+  it('蘑菇 ?块:顶出蘑菇 → 追到它 → 变大 power=big', () => {
+    const s = quietState();
+    s.mario.x = 16 * TILE + 8 - OXShift(); // col16 = mushroom
+    run(s, I({ jump: true }), 30);
+    expect(s.items.some((i) => i.kind === 'mushroom')).toBe(true);
+    // 追蘑菇(向右跑)直至吃掉
+    let grew = false;
+    for (let i = 0; i < 400 && !grew; i += 1) {
+      step(WORLD_1_1, s, I({ right: true, run: true }));
+      if (s.mario.power !== 'small') grew = true;
+    }
+    expect(grew).toBe(true);
+    expect(s.mario.power).toBe('big');
+    expect(s.score).toBeGreaterThanOrEqual(1000);
+  });
+
+  it('big 马里奥 顶碎砖块(tile 变空 +50 分)', () => {
+    const s = quietState();
+    s.mario.power = 'big';
+    s.mario.x = 20 * TILE + 8 - OXShift(); // col20 row9 是砖
+    run(s, I({ jump: true }), 40);
+    expect(s.tiles[9 * COLS + 20]).toBe(0);
+    expect(s.blocks.has(20 * 32 + 9)).toBe(false);
+    expect(s.score).toBe(50);
+  });
+
+  it('small 马里奥 顶砖只顶不碎(砖仍在)', () => {
+    const s = quietState();
+    s.mario.x = 20 * TILE + 8 - OXShift();
+    run(s, I({ jump: true }), 40);
+    expect(s.tiles[9 * COLS + 20]).not.toBe(0);
+  });
+
+  it('fire 形态可发射火球(按住不连发),火球弹地砸死 Goomba', () => {
+    const s = quietState();
+    s.mario.power = 'fire';
+    const g = s.goombas[0]!;
+    g.active = true;
+    g.vx = 0;
+    s.mario.x = g.x - 70;
+    s.mario.y = g.y;
+    step(WORLD_1_1, s, I({ right: true, fire: true }));
+    expect(s.fireballs).toHaveLength(1);
+    // 按住不放不连发(需要松手再按)
+    step(WORLD_1_1, s, I({ right: true, fire: true }));
+    expect(s.fireballs).toHaveLength(1);
+    // 松手 → 再按 → 第二颗(上限 2)
+    step(WORLD_1_1, s, I({ right: true }));
+    step(WORLD_1_1, s, I({ right: true, fire: true }));
+    expect(s.fireballs).toHaveLength(2);
+    let killed = false;
+    for (let i = 0; i < 200 && !killed; i += 1) {
+      step(WORLD_1_1, s, I({ right: true }));
+      if (!g.alive) killed = true;
+    }
+    expect(killed).toBe(true);
+  });
+
+  it('big 受伤降级为 small,small 再受伤才死', () => {
+    const s = createGameState();
+    s.mario.power = 'big';
+    s.mario.invuln = 0;
+    const g = s.goombas[0]!;
+    g.active = true;
+    g.vx = 0;
+    s.mario.x = g.x - 20;
+    s.mario.y = g.y;
+    let damaged = false;
+    for (let i = 0; i < 40 && !damaged; i += 1) {
+      step(WORLD_1_1, s, I({ right: true }));
+      if (String(s.mario.power) === 'small') damaged = true;
+    }
+    expect(damaged).toBe(true);
+    expect(s.phase).toBe('running');
+    expect(s.mario.invuln).toBeGreaterThan(0);
+  });
+
+  it('受击后无敌窗口内不再二次受伤', () => {
+    const s = createGameState();
+    s.mario.invuln = 30;
+    const g = s.goombas[0]!;
+    g.active = true;
+    g.vx = 0;
+    s.mario.x = g.x - 20;
+    s.mario.y = g.y;
+    run(s, I({ right: true }), 10);
+    expect(s.phase).toBe('running');
   });
 
   it('踩踏 Goomba:敌人消灭、马里奥反弹', () => {
@@ -170,6 +283,114 @@ describe('mario engine', () => {
     expect(types).toContain('stomp');
     expect(g.alive).toBe(false);
     expect(s.mario.vy).toBeLessThan(0);
+  });
+
+  it('连踩连击:分越踩越高(第 n 踩 = base × n)', () => {
+    const s = createGameState();
+    for (let n = 1; n <= 4; n += 1) {
+      const g = s.goombas[n - 1]!;
+      g.active = true;
+      s.mario.x = g.x - 2;
+      s.mario.y = g.y - 20;
+      s.mario.vy = 2;
+      s.score = 0;
+      s.combo = n - 1; // 已经连了 n-1 脚,这一脚应加成 n
+      for (let i = 0; i < 10; i += 1) {
+        step(WORLD_1_1, s, IDLE_INPUT);
+        if (!g.alive) break;
+      }
+      expect(g.alive).toBe(false);
+      expect(s.score).toBe(ITEMS.comboBase * n);
+      // 把马里奥挪回地面,下一轮重来
+      s.mario.y = 12 * TILE;
+      s.mario.vy = 0;
+    }
+    expect(s.maxCombo).toBeGreaterThanOrEqual(4);
+  });
+
+  it('踩 Koopa → 变壳;侧踢 → 滑行', () => {
+    const s = createGameState();
+    const k = s.koopas[0]!;
+    k.active = true;
+    s.mario.x = k.x - 2;
+    s.mario.y = k.y - 20;
+    s.mario.vy = 2;
+    for (let i = 0; i < 12 && k.mode === 'walk'; i += 1) step(WORLD_1_1, s, IDLE_INPUT);
+    expect(k.mode).toBe('shell');
+
+    // 侧踢
+    s.mario.y = k.y;
+    s.mario.x = k.x - 24;
+    s.mario.invuln = 0;
+    let kicked = false;
+    for (let i = 0; i < 40 && !kicked; i += 1) {
+      step(WORLD_1_1, s, I({ right: true }));
+      if (k.mode === 'slide') kicked = true;
+    }
+    expect(k.mode).toBe('slide');
+  });
+
+  it('滑行龟壳撞死 Goomba(链式清场)', () => {
+    const s = createGameState();
+    const k = s.koopas[0]!;
+    const g = s.goombas[0]!;
+    // 摆位:壳在左、Goomba 在右 60px,马里奥 远离且无敌
+    k.active = true;
+    k.mode = 'slide';
+    k.vx = 3.2;
+    k.x = 30 * TILE;
+    k.y = 12 * TILE;
+    g.active = true;
+    g.alive = true;
+    g.vx = 0;
+    g.x = k.x + 60;
+    g.y = k.y;
+    s.mario.x = 20 * TILE;
+    s.mario.y = 12 * TILE;
+    s.mario.invuln = 9999;
+    for (let i = 0; i < 90 && g.alive; i += 1) step(WORLD_1_1, s, IDLE_INPUT);
+    expect(g.alive).toBe(false);
+  });
+
+  it('龟壳倒计时归零 → 复活为行走态', () => {
+    const s = createGameState();
+    const k = s.koopas[0]!;
+    k.active = true;
+    k.mode = 'shell';
+    k.revive = 3;
+    for (let i = 0; i < 8; i += 1) step(WORLD_1_1, s, IDLE_INPUT);
+    expect(k.mode).toBe('walk');
+  });
+
+  it('食人花:伸出时碰到马里奥 → 受伤;缩回时无敌', () => {
+    const s = createGameState();
+    const p = s.plants[0]!;
+    expect(p).toBeDefined();
+    // 站到管顶上(管高 4 → topRow 9),与完全伸出的食人花同排
+    s.mario.x = p.col * TILE + 4;
+    s.mario.y = p.topRow * TILE - TILE;
+    s.mario.invuln = 0;
+    p.stage = 'out';
+    p.out = 1;
+    p.timer = 999;
+    let hurt = false;
+    for (let i = 0; i < 6 && !hurt; i += 1) {
+      step(WORLD_1_1, s, IDLE_INPUT);
+      hurt = s.phase === 'dead' || s.mario.invuln > 0;
+    }
+    expect(hurt).toBe(true);
+  });
+
+  it('食人花 马里奥贴近时不伸出(经典规避)', () => {
+    const s = createGameState();
+    const p = s.plants[0]!;
+    s.mario.x = p.col * TILE + TILE - 8; // 站在管子上
+    p.stage = 'retracted';
+    p.out = 0;
+    p.timer = 1;
+    for (let i = 0; i < 10; i += 1) step(WORLD_1_1, s, IDLE_INPUT);
+    expect(p.out).toBe(0);
+    expect(p.stage).toBe('retracted');
   });
 
   it('侧面碰 Goomba → 死亡 goomba', () => {
@@ -226,6 +447,41 @@ describe('mario engine', () => {
       }
       expect(won).toBe(true);
     });
+  });
+
+  it('autopilot 通关 1-2(System 2 搜索对全新布局同样有效)', () => {
+    return import('./planner').then(({ autopilotInput }) => {
+      const s = createGameState(WORLD_1_2);
+      let won = false;
+      const maxTicks = 60 * 160;
+      for (let i = 0; i < maxTicks && !won; i += 1) {
+        const input = autopilotInput(s, WORLD_1_2);
+        const events = step(WORLD_1_2, s, input);
+        if (events.some((e) => e.type === 'win')) won = true;
+      }
+      expect(won).toBe(true);
+      expect(s.score).toBeGreaterThan(0);
+    });
+  });
+
+  it('通关序列:旗杆下滑 → 走向城堡 → 消失 + 时间奖励结算', () => {
+    const s = createGameState();
+    s.mario.x = 197 * TILE;
+    s.mario.y = 6 * TILE;
+    let win: { type: 'win'; bonus: number } | undefined;
+    for (let i = 0; i < 40 && !win; i += 1) {
+      win = step(WORLD_1_1, s, I({ right: true, run: true })).find(
+        (e): e is { type: 'win'; bonus: number } => e.type === 'win',
+      );
+    }
+    expect(win).toBeDefined();
+    expect(s.phase).toBe('won');
+    expect(s.win.stage).toBe('slide');
+    // 跑完整个序列
+    for (let i = 0; i < 400; i += 1) step(WORLD_1_1, s, IDLE_INPUT);
+    expect(s.win.stage).toBe('enter');
+    expect(s.mario.hidden).toBe(true);
+    expect(s.timeBonus).toBe(s.timeUnits * ITEMS.timeBonusPerUnit);
   });
 });
 

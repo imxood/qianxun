@@ -94,19 +94,75 @@ pub enum Ep {
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
     pub ep: Ep,
+    /// 线程数;0 = 交给 ORT 取默认(= 物理核数)。
+    /// 桌面端 sidecar 没有别的活可干,给满比留一半快。
     pub intra_threads: usize,
     /// ONNX 图文件名,receptron/laya-onnx 布局为 `laya.onnx`(+ `.data`)。
     pub model_file: String,
+    /// 线程池在两次推理之间是否自旋等待。
+    /// **默认 false,且这是最大的一项 CPU 优化**:ORT 的 intra-op 线程池
+    /// 默认在空闲时自旋吃满 CPU,sidecar 每 250ms 才来一次请求,绝大部分
+    /// 时间全花在空转上,还会和 UI 线程抢核。关掉后本机实测(见 docs/16 §4)
+    /// 延迟不升反降、CPU 占用大降。
+    pub intra_op_spinning: bool,
+    /// 把非规格化数(denormal)当 0 处理。attention 的 softmax 会产出大量
+    /// 极小值,非规格化数在 x86 上走微码路径,能慢一个数量级。
+    pub flush_to_zero: bool,
+    /// 用 tanh 近似 GELU。ORT 官方文档:约 10% 更快且无数值质量损失。
+    pub approximate_gelu: bool,
 }
 
 impl Default for EngineOptions {
     fn default() -> Self {
         Self {
             ep: Ep::Cpu,
-            intra_threads: 4,
+            intra_threads: 0,
             model_file: "laya.onnx".into(),
+            intra_op_spinning: false,
+            flush_to_zero: true,
+            approximate_gelu: true,
         }
     }
+}
+
+/// 量化候选文件名(按优先级)。
+///
+/// 背景(docs/16 §4):fp32 的 322M 模型在本机实测 ~0.8ms/token,游戏态
+/// ~200 token 就是 180ms,刚好卡在 System 1 的时间预算上。int8 把内存
+/// 带宽压力降到 1/4,配合 VNNI(本机 14900HX 有)是最大的单点提速。
+///
+/// **per-tensor,不 per-channel**:Laya v0.3.23 实测 per-channel 量化把
+/// 输出一致性压到 32%,官方已回退成 per-tensor。上线前必须跑 parity 比对。
+pub const QUANTIZED_CANDIDATES: [&str; 3] = ["laya.int8.onnx", "laya.q8.onnx", "laya.quant.onnx"];
+
+/// 默认 fp32 图名。它是**兜底**而不是显式指定,所以量化版要压过它。
+pub const DEFAULT_FP32_NAME: &str = "laya.onnx";
+
+/// 在目录里挑一个可用的 ONNX 图。
+///
+/// 优先级:
+/// 1. 调用方**显式**指定的名字(≠ `DEFAULT_FP32_NAME`)存在 → 用它;
+/// 2. 量化候选按 `QUANTIZED_CANDIDATES` 顺序第一个存在的;
+/// 3. `DEFAULT_FP32_NAME`;
+/// 4. 都没有 → 报错并指出期望的名字。
+///
+/// 纯函数,不碰 ORT —— 便于单测锁定优先级顺序。
+pub fn resolve_model_file(dir: &Path, preferred: &str) -> Result<String> {
+    if preferred != DEFAULT_FP32_NAME && dir.join(preferred).is_file() {
+        return Ok(preferred.to_owned());
+    }
+    for c in QUANTIZED_CANDIDATES {
+        if dir.join(c).is_file() {
+            return Ok(c.to_owned());
+        }
+    }
+    if dir.join(DEFAULT_FP32_NAME).is_file() {
+        return Ok(DEFAULT_FP32_NAME.to_owned());
+    }
+    Err(LayaError::IncompleteBundle {
+        dir: dir.display().to_string(),
+        missing: preferred.to_owned(),
+    })
 }
 
 pub struct OrtEngine {
@@ -138,14 +194,19 @@ pub struct BatchOutput {
 impl OrtEngine {
     pub fn new(model_dir: &Path, options: EngineOptions) -> Result<Self> {
         ensure_ort_dylib()?;
-        let model_path = model_dir.join(&options.model_file);
+        // 优先量化版(若存在),否则用调用方指定的名字
+        let model_file = match resolve_model_file(model_dir, &options.model_file) {
+            Ok(f) => f,
+            Err(_) => options.model_file.clone(),
+        };
+        let model_path = model_dir.join(&model_file);
         if !model_path.exists() {
             return Err(LayaError::IncompleteBundle {
                 dir: model_dir.display().to_string(),
                 missing: options.model_file.clone(),
             });
         }
-        let data_path = model_dir.join(format!("{}.data", options.model_file));
+        let data_path = model_dir.join(format!("{}.data", model_file));
         // receptron 官方 bundle 权重外置(.data);自导出(export_onnx external_data=False)
         // 为单文件内嵌权重——图文件足够大即视为已含权重,不再硬性要求 .data。
         if !data_path.exists() {
@@ -153,15 +214,29 @@ impl OrtEngine {
             if graph_len < 100_000_000 {
                 return Err(LayaError::IncompleteBundle {
                     dir: model_dir.display().to_string(),
-                    missing: format!("{}.data", options.model_file),
+                    missing: format!("{}.data", model_file),
                 });
             }
         }
+        let options = EngineOptions {
+            model_file,
+            ..options
+        };
         Ok(Self {
             model_path,
             options,
             session: Mutex::new(None),
         })
+    }
+
+    /// 实际使用的图文件名(fp32 还是量化版)—— 供 /health 与日志展示。
+    pub fn model_file(&self) -> &str {
+        &self.options.model_file
+    }
+
+    /// 已生效的线程数(0 = ORT 取物理核数)。
+    pub fn intra_threads(&self) -> usize {
+        self.options.intra_threads
     }
 
     fn ensure_loaded(&self) -> Result<std::sync::MutexGuard<'_, Option<Session>>> {
@@ -176,7 +251,22 @@ impl OrtEngine {
             .with_optimization_level(GraphOptimizationLevel::All)
             .map_err(ort_err)?
             .with_intra_threads(self.options.intra_threads)
+            .map_err(ort_err)?
+            // 下面三项是 CPU 侧真正的提速开关(docs/16 §4),缺任何一个都会
+            // 浪费掉 20~50% 的算力:线程池空转、denormal 走微码、GELU 精算。
+            .with_intra_op_spinning(self.options.intra_op_spinning)
             .map_err(ort_err)?;
+        // rc.13 里这两个是无参开关(只能开不能关),要关就整段不调用
+        let builder = if self.options.flush_to_zero {
+            builder.with_flush_to_zero().map_err(ort_err)?
+        } else {
+            builder
+        };
+        let builder = if self.options.approximate_gelu {
+            builder.with_approximate_gelu().map_err(ort_err)?
+        } else {
+            builder
+        };
         let mut builder = match &self.options.ep {
             Ep::Cpu => builder
                 .with_execution_providers([CPU::default().build()])
