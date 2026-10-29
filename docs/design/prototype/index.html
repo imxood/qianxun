@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>千寻移动端 · 可交互原型</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   令牌层 —— 逐值抄自 lib/app/theme/qx_semantic.dart（暗色板）
+   与 qx_type.dart。**不要**在这里另发明颜色：check_contrast.py
+   已经把这些值验到 WCAG AA，改了就等于绕过闸门。
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --running:#3DDC97; --waiting:#FFC24B; --done:#7CC4FF;
+  --detached:#737C87; --failed:#FF7B72;
+  --accent:#12B5A8;   --onAccent:#04211F;
+  --canvas:#0B0E13;    --surface:#12161D;  --raised:#1A2029;
+  --sunken:#070A0E;    --hairline:rgba(255,255,255,.12);
+  --t1:#E8EDF2; --t2:#9AA7B4; --t3:#72818F;
+  --railIdle:#2A323C;
+
+  /* QxSpace：8dp 体系，但有 12 / 20 这种「不上不下」的档 */
+  --xxs:2px; --xs:4px; --s:8px; --m:12px; --l:16px;
+  --xl:20px; --xxl:24px; --xxxl:32px; --huge:48px;
+
+  /* QxRadius：工具界面用小圆角，圆角越大越「软」 */
+  --r-chip:6px; --r-control:8px; --r-block:12px;
+  --r-card:14px; --r-bubble:18px; --r-container:22px;
+
+  /* QxMotion：150 反馈 / 220 状态 / 300 大件 */
+  --t-instant:150ms; --t-quick:220ms; --t-normal:300ms;
+  --ease-out:cubic-bezier(.33,1,.68,1);
+  --ease-in:cubic-bezier(.55,0,1,.45);
+
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{background:#05070A}
+body{
+  font-family:var(--sans); color:var(--t1);
+  display:flex; gap:32px; padding:28px 24px 60px;
+  align-items:flex-start; justify-content:center; flex-wrap:wrap;
+}
+
+/* ── 左侧：评审控制台 ───────────────────────────────────────── */
+.panel{width:300px; position:sticky; top:28px; max-height:calc(100vh - 56px); overflow:auto}
+.panel h1{font-size:17px; font-weight:650; letter-spacing:-.01em; margin-bottom:4px}
+.panel .sub{font-size:12px; color:var(--t3); line-height:1.6; margin-bottom:20px}
+.grp{margin-bottom:18px}
+.grp>label{
+  display:block; font-size:10.5px; font-weight:700; letter-spacing:.06em;
+  color:var(--t3); text-transform:none; margin-bottom:7px; font-family:var(--mono);
+}
+.btn{
+  display:block; width:100%; text-align:left; padding:9px 11px; margin-bottom:4px;
+  background:var(--surface); border:1px solid var(--hairline); color:var(--t2);
+  border-radius:var(--r-control); font:500 12.5px/1.35 var(--sans); cursor:pointer;
+  transition:background var(--t-instant) var(--ease-out),
+             color var(--t-instant) var(--ease-out);
+}
+.btn:hover{background:var(--raised); color:var(--t1)}
+.btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.btn[aria-pressed="true"]{
+  background:color-mix(in srgb,var(--accent) 18%,var(--surface));
+  border-color:var(--accent); color:var(--t1); font-weight:600;
+}
+.tog{display:flex;align-items:center;gap:9px;padding:7px 2px;cursor:pointer;font-size:12.5px;color:var(--t2)}
+.tog input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.tog input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.note{font-size:11.5px;line-height:1.65;color:var(--t3);border-left:2px solid var(--hairline);padding-left:10px;margin-top:8px}
+
+/* ── 中间：手机 ─────────────────────────────────────────────── */
+.stage{display:flex;flex-direction:column;align-items:center;gap:14px}
+.cap{font-size:11.5px;color:var(--t3);font-family:var(--mono);text-align:center}
+.phone{
+  width:390px; height:844px; background:var(--canvas);
+  border-radius:38px; border:9px solid #1B1F26;
+  box-shadow:0 24px 70px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.05);
+  overflow:hidden; position:relative; display:flex; flex-direction:column;
+  font-size:15.5px;
+}
+.statusbar{
+  height:38px; flex:0 0 38px; display:flex; align-items:center;
+  justify-content:space-between; padding:0 22px; font-size:12px;
+  font-family:var(--mono); color:var(--t2); background:var(--canvas);
+}
+
+/* AppBar —— Material Top App Bar（02 §7 ConnectionBar） */
+.appbar{
+  flex:0 0 auto; padding:var(--s) var(--m) var(--s) var(--l);
+  background:var(--canvas); display:flex; align-items:center; gap:var(--xs);
+  min-height:56px;
+}
+.appbar .titles{flex:1; min-width:0}
+.appbar .t1{font-size:19px;font-weight:600;line-height:1.3;letter-spacing:-.01em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.appbar .t2{font-family:var(--mono);font-size:11px;color:var(--t2);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.iconbtn{
+  width:48px;height:48px;flex:0 0 48px; display:grid;place-items:center;
+  background:none;border:none;color:var(--t2);cursor:pointer;border-radius:var(--r-control);
+  transition:background var(--t-instant) var(--ease-out);
+}
+.iconbtn:hover{background:var(--raised)}
+.iconbtn:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+/* ── 信号轨：签名元素（05 §3.1）─────────────────────────────────
+   四重编码：粗细 / 纹理 / 运动 / 颜色。缺一重，灰度下就少一条通道。 */
+.rail{
+  width:var(--w); align-self:stretch; flex:0 0 var(--w);
+  border-radius:var(--w); position:relative; overflow:hidden;
+  background:var(--c);
+}
+.rail.solid{background:var(--c)}
+/* 虚线段：段 5px / 空 4px。
+   段与空接近 1:1 时，在 2-3dp 宽的轨上会糊成一条实线 —— 实线与实线
+   只差颜色，那就等于「靠颜色单独表意」了。留出明显节奏才能在灰度下
+   也读出「虚」。 */
+.rail.dashed{
+  background:repeating-linear-gradient(
+    to bottom, var(--c) 0 5px, transparent 5px 9px);
+}
+/* 运行中的流光彗尾：1.6s 循环，唯一「故意不 settle」的动画 */
+.rail.live::after{
+  content:''; position:absolute; left:0; right:0; height:45%;
+  background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,.6));
+  animation:comet 1.6s linear infinite;
+}
+@keyframes comet{
+  0%{transform:translateY(-100%)} 100%{transform:translateY(222%)}
+}
+
+/* ── 会话行：05 §4.2，66dp 定高（下限）────────────────────────── */
+.row{
+  display:flex; min-height:66px; padding-left:0;
+  border-bottom:1px solid var(--hairline); cursor:pointer; background:none;
+  border-left:none;border-right:none;border-top:none; width:100%; text-align:left;
+  color:inherit; font:inherit;
+  transition:background var(--t-instant) var(--ease-out);
+}
+.row:hover{background:var(--surface)}
+.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.row .body{
+  flex:1; min-width:0; padding:var(--s) var(--l) var(--s) var(--s);
+  display:flex; flex-direction:column; justify-content:center; gap:3px;
+}
+.row .title{
+  font-size:15.5px; font-weight:600; line-height:1.35; color:var(--t1);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.row .second{
+  font-size:13px; line-height:1.4; color:var(--t2);
+  /* 必须 nowrap：05 §4.2 的行是 66dp 定高，第二行一旦换行就会把整行
+     撑到 80dp+，一屏就放不下 10 行，扫的节奏全毁。放不下就省略。 */
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+/* 元信息固定格：每格一个词，放不下就省略，**永不换行**（05 §4.4） */
+.meta{
+  display:flex; align-items:center; min-width:0; overflow:hidden;
+  font-size:11.5px; line-height:1.25;
+}
+.meta .cell{
+  flex:1 1 0; min-width:0; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; color:var(--t3);
+  font-family:var(--mono); font-variant-numeric:tabular-nums;
+}
+/* ⚠️ 状态格与分隔符都**不许收缩**。
+   曾经写成 `.state{flex:0 0 auto}` 但没给 `.dot` 定规则，而相邻格是
+   `flex:1 1 0`（flex-shrink:1）—— 容器不够宽时它们先把状态词和 `·`
+   挤扁到零宽，于是列表上出现「等你qianxun」这种粘连。
+   状态词是「绝不靠颜色单独表意」的那条可见中文词，被挤没等于这条
+   规则在窄屏上失效。 */
+.meta .cell.state{
+  flex:0 0 auto; color:var(--c); font-weight:700; padding-right:1px;
+}
+.meta .dot{
+  flex:0 0 auto; padding:0 5px; color:var(--t3); opacity:.7;
+}
+/* 不带 · 的变体：留给 A/B 对比（见左侧开关） */
+.meta.plain{gap:var(--m)}
+.meta.plain .cell{flex:0 1 auto; padding:0}
+
+.list{flex:1; overflow-y:auto; background:var(--canvas)}
+.list::-webkit-scrollbar{width:0}
+
+/* ── 空态（05 §9 唯一允许「说人话」的地方）─────────────────── */
+.empty{
+  flex:1; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; padding:var(--huge) var(--xl); text-align:center; gap:var(--m);
+}
+.empty svg{color:var(--t3); opacity:.55}
+.empty h3{font-size:17px; font-weight:650; color:var(--t1)}
+.empty p{font-size:13px; line-height:1.6; color:var(--t2); max-width:26ch}
+.btn-primary,.btn-ghost{
+  min-height:48px; padding:0 var(--xl); border-radius:var(--r-control);
+  font:600 15px/1 var(--sans); cursor:pointer; border:1px solid transparent;
+  transition:background var(--t-instant) var(--ease-out);
+}
+.btn-primary{background:var(--accent); color:var(--onAccent)}
+.btn-primary:hover{background:color-mix(in srgb,var(--accent) 86%,#fff)}
+.btn-ghost{background:transparent; border-color:var(--hairline); color:var(--t1)}
+.btn-ghost:hover{background:var(--raised)}
+.btn-primary:focus-visible,.btn-ghost:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ── 待答驻留条（05 §6，唯一允许抢焦点的东西）──────────────── */
+.pending{
+  flex:0 0 auto; background:var(--raised); border-top:1px solid var(--hairline);
+  padding:var(--m) var(--l); display:flex; align-items:center; gap:var(--m);
+}
+.pending .info{flex:1; min-width:0}
+.pending .k{font-size:12px; color:var(--waiting); font-weight:700}
+.pending .v{font-size:13px; color:var(--t1); white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--waiting);flex:0 0 8px;
+  animation:breathe 1.6s var(--ease-out) infinite}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── 输入栏（Batch 4）────────────────────────────────────────── */
+.composer{
+  flex:0 0 auto; background:var(--surface); border-top:1px solid var(--hairline);
+  padding-bottom:var(--s);
+}
+.err{
+  margin:var(--s) var(--m) 0; padding:var(--s) var(--m); font-size:12.5px;
+  color:var(--failed); background:color-mix(in srgb,var(--failed) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--failed) 40%,transparent);
+  border-radius:var(--r-control);
+}
+.atts{display:flex; gap:var(--xs); padding:var(--s) var(--m) 0; overflow-x:auto}
+.atts::-webkit-scrollbar{height:0}
+.att{
+  flex:0 0 132px; padding:var(--s); background:var(--sunken);
+  border:1px solid var(--hairline); border-radius:var(--r-control);
+  display:flex; flex-direction:column; gap:var(--xs);
+}
+.att.bad{border-color:var(--failed)}
+.att .n{font-size:11.5px;color:var(--t1);display:flex;align-items:center;gap:4px}
+.att .n span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.att .x{
+  width:48px;height:48px;margin:-16px -12px -16px 0; display:grid;place-items:center;
+  background:none;border:none;color:var(--t3);cursor:pointer;flex:0 0 48px;
+}
+.att .x:hover{color:var(--t1)}
+.att .x:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.att .s{font-size:11.5px;font-family:var(--mono);color:var(--t3)}
+.att .s.bad{color:var(--failed)}
+.steer{
+  display:flex;align-items:center;gap:var(--s);padding:var(--s) var(--m) 0;
+  font-size:11.5px;
+}
+.steer .lbl{color:var(--t3)}
+.steer.on .lbl{color:var(--accent);font-weight:700}
+.switch{
+  width:44px;height:26px;border-radius:13px;background:var(--raised);
+  border:1px solid var(--hairline);position:relative;cursor:pointer;flex:0 0 44px;
+  transition:background var(--t-quick) var(--ease-out);
+}
+.switch::after{
+  content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+  background:var(--t2);transition:transform var(--t-quick) var(--ease-out),
+    background var(--t-quick) var(--ease-out);
+}
+.switch[aria-checked="true"]{background:color-mix(in srgb,var(--accent) 40%,var(--raised))}
+.switch[aria-checked="true"]::after{transform:translateX(18px);background:var(--accent)}
+.switch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.crow{display:flex;align-items:flex-end;gap:var(--xs);padding:var(--s) var(--m) 0}
+.crow input{
+  flex:1; min-width:0; background:var(--sunken); color:var(--t1);
+  border:1px solid var(--hairline); border-radius:var(--r-control);
+  padding:var(--s) var(--m); font:400 15.5px/1.35 var(--sans); resize:none;
+  min-height:44px; max-height:140px;
+}
+.crow input::placeholder{color:var(--t3)}
+.crow input:focus{outline:none;border-color:var(--accent)}
+.attach,.send{
+  width:44px;height:44px;flex:0 0 44px;border-radius:var(--r-control);
+  border:none;display:grid;place-items:center;cursor:pointer;
+  transition:background var(--t-instant) var(--ease-out), color var(--t-instant) var(--ease-out);
+}
+.attach{background:transparent;color:var(--t2)}
+.attach:hover{background:var(--raised);color:var(--t1)}
+.attach[aria-expanded="true"]{background:var(--raised);color:var(--t1)}
+.attach:focus-visible,.send:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.send{background:var(--raised);color:var(--t3)}
+.send[disabled]{cursor:default}
+.send.on{background:var(--accent);color:var(--onAccent)}
+
+/* 附件弹出菜单 */
+.pop{
+  position:absolute; bottom:100%; left:0; right:0; background:var(--raised);
+  border:1px solid var(--hairline); border-radius:var(--r-block) var(--r-block) 0 0;
+  padding:var(--s); z-index:20; animation:pop var(--t-quick) var(--ease-out);
+}
+@keyframes pop{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.pop button{
+  display:flex;align-items:center;gap:var(--m);width:100%;text-align:left;
+  padding:var(--m);min-height:48px;background:none;border:none;color:var(--t1);
+  border-radius:var(--r-control);cursor:pointer;font:400 15.5px/1.3 var(--sans);
+}
+.pop button:hover{background:var(--sunken)}
+.pop button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.pop .sub{display:block;font-size:12px;color:var(--t3);margin-top:2px}
+.pop hr{border:none;border-top:1px solid var(--hairline);margin:var(--xs) 0}
+
+/* ── 转录 ───────────────────────────────────────────────────── */
+.transcript{flex:1;overflow-y:auto;padding:var(--m) var(--l) var(--xxl)}
+.transcript::-webkit-scrollbar{width:0}
+.turn{
+  display:flex;align-items:center;gap:var(--s);margin:var(--l) 0 var(--m);
+  font-family:var(--mono);font-size:10.5px;color:var(--t3);
+}
+.turn::before,.turn::after{content:'';flex:1;height:1px;background:var(--hairline)}
+.msg{margin-bottom:var(--m);display:flex}
+.msg.user{justify-content:flex-end}
+.bubble{
+  max-width:82%;padding:var(--m);border-radius:var(--r-bubble);
+  font-size:15.5px;line-height:1.55;
+}
+.msg.user .bubble{background:var(--accent);color:var(--onAccent);border-bottom-right-radius:var(--r-chip)}
+.msg.bot .bubble{background:var(--surface);color:var(--t1);border-bottom-left-radius:var(--r-chip)}
+.msg .who{font-size:11px;color:var(--t3);margin-bottom:4px;padding:0 var(--m)}
+.tool{
+  background:var(--sunken);border:1px solid var(--hairline);
+  border-radius:var(--r-control);overflow:hidden;margin-bottom:var(--s);
+}
+.tool .head{
+  display:flex;align-items:center;gap:var(--s);padding:var(--m);
+  min-height:48px;cursor:pointer;width:100%;background:none;border:none;
+  color:inherit;font:inherit;text-align:left;
+}
+.tool .head:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.tool .nm{font-family:var(--mono);font-size:12.5px;color:var(--t1);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{
+  font-family:var(--mono);font-size:10.5px;font-weight:700;
+  padding:3px var(--s);border-radius:var(--r-chip);
+  border:1px solid color-mix(in srgb,var(--c) 45%,transparent);
+  color:var(--c); white-space:nowrap; flex:0 0 auto;
+}
+.tool .body{padding:0 var(--m) var(--m);font-family:var(--mono);font-size:12px;
+  color:var(--t2);white-space:pre-wrap;word-break:break-all;line-height:1.5}
+
+/* ── 底部弹层（审批单 / 提问单）────────────────────────────── */
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.62);z-index:30;
+  animation:fade var(--t-quick) var(--ease-out)}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;z-index:31;
+  background:var(--raised);border-top:1px solid var(--hairline);
+  border-radius:var(--r-container) var(--r-container) 0 0;
+  padding:var(--l) var(--l) var(--xl);max-height:82%;
+  overflow-y:auto;animation:up var(--t-normal) var(--ease-out);
+}
+@keyframes up{from{transform:translateY(100%)}to{transform:none}}
+.sheet h2{font-size:17px;font-weight:650;margin-bottom:var(--s)}
+.sheet .desc{font-size:13px;line-height:1.6;color:var(--t2);margin-bottom:var(--m)}
+.cmd{
+  font-family:var(--mono);font-size:12.5px;color:var(--t1);background:var(--sunken);
+  border:1px solid var(--hairline);border-radius:var(--r-control);
+  padding:var(--m);margin-bottom:var(--m);white-space:pre;overflow-x:auto;
+}
+.kv{display:flex;gap:var(--m);padding:var(--xs) 0;font-size:12.5px}
+.kv .k{flex:0 0 72px;color:var(--t3);font-family:var(--mono);font-size:11.5px}
+.kv .v{flex:1;color:var(--t1);font-family:var(--mono);font-size:11.5px;word-break:break-all}
+.warn{
+  font-size:12.5px;line-height:1.6;color:var(--waiting);
+  background:color-mix(in srgb,var(--waiting) 10%,transparent);
+  border:1px solid color-mix(in srgb,var(--waiting) 35%,transparent);
+  border-radius:var(--r-control);padding:var(--m);margin-bottom:var(--m);
+}
+.sheet .actions{display:flex;gap:var(--s);margin-top:var(--m)}
+.sheet .actions>*{flex:1}
+
+/* ── 顶部提示条（连接状态）────────────────────────────────── */
+.linkbar{
+  flex:0 0 auto;display:flex;align-items:center;gap:var(--s);
+  padding:var(--s) var(--l);font-size:12.5px;background:var(--raised);
+  border-bottom:1px solid var(--hairline);
+}
+.linkbar.warnbar{color:var(--waiting)}
+.linkbar .txt{flex:1}
+.linkbar button{
+  min-height:32px;padding:0 var(--m);background:transparent;color:var(--waiting);
+  border:1px solid color-mix(in srgb,var(--waiting) 40%,transparent);
+  border-radius:var(--r-chip);font:600 12.5px/1 var(--sans);cursor:pointer;
+}
+
+/* ── 日志 ───────────────────────────────────────────────────── */
+.filters{display:flex;gap:var(--xs);padding:var(--s) var(--l);overflow-x:auto;
+  border-bottom:1px solid var(--hairline);background:var(--canvas)}
+.filters::-webkit-scrollbar{height:0}
+.chip{
+  flex:0 0 auto;min-height:32px;padding:0 var(--m);border-radius:var(--r-chip);
+  border:1px solid var(--hairline);background:var(--surface);color:var(--t2);
+  font:500 12px/1 var(--mono);cursor:pointer;
+  transition:background var(--t-instant) var(--ease-out);
+}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--onAccent);font-weight:700}
+.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.logrow{
+  display:flex;gap:var(--s);padding:var(--s) var(--l);
+  border-bottom:1px solid var(--hairline);font-size:12.5px;align-items:flex-start;
+}
+.logrow .bar{width:3px;align-self:stretch;border-radius:2px;background:var(--c);flex:0 0 3px}
+.logrow .lv{font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--c);flex:0 0 44px}
+.logrow .ts{font-family:var(--mono);font-size:11px;color:var(--t3);flex:0 0 58px}
+.logrow .ms{flex:1;color:var(--t2);font-family:var(--mono);font-size:11.5px;word-break:break-word}
+
+/* ── 标签页（多屏切换）──────────────────────────────────────── */
+.tabs{
+  display:flex;gap:2px;background:var(--surface);padding:3px;
+  border-radius:var(--r-control);border:1px solid var(--hairline);
+}
+.tabs button{
+  flex:1;padding:7px 4px;min-height:34px;background:none;border:none;
+  color:var(--t2);border-radius:var(--r-chip);font:500 11.5px/1 var(--mono);
+  cursor:pointer;white-space:nowrap;
+  transition:background var(--t-instant) var(--ease-out);
+}
+.tabs button[aria-pressed="true"]{background:var(--raised);color:var(--t1);font-weight:700}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::after{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <h1>千寻移动端 · 可交互原型</h1>
+  <p class="sub">
+    令牌逐值抄自 <code>qx_semantic.dart</code>，已过 <code>check_contrast.py</code> 的 WCAG 闸门。<br>
+    左边切屏、切状态、切 A/B 变体；中间那台是 390×844 的真机比例。
+  </p>
+
+  <div class="grp">
+    <label>对照实验</label>
+    <label class="tog"><input type="checkbox" id="v-gray">灰度模拟（检验「不靠颜色单独表意」）</label>
+    <label class="tog"><input type="checkbox" id="v-scale">正文放大 2.0×（05 §9.5 第 4 条）</label>
+    <label class="tog"><input type="checkbox" id="v-dots" checked>元信息用 · 分隔（05 §4.4 规定）</label>
+    <p class="note">
+      灰度是关键自检：把所有颜色抽成灰后，五种状态必须仍分得开
+      （靠轨宽 + 虚实 + 中文词）。分不开就是在靠颜色作弊。<br><br>
+      <b>已知取舍</b>：「已完成」的轨用 <code>railIdle</code>，在 canvas 上
+      只有 1.40:1 —— 这是 05 §2 有意的「完成要退后而不是庆祝」。代价是
+      灰度下它接近隐形，只剩 1dp 细线 + 「已完成」三个字在撑。
+      若你认为「已完成」也该一眼可辨，把 <code>--railIdle</code> 调亮即可，
+      但那就违背了那条设计意图。
+    </p>
+  </div>
+
+  <div class="grp">
+    <label>屏幕</label>
+    <div id="screens"></div>
+  </div>
+
+  <div class="grp">
+    <label>状态变体</label>
+    <div id="variants"></div>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div class="phone" id="phone"></div>
+  <div class="cap" id="cap"></div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   数据。用**真实内容**——05 说原型必须用真内容，placeholder 会让
+   设计看起来像模板。下面这些会话名与第二行取自模拟器上真机 dump 出来的
+   实际数据（393 条会话里可见的那些）。
+   ══════════════════════════════════════════════════════════════ */
+const ST = {
+  running:  {label:'运行中', c:'var(--running)', w:4,  dash:false, live:true },
+  waiting:  {label:'等你',   c:'var(--waiting)', w:3,  dash:true },
+  done:     {label:'已完成', c:'var(--done)',    w:1,  dash:false, railIdle:true },
+  detached: {label:'已断开', c:'var(--detached)',w:2,  dash:true },
+};
+
+const SESSIONS = [
+  { st:'waiting',  title:'部署预发环境', second:'Bash  ./deploy.sh --env staging', cwd:'qianxun', turns:7, ctx:365000, ago:'1 分钟前' },
+  { st:'running',  title:'最新代码部署测试环境', second:'正在跑 pnpm check', cwd:'qianxun', turns:12, ctx:486000, ago:'刚刚' },
+  { st:'running',  title:'修复 flaky 测试', second:'rg -n timeout test/', cwd:'qianxun', turns:3, ctx:82000, ago:'刚刚' },
+  { st:'done',     title:'裁判模型项目对比分析', second:'## R5 战役做了\n结论是方案死了', cwd:'iot_tool_cloud', turns:24, ctx:1840000, ago:'22 小时前' },
+  { st:'done',     title:'egui 字体缺失字符问题', second:'完成。复现 crate 已改为 woff2', cwd:'egui_hikvision_app', turns:1, ctx:23000, ago:'22 小时前' },
+  { st:'detached', title:'你是独立验证员 (盲评)', second:'三个步骤均已在远程机跑完', cwd:'qianxun', turns:9, ctx:640000, ago:'1 天前' },
+  { st:'done',     title:'test_dsh', second:'ok', cwd:'test_dsh', turns:2, ctx:41000, ago:'2 天前' },
+  { st:'done',     title:'你好你是什么模型', second:'我是 DSH', cwd:'tests', turns:1, ctx:12000, ago:'3 天前' },
+];
+
+const TRANSCRIPT = [
+  { t:'turn', n:1 },
+  { t:'user', text:'把预发环境的 3 个服务都更新一下，端口别动' },
+  { t:'tool', name:'Bash', args:'./deploy.sh --env staging --services api,worker,web', state:'running' },
+  { t:'bot', text:'先确认当前在跑的版本，再逐个更新。端口从 compose 文件里读，不手改。' },
+  { t:'tool', name:'Read', args:'docker-compose.yml', state:'done', out:'  api:\n    ports:\n      - "8080:8080"\n  worker:\n    ports:\n      - "9000:9000"' },
+  { t:'turn', n:2 },
+  { t:'user', text:'顺便把 api 的健康检查也加上' },
+  { t:'bot', text:'加好了。`/healthz` 现在会检查下游依赖，端口没动。' },
+];
+
+/* ── 屏幕清单 ─────────────────────────────────────────────── */
+const SCREENS = [
+  { id:'list',      name:'会话列表',  variants:['ready','waiting-pin','noMachines','needsMachineChoice','unreachable','loading'] },
+  { id:'session',   name:'会话详情',  variants:['idle','running','attachments','steering','empty'] },
+  { id:'conn',      name:'连接管理',  variants:['list','empty','addForm','multi'] },
+  { id:'logs',      name:'运行日志',  variants:['all','errorOnly'] },
+  { id:'approval',  name:'审批单',    variants:['known','unknownArgs'] },
+  { id:'question',  name:'提问单',    variants:['choice','freeText'] },
+];
+
+/* ── 状态切换 ─────────────────────────────────────────────── */
+let cur = { screen:'list', variant:'ready', dots:true, scale:false, gray:false };
+
+/* ══════════════════════════════════════════════════════════════
+   片段
+   ══════════════════════════════════════════════════════════════ */
+const rail = (st) => {
+  const s = ST[st];
+  const cls = ['rail', s.dash ? 'dashed' : 'solid', s.live ? 'live' : ''].join(' ');
+  return `<div class="${cls}" style="--w:${s.w}px;--c:${s.railIdle?'var(--railIdle)':s.c}"></div>`;
+};
+
+const meta = (cells) => {
+  const sep = cur.dots ? '<span class="dot">·</span>' : '';
+  return `<div class="meta ${cur.dots?'':'plain'}">` +
+    cells.map((c,i)=> (i? sep : '') + `<span class="cell ${c.k||''}" style="--c:${c.c||'var(--t3)'}">${c.t}</span>`).join('') +
+  `</div>`;
+};
+const row = (s) => `
+  <button class="row" data-go="session">
+    ${rail(s.st)}
+    <div class="body">
+      <div class="title">${s.title}</div>
+      <div class="second">${s.second.split('\n')[0]}</div>
+      ${meta([
+        {k:'state', t:ST[s.st].label, c:ST[s.st].c},
+        ...(s.cwd ? [{t:s.cwd}] : []),
+        {t:`${s.turns} 轮`},
+        {t:`${fmtK(s.ctx)} ctx`},
+        {t:s.ago},
+      ])}
+    </div>
+  </button>`;
+
+const fmtK = n => n>=1000000 ? (n/1000000).toFixed(1)+'M' : n>=1000 ? Math.round(n/1000)+'k' : String(n);
+
+const appbar = (title, sub, actions='') => `
+  <div class="appbar">
+    <div class="titles">
+      <div class="t1">${title}</div>
+      ${sub?`<div class="t2">${sub}</div>`:''}
+    </div>
+    ${actions}
+  </div>`;
+
+const ico = (d, size=20) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const I = {
+  refresh:'<path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/>',
+  dns:'<rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><path d="M6 6.5h.01M6 17.5h.01"/>',
+  send:'<path d="M12 19V5M5 12l7-7 7 7"/>',
+  plus:'<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
+  x:'<path d="M18 6 6 18M6 6l12 12"/>',
+  stop:'<circle cx="12" cy="12" r="9"/><rect x="9" y="9" width="6" height="6" rx="1"/>',
+  back:'<path d="M19 12H5M12 19l-7-7 7-7"/>',
+  img:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+  file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+  inbox:'<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/>',
+  cloud:'<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.2 9.5 4.5 4.5 0 0 0 7 19z"/>',
+  devices:'<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 20h6M9 14v6"/><rect x="17" y="9" width="5" height="11" rx="1.5"/>',
+  chev:'<path d="m9 18 6-6-6-6"/>',
+};
+
+/* ══════════════════════════════════════════════════════════════
+   各屏渲染
+   ══════════════════════════════════════════════════════════════ */
+function renderList(){
+  const v = cur.variant;
+  const actions = `
+    <button class="iconbtn" aria-label="刷新">${ico(I.refresh)}</button>
+    <button class="iconbtn" data-go="conn" aria-label="连接管理">${ico(I.dns)}</button>`;
+
+  if (v === 'loading') {
+    return appbar('工作台','',actions) + `
+      <div class="list" style="display:grid;place-items:center">
+        <div class="empty" style="gap:var(--m)">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" style="color:var(--t3)">
+            <path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6" opacity=".9">
+              <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12"
+                dur="1s" repeatCount="indefinite"/></path>
+          </svg>
+          <p style="color:var(--t3)">正在连电脑…</p>
+        </div>
+      </div>`;
+  }
+
+  const BLOCK = {
+    noMachines: {
+      icon:I.devices, title:'还没有电脑',
+      hint:'先在这台手机上配对一次，之后就能看到它的会话了。',
+      cta:['去配对','add'],
+      note:'⚠️ 这一屏曾经显示「连不上这台电脑」+「重试」——全新用户一台机器都没有，被告知连不上。'
+    },
+    needsMachineChoice: {
+      icon:I.dns, title:'选一台电脑',
+      hint:'选一台电脑，就能看到它的会话了。', cta:['去选择','conn'],
+      note:'多台时**不自动选**——那是用户要做的决定。'
+    },
+    unreachable: {
+      icon:I.cloud, title:'连不上这台电脑',
+      hint:'链路建立失败：3 次重连都没握上手。', cta:['重试','retry'],
+      note:'只有真连不上才该说连不上。'
+    },
+  };
+
+  if (v in BLOCK) {
+    const b = BLOCK[v];
+    return appbar('工作台','',actions) + `
+      <div class="list"><div class="empty">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${b.icon}</svg>
+        <h3>${b.title}</h3>
+        <p>${b.hint}</p>
+        <button class="btn-primary" data-act="${b.cta[1]}">${b.cta[0]}</button>
+      </div></div>`;
+  }
+
+  // 等你置顶（05 §3.3 强制规则）
+  let list = [...SESSIONS];
+  if (v === 'waiting-pin') {
+    // 把一条「等你」排到最前，并显示它排在最前
+    const w = { st:'waiting', title:'部署预发环境', second:'Bash  ./deploy.sh --env staging', cwd:'qianxun', turns:7, ctx:365000, ago:'1 分钟前' };
+    list = [w, ...SESSIONS.filter(s=>s.st!=='waiting')];
+  }
+  return appbar('DESKTOP-CLTN8CB','192.168.20.2:23090',actions) + `
+    <div class="list">
+      ${list.map(row).join('')}
+      <div style="height:120px"></div>
+    </div>
+    ${v==='waiting-pin' ? pendingBar() : ''}`;
+}
+
+function pendingBar(){
+  return `<div class="pending">
+    <div class="pulse"></div>
+    <div class="info">
+      <div class="k">等你回答</div>
+      <div class="v">Bash · 部署预发环境</div>
+    </div>
+    <button class="btn-primary" data-go="approval" style="min-height:40px;padding:0 var(--l);font-size:13.5px">处理</button>
+  </div>`;
+}
+
+function renderSession(){
+  const v = cur.variant;
+  const running = v === 'running' || v === 'steering' || v === 'attachments';
+  const actions = `
+    ${running?`<button class="iconbtn" aria-label="中断当前轮次">${ico(I.stop,22)}</button>`:''}
+    <button class="iconbtn" aria-label="重新加载">${ico(I.refresh)}</button>`;
+
+  let body = TRANSCRIPT.map(r => {
+    if (r.t==='turn') return `<div class="turn">第 ${r.n} 轮</div>`;
+    if (r.t==='user') return `<div class="msg user"><div class="bubble">${r.text}</div></div>`;
+    if (r.t==='bot')  return `<div class="msg bot"><div class="who">agent</div><div class="bubble">${r.text}</div></div>`;
+    if (r.t==='tool') {
+      const st = r.state==='done'
+        ? {label:'已完成',c:'var(--done)'}
+        : {label:'运行中',c:'var(--running)'};
+      return `<div class="tool">
+        <button class="head" aria-expanded="${r.state!=='done'}">
+          ${ico(r.state==='done'?'<path d="m6 9 6 6 6-6"/>':'<circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>',16)}
+          <span class="nm">${r.name}</span>
+          <span class="badge" style="--c:${st.c}">${st.label}</span>
+        </button>
+        ${r.state!=='done' ? `<div class="body">${r.args}</div>` : `<div class="body">${r.args}\n${r.out}</div>`}
+      </div>`;
+    }
+    return '';
+  }).join('');
+
+  if (v==='empty') body = `
+    <div class="empty" style="min-height:420px">
+      ${ico(I.inbox,44)}
+      <h3>这个会话还没有内容</h3>
+      <p>在下面发一条消息，agent 就会开始跑。</p>
+    </div>`;
+
+  return appbar('部署预发环境', running?'<span style="color:var(--running)">agent 运行中</span>':'',actions)
+    + `<div class="transcript">${body}</div>` + composer(v);
+}
+
+function composer(v){
+  const running = v==='running'||v==='steering'||v==='attachments';
+  const steering = v==='steering';
+  const withAtt = v==='attachments';
+  const text = (v==='running'||v==='steering') ? '顺便把 api 的健康检查也加上' : '';
+
+  return `<div class="composer">
+    ${withAtt ? `<div class="atts">
+      <div class="att">
+        <div class="n">${ico(I.img,14)}<span>架构图.png</span>
+          <button class="x" aria-label="移除 架构图.png">${ico(I.x,14)}</button></div>
+        <div class="s">已就绪 · 248 KB</div>
+      </div>
+      <div class="att">
+        <div class="n">${ico(I.file,14)}<span>deploy-notes.md</span>
+          <button class="x" aria-label="移除 deploy-notes.md">${ico(I.x,14)}</button></div>
+        <div class="s">上传中 · 1.2 MB</div>
+      </div>
+    </div>` : ''}
+    ${running ? `<div class="steer ${steering?'on':''}">
+      <span class="lbl">${steering?'插进当前轮次':'排队等这轮跑完'}</span>
+      <button class="switch" role="switch" aria-checked="${steering}"
+        aria-label="${steering?'当前：插进当前轮次':'当前：排队'}" data-act="steer"></button>
+    </div>` : ''}
+    <div class="crow">
+      <button class="attach" aria-label="添加附件" aria-expanded="false" data-act="menu">${ico(I.plus,22)}</button>
+      <input type="text" placeholder="给 agent 发消息…" value="${text}" aria-label="给 agent 发消息">
+      <button class="send ${text||withAtt?'on':''}" ${text||withAtt?'':'disabled'}
+        aria-label="发送">${ico(I.send,20)}</button>
+    </div>
+  </div>`;
+}
+
+function renderConn(){
+  const v = cur.variant;
+  const actions = `<button class="iconbtn" data-go="list" aria-label="返回">${ico(I.back)}</button>`;
+  const head = appbar('连接','',actions);
+
+  if (v==='empty' || v==='addForm') {
+    return head + `<div class="list">
+      ${v==='addForm' ? `
+        <div style="padding:var(--l)">
+          <div style="font-size:15px;font-weight:600;margin-bottom:var(--s)">添加电脑</div>
+          <div style="font-size:12.5px;color:var(--t2);line-height:1.6;margin-bottom:var(--m)">
+            在电脑端打开「设置 → 远程访问」，把配对链接粘进来。
+          </div>
+          <input type="text" placeholder="http://192.168.20.2:23090/qx-gate?code=…"
+            aria-label="配对链接"
+            style="width:100%;background:var(--sunken);border:1px solid var(--hairline);
+                   border-radius:var(--r-control);padding:var(--m);color:var(--t1);
+                   font:400 12.5px var(--mono);min-height:48px">
+          <div style="font-size:11.5px;color:var(--t3);margin-top:6px">
+            链接是一次性的，5 分钟内有效。
+          </div>
+          <div style="display:flex;gap:var(--s);margin-top:var(--l)">
+            <button class="btn-ghost" style="flex:1" data-act="conn-empty">取消</button>
+            <button class="btn-primary" style="flex:1" data-act="conn-add">连接</button>
+          </div>
+        </div>` : `
+        <div class="empty">
+          ${ico(I.dns,44)}
+          <h3>还没有连接任何电脑</h3>
+          <p>在电脑端打开「设置 → 远程访问」，把配对链接扫进来就能远程操控这台机器。</p>
+          <button class="btn-primary" data-act="conn-add">添加电脑</button>
+        </div>`}
+    </div>`;
+  }
+
+  const many = v==='multi';
+  const rows = [
+    { n:'DESKTOP-CLTN8CB', h:'192.168.20.2:23090', s:'在线', c:'var(--running)' },
+    ...(many?[
+      { n:'家里的 NAS', h:'192.168.20.9:23090', s:'离线', c:'var(--t3)' },
+      { n:'公司那台', h:'10.0.0.31:23090', s:'凭据失效', c:'var(--failed)' },
+    ]:[]),
+  ];
+  return head + `<div class="list">${rows.map(r=>`
+    <button class="row" style="min-height:72px" data-go="list">
+      <div class="body">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:8px;height:8px;border-radius:50%;background:${r.c};flex:0 0 8px"></span>
+          <span style="font-size:15.5px;font-weight:600">${r.n}</span>
+        </div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--t3);margin-top:3px">${r.h}</div>
+      </div>
+      <div style="display:flex;align-items:center;padding-right:var(--l);gap:4px;color:${r.c};font-size:12.5px">
+        ${r.s} ${ico(I.chev,16)}
+      </div>
+    </button>`).join('')}
+    <div style="padding:var(--l)">
+      <button class="btn-ghost" style="width:100%" data-act="conn-add">${ico(I.plus,18)} 添加电脑</button>
+    </div>
+  </div>`;
+}
+
+function renderLogs(){
+  const only = cur.variant==='errorOnly';
+  const rows = [
+    {lv:'INFO', c:'var(--t2)', t:'14:56:06', m:'link  ★ 就绪 #1  clientId=2f26…  home=C:\\Users\\maxu'},
+    {lv:'INFO', c:'var(--t2)', t:'14:56:06', m:'mux   WS 升级成功（101）'},
+    {lv:'WARN', c:'var(--waiting)', t:'14:55:35', m:'link  $events 流结束'},
+    {lv:'INFO', c:'var(--t2)', t:'14:55:31', m:'probe 探测 http://192.168.20.2:23090  凭据=token'},
+    {lv:'ERROR',c:'var(--failed)', t:'14:54:02', m:'attach 上传失败 report.pdf：网关返回 413'},
+    {lv:'INFO', c:'var(--t2)', t:'14:53:58', m:'app   启动 v0.3.0  sdk_gphone64  Android 16'},
+  ].filter(r => !only || r.lv==='ERROR' || r.lv==='WARN');
+
+  return appbar('运行日志','',`<button class="iconbtn" data-go="list" aria-label="返回">${ico(I.back)}</button>`)
+    + `<div class="filters">
+        ${['全部','警告','错误'].map((f,i)=>
+          `<button class="chip" aria-pressed="${only?(i===2):(i===0)}" data-act="f${i}">${f}</button>`).join('')}
+      </div>
+      <div class="list">${rows.map(r=>`
+        <div class="logrow" style="--c:${r.c}">
+          <div class="bar"></div>
+          <div class="lv">${r.lv}</div>
+          <div class="ts">${r.t}</div>
+          <div class="ms">${r.m}</div>
+        </div>`).join('')}</div>`;
+}
+
+function renderApproval(){
+  const known = cur.variant==='known';
+  return `<div class="scrim"></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ap-t">
+    <h2 id="ap-t">需要你确认</h2>
+    <div class="desc">agent 想执行下面这条命令。确认后它才会继续。</div>
+    <div class="kv"><span class="k">工具</span><span class="v">Bash</span></div>
+    ${known ? `
+      <div class="cmd">cd /home/me/qianxun && ./deploy.sh --env staging</div>
+      <div class="kv"><span class="k">callId</span><span class="v">c_9f2a41</span></div>
+      <div class="warn">
+        这条命令会覆盖 staging 上的 3 个服务。你确定就跑这一次的权限。
+      </div>` : `
+      <div class="warn" style="color:var(--failed);background:color-mix(in srgb,var(--failed) 10%,transparent);
+        border-color:color-mix(in srgb,var(--failed) 35%,transparent)">
+        这次调用没有带参数，我没法告诉你它要干什么。<br>
+        下面这个「允许」建议先别按。
+      </div>`}
+    <div class="actions">
+      <button class="btn-ghost" data-act="reject">拒绝</button>
+      <button class="btn-primary" ${known?'':'disabled style="opacity:.45"'}
+        data-act="allow">允许这一次</button>
+    </div>
+    <div style="font-size:11.5px;color:var(--t3);margin-top:var(--m);line-height:1.5">
+      协议只有四个结局，没有「始终允许」。按下去只放行这一次。
+    </div>
+  </div>`;
+}
+
+function renderQuestion(){
+  const free = cur.variant==='freeText';
+  return `<div class="scrim"></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="q-t">
+    <h2 id="q-t">agent 在问你</h2>
+    <div class="desc">它卡住了。答完才能继续跑这一轮。</div>
+    <div style="font-size:15.5px;line-height:1.55;margin-bottom:var(--m)">
+      预发环境有 3 个服务在跑。要一起更新，还是只更 web？
+    </div>
+    ${free ? `
+      <input type="text" placeholder="补充说明（可不填）" aria-label="补充说明"
+        style="width:100%;background:var(--sunken);border:1px solid var(--hairline);
+               border-radius:var(--r-control);padding:var(--m);color:var(--t1);
+               font:400 15.5px var(--sans);min-height:48px;margin-bottom:var(--m)">
+    ` : `
+      ${['三个一起更','只更 web','先别动'].map((o,i)=>`
+        <button class="btn-ghost" style="width:100%;justify-content:flex-start;margin-bottom:6px;
+          ${i===0?'border-color:var(--accent)':''}" data-act="opt${i}">
+          <span style="width:16px;height:16px;border-radius:50%;flex:0 0 16px;
+            border:1.5px solid ${i===0?'var(--accent)':'var(--t3)'}"></span>${o}
+        </button>`).join('')}
+    `}
+    <div class="actions">
+      <button class="btn-ghost" data-act="later">稍后</button>
+      <button class="btn-primary" data-act="reply">发回去</button>
+    </div>
+    <div style="font-size:11.5px;color:var(--t3);margin-top:var(--m);line-height:1.5">
+      这一屏关不掉——它必须有个明确结局，否则 agent 会一直挂着。
+    </div>
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   装配
+   ══════════════════════════════════════════════════════════════ */
+const RENDER = { list:renderList, session:renderSession, conn:renderConn,
+                 logs:renderLogs, approval:renderApproval, question:renderQuestion };
+
+function draw(){
+  const sc = SCREENS.find(s=>s.id===cur.screen);
+  const phone = document.getElementById('phone');
+  phone.style.filter = cur.gray ? 'grayscale(1)' : '';
+  phone.style.fontSize = cur.scale ? '31px' : '15.5px';
+  // 放大时把固定高度的容器交给内容撑开（对应真机的 minHeight 行为）
+  phone.style.height = cur.scale ? '844px' : '844px';
+
+  phone.innerHTML =
+    `<div class="statusbar"><span>14:56</span><span>${ico(I.dns,13)} ${ico(I.chev,13)} 100%</span></div>` +
+    RENDER[cur.screen]();
+
+  document.getElementById('cap').textContent =
+    `${sc.name} · ${VARNAME[cur.variant]}` + (cur.gray?' · 灰度自检':'') + (cur.scale?' · 2.0×':'');
+
+  // 控制台
+  document.getElementById('tabs').innerHTML = SCREENS.map(s=>
+    `<button role="tab" aria-pressed="${s.id===cur.screen}" data-screen="${s.id}">${s.name}</button>`).join('');
+  document.getElementById('screens').innerHTML = SCREENS.map(s=>
+    `<button class="btn" aria-pressed="${s.id===cur.screen}" data-screen="${s.id}">${s.name}</button>`).join('');
+  document.getElementById('variants').innerHTML = sc.variants.map(v=>
+    `<button class="btn" aria-pressed="${v===cur.variant}" data-variant="${v}">${VARNAME[v]}</button>`).join('');
+}
+
+const VARNAME = {
+  ready:'有会话', 'waiting-pin':'等你置顶（强制规则）', noMachines:'首启：一台都没配',
+  needsMachineChoice:'多台机器未选', unreachable:'真的连不上', loading:'加载中',
+  idle:'空闲', running:'运行中', attachments:'带附件（上传中）', steering:'steer 打开',
+  empty:'空会话',
+  list:'有连接', multi:'多台', addForm:'添加表单',
+  all:'全部', errorOnly:'只看警告/错误',
+  known:'参数查得到', unknownArgs:'参数查不到',
+  choice:'单选', freeText:'带补充输入',
+};
+
+/* 事件委托 */
+/* ══════════════════════════════════════════════════════════════
+   状态同步到 URL hash —— 顺手解决两件事：
+   1. 评审时可以把「某个状态」直接发给别人（深链）
+   2. 截图 / 自动化时可以直接打开指定状态，不必先点一遍
+   例：index.html#screen=session&variant=attachments&gray=1
+   ⚠️ 分隔符必须是 `&`：`URLSearchParams` 只认 `&`，用 `,` 会把后面整段
+   吞进 screen 的值，于是 gray / scale 悄悄失效（我踩过一次）。
+   ══════════════════════════════════════════════════════════════ */
+function readHash(){
+  const h = location.hash.replace(/^#/,''); if (!h) return;
+  const q = new URLSearchParams(h);
+  const s = q.get('screen'); if (s && SCREENS.some(x=>x.id===s)) cur.screen = s;
+  const v = q.get('variant');
+  const sc = SCREENS.find(x=>x.id===cur.screen);
+  if (v && sc && sc.variants.includes(v)) cur.variant = v;
+  if (q.get('gray')==='1') cur.gray=true;
+  if (q.get('scale')==='1') cur.scale=true;
+  if (q.get('dots')==='0') cur.dots=false;
+  // ⚠️ 深链进来时**必须把复选框也拨上**。只设 cur 而不管 UI，
+  // 会出现「灰度已经生效但开关显示未勾」—— 自己看了会以为功能坏了。
+  for (const [id, on] of [['v-gray',cur.gray],['v-scale',cur.scale],['v-dots',cur.dots]]) {
+    const el = document.getElementById(id); if (el) el.checked = on;
+  }
+}
+function writeHash(){
+  const q = new URLSearchParams();
+  q.set('screen',cur.screen); q.set('variant',cur.variant);
+  if (cur.gray) q.set('gray','1');
+  if (cur.scale) q.set('scale','1');
+  if (!cur.dots) q.set('dots','0');
+  history.replaceState(null,'','#'+q.toString());
+}
+window.addEventListener('hashchange',()=>{ readHash(); draw(); });
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-screen],[data-variant],[data-go],[data-act]');
+  if (!t) return;
+  if (t.dataset.screen) { cur.screen = t.dataset.screen;
+    const s = SCREENS.find(x=>x.id===cur.screen); cur.variant = s.variants[0]; }
+  else if (t.dataset.variant) cur.variant = t.dataset.variant;
+  else if (t.dataset.go) { cur.screen = t.dataset.go;
+    const s = SCREENS.find(x=>x.id===cur.screen); cur.variant = s.variants[0]; }
+  else if (t.dataset.act) {
+    const a = t.dataset.act;
+    if (a==='retry'){ cur.variant='loading'; draw(); writeHash();
+      setTimeout(()=>{cur.variant='ready';draw();writeHash();},1400); return; }
+    if (a==='add' || a==='conn-add'){ cur.screen='conn'; cur.variant='addForm'; }
+    if (a==='conn-empty'){ cur.screen='conn'; cur.variant='empty'; }
+    if (a==='steer'){ cur.variant = cur.variant==='steering' ? 'running' : 'steering'; }
+    if (a==='f2'){ cur.variant='errorOnly'; } if (a==='f0'||a==='f1'){ cur.variant='all'; }
+    if (a==='menu'){ t.setAttribute('aria-expanded', t.getAttribute('aria-expanded')==='true'?'false':'true'); return; }
+  }
+  draw(); writeHash();
+});
+['dots','scale','gray'].forEach(k =>
+  document.getElementById('v-'+k).addEventListener('change', e => {
+    cur[k]=e.target.checked; draw(); writeHash();
+  }));
+
+readHash();
+draw();
+writeHash();
+</script>
+</body>
+</html>

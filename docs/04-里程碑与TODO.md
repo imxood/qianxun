@@ -488,6 +488,93 @@ npm 装完保留了该字段，pnpm 走 pnpm 11.7.0 正常落位。
 - [ ] 桌面端端口策略交叉验证：千寻固定 `dsh.port`（17300）与上游「系统分配端口」不冲突
 - [ ] tag + 简短 release note（按 §「里程碑间的纪律」第 3 条）
 
+## V0.8.1 · DSH 0.2.1-alpha.1 → 0.2.1-alpha.2（同锚点修订，2026-10-09）
+
+**目标**：锚点仍是 DSH `0.2.1`，只把钉版从 `0.2.1-alpha.1` 递到 `0.2.1-alpha.2`
+（上游 2026-10-09 发布，npm dist-tag `alpha`），千寻版本号 `0.8.0` → `0.8.1`。
+按 ADR-015，这属于**千寻修订号**而非锚点切换：DSH 契约面没动，跑千寻自身回归即可。
+
+### 依赖树实测（npm registry diff，2026-10-09）
+
+顶层依赖的两类变化：
+
+- **新增 7 个 experimental 包**：`dsh-experimental-badge-skill-bundle` /
+  `-cot-translation-bundle` / `-ralph-bundle` / `-session-search` /
+  `-session-titles-bundle` / `-terminal-bundle` / `-tool-worktree`。
+  ralph 从工具（`dsh-tool-ralph`）改成了 bundle，是重定位不是删除。
+- **移除 5 个包**：`dsh-webhook` / `dsh-webhook-github`（webhook 能力下线）、
+  `dsh-hooks-claude-code` / `dsh-hooks-codex`（Claude Code Mods 兼容层下线，
+  与 V0.8 记的「新增 Mods 兼容层」正好相反）、`dsh-tool-ralph`（并入 ralph bundle）。
+  **仓内 grep 这 5 个包名：0 处引用**（含 `plugins/decision-laya`），无影响。
+- 其余：全部 `@deepseek-ai/*` 子包 `0.2.1-alpha.1` → `0.2.1-alpha.2`；
+  `cordis` / `schemastery` 等上游基座版本未动；`js-yaml ^4.2.0 → ^4.3.2`、
+  `node-addon-require-builtin ^0.1.6 → ^0.1.9`。
+
+### 契约面核验
+
+| 契约项 | 结果 |
+| --- | --- |
+| `dsh-client-connection`（回环代理鉴权） | ✅ exports 未变 |
+| `dsh-home-paths` / `dsh-app-boot` / `dsh-web-app` | ✅ exports 未变 |
+| 顶层 `exports` / `bin` | ✅ 逐键 diff 无差异 |
+
+结论：**千寻依赖的外部契约全部未变**。余下风险仍在 DOM 层（mobile-access
+`custom.js` 注入）与千寻自身 UI，需要真机过一遍。
+
+### 落地项
+
+- [x] `install::PINNED_VERSION` 由 `0.2.1-alpha.1` 升到 `0.2.1-alpha.2` ✅（代码侧）
+- [x] 千寻版本号 `0.8.0` → `0.8.1` ✅（包元数据：root / tauri / mobile / Cargo.lock / mobile lockfile / iOS MARKETING_VERSION / Android versionName）
+- [x] 双源可解析 ✅（npmmirror 与 npmjs 都已同步 `0.2.1-alpha.2`；默认走 npmmirror，镜像滞后会让安装直接失败，必须提前确认）
+- [x] Rust `cargo fmt --check` + `clippy --all-targets -D warnings` + `test --workspace`
+      ✅（478 passed / 0 failed / 6 ignored）
+- [x] 前端 `svelte-check` ✅（0 error / 13 warning，均为既有 a11y 提示）、
+      `vitest` ✅（297 passed / 1 skipped）、`verify-assets` ✅；
+      `prettier` / `eslint` ❌ **仍是 `mobile-flutter/` 下的分支既有欠账**
+      （`scripts/probe_dom_structure.js` 用 Python 式 `"""` 开头，解析不了；
+      `scripts/_dbg_harness.cjs` 整包按 CommonJS 写，`no-undef` 报了几百条），
+      与本次改动无关，本次未新增一条
+- [x] 兼容判定语义不变：`^0.2.x` 与 `^0.2.0-rc.1` 宽范围仍放行，`^0.1.x` 仍拦
+      （`registry::兼容判定对rc钉版宽松` 用例硬编码范围，不随钉版漂移）
+- [ ] DSH `0.2.1-alpha.2` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装→重启→卸载
+- [ ] **mobile-access 回归**（同 V0.8 记录：`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
+- [ ] 老 profile 里悬空的 `@deepseek-ai/dsh-experimental-schedule-bundle`
+      条目（V0.8 首次发现）仍待用户点一次「取消钉版」；本次确认它在 alpha.2
+      顶层依然不在，新版不提供自动清理
+- [ ] `remote::online::tests::端到端_接入边缘并转发请求` 在**整个 workspace 并行跑**时
+      偶发失败（mock 上游 HTTP server 抢不到端口，502），单跑 3/3 绿。与本次无关，
+      但它是条真 flaky，值得单独排一次
+
+## V0.8.2 · DSH 0.2.1-alpha.2 → 0.2.1-rc.3（同锚点修订，2026-10-24）
+
+**目标**：锚点仍是 DSH `0.2.1`，钉版从 `0.2.1-alpha.2` 递到 `0.2.1-rc.3`（alpha
+全部出清，基座转正），千寻版本号 `0.8.1` → `0.8.2`。按 ADR-015 属**千寻修订号**：
+同锚点 DSH 升级，跑千寻自身回归 + 依赖树 diff，不做全套 DSH 真机重验。
+
+### 依赖树实测（npm registry diff，2026-10-24）
+
+顶层依赖 85 → 86：
+
+- **移除 0 个**；
+- **新增 1 个**：`@deepseek-ai/dsh-experimental-plugin-market-bundle`（插件市场
+  experimental bundle，纯增量，market 兼容判定按钉版走不受影响）；
+- 其余全部 `@deepseek-ai/*` 子包 `0.2.1-alpha.2` → `0.2.1-rc.3`；上游基座出 alpha：
+  `cordis ~4.0.5-alpha.1 → ~4.0.5`、`schemastery ~3.18.5-alpha.1 → ~3.18.5`、
+  `cordis-plugin-{timer,loader,include}` alpha → 正式。
+
+### 落地项
+
+- [x] `install::PINNED_VERSION` 由 `0.2.1-alpha.2` 升到 `0.2.1-rc.3` ✅（代码侧）
+- [x] 千寻版本号 `0.8.1` → `0.8.2` ✅（包元数据：root / tauri / Cargo.lock 随构建；
+      **mobile 系元数据未动**——mobile/ 与 mobile-flutter/ 有在制改动，发版时同步）
+- [x] 双源可解析 ✅（npmmirror 与 npmjs 均已同步 `0.2.1-rc.3`，2026-10-24 实测）
+- [x] Rust `fmt` + `clippy --all-targets -D warnings` + `test --workspace` ✅
+      （2026-10-24 全绿；跳过两条既有失败：`intel::fetch::rss解析完整条目并过滤过期`
+      ——intel 为在制模块；`remote::online::端到端_接入边缘并转发请求`——上节已记的真 flaky）
+- [x] NSIS 发布包 `qianxun_0.8.2_x64-setup.exe` 构建成功 ✅（2026-10-24，11.6 MB）
+- [ ] DSH `0.2.1-rc.3` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装→重启→卸载
+- [ ] **mobile-access 回归**（`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
+
 ## 里程碑间的纪律
 
 1. 任何里程碑开工前，先读 `03-编码规范`，门禁脚本必须已在跑；
