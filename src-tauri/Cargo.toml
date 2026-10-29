@@ -1,6 +1,6 @@
 [package]
 name = "qianxun"
-version = "0.8.0"
+version = "0.8.2"
 edition = "2021"
 description = "千寻 —— 个人开发者的工作台：管理 DSH、承载工具、连接远程"
 
@@ -72,6 +72,9 @@ node-runtime = { path = "crates/node-runtime" }
 tauri-plugin-clipboard-manager = "2.3.3"
 xcap = "0.9.8"
 tauri-plugin-global-shortcut = "2.3.2"
+# 托盘「开机自启」勾选项：封装注册表 Run 键（HKCU，当前用户）的
+# 读写与回读；只在 Rust 侧用（托盘），无需前端 capability。
+tauri-plugin-autostart = "2"
 base64 = "0.23.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # 远程网关（R1，架构 §4.5）：DSH 回环唯一暴露面——axum 终结 HTTP/WS，
@@ -126,8 +129,11 @@ windows-sys = { version = "0.60", features = [
     "Win32_Graphics_Dwm",
 ] }
 # 窗口域：WebView2 COM 偏好（浏览器加速键开关、首选配色跟随 OS 应用模式）。
-webview2-com = "0.38"
-windows-core = "0.61"
+# 版本必须与 wry 一致：with_webview 回调递出的 COM 对象实现的是 wry 那份
+# webview2-com/windows-core 的 Interface，两份版本并存时 `cast` 找不到方法
+# （E0599 实测踩坑：autostart 插件把 wry 升到 webview2-com 0.39 这一代）。
+webview2-com = "0.39"
+windows-core = "0.62"
 
 # fff-search 增量编译：该 crate 的 LLVM 后端体量极端（收编的 frizbee SIMD
 # 匹配矩阵单包 ≈ 全仓一半编译时间，且按调用树整簇塞进单个 CGU 串行编译），

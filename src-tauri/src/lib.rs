@@ -131,6 +131,12 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_clipboard_manager::init())
+        // 开机自启（托盘「开机自启」勾选项）：写 HKCU Run 键；勾选态
+        // 与切换结果都以 is_enabled 回读注册表为准，不走设置文件。
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let handle = app.handle();
 

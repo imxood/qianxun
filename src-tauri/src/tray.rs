@@ -1,9 +1,10 @@
-//! 托盘：回到窗口、重建界面、截图、DSH 启停、真正退出；tooltip 实时
-//! 反映 DSH 运行状态。左键单击 = 显示窗口，右键 = 菜单。
+//! 托盘：回到窗口、重建界面、截图、DSH 启停、开机自启、真正退出；
+//! tooltip 实时反映 DSH 运行状态。左键单击 = 显示窗口，右键 = 菜单。
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::error::{Error, Result};
 use crate::harness::supervisor::Status;
@@ -14,6 +15,9 @@ static TRAY: std::sync::OnceLock<TrayIcon> = std::sync::OnceLock::new();
 
 /// 「退出 UI」菜单句柄：轻量模式下置灰（UI 已不在，无可退出）。
 static EXIT_UI: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+
+/// 「开机自启」勾选句柄：切换后按注册表回读刷新勾选态。
+static AUTOSTART: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 /// 轻量模式切换 → 菜单可用态。失败静默：菜单态不是关键路径。
 pub fn reflect_light_mode(light: bool) {
@@ -47,6 +51,25 @@ pub fn build(app: &AppHandle) -> Result<()> {
         .map_err(|error| Error::Tray(error.to_string()))?;
     let separator =
         PredefinedMenuItem::separator(app).map_err(|error| Error::Tray(error.to_string()))?;
+    // 「开机自启」勾选项：初始勾选态回读注册表（插件写的 HKCU Run 键），
+    // 读失败按未勾选兜底并落日志——菜单态不是关键路径（同 EXIT_UI 风格）。
+    let autostart_enabled = app
+        .autolaunch()
+        .is_enabled()
+        .inspect_err(|cause| crate::logging::log("warn", &format!("读取开机自启状态失败：{cause}")))
+        .unwrap_or(false);
+    let autostart = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "开机自启",
+        true,
+        autostart_enabled,
+        None::<&str>,
+    )
+    .map_err(|error| Error::Tray(error.to_string()))?;
+    let _ = AUTOSTART.set(autostart.clone());
+    let separator2 =
+        PredefinedMenuItem::separator(app).map_err(|error| Error::Tray(error.to_string()))?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
         .map_err(|error| Error::Tray(error.to_string()))?;
     let menu = Menu::with_items(
@@ -59,7 +82,9 @@ pub fn build(app: &AppHandle) -> Result<()> {
             &separator,
             &start,
             &stop,
-            &separator,
+            &separator2,
+            &autostart,
+            &separator2,
             &quit,
         ],
     )
@@ -126,6 +151,27 @@ pub fn build(app: &AppHandle) -> Result<()> {
                 tauri::async_runtime::spawn(async move {
                     supervisor.stop().await;
                 });
+            }
+            "autostart" => {
+                // 切换后以 is_enabled 回读注册表刷新勾选态：成败都回读，
+                // UI 与注册表永不各说各话；失败只落日志不改其他状态。
+                let autolaunch = app.autolaunch();
+                let outcome = if autolaunch.is_enabled().unwrap_or(false) {
+                    autolaunch.disable()
+                } else {
+                    autolaunch.enable()
+                };
+                if let Err(cause) = outcome {
+                    crate::logging::log("warn", &format!("切换开机自启失败：{cause}"));
+                }
+                let enabled = autolaunch.is_enabled().unwrap_or(false);
+                if let Some(item) = AUTOSTART.get() {
+                    let _ = item.set_checked(enabled);
+                }
+                crate::logging::log(
+                    "info",
+                    &format!("开机自启已{}", if enabled { "开启" } else { "关闭" }),
+                );
             }
             "quit" => {
                 // 窗口可能从未经过 CloseRequested（例如一直隐藏），
