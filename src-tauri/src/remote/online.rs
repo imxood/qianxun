@@ -642,6 +642,7 @@ mod tests {
             hub,
             public_host: addr.to_string(),
             public_proto: "http",
+            limiter: std::sync::Arc::new(qx_server::web::AttemptLimiter::default()),
         });
         tokio::spawn(web::serve(listener, state));
 
