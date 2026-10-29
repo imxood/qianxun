@@ -352,8 +352,27 @@ pub fn start_session(app: &AppHandle) {
         // 上一轮覆盖窗还开着：视为误触，忽略。
         return;
     }
-    if let Err(failure) = open_overlays_impl(app) {
-        logging::log("warn", &format!("截屏会话启动失败：{failure}"));
+    // 逐屏捕获 + 建覆盖窗全是重活（GDI 截屏、PNG 编码落盘、WebView2
+    // 建窗，高分辨率多屏下秒级），而全局热键回调跑在主线程（WM_HOTKEY
+    // 由事件循环投递）、托盘菜单与前端 sync 命令同样如此——同步做就是
+    // 「Ctrl+Shift+A 窗口卡死」的根因：整个事件循环被堵住，所有窗口
+    // 一起无响应。故这里只留同步防重入，重活整段丢后台线程；建窗经
+    // 运行时代理回主线程（同 window::rebuild_main 的跨线程先例）。
+    let handle = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("shots-session".into())
+        .spawn(move || {
+            if let Err(failure) = open_overlays_impl(&handle) {
+                crate::logging::log("warn", &format!("截屏会话启动失败：{failure}"));
+                handle
+                    .state::<ShotsState>()
+                    .overlay_active
+                    .store(false, Ordering::Release);
+            }
+        });
+    if let Err(cause) = spawned {
+        // 线程都起不来的极端路径：解锁会话，别让热键从此哑火。
+        logging::log("warn", &format!("截屏会话派发失败：{cause}"));
         state.overlay_active.store(false, Ordering::Release);
     }
 }
