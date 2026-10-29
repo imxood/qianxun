@@ -103,7 +103,7 @@
   let moliStatus = $state<MoliStatus | null>(null);
 
   let layaForm = $state<LayaSettings>({ serverExe: '', modelDir: '', port: 10230, threads: 8 });
-  let qwenForm = $state<QwenSettings>({ serverExe: '', args: '', port: 17230 });
+  let qwenForm = $state<QwenSettings>({ strataHome: '', config: '', port: 23661 });
   let moliBinaryPath = $state('');
 
   let layaBusy = $state<'' | 'starting' | 'stopping' | 'saving'>('');
@@ -282,7 +282,7 @@
   );
   const qwenLine = $derived(
     qwenBusy === 'starting'
-      ? '启动中…（模型载入可能较慢）'
+      ? '启动中…（内存载入 1-3 分钟，期间卡顿属正常）'
       : qwenStatus?.ready
         ? `就绪 · :${qwenStatus.port}`
         : qwenStatus?.running
@@ -550,12 +550,12 @@
         {/if}
       </div>
 
-      <!-- QWen3.5 -->
+      <!-- Qwen3.8-Flash-Next（Strata 本地引擎） -->
       <div class="qx-card p-3.5">
         <div class="flex h-7 items-center justify-between">
           <span class="flex items-center gap-2 text-sm font-medium">
             <span class="size-1.5 rounded-full {dot(qwenTone)}" aria-hidden="true"></span>
-            QWen3.5
+            Qwen3.8-Flash-Next
           </span>
           <span class="flex items-center gap-1.5">
             {#if qwenStatus?.running}
@@ -569,7 +569,7 @@
             {:else}
               <button
                 class="qx-btn qx-btn-sm qx-btn-primary"
-                disabled={qwenBusy !== '' || !qwenForm.serverExe}
+                disabled={qwenBusy !== '' || !qwenForm.strataHome}
                 data-testid="qwen-start"
                 onclick={() => void qwenAction('qwen_start')}
               >
@@ -594,19 +594,19 @@
         {#if qwenConfigOpen}
           <div class="mt-2 space-y-1.5 border-t border-line/60 pt-2.5">
             <label class="block">
-              <span class="text-xs text-muted">可执行文件</span>
+              <span class="text-xs text-muted">Strata 程序目录（含 .venv 与 serve）</span>
               <input
                 class="qx-input mt-0.5 w-full font-mono text-xs"
-                bind:value={qwenForm.serverExe}
-                placeholder="如 D:\AI\llama\llama-b…\llama-server.exe"
+                bind:value={qwenForm.strataHome}
+                placeholder="如 E:\git\ai\Strata"
               />
             </label>
             <label class="block">
-              <span class="text-xs text-muted">启动参数（缺 --port 时自动追加配置端口）</span>
+              <span class="text-xs text-muted">引擎配置（相对程序目录或绝对路径）</span>
               <input
                 class="qx-input mt-0.5 w-full font-mono text-xs"
-                bind:value={qwenForm.args}
-                placeholder="-m Qwen3.5-9B-Q6_K.gguf -ngl 99 -c 65536"
+                bind:value={qwenForm.config}
+                placeholder="D:\AI\Strata\strata-iq2_xs.json"
               />
             </label>
             <div class="flex gap-1.5">

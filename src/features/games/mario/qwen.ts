@@ -1,5 +1,6 @@
 /**
- * 本地 Qwen 客户端(docs/12 双脑"慢思"侧,仅 :17230 本地服务)。
+ * 本地 Qwen 客户端(docs/12 双脑"慢思"侧,仅 :23661 本地服务——Strata 引擎的
+ * qwen3.8-flash-next,OpenAI 兼容;旧 llama-server :17230 方案已移除)。
  *
  * v3(docs/15 §6):输入 = 触发原因 + 全局 digest + **死亡级全量轨迹与 Laya
  * 收发明细**;输出 = ①playbook ②沙箱内 policy_patch(数值+消息设计,单维度)
@@ -14,7 +15,7 @@ import { sanitizePolicy, type PolicyProfile } from './policy';
 
 export const PLAYBOOK_MAX_CHARS = 1600;
 export const INSIGHT_MAX_CHARS = 200;
-export const QWEN_ENDPOINT = 'http://127.0.0.1:17230';
+export const QWEN_ENDPOINT = 'http://127.0.0.1:23661';
 /** 单次分析超时(docs/15 R2):本地服务挂起不得占死队列。 */
 export const QWEN_TIMEOUT_MS = 60_000;
 /** 载荷字符预算(≈6k token,按 chars/4 折算,不用分词器 → 同输入必同输出)。 */
