@@ -12,6 +12,7 @@
   import DshPage from './features/dsh/DshPage.svelte';
   import SearchPage from './features/search/SearchPage.svelte';
   import WebPage from './features/web/WebPage.svelte';
+  import IntelPage from './features/intel/IntelPage.svelte';
   import RemotePage from './features/remote/RemotePage.svelte';
   import NotesPage from './features/notes/NotesPage.svelte';
   import GamesPage from './features/games/GamesPage.svelte';
@@ -137,6 +138,11 @@
       {#if nav.visited.web}
         <div class="absolute inset-0 overflow-y-auto p-6 {show('web')}">
           <WebPage />
+        </div>
+      {/if}
+      {#if nav.visited.intel}
+        <div class="absolute inset-0 overflow-hidden {show('intel')}">
+          <IntelPage />
         </div>
       {/if}
       {#if nav.visited.games}
