@@ -4,6 +4,9 @@
 //!
 //! 几何记忆采用「关闭/退出时一次性快照」而非每次移动都写盘：
 //! 设置文件不值得为窗口拖动承受成倍的写入（架构 §4.1 的原子写代价）。
+//! 快照与还原两头都做「屏幕相交」校验：Windows 最小化会把窗口停放到
+//! (-32000,-32000)，拔显示器等拓扑变化也会让记忆坐标失效——垃圾值
+//! 不许入账，历史坏数据在下次启动/重建时就地自修复（居中兜底）。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -106,28 +109,117 @@ pub fn restore(app: &AppHandle, geometry: &Geometry) {
     let Some(window) = front(app) else {
         return;
     };
-    // 顺序有意为之：先尺寸后位置；最大化必须最后——否则
-    // set_position 会把窗口从最大化状态拉回来。
-    let _ = window.set_size(PhysicalSize::new(geometry.width, geometry.height));
+    // 启动/重建即自修复：记忆几何可能来自旧版本写下的停放点（-32000）
+    // 或已失效的显示拓扑（拔显示器、改主屏）。按当前屏幕枚举校验，矩形
+    // 与所有屏幕都不相交就放弃记忆位置、改居中——宁可挪位置，不可不亮窗。
+    // 枚举失败按有效处理（fail-open），不能让校验本身弄丢窗口。
+    let screens = screen_rects(&window);
+    let on_screen = screens.is_empty()
+        || intersects_any_screen(
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            &screens,
+        );
+    // 顺序有意为之：先尺寸后位置，最大化必须最后——位置在最大化之前
+    // 落定，set_position 拉不回最大化状态，顺带把「取消最大化」时的
+    // 还原锚点一并修成合法值。
+    if geometry.width > 0 && geometry.height > 0 {
+        let _ = window.set_size(PhysicalSize::new(geometry.width, geometry.height));
+    }
+    if on_screen {
+        let _ = window.set_position(PhysicalPosition::new(geometry.x, geometry.y));
+    } else {
+        logging::log(
+            "warn",
+            &format!(
+                "记忆窗口位置 ({},{}) 不在任何屏幕内，已改为居中恢复",
+                geometry.x, geometry.y
+            ),
+        );
+        let _ = window.center();
+    }
     if geometry.maximized {
         let _ = window.maximize();
-    } else {
-        let _ = window.set_position(PhysicalPosition::new(geometry.x, geometry.y));
     }
 }
 
 /// 当前几何快照。最大化时 outer_position 仍是还原锚点，直接记录即可。
+/// 两类垃圾值在源头拦下、本次不入账（设置里保住上一次的正常几何）：
+/// 1. 最小化中——Windows 把最小化窗口停放到 (-32000,-32000)；
+/// 2. 矩形与所有屏幕都不相交——最小化后隐藏（关到托盘）的窗口
+///    IsIconic 已为假、停放点会漏过第 1 条；以及拔显示器后退出等。
 pub fn capture(app: &AppHandle) -> Option<Geometry> {
     let window = front(app)?;
+    if window.is_minimized().unwrap_or(false) {
+        return None;
+    }
     let maximized = window.is_maximized().ok()?;
     let position = window.outer_position().ok()?;
     let size = window.outer_size().ok()?;
-    Some(Geometry {
+    let geometry = Geometry {
         x: position.x,
         y: position.y,
         width: size.width,
         height: size.height,
         maximized,
+    };
+    // 屏幕枚举失败按放行处理：校验不能反把快照弄丢。
+    let screens = screen_rects(&window);
+    if !screens.is_empty()
+        && !intersects_any_screen(
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            &screens,
+        )
+    {
+        logging::log(
+            "warn",
+            "窗口位置不在任何屏幕内，跳过几何快照（保留上次正常值）",
+        );
+        return None;
+    }
+    Some(geometry)
+}
+
+/// 当前全部屏幕的物理矩形 `(x, y, width, height)`，供相交校验使用。
+fn screen_rects(window: &WebviewWindow) -> Vec<(i32, i32, u32, u32)> {
+    window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| {
+            (
+                monitor.position().x,
+                monitor.position().y,
+                monitor.size().width,
+                monitor.size().height,
+            )
+        })
+        .collect()
+}
+
+/// 窗口矩形是否与任一屏幕相交（至少露出 1px，压屏边窗口不算失联）。
+/// 坐标加法走 i64：i32 边界附近的野值不会溢出绕回而误判成相交。
+fn intersects_any_screen(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    screens: &[(i32, i32, u32, u32)],
+) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let (x, y) = (i64::from(x), i64::from(y));
+    let (width, height) = (i64::from(width), i64::from(height));
+    screens.iter().any(|&(sx, sy, sw, sh)| {
+        let right = i64::from(sx) + i64::from(sw);
+        let bottom = i64::from(sy) + i64::from(sh);
+        x < right && x + width > i64::from(sx) && y < bottom && y + height > i64::from(sy)
     })
 }
 
@@ -583,5 +675,49 @@ pub fn on_theme_changed(app: &AppHandle) {
 pub fn on_standalone_destroyed(app: &AppHandle, label: &str) {
     if let Some(view) = standalone_view_of_label(label) {
         let _ = app.emit("window://closed", StandaloneClosedEvent { label, view });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::intersects_any_screen;
+
+    /// 单屏：1920×1080 @ (0,0)。
+    const SINGLE: [(i32, i32, u32, u32); 1] = [(0, 0, 1920, 1080)];
+    /// 双屏：主屏 @ (0,0) + 左侧副屏 @ (-1920,0)。
+    const DUAL: [(i32, i32, u32, u32); 2] = [(0, 0, 1920, 1080), (-1920, 0, 1920, 1080)];
+
+    #[test]
+    fn windows最小化停放点_负三万二_判为失联() {
+        assert!(!intersects_any_screen(-32000, -32000, 455, 99, &SINGLE));
+    }
+
+    #[test]
+    fn 正常屏幕内坐标_判为可见() {
+        assert!(intersects_any_screen(800, 800, 455, 99, &SINGLE));
+    }
+
+    #[test]
+    fn 只露一像素也算可见_完全出界才算失联() {
+        assert!(intersects_any_screen(-454, 100, 455, 99, &SINGLE));
+        assert!(!intersects_any_screen(-455, 100, 455, 99, &SINGLE));
+    }
+
+    #[test]
+    fn 拔掉副屏后_原副屏坐标判为失联() {
+        assert!(intersects_any_screen(-1800, 100, 455, 99, &DUAL));
+        assert!(!intersects_any_screen(-1800, 100, 455, 99, &SINGLE));
+    }
+
+    #[test]
+    fn 零尺寸判为失联() {
+        assert!(!intersects_any_screen(800, 800, 0, 99, &SINGLE));
+        assert!(!intersects_any_screen(800, 800, 455, 0, &SINGLE));
+    }
+
+    #[test]
+    fn 野值坐标_不溢出绕回误判() {
+        assert!(!intersects_any_screen(i32::MAX, i32::MAX, 455, 99, &SINGLE));
+        assert!(!intersects_any_screen(i32::MIN, i32::MIN, 455, 99, &SINGLE));
     }
 }
