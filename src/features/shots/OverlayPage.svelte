@@ -91,10 +91,19 @@
   const WIDTHS = [2, 4, 8];
 
   // ---- 工具栏定位（CSS 像素，HTML 层）----
-  const toolbarBox = $derived.by(() => {
+  // toolbarBase = 贴着选区的默认位置；toolbarBox = 默认位置 + 用户拖动偏移
+  // （钳制在屏内）。新选区开始时偏移归位（重新贴到选区旁）。
+  let toolbarW = $state(0);
+  let toolbarOffset = $state({ x: 0, y: 0 });
+  let colorOpen = $state(false);
+  let widthOpen = $state(false);
+  let toolbarDrag: { sx: number; sy: number; ox: number; oy: number } | null = null;
+  const TOOLBAR_FALLBACK_W = 300;
+
+  const toolbarBase = $derived.by(() => {
     if (phase !== 'selected') return null;
     const phys = norm(selection);
-    const w = 430;
+    const w = toolbarW || TOOLBAR_FALLBACK_W;
     const h = 44;
     let x = phys.x1 / dpr;
     let y = phys.y2 / dpr + 12;
@@ -102,12 +111,28 @@
     const cssH = canvas?.clientHeight ?? 0;
     if (y + h > cssH - 8) y = phys.y1 / dpr - h - 12;
     if (y < 8) y = 8;
-    x = Math.min(Math.max(x, 8), cssW - w - 8);
+    x = Math.min(Math.max(x, 8), Math.max(8, cssW - w - 8));
     return { x, y, w, h };
   });
 
+  const toolbarBox = $derived.by(() => {
+    const base = toolbarBase;
+    if (!base) return null;
+    const cssW = canvas?.clientWidth ?? 0;
+    const cssH = canvas?.clientHeight ?? 0;
+    const x = Math.min(Math.max(base.x + toolbarOffset.x, 8), Math.max(8, cssW - base.w - 8));
+    const y = Math.min(Math.max(base.y + toolbarOffset.y, 8), Math.max(8, cssH - base.h - 8));
+    return { x, y };
+  });
+
+  /** 收起颜色 / 线宽下拉（点外部、Esc、回车产出时）。 */
+  function closeMenus(): void {
+    colorOpen = false;
+    widthOpen = false;
+  }
+
   const sizeLabel = $derived.by(() => {
-    if (phase !== 'selected') return '';
+    if (phase === 'idle') return '';
     const phys = norm(selection);
     return `${Math.round(Math.abs(phys.x2 - phys.x1))} × ${Math.round(Math.abs(phys.y2 - phys.y1))}`;
   });
@@ -156,6 +181,11 @@
       if (event.key === 'Escape') {
         if (textDraft) {
           textDraft = null;
+          return;
+        }
+        // 下拉开着先收起，不当作退出意图。
+        if (colorOpen || widthOpen) {
+          closeMenus();
           return;
         }
         // 先取消标注选中，再退出截屏。
@@ -396,6 +426,7 @@
       phase = 'selecting';
       selection = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
       drag = { kind: 'new', origin: { ...selection }, start: point };
+      toolbarOffset = { x: 0, y: 0 };
       render();
       return;
     }
@@ -429,6 +460,7 @@
       selected = null;
       hoverRect = null;
       pressHover = null;
+      toolbarOffset = { x: 0, y: 0 };
       return;
     }
 
@@ -535,8 +567,42 @@
     }
   }
 
+  /** 工具栏拖动：仅把手/容器空白区按下生效（按钮与下拉上的按下照常工作）。 */
+  function onToolbarMouseDown(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    const onGrip = target.closest('[data-toolbar-grip]') !== null;
+    if (!onGrip && target !== event.currentTarget) return;
+    event.preventDefault();
+    closeMenus();
+    toolbarDrag = {
+      sx: event.clientX,
+      sy: event.clientY,
+      ox: toolbarOffset.x,
+      oy: toolbarOffset.y,
+    };
+  }
+
   function onMouseMove(event: MouseEvent): void {
     if (!canvas) return;
+    // 工具栏拖动：跟随指针，位置钳制在屏内（offset 记的是相对默认位的净偏移）。
+    if (toolbarDrag) {
+      const base = toolbarBase;
+      if (base) {
+        const cssW = canvas.clientWidth;
+        const cssH = canvas.clientHeight;
+        const x = Math.min(
+          Math.max(base.x + toolbarDrag.ox + (event.clientX - toolbarDrag.sx), 8),
+          Math.max(8, cssW - base.w - 8),
+        );
+        const y = Math.min(
+          Math.max(base.y + toolbarDrag.oy + (event.clientY - toolbarDrag.sy), 8),
+          Math.max(8, cssH - base.h - 8),
+        );
+        toolbarOffset = { x: x - base.x, y: y - base.y };
+      }
+      return;
+    }
     const point = toPhysical(event);
     if (!drag && !liveShape) {
       updateCursor(point);
@@ -774,6 +840,7 @@
   }
 
   function onMouseUp(): void {
+    toolbarDrag = null;
     if (drag && (drag.kind === 'shape-move' || drag.kind === 'shape-resize')) {
       // 标注编辑是一次新改动，使重做历史失效。
       redoStack = [];
@@ -1000,7 +1067,12 @@
   }
 </script>
 
-<svelte:window onmousemove={onMouseMove} onmouseup={onMouseUp} ondblclick={onDoubleClick} />
+<svelte:window
+  onmousedown={() => closeMenus()}
+  onmousemove={onMouseMove}
+  onmouseup={onMouseUp}
+  ondblclick={onDoubleClick}
+/>
 
 <div class="fixed inset-0 select-none overflow-hidden bg-black">
   <canvas
@@ -1011,13 +1083,22 @@
     onmousedown={onMouseDown}
   ></canvas>
 
-  {#if phase === 'selected' && !textDraft}
-    <!-- 尺寸提示：选区上方居中 -->
+  {#if phase !== 'idle' && !textDraft}
+    {@const sel = norm(selection)}
+    {@const selW = (sel.x2 - sel.x1) / dpr}
+    {@const selH = (sel.y2 - sel.y1) / dpr}
+    {@const inside = selW >= 90 && selH >= 30}
+    <!-- 尺寸提示：默认放选区内左上角（全屏截图也可见）；选区太小装不下时
+         回退到选区下方（贴底边时改上方）。拖选过程中同样跟随。 -->
     <div
       class="pointer-events-none absolute rounded bg-black/70 px-2 py-0.5 text-xs text-white"
-      style="left: {(norm(selection).x1 + norm(selection).x2) / 2 / dpr}px;
-        top: {norm(selection).y1 / dpr - 26}px;
-        transform: translateX(-50%);"
+      style="left: {inside ? sel.x1 / dpr + 6 : (sel.x1 + sel.x2) / 2 / dpr}px;
+        top: {inside
+        ? sel.y1 / dpr + 6
+        : sel.y2 / dpr + 6 + 20 < (canvas?.clientHeight ?? 0)
+          ? sel.y2 / dpr + 6
+          : sel.y1 / dpr - 26}px;
+        {inside ? '' : 'transform: translateX(-50%);'}"
     >
       {sizeLabel}
     </div>
@@ -1043,9 +1124,30 @@
 
   {#if toolbarBox}
     <div
-      class="absolute z-10 flex items-center gap-1 rounded-lg border border-white/15 bg-neutral-900/95 px-2 py-1.5 shadow-xl"
+      bind:clientWidth={toolbarW}
+      role="toolbar"
+      aria-label="标注工具"
+      tabindex="-1"
+      class="absolute z-10 flex items-center gap-1 rounded-lg border border-white/15 bg-neutral-900/95 px-1.5 py-1.5 shadow-xl"
       style="left: {toolbarBox.x}px; top: {toolbarBox.y}px;"
+      onmousedown={onToolbarMouseDown}
     >
+      <!-- 拖动把手：把手上（或容器空白处）按下即可拖走工具栏 -->
+      <span
+        data-toolbar-grip
+        class="mr-0.5 flex size-6 cursor-grab items-center justify-center rounded text-neutral-500 transition-colors hover:text-neutral-300 active:cursor-grabbing"
+        title="拖动工具栏"
+      >
+        <svg viewBox="0 0 24 24" class="size-3.5" fill="currentColor">
+          <circle cx="9" cy="6" r="1.7"></circle>
+          <circle cx="15" cy="6" r="1.7"></circle>
+          <circle cx="9" cy="12" r="1.7"></circle>
+          <circle cx="15" cy="12" r="1.7"></circle>
+          <circle cx="9" cy="18" r="1.7"></circle>
+          <circle cx="15" cy="18" r="1.7"></circle>
+        </svg>
+      </span>
+
       {#each TOOLS as item (item.id)}
         <button
           class="flex size-8 items-center justify-center rounded transition-colors {tool === item.id
@@ -1076,32 +1178,133 @@
 
       <span class="mx-1 h-5 w-px bg-white/15"></span>
 
-      {#each COLORS as swatch (swatch)}
+      <!-- 颜色：按钮只显示当前选中，点开下拉挑选（紧凑） -->
+      <div class="relative">
         <button
-          class="size-4 rounded-full border {color === swatch
-            ? 'border-white ring-2 ring-white/40'
-            : 'border-white/30'}"
-          style="background: {swatch};"
-          title={swatch}
-          onclick={() => (color = swatch)}
-        ></button>
-      {/each}
-
-      <span class="mx-1 h-5 w-px bg-white/15"></span>
-
-      {#each WIDTHS as size (size)}
-        <button
-          class="flex h-8 w-7 items-center justify-center rounded transition-colors {strokeWidth ===
-          size
-            ? 'bg-sky-500'
-            : 'hover:bg-white/10'}"
-          title="线宽 {size}"
-          onclick={() => (strokeWidth = size * dpr)}
+          class="flex h-8 items-center gap-0.5 rounded px-1.5 transition-colors hover:bg-white/10"
+          title="颜色 {color}"
+          aria-label="选择颜色，当前 {color}"
+          onmousedown={(event) => {
+            event.stopPropagation();
+            widthOpen = false;
+            colorOpen = !colorOpen;
+          }}
         >
-          <span class="rounded-full bg-neutral-200" style="width: {size * 2}px; height: {size}px;"
+          <span class="size-4 rounded-full border border-white/60" style="background: {color};"
           ></span>
+          <svg
+            viewBox="0 0 24 24"
+            class="size-3 text-neutral-400"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="m6 9 6 6 6-6"></path>
+          </svg>
         </button>
-      {/each}
+        {#if colorOpen}
+          <div
+            role="menu"
+            aria-label="颜色"
+            tabindex="-1"
+            class="absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-lg border border-white/15 bg-neutral-900/95 px-2.5 py-2 shadow-xl {toolbarBox.y >
+            120
+              ? 'bottom-full mb-2'
+              : 'top-full mt-2'}"
+            onmousedown={(event) => event.stopPropagation()}
+          >
+            {#each COLORS as swatch (swatch)}
+              <button
+                role="menuitemradio"
+                aria-checked={color === swatch}
+                class="size-5 rounded-full border {color === swatch
+                  ? 'border-white ring-2 ring-white/40'
+                  : 'border-white/30'}"
+                style="background: {swatch};"
+                title={swatch}
+                aria-label="颜色 {swatch}"
+                onmousedown={(event) => {
+                  event.stopPropagation();
+                  color = swatch;
+                  colorOpen = false;
+                }}
+              ></button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <!-- 线宽：按钮只显示当前粗细，点开下拉挑选（紧凑） -->
+      <div class="relative">
+        <button
+          class="flex h-8 items-center gap-0.5 rounded px-1.5 transition-colors hover:bg-white/10"
+          title="线宽 {strokeWidth / dpr}"
+          aria-label="选择线宽，当前 {strokeWidth / dpr}"
+          onmousedown={(event) => {
+            event.stopPropagation();
+            colorOpen = false;
+            widthOpen = !widthOpen;
+          }}
+        >
+          <span class="flex h-4 w-5 items-center justify-center">
+            <span
+              class="rounded-full bg-neutral-200"
+              style="width: {(strokeWidth / dpr) * 2}px; height: {strokeWidth / dpr}px;"
+            ></span>
+          </span>
+          <svg
+            viewBox="0 0 24 24"
+            class="size-3 text-neutral-400"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="m6 9 6 6 6-6"></path>
+          </svg>
+        </button>
+        {#if widthOpen}
+          <div
+            role="menu"
+            aria-label="线宽"
+            tabindex="-1"
+            class="absolute left-1/2 z-20 flex -translate-x-1/2 flex-col gap-0.5 rounded-lg border border-white/15 bg-neutral-900/95 p-1.5 shadow-xl {toolbarBox.y >
+            120
+              ? 'bottom-full mb-2'
+              : 'top-full mt-2'}"
+            onmousedown={(event) => event.stopPropagation()}
+          >
+            {#each WIDTHS as size (size)}
+              <button
+                role="menuitemradio"
+                aria-checked={strokeWidth === size * dpr}
+                class="flex h-8 w-20 items-center justify-center gap-2 rounded transition-colors {strokeWidth ===
+                size * dpr
+                  ? 'bg-sky-500'
+                  : 'hover:bg-white/10'}"
+                title="线宽 {size}"
+                aria-label="线宽 {size}"
+                onmousedown={(event) => {
+                  event.stopPropagation();
+                  strokeWidth = size * dpr;
+                  widthOpen = false;
+                }}
+              >
+                <span
+                  class="rounded-full bg-neutral-200"
+                  style="width: {size * 2.5}px; height: {size}px;"
+                ></span>
+                <span class="w-6 text-left text-xs text-neutral-300"
+                  >{size === 2 ? '细' : size === 4 ? '中' : '粗'}</span
+                >
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
 
       <span class="mx-1 h-5 w-px bg-white/15"></span>
 
