@@ -91,6 +91,37 @@ JS = r"""
     }
   }
 
+  // 1b. 🔴 **内容把消息撑宽**（第 9 轮抓到的，之前完全隐形）
+  //     实测：一条含代码块的消息把 flowItem 撑到 **936px**（视口 359），
+  //     代码块上的 Copy / Wrap lines 落在 x=1754 / 1802 —— **永远点不到**。
+  //
+  //     为什么上面的 1 抓不到：那条路径先 `if (ancestorHandles(el)) continue`，
+  //     而转录滚动容器 `wSkVaW_scrollBody` 是 `overflow-x: auto`，
+  //     于是整个撑宽的元素**被当成「可横向滚动的正常内容」跳过了**。
+  //     可它横向根本不该滚 —— 该滚的是**代码块自己**（`pre`，A4 已让它 scroll），
+  //     滚整条消息是副作用。
+  //
+  //     判据：比视口宽 1.2 倍以上，**且不在真正该横向滚的元素里**
+  //     （pre / table / 代码块内容 / 宽图），**且祖先链上没有横向滚动容器**
+  //     —— 三条都满足才是缺陷。
+  const SCROLLABLE = 'pre,table,[data-code-block-content],[data-json-root-row]';
+  let blowout = 0;
+  for (const { el, r } of vis) {
+    if (r.width < VW * 1.2) continue;
+    if (el.closest(SCROLLABLE)) continue;          // 这些横向滚是对的
+    let scrolled = false;
+    for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+      const c = getComputedStyle(n).overflowX;
+      if (c === 'auto' || c === 'scroll') { scrolled = true; break; }
+      if (c === 'hidden' || c === 'clip') break;  // 被裁掉，用户看不见
+    }
+    if (scrolled) continue;                        // 有意横向滚，跳过
+    blowout++;
+    if (blowout <= 4) add('content-blowout', 'high',
+        `内容把版面撑到 ${Math.round(r.width)}px（视口 ${VW}）`, el);
+  }
+  out.info.blowout = blowout;
+
   // 2. 触控目标 < 44dp（可点的：button / [role=button] / a / treeitem）
   //    ⚠️ **必须量「含 padding 的热区」，不能直接用 rect**。
   //    实测踩过两轮：
@@ -211,6 +242,11 @@ def report(d: dict) -> None:
     i = d["info"]
     print(f"可见节点 {i.get('visibleNodes')}  触控过小 {i.get('smallTapTargets')}  "
           f"截断 {i.get('truncated')}  小字号 {i.get('tinyFont')}")
+    # 撑宽单独列出来：它是 high 级，而且**症状极不明显**
+    #（页面看着正常，只是代码块上的按钮点不到），
+    # 不显式打出来就只会被当成 0。
+    print(f"版面撑宽 {i.get('blowout', 0)}"
+          + ("  ✓" if not i.get("blowout") else "  🔴 内容撑破了视口"))
     print(f"顶栏 {i.get('headerH')}px（{i.get('headerPct')}% 屏高）  "
           f"栅格 {i.get('frameCols')}  折叠 {i.get('collapsed')}")
     print(f"侧栏 {i.get('sidebar')}  ☰ {i.get('menuBtn')}  "

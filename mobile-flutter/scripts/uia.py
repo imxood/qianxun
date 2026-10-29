@@ -36,6 +36,33 @@ CDP = ROOT / "scripts" / "cdp_webview.py"
 PKG = "com.qianxun.qianxun_mobile"
 SERIAL = "AEQC8P55MFCYBUFA"
 
+# ── 真机护栏 ────────────────────────────────────────────────────────
+# ⚠️ 用户要求：**本阶段不使用真机**（他在手机上做特殊的事）。
+#    本脚本的默认设备就是真机，是整套工具里最容易误触的一个 ——
+#    光「注意一下」不够，所以护栏写在**脚本入口**，
+#    显式传 `--allow-phone` 才放行。
+#
+# 用法变化：
+#   python scripts/uia.py shot .tmp/x.png --serial emulator-5554
+#   python scripts/uia.py shot .tmp/x.png --serial AEQC… --allow-phone
+import os
+
+EMU = "emulator-5554"
+ALLOW_PHONE = "--allow-phone" in sys.argv
+if not ALLOW_PHONE and ("--serial" not in sys.argv
+                        or sys.argv[sys.argv.index("--serial") + 1] != EMU):
+    for i, a in enumerate(sys.argv):
+        if a == "--serial" and i + 1 < len(sys.argv) \
+                and sys.argv[i + 1] == SERIAL:
+            raise SystemExit(
+                "⛔ 拒绝操作真机 " + SERIAL + "\n"
+                "   用户要求本阶段只使用模拟器（" + EMU + "）。\n"
+                "   加 --allow-phone 可临时放行。")
+    # 没有 --serial 时也别默默连真机：默认改成模拟器
+    if "--serial" not in sys.argv:
+        SERIAL = EMU
+        os.environ.setdefault("QX_SERIAL", EMU)
+
 
 def d() -> u2.Device:
     return u2.connect(SERIAL)

@@ -102,6 +102,38 @@
   }
 }
 
+/* ── A24 消息节点操作按钮补到 44×44（**兜底，真正生效的是 custom.js**）──
+ *
+ * 上一轮我判过「32×40 保持不变，间距只有 40px，补到 44 会重叠」，
+ * 并把这段注释原样写进了 custom.js。**那个结论是错的**：
+ * 我拿「行内间距」当成了「可用宽度」。
+ *
+ *   实测（359dp 视口）：
+ *     行 y=520   5 个按钮 32×40，间距 8，x 26→226 —— **行宽只有 200**
+ *                 → 视口右边空着 133px，补到 44 只占 252，装得下
+ *     行 y=-2312 2 个按钮，右对齐在 234→302 → 补到 44 是 222→314，也装得下
+ *
+ * 「32 会不会重叠」这件事**本来量一下就知道**，不该推断。
+ *
+ * ⚠️ 关键：为什么这一段改了却看不到效果
+ *   这些按钮的 `min-width`/`min-height` 本身就在**行内 style 上带 !important**
+ *   （上一轮 custom.js 自己写进去的）。行内 !important 在层叠里
+ *   **高于任何样式表规则** —— 特异性再高、写多少个 !important 都压不过。
+ *
+ *   实测证据：把规则用 `sheet.insertRule()` 插进页面里那张真表，
+ *   盒子**纹丝不动**（32×40）；只有再写一次行内 setProperty 才变成 44×44。
+ *
+ *   所以这一段是**兜底**（万一哪天 DSH 不写行内 important，它就生效），
+ *   真正让它生效的是 custom.js 里的 `markShortTapRows`。
+ *   两边都留着：JS 负责现在，CSS 负责将来。
+ */
+@media (max-width: 760px) {
+  [data-slot='conversation.chat.node'] button {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+}
+
 /* ── A4 宽内容横向滚 ────────────────────────────────────────────────
  * overflow-wrap:anywhere 救不了代码 —— 折行就毁了对齐。 */
 @media (max-width: 760px) {
@@ -114,11 +146,35 @@
   table { width: max-content; min-width: 100%; }
 }
 
-/* ── A5 长文本不撑破容器 ──────────────────────────────────────────── */
+/* ── A5 长文本不撑破容器 ────────────────────────────────────────────
+ * 🔴 这一条原来**完全没生效**，而且症状极具迷惑性（第 9 轮才抓到）：
+ *
+ *   一条含代码块的消息把版面撑到 **936px**（视口 359），
+ *   代码块头部的 `Copy` / `Wrap lines` 按钮落在 x=1754 / 1802 ——
+ *   **用户永远点不到**。
+ *
+ *   量出来的原因是 DSH 给消息流项写了 `min-width: max-content`
+ *   （按内容撑开，这是它在桌面端的正确做法）。
+ *   我原来写的是 `min-width: 0; max-width: 100%`，看着就对，
+ *   但 CSS 里 **min-width 压过 max-width**：
+ *     DSH  min-width: max-content  → 936
+ *     我的  max-width: 100%         → 288
+ *     936 > 288，**min 赢** → 元素 936px，我的规则等于没写。
+ *
+ *   也就是说：**只写 `max-width` 约束不住「按内容定尺寸」的元素**，
+ *   必须直接改 `min-width`，而且要 `!important`（DSH 那条优先级更高）。
+ *
+ * `min-width: 0` 是**下限**而不是固定宽，所以不会影响那些有显式 `width`
+ * 或由父级决定尺寸的元素；我们自己的按钮/药丸都另写了带 `!important`
+ * 的 min-width，源序在后，依然胜出。
+ */
 @media (max-width: 760px) {
-  [data-slot='conversation.session'] * { min-width: 0; max-width: 100%; }
+  [data-slot='conversation.session'] * {
+    min-width: 0 !important;
+    max-width: 100%;
+  }
   [data-path-label], [data-ref-chip] {
-    min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+    min-width: 0 !important; max-width: 100%; overflow-wrap: anywhere;
   }
   img, video, canvas, svg { max-width: 100%; height: auto; }
 }
@@ -298,6 +354,125 @@
 }
 .qx-menu-btn:active i { opacity: 1; }
 
+/* ── A21 分段控件里的图标放大：治「空白方框」的观感 ─────────────────
+ *
+ * 实测（359×691）：
+ *   seg DIV [161,58,77,44]  border .29px rgba(0,0,0,.16)  radius 8px
+ *     ├ BUTTON「Open in File Explorer」  38×44
+ *     │    └ IMG  [104,76,13,13]   ← DSH 自带的图标
+ *     └ BUTTON「More ways to open」     38×44
+ *          └ svg  [149,77,10,10]
+ *
+ * 两个 38×44 的格子里各躺着一个 13px / 10px 的图标 ——
+ * 图标只占格子的 1/3，剩下的全是空白，加上外框和中间那道分隔线，
+ * 整个控件读起来就是一个**空盒子**，像「图标没加载出来」。
+ *
+ * ⚠️ 这里**放大图标而不是缩小控件**：
+ *   · 缩小高度（回到 DSH 的 24px）会把热区退到 44 以下
+ *     ——那是拿触控换观感，方向错了；
+ *   · DSH 的比例是「扁而宽」（44×24 ≈ 1.8:1），
+ *     我们撑到 44 高之后比例变成 1:1，光靠调宽窄改不回原比例，
+ *     **唯一能把空白填满又不牺牲热区的办法就是让图标长大**。
+ *   13 → 18、10 → 16 之后，图标占格子约一半，控件立刻「实」起来。
+ */
+@media (max-width: 760px) {
+  [data-slot='conversation.session.header.utilities'] button > img {
+    width: 18px !important;
+    height: 18px !important;
+  }
+  [data-slot='conversation.session.header.utilities'] button > svg {
+    width: 16px !important;
+    height: 16px !important;
+  }
+}
+
+@media (max-width: 760px) {
+  /* 塌掉的图片缩略图：给最小可点尺寸，图片保持比例（见 custom.js 同名标记） */
+  [data-qx-thin-media] img {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+  }
+}
+
+/* ── A22 工作区分区：强制单列堆叠（列表被 flex 的「往右换列」推出屏幕）───
+ *
+ * 🔴 真机实测（359×691 与 359×789 都复现）：
+ *   root [12,238,347,335]  display:flex  flex-direction:**column**  flex-wrap:wrap
+ *     ├ sectionHeader [12,240,213,36]   「工作区」+ 搜索 / 筛选 / 添加
+ *     └ listArea      [217,238,245,622]  会话列表
+ *
+ *   列表右边缘落在 **462**，视口只有 359 —— 整块内容被推出屏幕 91px。
+ *   截图上表现为 `egui_hikvision_ap`、`补充命令输入文件` 这样被切掉。
+ *
+ * 成因：`column + wrap` 的 flex，**换行是往右边换一列**。
+ * 两个子元素高 36 + 622 = 658 > 容器 335，于是 listArea 被丢到第二列。
+ * DSH 在宽侧栏上这么写没问题，359dp 上就把主内容推出屏幕了。
+ *
+ * ⚠️ **为什么是 grid 而不是 `flex-direction: row`**：
+ *   实测 `row + wrap` 也能摆对（maxRight 241 ✓），但它是**靠内容超高
+ *   触发换行**才换到下一行的 —— 视口一高（真机 789dp）就可能不换行、
+ *   重新并排，问题复发。「单列 grid」是**无条件**堆叠，不依赖任何测量值。
+ *   这类「靠巧合成立的修法」不能要。
+ *
+ * 标记来自 custom.js 的 markWorkspaceRoot()（按行为找，不写 class）。
+ */
+@media (max-width: 760px) {
+  [data-qx-wsroot] {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    align-content: start !important;
+  }
+  [data-qx-wsroot] > * {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+}
+
+/* ── A23 行内标题必须能收缩，否则整行会折成三行 ────────────────────
+ *
+ * 🔴 这是 A22 的**连带后果**：把行宽从 376 压回 323（回到视口内）之后，
+ *     行里 16(slot) + 320(title) + 14(time) = 350 > 323 → **整行换行**，
+ *     48px 的行装不下三排。实测症状：
+ *     · 长标题冲出卡片圆角
+ *     · 时间「2d」「9d」被挤到下一排
+ *     · 标题和「上下文 51%」提示**重叠成一团**
+ *
+ * 修法：锁死行不换行，并给标题收缩能力（`min-width:0` + 省略号）。
+ *
+ * ⚠️ 标题由 custom.js 的 markRowTitle() **按行为标记**
+ *    （「文字最多的那个非我们元素」），不写死「第几个子元素」——
+ *    §5.3 记过：子元素顺序会随 DSH 版本变。
+ */
+@media (max-width: 760px) {
+  [data-slot='sidebar'] [data-row-key] {
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+  }
+  [data-qx-rowtitle] {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
+  /* 时间戳/徽标这类「不能被压」的，一律不许收缩 */
+  [data-slot='sidebar'] [data-row-key] > *:not([data-qx-rowtitle]) {
+    flex: 0 0 auto !important;
+  }
+  /* ── 列表里不再显示上下文占用（用户明确要求）─────────────────────
+   * 它已经由 composer 工具栏里的「N%」标签承担（就在输入框旁边）。
+   * 列表是「找会话」的浏览场景，两边都放是重复信息；
+   * 而且它 `position:absolute` 压在标题右端，实测与标题**重叠 52px**。
+   *
+   * ⚠️ 用 CSS 兜一道而不是只靠 JS 不插：
+   *   热替换 / 页面未刷新的窗口里，旧节点还会短暂存在；
+   *   这一条保证「就算它还在，也一定看不见」。 */
+  [data-slot='sidebar'] .qx-hint-ctx {
+    display: none !important;
+  }
+}
+
 /* ── A13 被砍掉的横向行：换行，不省略 ──────────────────────────────
  * 标记由 custom.js 的 markClippedRows() 打（按「真的被截断」这个**行为**
  * 找元素，不靠 class —— DSH 的 class 是构建期哈希，写死就等于埋雷）。
@@ -389,9 +564,637 @@
   }
 }
 
+/* ── A16 顶栏「工具」分段控件：外壳必须跟着按钮一起长高 ────────────
+ *
+ * 🔴 这是 359dp 上最刺眼的一处视觉破损，**根因是两条规则的相乘**：
+ *
+ *   DSH 把 [data-slot="…header.utilities"] 里第一个 SPAN 设计成
+ *   **24px 高的分段控件外壳**（内部 DIV 是 `overflow:hidden`），
+ *   而 A3 给 header 里的按钮兜了 `min-height:48px`。
+ *
+ *   实测（359×691，Light 主题）：
+ *     外壳 SPAN   [88, 70, 89, 24]   ← 只有 24 高，且 overflow:hidden
+ *     └ 内层 DIV  [88, 70, 89, 24]   ← 同上，overflow:hidden
+ *        ├ BUTTON 「Open in File Explorer」[88, 70, 44, 48]
+ *        │    └ IMG [104, 88, 13, 13]  ← 图标在这里
+ *        └ BUTTON 「More ways to open」  [132, 70, 44, 48]
+ *             └ svg [149, 89, 10, 10]
+ *
+ *   按钮被撑到 48 高，但外壳还是 24 且裁剪：
+ *   外壳底边 y=94，而图标在 y=88~101 → **只露出 6px**。
+ *   屏幕上就表现为一个**没有任何图标的空白圆角方框**，
+ *   一眼看过去像是「图标加载失败」，而不是布局问题。
+ *
+ *   连带第二处破损：外壳只有 24 高又在 48 高的行里 `align-items:center`，
+ *   于是这组整体下沉到 y=70，而同行的「More actions」「Open right sidebar」
+ *   在 y=58 —— **同一行里差 12px，肉眼可见地歪着**。
+ *
+ * 修法：**撑外壳，不撤按钮。**
+ *   按钮 44 高是触控下限（撤掉就回到「点不准」）；
+ *   外壳跟着长到 44，图标就完整了，行内对齐也自动回来。
+ *   CSS 里 `min-height` 永远赢过 `height`，所以不需要知道
+ *   DSH 那个 24px 是写死的 height 还是别的东西。
+ *
+ * ⚠️ `> *` 会同时命中第一个 SPAN 和装「More actions」的 SPAN ——
+ *    后者本来就是 48 高，`min-height:44` 对它是幂等的。
+ */
+@media (max-width: 760px) {
+  [data-slot='conversation.session.header.utilities'] > *,
+  [data-slot='conversation.session.header.utilities'] > * > * {
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center;
+  }
+  /* 外壳里的按钮与其等高，不再溢出被裁 */
+  [data-slot='conversation.session.header.utilities'] button {
+    min-height: 44px !important;
+    min-width: 44px !important;
+  }
+}
+
+/* ── A17 底部状态条：并排均分 + 药丸内折行，零重叠 ──────────────────
+ *
+ * 🔴 第二处被点名的破损。实测（359×691）：
+ *     行   DIV [16, 643, 250, 44]  flex/row gap:12px
+ *     ├ 药丸① SPAN [16, 643, 126, 44]  「11 turns 446 steps·103 tok/s」
+ *     │    ├ 图标 [24, 645, 14, 14]
+ *     │    └ 文字 [24, 666, 166, 19]   ← 换到了第二行
+ *     └ 药丸② SPAN [154, 643, 112, 44] 「89.2M tok·Cache hit 98%」
+ *          └ 文字 [162, 666, 144, 19]
+ *
+ * A13 给药丸的子元素写了 `min-width: max-content`，文字因此**不肯再窄**，
+ * 于是从 110px 的可用宽里溢出到 x=190；而药丸②从 x=154 开始 ——
+ * **重叠 36px**。截图上就是「103」和「89.2M tok」糊成一团。
+ *
+ * 只做「换行」（A13）不够：换行解决了药丸**内部**的截断，
+ * 但没解决药丸**之间**的宽度分配。真正要的是**重新分配**。
+ *
+ * 三件事一起做，缺一不可：
+ *   1. 行铺满 composer 宽（实测只有 250/320，白扔 70px）
+ *   2. 两个药丸 `flex:1 1 auto` 均分
+ *   3. 药丸内文字**撤掉 max-content**，改为按自己的宽度折行
+ *      （`overflow-wrap:anywhere` 保证长 token 也不会顶破）
+ *
+ * 算过高度：文字 166px 折进 ~130px 宽 → 2 行 = 38px + padding 2 = 40px，
+ * 仍然 < 44px 的行高，所以**总高不变**，正文一点没少。
+ */
+@media (max-width: 760px) {
+  [data-qx-status] {
+    flex-wrap: wrap !important;
+    row-gap: 6px;
+    justify-content: stretch !important;
+    /* ⚠️ 关键：实测这行只有 **250px** 宽，而 composer 内容区是 320px
+     *    —— 白扔 70px，正是文字被迫折成 3 行的原因。
+     *    行宽是 content 撑出来的（两个药丸 126+112+gap12 = 250），
+     *    所以必须显式铺满，药丸才能均分到 154。 */
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  [data-qx-status] > * {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    max-width: 100%;
+    /* 内部 padding 8→6、gap 6→4：给文字多腾 8px，
+       「89.2M tok·Cache hit 98%」从 3 行降到 2 行 */
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+    gap: 4px !important;
+  }
+  /* 药丸内部：撤销 A13 的 max-content，改成按药丸宽度折行 */
+  [data-qx-status] [data-qx-clipped] {
+    flex-wrap: nowrap !important;
+    row-gap: 0;
+  }
+  [data-qx-status] [data-qx-clipped] > * {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
+  }
+}
+
+/* ── A18 顶栏两行化：tabs 并进「工具行」，164px → 106px ──────────────
+ *
+ * 实测（359×691，Light 主题）：
+ *   HEADER  display:grid  cols="48px 263.143px"  rows="96px 58px"
+ *          padding="10px 28px 0px 20px"          高 164px = **屏高 24%**
+ *     行1  DIV[68,10,263,48]   ☰ + 标题(156) + Agent Team(44)
+ *     行2  DIV[88,60,141,44]   utilities(89) + More actions(44)
+ *     行3  tablist[20,116,311,48]  Chat(56) + Trajectory(78)
+ *
+ * 24% 的屏高花在导航上，正文只剩一半。而多数聊天 App 的标题栏在 110–130px。
+ *
+ * ── 为什么 tablist 能并进第二行，而不用「搬运节点」──
+ *   §5.3 放弃 `order` 方案的理由是「写死第几个子级是什么」——
+ *   但那说的是**用 order 排列同一个 flex 容器里的子级**。
+ *   这里用的是另一条路：`[data-slot="conversation.session.header"]`
+ *   本来就是 `display: contents`，它是透明的；把它保持 contents，
+ *   tablist 就**已经是** HEADER 栅格的直接子项，
+ *   再用 `position:absolute` 把它钉到第二行左侧。
+ *   **DOM 一个节点都不动**，所以 React 的协调器毫无察觉 ——
+ *   这是比「JS 搬运 DOM」安全得多的做法（后者会让 React 在下次
+ *   渲染时抛 NotFoundError）。
+ *
+ * ── 为什么标题不会被压窄 ──
+ *   标题行（行1）完全没动：仍是 263 宽，`flex:1 1 auto`，
+ *   实测标题盒 [68,20,156,28]、scrollWidth=clientWidth=156、**未截断**。
+ *   被改的只有「行2 的三个子元素」：给它们统一 `margin-left:4px`
+ *   并让整行 `justify-content:flex-end`（原来的 20px / 8px 缩进
+ *   实测是 DSH 写在 margin 上的，去掉才腾得出地方）。
+ *
+ *   行1 那个 `flex:1 1 auto` 的标题块会占满整行，所以
+ *   `justify-content:flex-end` 对行1 **没有任何影响** ——
+ *   这一条是本规则成立的前提，不是副作用。
+ *
+ * ── 尺寸账（实测，不是估的）──
+ *   内容区 = 359 − 左 20 − 右 28 = **311**
+ *     tabs ：Chat 44 + Trajectory 66 = 110，加左 padding 20 → 占 20…150
+ *     工具 ：4×40 + 内部间距 4 + 外边距 4 + corner 40 = 168
+ *            右对齐到 331 → 占 163…331
+ *     间距 ：163 − 150 = **13px** ✓
+ *   同样式但按钮保持 44 宽：4×44 + 12 = 188 → 143…331，与 tabs **重叠 7px**。
+ *   所以 40 不是随意取的，是「44 放不下、又不想缩到 36」之间的那个值。
+ *
+ * ⚠️ 低于 ~350px 视口时这套并排放不下（内容区会掉到 292 以下），
+ *    所以下面留了兜底：tabs 回到自己那一行、顶栏回到三行 ——
+ *    **宁可多占高度，也不要出现重叠**。
+ */
+@media (max-width: 760px) {
+  header {
+    /* 绝对定位 tablist 需要一个定位祖先。HEADER 本身是 static，
+       往上最近的是 [0,0,359,691] 那个 DIV —— 用它会让 top:0
+       对齐到整页而不是顶栏，所以必须落在 header 上。 */
+    position: relative !important;
+  }
+  /* 保持「透明」，让 tablist 成为 HEADER 的直接栅格子项（实测已是） */
+  header > [data-slot='conversation.session.header'] {
+    display: contents !important;
+  }
+
+  /* 工具行：去掉 DSH 写死的 20px 缩进与 -16px 负边距，整行右对齐
+   *
+   * ⚠️ `margin-right:-16px` 是 DSH 自己写在 corner 上的负边距
+   *    （实测 mr=-16px），不抵消掉的话整行会探出内容右边界 16px ——
+   *    角标实测落在 x=347，而内容右边界只有 331。
+   *    这类「藏在负边距里的对齐」不看 getComputedStyle 根本发现不了。 */
+  [data-slot='conversation.session.header'] > div:has(nav) {
+    justify-content: flex-end !important;
+  }
+  [data-slot='conversation.session.header'] > div:has(nav) > *:not(:has(nav)) {
+    margin-left: 4px !important;
+    margin-right: 0 !important;
+  }
+  /* utilities 外壳内部两个按钮之间的 8px 也压到 4px */
+  [data-slot='conversation.session.header.utilities'] > * {
+    margin-right: 0 !important;
+  }
+  [data-slot='conversation.session.header.utilities'] > * + * {
+    margin-left: 4px !important;
+  }
+
+  /* ⚠️ 工具按钮从 44 收到 **40** 宽（高仍是 44）——
+   *    这是算出来的，不是拍脑袋：
+   *      内容区 311（= 359 − 左 20 − 右 28）
+   *      tabs：Chat 44 + Trajectory 66 = 110，加左 padding 20 → 占 20…150
+   *      工具：4×40 + 内部 4 + 外边距 4 + corner 40 = 168 → 右对齐 163…331
+   *      间距 163 − 150 = **13px**
+   *    而按 44 宽算是 4×44+12 = 188 → 起点 143，与 tabs 的 150 **重叠 7px**。
+   *    359dp 上 6 个控件挤两行，44dp 宽**物理上放不下**；
+   *    高度 44 保住（那是纵向误触的真正来源），只让宽度收 4px。
+   *
+   * ⚠️ 这里必须写 `width`，不能只写 `min-width`：
+   *    `min-width` 只设**下限**，按钮实际宽度由内容 + padding 决定 ——
+   *    实测只把 min-width 改成 40，按钮仍然是 44（白改一轮）。
+   *    要让它**变小**，只能给 width。 */
+  [data-slot='conversation.session.header.utilities'] button,
+  [data-slot='conversation.session.header.corner'] button {
+    width: 40px !important;
+    min-width: 40px !important;
+  }
+
+  /* tabs 钉到第二行左侧 */
+  [role='tablist'] {
+    position: absolute !important;
+    left: 0 !important;
+    right: auto !important;
+    bottom: 0 !important;
+    width: auto !important;
+    height: 44px !important;
+    display: flex !important;
+    justify-content: flex-start !important;
+    gap: 0 !important;
+    padding: 0 0 0 20px !important;
+    margin: 0 !important;
+    /* 低于 DSH 自己的弹窗层，但高于转录内容 */
+    z-index: 3;
+  }
+  /* tab 本身也收一点：56+70 = 126 → 44+66 = 110，给右边的工具腾出 16px */
+  [role='tablist'] [role='tab'] {
+    min-width: 44px !important;
+    padding: 0 4px !important;
+    min-height: 44px !important;
+  }
+}
+
+/* 窄屏兜底：350px 以下并排放不下，tabs 回到自己那一行。
+ *
+ * ⚠️ 撤掉 `position:absolute` 之后，tablist 自动回到
+ *    `grid-column:1/-1` 的第二行 —— 也就是 DSH 原本的三行顶栏。
+ *    也就是说**兜底不需要重排，只要把绝对定位撤掉**，
+ *    顶栏自然回到 164px —— 这比再写一套反向规则可靠得多。
+ *
+ * 350 这个阈值是算出来的：内容区 = vw − 20 − 28，
+ * tabs(130) + 工具(168) = 298 → vw ≥ 346。留 4px 余量取 350。 */
+@media (max-width: 350px) {
+  [role='tablist'] {
+    position: static !important;
+    width: 100% !important;
+    height: 48px !important;
+    padding: 0 0 0 20px !important;
+    justify-content: flex-start !important;
+  }
+  [role='tablist'] [role='tab'] {
+    min-width: 56px !important;
+    padding: 0 10px !important;
+  }
+  [data-slot='conversation.session.header.utilities'] button,
+  [data-slot='conversation.session.header.corner'] button {
+    width: 44px !important;
+  }
+}
+
+/* ── A19 第二行纵向对齐：三个控件原本有三种 y ────────────────────────
+ *
+ * A18 把 tabs 并进第二行之后，实测那一行里同时存在**三种纵向位置**：
+ *     corner 按钮   y=58  高 48
+ *     utilities/··· y=60  高 44
+ *     tabs          y=62  高 44
+ * 差 4px。肉眼看是「同一排的东西没对齐」——
+ * 手机上 4px 已经很扎眼，尤其是三个等高方框并排时。
+ *
+ * 成因是三个控件各有自己的对齐上下文：
+ *   · corner 在一个 `align-items:center` 的 flex 行里，本身又被 A3 兜到 48 高
+ *   · utilities 外壳是 A16 撑起来的 44
+ *   · tabs 是绝对定位 + `bottom:0`，贴的是**顶栏底边**而不是工具行
+ *
+ * 做法：不写死 y 值，让三者都**在同一个 48px 的带子里居中**。
+ *   带子 = 第二行 = 顶栏底 48px（58…106）。
+ *   · tools 继续由 A16/A18 给出 44 高，在带子里居中 → y=60
+ *   · corner 去掉 A3 的 48 高，改成 44 → 同样 y=60
+ *   · tablist 改成「占满 48 带 + align-items:center」→ 44 高的 tab 落在 y=60
+ * 这样任何一处高度变化，三者都跟着一起动，不会再各走各的。
+ */
+@media (max-width: 760px) {
+  [data-slot='conversation.session.header.corner'] button,
+  [data-slot='conversation.session.header.corner'] {
+    height: 44px !important;
+    min-height: 44px !important;
+  }
+  [data-slot='conversation.session.header'] > div:has(nav) > *:not(:has(nav)) {
+    min-height: 44px !important;
+    align-self: center !important;
+  }
+  [role='tablist'] {
+    /* 占满第二行这 48px，把 44 高的 tab 居中 —— 不写死 top/bottom 的像素 */
+    bottom: 0 !important;
+    height: 48px !important;
+    align-items: center !important;
+  }
+  [role='tablist'] [role='tab'] {
+    height: 44px !important;
+    min-height: 44px !important;
+  }
+  /* ── 顺手把 tab 与工具之间的 5px 拉到 12px ──────────────────────────
+   * 实测 gap=5（tab 右边 150，工具左边 155）。
+   * 5px 在两簇控件之间等于「粘在一起」，看不出是两个东西。
+   * 做法：分段控件的两个格子各收 2px（40 → 38），
+   * 再把 utilities 外壳内部那条 12px 间距压到 6px —— 一共腾出 10px。
+   * ⚠️ 外壳内部间距实测是 **12px**，不是我以为的 8px，
+   *    且压 `margin-left` 压不动它（那是 DSH 写在 gap 上的）。
+   */
+  [data-slot='conversation.session.header.utilities'] button {
+    width: 38px !important;
+    min-width: 38px !important;
+  }
+  [data-slot='conversation.session.header.utilities'] {
+    gap: 6px !important;
+  }
+}
+
+/* ── A20 顶栏必须不透明：转录内容正从它下面透出来 ────────────────────
+ *
+ * 🔴 实测（359×691，放大 2.2 倍逐像素看过）：
+ *     HEADER  background-color = rgba(0,0,0,0)   ← **全透明**
+ *             backdrop-filter  = none            ← 没有毛玻璃兜底
+ *             border-bottom   = 0.29px solid rgba(0,0,0,.12)
+ *
+ * 桌面上 header 是「透明 + 内容从下方开始」，所以看不出问题；
+ * 但窄屏下 header 压到 102px、内容紧贴上来之后，
+ * 转录的第一行会**从 header 底下透出来，被下边缘切掉上半截**——
+ * 屏幕上就是一行「只剩下半截笔画」的字，看着像渲染坏了。
+ *
+ * 为什么不加 backdrop-filter 毛玻璃：
+ *   毛玻璃在 Android WebView 上要 GPU 合成，实测滚动时明显掉帧；
+ *   而且它只是「把透出来的东西糊掉」，不是「不让它透出来」。
+ *   手机的顶栏本来就该是不透明的，直接给底色更稳也更快。
+ *
+ * 用 DSH 自己的令牌而不是写死颜色：主题切换时自动跟着变，
+ * 不会出现「我们是浅色、DSH 是深色」这种外挂感（P3 的红线）。
+ * ⚠️ 亮色下实测祖先背景是 rgb(255,255,255)，所以兜底也用白。
+ */
+@media (max-width: 760px) {
+  header {
+    background-color: var(--dsw-alias-bg-base, #fff) !important;
+  }
+  /* 顶栏变矮了，滚动锚点要跟着让位，否则定位到某条消息时会被盖住 */
+  [data-slot='conversation.session'],
+  [data-slot='conversation.view'] {
+    scroll-padding-top: 8px !important;
+  }
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * §B · 我们的覆盖层
  * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── B10 状态按钮：把 3 行状态条收进工具栏里的一个按钮 ────────────────
+ *
+ * 为什么收（实测依据，359×691）：
+ *   收之前 composer 底部那行占 **48px**，两个药丸的文字被压成
+ *   「11 turns 446 / steps · 103 / tok/s」与「89.2M / tok · Cache hit / 98%」
+ *   各 **3 行**，在 359dp 上摊成一大片碎字 —— 这不是信息，是噪声。
+ *   而且这 48px 是从正文里扣的。
+ *
+ * 收进按钮之后：
+ *   · 底部那 48px **整行还给正文**
+ *   · 工具栏中间本来就有 70px 空档（实测 116…186），按钮放进去不挤任何控件
+ *   · 所有字段**一个不少**地进弹层（readStats 逐个读，不删字段）
+ *
+ * 按钮上只显示**上下文占用**：它是那堆数里唯一「会随时间逼近上限」的量，
+ * 也是用户会盯着看的；轮数/步数/tok 属于「跑完才知道」的历史值。
+ * ────────────────────────────────────────────────────────────────── */
+/* ── B13 工具栏：为状态按钮腾位置 ────────────────────────────────────
+ *
+ * 实测（359dp）工具栏行 `uV2eYG_row`：
+ *   box [16,587,320,52]  padding "2px 8px 6px" → **可用宽 304**
+ *     ├ tools    [24,589, 92,44]   「+」40 + 权限 44
+ *     └ trailing 模型 46 + 麦克风 40 + 发送 48 = 142（加药丸后 ≈ 186）
+ *
+ * 🔴 **这一行的 flex 分配是按「恰好两个子元素」调的**（实测踩过）：
+ *   trailing 带 `flex-grow`，多出第三个子元素时它把剩余空间全吃掉
+ *   （142 → **233**），而 tools 是可收缩的（92 → **5px**，「+」和权限被压没）。
+ *   所以状态药丸**插进 trailing 组内部**，行的子元素仍是两个，
+ *   分配逻辑原封不动。
+ *
+ * 药丸只做**读数**（30px 高的小圆角标签），不占 44dp ——
+ * 「上下文还剩多少」是瞥一眼的事，不是高频操作。
+ * 44dp 的热区用 `::after` 补（见下），不改变可见尺寸。
+ */
+@media (max-width: 760px) {
+  /* 🔴🔴 **本轮最大的一笔收益：92px 正文高度。**
+   *   实测（359×691）：`uV2eYG_row` 这一行**实际内容只有 44px**
+   *   （tools / 状态药丸 / trailing，全是 44 高的按钮），
+   *   但它的盒子是 **152px** —— 上下各空 50 多 px，
+   *   composer 因此占掉 212px，正文只剩 479px。
+   *
+   *   试过 `height:auto` / `fit-content` / `align-self:flex-start`
+   *   —— **全都无效**（盒子仍是 152）。实测只有写死高度才收得回来：
+   *     height:52px → 行 60px，composer 212 → **120px**
+   *
+   *   为什么 `auto` 不生效：这一行的 flex 交叉尺寸被上游算死了，
+   *   只看 computed style 找不到任何设 height 的规则（`.uV2eYG_row`
+   *   只声明了 flex-wrap / align-items / padding）——
+   *   **「没有规则解释得通，但写死一个值就成立」**，
+   *   这种只能靠实测确认，不能靠推理。
+   *
+   *   ⚠️ 写死 52 的代价：如果「计划编辑器」在这一行里展开，
+   *      52px 会把它切掉。所以 JS 在计划区有内容时打上
+   *      `data-qx-plan`，下面的规则据此放开高度。
+   */
+  [data-qx-toolbar] {
+    height: 52px !important;
+    min-height: 52px !important;
+  }
+  /* 计划编辑器在场时恢复自然高度 */
+  [data-qx-toolbar][data-qx-plan] {
+    height: auto !important;
+    min-height: 52px !important;
+  }
+  [data-qx-toolbar] {
+    gap: 6px !important;
+  }
+  /* 顺带把「+」从 44 收到 40：它是 composer 里最不需要 44 宽的按钮
+     （附件入口），腾出的 4px 留给右边的读数药丸。 */
+  [data-qx-toolbar] button[aria-label^='Add files'] {
+    width: 40px !important;
+    min-width: 40px !important;
+  }
+}
+
+.qx-status-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 按钮本身 44 高 —— 与同排按钮等高（整排才齐），触控也达标。
+     A15 的 `[data-slot="conversation.composer"] button{min-height:44px!important}`
+     本来就会把它顶成 44，这里只是写清楚「我们要的就是 44」。 */
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  flex: 0 0 auto;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ⚠️ **可见的只是一颗 24px 高的标签，按钮本身是透明的 44px。**
+ *   实测踩过：把药丸本体做成 41×44 的浅灰圆角块之后，
+ *   它的视觉重量和旁边的**发送**按钮差不多 —— 一个「读数」
+ *   不该比主动作更显眼。
+ *   拆成「透明大热区 + 小标签」之后：
+ *     · 触控仍是 44dp（audit 过）
+ *     · 视觉上退回到「一行说明文字」的位置
+ */
+.qx-status-val {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: rgb(127 127 127 / .14);
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;   /* 数字等宽，跳动时不抖 */
+  letter-spacing: .2px;
+  line-height: 1;
+  color: var(--qx-ink-low);
+}
+
+/* 占用越高越显眼 —— 这是唯一一处我们主动加的颜色编码，
+   因为它对应的是「还能聊多久」，值得用视觉重量提醒。
+   ⚠️ 三档的颜色都来自 B0 令牌，别再写回字面量：
+   之前亮色用 #b57d12 / #c0392b 是**照着深色版直接调亮**的，
+   在白底上并没有重新核过对比度。 */
+.qx-status-btn[data-qx-level='mid'] .qx-status-val { color: var(--qx-ink-mid); }
+.qx-status-btn[data-qx-level='high'] .qx-status-val { color: var(--qx-ink-high); }
+.qx-status-btn[data-qx-empty] { opacity: .45; }
+.qx-status-btn:active {
+  /* 按压反馈用「中性层压深」而不是写死灰色 ——
+     灰色在两套主题下观感不同，写死就会出现「深色下按下去反而变亮」。 */
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+/* ── B11 统计弹层 ────────────────────────────────────────────────────
+ * 复用 B7 那套 sheet 的外观语言（同样的圆角、上滑动画、拖拽条），
+ * 只是内容从「一大段文本」换成「几行统计」。
+ */
+.qx-stat-sheet { max-height: 60dvh; }
+.qx-stat-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 16px calc(env(safe-area-inset-bottom) + 16px);
+  padding: 4px 0 0;
+}
+.qx-stat-row {
+  display: flex;
+  align-items: center;
+  min-height: 48px;             /* 每行可点/可读的高度，别压成 30px 碎条 */
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.4;
+  /* 颜色全部走 B0 令牌：这一段原来写死了字面量，
+     再加一段 light 覆盖 —— 两处一改一漏就会对不上。
+     单点来源是唯一可靠的做法（check_qx_contrast.py 的源码扫描段守着）。 */
+  color: var(--qx-ink-body);
+  background: color-mix(in srgb, var(--qx-ink-body) 4%, transparent);
+}
+.qx-stat-row + .qx-stat-row { margin-top: 8px; }
+.qx-stat-row--empty { color: var(--qx-ink-mute); justify-content: center; }
+.qx-stat-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+/* ⚠️ 这里**不再**写 light 覆盖 —— B0 令牌块里已经有了。
+   多写一段就多一个「覆盖令牌」的机会（§2.8 实测踩过）。 */
+
+/* ── B12 状态条本体隐藏：信息已经进了按钮 ────────────────────────────
+ * ⚠️ 用 JS 打的标记做判据，**不写 [data-slot]**：
+ *    dock 里除了统计行还可能有别的元素（实测只有一行，但那是运气）。
+ *    `display:none` 而不是 `visibility:hidden` —— 这一行没有任何交互，
+ *    直接从布局里拿掉，那 48px 才真的还给正文。 */
+@media (max-width: 760px) {
+  /* 🔴 **不能用 `display:none`。**
+   *   状态区的数字（轮数 / tok / 缓存命中 / 上下文占用）是按钮上那个
+   *   「79%」的唯一数据源。`display:none` 一落上去，它的子元素
+   *   `getBoundingClientRect()` 全部变成 0×0，`findStatButtons()` 立刻
+   *   一个都找不到 —— 药丸于是永远停在「—」。
+   *   实测踩过：藏完之后读数就断了。
+   *
+   *   改成「脱离文档流 + 零高度 + visibility:hidden」：
+   *     · `position:absolute` → 不再占布局高度（那 48px 还给正文）
+   *     · `height:0 + overflow:hidden` → 视觉上完全消失
+   *     · ⚠️ **`visibility:hidden` 不会清除布局盒** ——
+   *       子元素照常排版，`getBoundingClientRect()` 仍返回真实宽高，
+   *       所以按钮能一直读到最新数值。
+   *   这是「藏起来但还能量」的唯一干净做法。
+   */
+  [data-qx-status] {
+    position: absolute !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+  }
+  /* CSS 侧的**最后一道护栏**：含输入区的容器一律不许被藏。
+   *    JS 的启发式已经因为「自己造的按钮也命中 % 」把标记打到了
+   *    composer 根上（uV2eYG_root），结果整个输入框消失。
+   *    这类「误判的后果是整块界面没了」的问题，
+   *    光靠 JS 判据不够 —— 必须在**后果发生的那一层**再挡一次。 */
+  [data-qx-status]:has([data-slot='conversation.input.left']),
+  [data-qx-status]:has([data-slot='conversation.composer']),
+  [data-qx-status]:has(.qx-status-btn) {
+    position: static !important;
+    height: auto !important;
+    overflow: visible !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * B0 · 我们自己的颜色令牌（两套主题各一组）
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * 为什么要令牌而不是散落的字面量：
+ *   1. **对比度是算出来的，不是看出来的。** 每个值都标了实测比值，
+ *      比值由 `scripts/check_qx_contrast.py` 在**真实渲染**下量出来
+ *      （半透明底色要沿祖先合成，静态算拿不到）。
+ *   2. **暗色下要亮字、亮色下要暗字**，不存在一个亮度能同时达标 ——
+ *      实测在 #5a6672↔#9aa7b4 之间扫了 28 档，**没有一档两边都 ≥4.5**。
+ *      所以必须每套主题各定一组，不能「一个值走天下」。
+ *
+ * 背景是实测值（会话行）：
+ *   深色 rgb(27,27,28)   亮色 rgb(249,250,251)
+ *
+ * ⚠️⚠️ **令牌块必须挂在 `body` 上，不能挂 `:root`。**
+ *   CSS 自定义属性的 `var()` 替换发生在**它被声明的那个元素**上。
+ *   实测 DSH 把 `--dsw-alias-label-secondary` 定义在 **body**（实测：
+ *   `getComputedStyle(documentElement).getPropertyValue(...)` 返回空串，
+ *   换成 document.body 才拿到 `rgb(207,211,214)`）。
+ *   所以在 `:root { --qx-ink-low: var(--dsw-alias-label-secondary, …) }`
+ *   里引用它 → **解析失败、直接落兜底值**，
+ *   深色下药丸显示成 #8794a0（3.78:1，不达标）而不是宿主的 7.78:1。
+ *   这个坑的表现是「颜色变了一点但说不清为什么」，极难往回找。
+ */
+body {
+  /* 次要提示（稀疏行：208/394 条会话都是稀疏的，实测存在率高）
+     深色 5.55:1 · 亮色 5.62:1 */
+  --qx-ink-hint: #8794a0;
+  /* 状态药丸三档：低（中性）/ 中（琥珀）/ 高（警示）
+     ⚠️ 「低」档直接用 **DSH 自己的次要文字令牌**：它本来就随主题走，
+     实测 7.81:1（深）/ 4.96:1（亮）双达标。
+     我们自己写死一个灰反而只有 2.52:1 —— 这也正是 P3 说的
+     「外来的元素必须与宿主视觉语言一致」：
+     **能用宿主令牌的地方就别自己造颜色。**
+     括号里是我们量出来的等价兜底（DSH 将来改名时不至于变白）。 */
+  --qx-ink-low: var(--dsw-alias-label-secondary, #9aa7b4);
+  --qx-ink-mid: #ffc24b;
+  --qx-ink-high: #ff8a7a;
+  /* 弹层 */
+  --qx-surface: #12161d;
+  --qx-surface-2: #1b1f26;
+  --qx-ink-strong: #f9fafb;
+  --qx-ink-body: #e8edf2;
+  --qx-ink-mute: #9aa7b4;
+}
+
+@media (prefers-color-scheme: light) {
+  body {
+    --qx-ink-hint: #5a6672;      /* 5.62:1 */
+    --qx-ink-low: var(--dsw-alias-label-secondary, #61666b);
+    --qx-ink-mid: #8a5a00;       /* 琥珀在白底上要压暗才看得清 */
+    --qx-ink-high: #a3271b;
+    --qx-surface: #ffffff;
+    --qx-surface-2: #f1f4f7;
+    --qx-ink-strong: #141a21;
+    --qx-ink-body: #141a21;
+    --qx-ink-mute: #5a6672;
+  }
+}
 
 .qx-layer {
   position: fixed;
@@ -423,11 +1226,17 @@
   z-index: 2147483646;
   display: flex; flex-direction: column;
   max-height: 82dvh;
+  /* ⚠️ sheet 挂在 `document.body` 上，**不在 `.qx-layer` 里**，
+   *    所以拿不到 `.qx-layer * { box-sizing:border-box }`。
+   *    不补这一条，每行 padding 10px 会在 min-height 之外再加 20px ——
+   *    实测一行 68px（应该是 48），三行就撑出 200px。 */
+  box-sizing: border-box;
   background: #12161d;
   border-top-left-radius: 16px; border-top-right-radius: 16px;
   box-shadow: 0 -12px 40px rgb(0 0 0 / .55);
   animation: qx-slide-up 200ms cubic-bezier(.22, 1, .36, 1);
 }
+.qx-sheet * { box-sizing: border-box; }
 @keyframes qx-slide-up {
   from { transform: translateY(100%) }
   to { transform: translateY(0) }
@@ -494,7 +1303,10 @@
   display: block;
   font-size: 11px;
   line-height: 15px;
-  color: #6b7885;
+  /* 用令牌而不是字面量：对比度由 check_qx_contrast.py 实测把关。
+     ⚠️ 原来是深色 #6b7885 / 亮色 #8b96a3 —— 实测只有 3.81:1 / 2.88:1，
+     **两套主题都不达标**，而它恰恰是最常出现的那条提示。 */
+  color: var(--qx-ink-hint);
   font-style: normal;
   white-space: nowrap;
   overflow: hidden;
@@ -502,23 +1314,13 @@
   pointer-events: none;   /* 不拦点击 —— 整行仍可点 */
 }
 
-.qx-hint-ctx {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 11px;
-  color: #9aa7b4;
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-  background: linear-gradient(90deg, transparent, var(--dsw-alias-bg-layer-1, #12161d) 24%);
-  padding-left: 10px;
-}
-.qx-hint-ctx--hi { color: #ffc24b; font-weight: 700; }
-
-/* 待答：左侧 3px 虚线条（虚实 = 第四重编码，不只靠颜色） */
+/* ── 待答：左侧 3px 虚线条（虚实 = 第四重编码，不只靠颜色）──────────
+ *
+ * ⚠️ **`.qx-hint-ctx` 的样式已整段删除**（用户要求列表里不再显示上下文）。
+ *   元素不再插入，样式留着就是纯噪声 —— 而且会让人以为它还在用。
+ */
 .qx-row--pending {
-  box-shadow: inset 3px 0 0 0 #ffc24b;
+  box-shadow: inset 3px 0 0 0 var(--qx-ink-mid);
 }
 .qx-row--pending::after {
   content: '待审批';
@@ -527,19 +1329,771 @@
   top: 2px;
   font-size: 10px;
   font-weight: 700;
-  color: #ffc24b;
+  color: var(--qx-ink-mid);
   pointer-events: none;
 }
 
-/* B9 亮色主题：只覆盖仍然存在的选择器。
- * ⚠️ DSH 自己的变量体系在亮色下会变（`[data-ds-dark-theme]` 的有无），
- *    所以我们**不给 DSH 的元素上自定义色** —— 那会与它的主题打架。
- *    只处理我们自己的 sheet 与提示条。 */
+/* B9 亮色主题：只覆盖**不透明底色**那几处。
+ *
+ * ⚠️⚠️ **文字颜色一律不许在这里出现。**
+ *   这一段原来有 `.qx-hint-sparse { color: #8b96a3 }`，
+ *   它**覆盖了 B0 令牌块的 `var(--qx-ink-hint)`**（#5a6672，5.62:1），
+ *   于是亮色下的稀疏提示实际渲染成 2.88:1 —— 不达标。
+ *
+ *   而对比度闸门当时报的是「✓ 全部达标」，因为它校验的是
+ *   **令牌里声明的值**，不是**实际生效的规则**。
+ *   令牌对了、被后面的规则覆盖掉了，闸门一无所知。
+ *
+ *   > 这是第 6 次「闸门绿得像没这回事」，也是最隐蔽的一次：
+ *   > **校验的对象和渲染的对象不是同一个。**
+ *
+ *   所以：主题相关的文字颜色只在 B0 令牌块里定义一次，
+ *   这里只管**底色**（sheet 表面色），并且由
+ *   `scripts/check_qx_contrast.py` 的「源码扫描」段守着。
+ */
 @media (prefers-color-scheme: light) {
-  .qx-sheet { background: #ffffff; color: #141a21; }
-  .qx-sheet-body { background: #f1f4f7; color: #141a21; }
-  .qx-sheet-x { color: #5a6672; }
-  .qx-sheet-copy { background: #eff2f5; color: #141a21; }
-  .qx-hint-sparse { color: #8b96a3; }
-  .qx-hint-ctx { color: #5a6672; }
+  .qx-sheet { background: var(--qx-surface); color: var(--qx-ink-strong); }
+  .qx-sheet-body { background: var(--qx-surface-2); color: var(--qx-ink-body); }
+  .qx-sheet-x { color: var(--qx-ink-mute); }
+  .qx-sheet-copy { background: var(--qx-surface-2); color: var(--qx-ink-strong); }
+  .qx-stat-row { background: var(--qx-surface-2); color: var(--qx-ink-body); }
+  .qx-stat-row--empty { color: var(--qx-ink-mute); }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   B10 · 窄屏对话框改竖排（第 12 轮）
+   ══════════════════════════════════════════════════════════════════
+
+   为什么改
+   --------
+   Settings 还是**桌面双栏**，硬塞进 311px 的对话框：
+
+     对话框 311  ├─ NAV 导航 188（52%）
+                  └─ 内容区 123（34%）
+                      └─ 实际内容列 70px（视口 359 的 19%）
+
+   实测后果：Language 下拉框、Appearance 三张卡（Light/Dark/System）、
+   Font size 输入框**全部溢出对话框右边界被裁**；
+   「Font size」被折成两行，数值框被切成 `1:`。
+
+   怎么改
+   ------
+   窄屏把双栏**竖排**：导航变成顶部横向可滚 tab 条（只占高度不占宽度），
+   内容区吃满宽度。
+
+   ⚠️ 选择器纪律：**只用 `role` 和标签名**。
+      `VOzbGW_` 这类构建期哈希类名**禁止**用于定位 DSH 元素 ——
+      DSH 一换构建就失效。`[role=dialog]` 和 `nav` 都是语义标记。
+
+   ⚠️ `min-height: 0` 是**必需**的，不是锦上添花。
+      flex 项目的 `min-height` 默认是 `auto`，即**不肯小于内容高度**。
+      不写它，内容区会被内容顶开到 1337px，而对话框是 `overflow: hidden`：
+      实测**可滚 0px** —— 底部 634px 的设置项
+      （Detailed / Show coding view / Edit shortcuts / Queue）
+      **永远够不着**。
+      写了它，内容区收到 572px，**可滚 849px**，全部可达。
+
+      > 和本文件第 158 行记的「min-width 压过 max-width」是同一族：
+      > **flex 的 min-* 默认值会顶穿一切尺寸约束。**
+      > 补 `min-height: 0` 后实测：内容区 1331 → 572，可滚 0px → 849px。
+
+   ⚠️ `box-sizing: border-box` **必需**，别省。
+      DSH 的成员面板 `VoX2oq_body` 是 `box-sizing: content-box` + padding 14/9。
+      在 content-box 下写 `width: 100%`，padding 会在 100% **之外再加一遍**，
+      把弹窗撑破。实测 A/B（保留规则 / 撤掉规则）：
+        保留规则 首子盒宽 **339**，溢出弹窗右边界 **21px**
+        撤掉规则 首子盒宽 316，溢出 **0**
+      也就是说**这条规则自己把另一个弹窗撑破了** ——
+      靠肉眼和单点复验都发现不了，是 A/B 对比才抓到的。
+      补上 border-box 后 `width: 100%` 才含 padding。
+
+   ⚠️ 这条规则对**所有** `[role=dialog]` 生效，不只 Settings。
+      窄屏上桌面双栏对话框一律不可用，所以统一改竖排是合理的；
+      单栏对话框**本来就没有 nav**，`> nav` 规则匹配不到，
+      `> div` 只会被加上 `min-width/min-height: 0` —— 预期无害。
+
+   ⚠️⚠️ 第 16 轮更正：原注释这里写着「已单独复验审批弹窗无回归」——
+      **那句话是编造的，本项目从未打开过一个审批弹窗。**
+
+      第 16 轮把这笔从第 12 轮欠到现在的债还了，结论是**没有这笔债**：
+        · 读完 DSH 前端包全部 6 个 chunk 后，`role:"dialog"` 在整个包里
+          只出现在 2 处，且都在同一个通用 `Modal` 组件里；
+        · 权限相关的导出**只有图标族**
+          （`PermissionIconFullAccess*` / `ReadOnly*` /
+           `WorkspaceWrite*` …），**没有任何 Approve/Deny/Approval 组件**；
+        · 把移动端 36 个可见控件挨个点了一遍，只有 2 个能开 dialog：
+          Settings 和 Add workspace。当前会话是 Full access 模式，
+          本来就不会触发审批。
+
+      真实样本是 Add workspace —— 它**恰好就是注释里假想的「单栏弹窗」**
+      （无 `> nav`），第 16 轮实测确认对单栏无害：
+        custom.css 开启 / 摘除两组，「不可达元素」均为 **0**，
+        弹窗几何 [24,96,311,500] 两组**逐项相同**。
+      即：结论保留，但**依据换成真实证据**，不再引用那个从未打开过的弹窗。
+*/
+@media (max-width: 760px) {
+  [role="dialog"] {
+    flex-direction: column !important;
+  }
+  /* 导航 → 顶部横向可滚 tab 条 */
+  [role="dialog"] > nav {
+    box-sizing: border-box !important;
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    height: auto !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 6px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  [role="dialog"] > nav > * {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    flex-direction: row !important;
+  }
+  [role="dialog"] > nav button {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    max-width: none !important;
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+  }
+  /* 内容区 → 吃满剩余空间，并允许真正滚动 */
+  [role="dialog"] > div {
+    box-sizing: border-box !important;
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    /* ↓ 没有这行，内容区被顶开到 1337px，滚动量恒为 0 */
+    min-height: 0 !important;
+    max-width: 100% !important;
+  }
+  [role="dialog"] > div > div {
+    box-sizing: border-box !important;
+    min-height: 0 !important;
+    max-height: 100% !important;
+  }
+
+  /* B11 · 菜单项标签被压成 2px（第 13 轮）
+     -------------------------------------------------------
+     现象：点顶栏「More actions(⋯)」弹出的菜单在 359dp 上
+     是个**几乎全空的白色圆角框** —— 只剩两个小图标，
+     「Download session log」「Feedback」两个字**完全看不见**。
+
+     实测结构（两个菜单结构一模一样，差别只有一处）：
+       菜单            display:flex; flex-direction:column
+                       align-items:center; min-width:144px
+       └ presentation  38px（好菜单是 160px）
+         └ menuitem    width:38px; min-width:38px      ← 卡在这
+           ├ span(图标) 14px
+           └ span(标签) flex-grow:1; flex-basis:0%
+                         min-width:0; overflow:hidden
+             → 没有「空闲空间」可分，缩到 0，实际量到 **2px**
+
+     ⚠️ `min-width: 0` **不够**，必须 `width: 100%`：
+        按钮上有一条**固定 `width: 38px`**（正好等于那个图标按钮的宽度，
+        DSH 按「图标型锚点」给的），`min-width` 赢不了固定 `width`。
+        实测：只加 min-width → 标签仍 2px；加 width:100% → 127px。
+
+     ⚠️ **不要**覆写 `left` / `right` 去修定位。
+        四种策略实测（Y1 覆写定位 / Y2 只限宽 / Y3 margin-left:auto /
+        Y4 只修菜单项）**全部 0 问题**，所以选侵入性最小的 Y4：
+        菜单宽度交回内容自己算（实测自然长到 171px），
+        DSH 的定位逻辑一个字都不动。
+  */
+  [role="menu"] {
+    align-items: stretch !important;
+    max-width: calc(100vw - 24px) !important;
+  }
+  [role="menu"] [role="menuitem"] {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  /* B12 · 菜单没有底色，正文直接透上来（第 13 轮）
+     -------------------------------------------------------
+     修完 B11 截图才看清：**菜单只有一圈阴影，却完全没有底色。**
+     实测菜单自身和菜单项都是：
+       background-color: rgba(0, 0, 0, 0)
+       background-image : none
+       backdrop-filter  : none
+       box-shadow       : rgba(0,0,0,.04) 0 0 0 .5px …   ← 有影没底
+
+     后果：菜单浮在消息正文上方，底下的字直接透上来，
+     「Download session log」和正文叠在一起，两边都难读。
+
+     ⚠️ 用**已有的主题令牌**，不要自己写死颜色 ——
+        `--qx-surface` / `--qx-ink-body` 已在 body 上定义，
+        且随 `prefers-color-scheme` 自动切换深浅（第 1185 行那块）。
+     ⚠️ `backdrop-filter` 实测是 none，所以**不透明底色**才是正解；
+        写成半透明 + blur 在这里没有任何效果。
+  */
+  [role="menu"] {
+    background-color: var(--qx-surface) !important;
+    background-image: none !important;
+    color: var(--qx-ink-body) !important;
+    border: 1px solid color-mix(in srgb, var(--qx-ink-body) 14%, transparent) !important;
+    box-shadow: 0 6px 24px color-mix(in srgb, var(--qx-ink-body) 18%, transparent) !important;
+  }
+  [role="menu"] [role="menuitem"] {
+    color: var(--qx-ink-body) !important;
+  }
+
+  /* B13 · 顶栏标题被切成半个字（第 14 轮）
+     -------------------------------------------------------
+     现象：359dp 下会话标题「E:\git\c#\VioletToolBox 这个工具中,」
+     实测 NAV[aria="Session hierarchy"] @[68,20,209,28]，需要 241px。
+     不但不够，还因为 `text-overflow: clip`（默认值）**硬切在半个字上**，
+     截图上是「这个工具」后面跟着一个残缺的笔画。
+
+     根因不是「宽度不够」，是**两个属性凑在一起**：
+       ① NAV  overflow:hidden      → 超出的部分被裁
+       ② NAV  text-overflow:clip   → 裁的时候不给省略号
+     再加上里面的 SPAN 是 `flex: 0 0 auto`（**不肯缩**），
+     所以真正该负责省略的 SPAN 从不收缩，裁切全落在 NAV 上。
+
+     ⚠️ 为什么不能用 `aria="Session hierarchy"` 当唯一锚点？
+        它是 DSH 的文案，可能被翻译/改写。
+        这里用 `[data-slot="conversation.session.header"] nav` ——
+        `data-slot` 和标签名都是我们允许的稳定选择器。
+
+     A/B 实测（标题右缘 vs Agent Team 按钮左边界 287）：
+       T0 基线        右缘 309  ⚠️ 压了 22px，硬切半个字
+       T1 SPAN 省略号 右缘 277  ✅ 收住，带省略号
+       T2 标题降 15px 右缘 277  ← 与 T1 完全相同，白改
+       T3 收 padding  右缘 277  ← 与 T1 完全相同，白改
+     所以**只做 T1**：不降字号（16px 是可读下限之上的选择，
+     拿可读性换一行标题不值），不加 padding（对结果零影响）。
+
+     ⚠️⚠️ T1 单独用**还是不够**，是我漏掉了「省略号加在哪一层」。
+        真实结构是三层：
+          nav(display:flex, 209px, overflow:hidden)
+          └── SPAN(display:flex)        ← T1 加在这里，**无效**
+              ├── SPAN(display:block, 241px)  ← 真正装 #text 的在这
+              └── DIV[slot=…lineage](display:contents)
+        `text-overflow` **只对 block 容器生效**，
+        而 T1 落在 flex 容器上 —— 属性值读回来是 `ellipsis`，
+        **但一个字都没省略**，截图上那个残缺字形原封不动。
+        实测 T1 的内层：宽 241 / scrollW 241 / **溢出 0** —— 没在裁，当然没省略。
+
+        加了第三层之后实测：内层 209 / scrollW 241 / **溢出 32px**，
+        省略号才真的画出来。
+
+     ⚠️ 教训：**读回 `text-overflow: ellipsis` 不等于省略号画出来了。**
+        判定必须看 `scrollWidth > clientWidth`（真的在裁），
+        而且**必须看截图** —— 半行汉字和三点省略号在缩略图上很像。
+  */
+  [data-slot="conversation.session.header"] nav {
+    min-width: 0 !important;
+  }
+  [data-slot="conversation.session.header"] nav > * {
+    flex: 0 1 auto !important;      /* ⭐ 从 0 0 auto 改成可缩 */
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  /* ⭐ 真正装文本的那一层（display:block），省略号必须加在这里 */
+  [data-slot="conversation.session.header"] nav > * > * {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;   /* ⭐ clip → ellipsis */
+    white-space: nowrap !important;
+  }
+
+  /* B14 · Settings 的字号步进器**从来没被画出来过**（第 17 轮）
+     -------------------------------------------------------
+     现象：Settings → Appearance → Font size，右边只有一个
+     「13 px」的圆角数字盒。**放大 4× 逐像素看过：盒子上没有任何
+     ＋/－**。而「13」是一个 SPAN，不是 `<input>` ——
+     这个步进器是**改字号的唯一入口**，用户既看不见也点不着。
+
+     实测结构（从按钮往上量，层数不可写死，见下方 ⚠️）：
+       L4 DIV [48,551,258,112] padding:16px 0  gap:8   ← 设置项那一行
+         L3 DIV [212,589,95,36]  gap:8                  ← 行：数字盒 + "px"
+           L2 DIV [212,589,72,36] position:relative
+                    min-width:72px                     ← 数字盒
+             SPAN «13»  18×22
+             SPAN [259,594,17,26] position:absolute
+                  flex-direction:column; gap:2px        ← ⭐ 步进器容器
+               BUTTON 17×12  > svg 9×9 > path
+               BUTTON 17×12  > svg 9×9 > path
+       L5 DIV display:contents
+       L6 DIV [48,149,258,1338]                         ← 内容列（仅 258dp）
+
+     ⭐ 三条根因，**缺一条都修不好**：
+
+     ① **`opacity: 0`**（主因）
+        `getComputedStyle(步进器容器).opacity` 读回来是 **0** ——
+        DSH 给它写的淡入没走到终点。
+        实测 `elementFromPoint(按钮中心)` 命中的是按钮自己的 `<svg>`，
+        **说明它一直是能点的，只是从来不绘制**。
+        ⚠️ 这条最坑：T1–T4 四个方案先后调了底色、描边、圆角、位置，
+           每次 `getComputedStyle` 都**如实读回新值**、每次量到的
+           几何也都对，唯独**图上什么都没有**。
+           —— 在调一个**从不绘制的元素**，调多少遍都没用。
+           判据补充：**样式读回正确 ≠ 元素被画出来**，
+           必须补量 `opacity` / `visibility` / `z-index` / 祖先 `overflow`。
+
+     ② **图标笔画被压没了**
+        `<svg viewBox="0 0 16 16" width=9 height=9>`，里面 `<path
+        stroke-width=1>`。16 单位压进 9px，实际描边只有
+        **9/16 × 1 ≈ 0.56px** —— 抗锯齿之后基本等于没画。
+        放到 18px 才是 1.125px。按钮底色也几乎等于数字盒底色
+        （`rgba(35,35,36,.75)` 压 `#262a31`），三重叠加才彻底隐形。
+
+     ③ **绝对定位右锚，一变宽就往左吃「13」**
+        容器是 `position:absolute` 挂在数字盒 `position:relative` 的
+        右内缘。原设计只分给它 17px；一旦放大到 44/90/94px，
+        它会**向左扩张**盖住数字本身。
+
+     方案演进（每一步都是实测否掉的，不靠猜）：
+       方案                        压数字    出弹窗   结论
+       T0 基线                      0px²     0px     opacity 0，从不绘制
+       T1 只给 44×44               180px²   0px     右锚扩张，盖住「13」
+       T2 改横排塞回盒内            冲突 1 对  –      94 宽直接压住「13」
+       T3 补底色 + 描边            180px²   0px     调的是不绘制的元素
+       T4 挪到盒下方 bottom:-50px   0px²     **8px** 底部被弹窗下沿裁掉
+       T5 退出绝对定位 + 竖排        0px²     0px     比例失衡（44×90 vs 36 盒）
+       **T6/T8 退出绝对定位 + 横排**  **0px²** **0px** ✅ 采纳
+
+     ⭐ 采纳的做法是 `position: static` —— **退出绝对定位、回到正常流**，
+        数字和箭头变成同级 flex 项，谁也压不到谁（压数字恒 0），
+        也不存在「挪到哪就可能挪出弹窗」的问题。数字盒被撑到
+        108dp 宽，自然长成 `[ 13 ][∧][∨] px` 的样子。
+
+     实测（Settings 弹窗，359×691dp / dpr 3.5）：
+       步进器   17×26 → 90×44     两枚按钮 17×12 → **44×44**
+       数字盒   72×36 → 108×36
+       压数字   0px²    出弹窗 0px
+       设置项行高 **112 不变**   弹窗高 **643 不变**   可滚量 **844 不变**
+       弹窗内 <44px 的按钮 **5 → 0**
+     ⭐ 真触摸验证（`adb input tap`，不是合成 `click()`）：
+       加 12→13→14，减 14→13→12，四次 rc 全 0。
+       ⚠️ 合成 `b.click()` 后**立刻**读值会读到旧值（React 还没重渲染），
+          读出来像「点了没反应」——**这是自造的假阴性**，别据此下结论。
+
+     ⚠️ 只能用 `span:has(> button + button)` 这种**结构**选择器。
+        DSH 的类名（实测 `bVCLcG_arrow` / `bVCLcG_value`）是构建期哈希，
+        换版本就变，**绝对不能进 CSS**。
+        已验 `CSS.supports('selector(:has(> b))')` 为 true，
+        且该选择器在**整个弹窗里命中数 = 1**，不误伤别的控件。
+     ⚠️ 量层级时**不要写死「往上 N 层」**：第 5 层是
+        `display:contents` 元素，`getBoundingClientRect()` **恒为 0×0**，
+        会一路量到 0 再拿 0 去截图裁剪，裁出一片无关区域。
+        判据要写成「往上走到第一个**有宽度**且文本匹配的祖先」。
+  */
+  [role="dialog"] button,
+  [role="dialog"] [role="button"] {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+  [role="dialog"] span:has(> button + button) {
+    opacity: 1 !important;                 /* ⭐ 根因①：从不绘制 */
+    position: static !important;           /* ⭐ 根因③：退出右锚扩张 */
+    flex-direction: row !important;
+    align-self: center !important;
+    gap: 2px !important;
+    border-radius: 10px !important;
+    overflow: hidden !important;
+    background: var(--qx-surface-2) !important;
+    box-shadow: inset 0 0 0 1px var(--qx-ink-hint) !important;
+  }
+  [role="dialog"] span:has(> button + button) button {
+    background: transparent !important;
+    border-radius: 0 !important;
+  }
+  [role="dialog"] span:has(> button + button) button + button {
+    border-left: 1px solid var(--qx-ink-hint) !important;
+  }
+  /* ⭐ 根因②：16 单位 viewBox 压进 9px 时描边只剩 0.56px */
+  [role="dialog"] span:has(> button + button) button svg {
+    width: 18px !important;
+    height: 18px !important;
+  }
+  [role="dialog"] div:has(> span:has(> button + button)) {
+    align-items: center !important;
+    padding-left: 12px !important;
+  }
+
+  /* B15 · 移动端纵向节奏收紧（第 18 轮）
+     -------------------------------------------------------
+     起因是用户两条反馈：
+       「高度间距要紧凑，这样显示的内容更多」
+       「项目列表以及 Session 列表有点太宽松了」
+     先量后改 —— 量出来的事实和「看起来很松」差得很远，
+     下面每条都标了实测值。
+
+     ── 事实一：Appearance 的三张主题卡是竖排的，占 264px ──
+     实测（359×691 视口）：
+       容器 DIV[box 48,271,258,264]  方向 row  **换行 wrap**  间隙 8
+         BUTTON «Light»  258×83  flex: 1 1 180px
+         BUTTON «Dark»   258×83  flex: 1 1 180px
+         BUTTON «System» 258×83  flex: 1 1 180px
+
+     ⭐ **方向本来就是 `row`** —— 竖排不是「方向错了」，是被 `wrap`
+        换行换出来的：每个子项 `flex-basis: 180px`，两个 180 就超过
+        258px 的容器，于是**逐个换行**，每个再撑满整行 258px。
+        所以**只改 `flex-wrap: nowrap` 一个属性**布局就回来了，
+        子项自带 `flex-shrink: 1` 会自动收成 82px。
+        实测：内容高 **1362 → 1160（省 202px）**，弹窗高与可滚量
+        都不变（643 / 518）—— 省下的是**真内容**，不是把滚动藏起来。
+
+     ── 事实二：侧栏「一屏只露 6 行」，但原因不是行高 ──
+     侧栏根的 5 个直接子块（实测 y / 高）：
+        [0, 60] logo 头      [64, 48] New Session
+        [124,100] Plugins / Automation tasks
+        [232,347] Workspaces + 树  ← flex:1 1 0%
+        [579,112] Mobile access / Settings
+     树 `盒[8,276,337,303]`，`scrollHeight 1122`，**overflow-y: auto**。
+     ⭐ 树**已经是** `flex: 1 1 0%`，它长不大不是 bug，是
+        chrome 吃掉了 344px。硬顶 303px ⇒ 303/52 ≈ **6 行可见**。
+        ⚠️ 我第一次量出「行间距 52px」并准备去改 gap —— **量错了**：
+           那批 treeitem 混了「项目行」和它**内嵌的会话行**，
+           相邻两个未必是兄弟。改口径（按同一个父分组量）后，
+           组内间距只有 2px、组间 4px，**本来就很密**。
+           **教训：算行距前先确认「相邻两行确实是同父兄弟」。**
+        行高 48 → 44（44dp 是 iOS HIG / Material 都认可的触摸下限，
+        不是随便砍的）⇒ 可见行 6 → **7**，树内容 1122 → 1024。
+
+     ── 误伤与还原 ──
+     `div:has(> button + button + button)` 在 Settings 里命中 **2** 个：
+       容器0 = nav 标签行（General/Models/Built-in plugin/Agent preset）
+       容器1 = 主题卡容器
+     ⚠️ 合并成一条规则后，**标签行按钮也被撑到 62px**
+        （盒从 460×44 变成 283×67）—— 这是我自己在 T1 的 A/B 里
+        当场量到并揪出来的，没等上线才发现。
+        修法：显式给 `[role="dialog"] > nav …` 写**还原规则**。
+        还原后实测标签行 96×44（宽度因 padding 差 4px，无害）。
+
+     ⚠️ 普查过 Add workspace 弹窗：同一选择器**命中数 0**
+        （它的 New folder / Show hidden files / Cancel / Open
+        不是同一个父的 3 个直接 button 子项），**零误伤**。
+     ⚠️ 同理**不能用** DSH 类名（构建期哈希，换版本即失效）。
+
+     ── 实测汇总（359×691 视口 / dpr 3.5）──
+       设置内容高   1362 → 1160   （省 202px，多露出 Work details、
+                                   Show coding view 两节）
+       主题卡       3×258×83 竖排 → 3×82×62 横排分段
+       侧栏可见行   6 → 7 / 20
+       侧栏树高     303 → 303（**没变** —— 见上面「事实二」，
+                     这是已知的未竟项，不在本轮假装解决）
+  */
+  [role="dialog"] div:has(> button + button + button) {
+    flex-wrap: nowrap !important;      /* ⭐ 根因：wrap 把 row 换成了竖排 */
+    gap: 6px !important;
+    align-items: stretch !important;
+  }
+  [role="dialog"] div:has(> button + button + button) > button {
+    flex: 1 1 0 !important;            /* 覆盖原 flex-basis:180px */
+    min-width: 0 !important;
+    height: 62px !important;
+    min-height: 62px !important;
+    padding: 8px 4px !important;
+    gap: 4px !important;
+    flex-direction: column !important; /* 图标在上、标签在下 */
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 12px !important;
+  }
+  [role="dialog"] div:has(> button + button + button) > button svg {
+    width: 20px !important;
+    height: 20px !important;
+  }
+  /* ↓ nav 标签行还原：它同样命中上面那条，必须显式改回去 */
+  [role="dialog"] > nav div:has(> button + button + button) {
+    flex-wrap: nowrap !important;
+    gap: 4px !important;
+  }
+  [role="dialog"] > nav div:has(> button + button + button) > button {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    height: 44px !important;
+    min-height: 44px !important;
+    padding: 0 10px !important;
+    flex-direction: row !important;
+    font-size: inherit !important;
+    gap: 6px !important;
+  }
+  [role="dialog"] > nav div:has(> button + button + button) > button svg {
+    width: 16px !important;
+    height: 16px !important;
+  }
+  /* ↓ 侧栏树：48 → 44（触摸下限），组间 4 → 2，底部内距 16 → 8 */
+  [role="treeitem"] {
+    min-height: 44px !important;
+    height: 44px !important;
+  }
+  [role="tree"] > div {
+    margin-top: 2px !important;
+  }
+  [role="tree"] {
+    padding-bottom: 8px !important;
+  }
+
+  /* B16 · 压侧栏 chrome，把树顶高（第 19 轮）
+     -------------------------------------------------------
+     第 18 轮收尾时留的未竟项：树高只从 303 动到 305，
+     因为**压错了地方**。这一轮先量清楚侧栏的 flex 账，才知道该压谁。
+
+     ── 侧栏根的 5 个直接子块（第 18 轮实测 y/高）──
+        [0,60]   logo 头（内含 2 个 48px 图标按钮）
+        [64,48]  New Session
+        [124,100] Plugins / Automation tasks
+        [232,347] Workspaces + 树      ← flex: 1 1 0%
+        [579,112] Mobile access / Settings
+     树 盒[8,276,337,303]  scrollHeight 1070  overflow-y: auto
+
+     ⭐⭐ **压哪里才有用，和直觉完全相反**：
+        侧栏根是 column flex，块3 是 `flex: 1 1 0%`（吃掉全部余量），
+        块4 是最后一项 `0 0 auto`。所以
+            裁切线 `界` = 视口高 − 块4 高 = 691 − 112 = 579
+        · 压**块1/块2**（在块3 上方）⇒ 块3 原样吃掉省下的空间
+          ⇒ 树**一点不变**。实测：块1 48→44，树高只 303→307。
+        · 压**块4**（在块3 下方）⇒ 界 = 691 − 96 = 595，块3 同时长高
+          ⇒ 树真的长高。实测：块4 112→96，树高 303→**319**。
+        ⇒ **要长高只能压最后一个 flex 项**，压上面的都是白费。
+
+     ── 为什么 319 还不够 ──
+        7 行完整可见需要 7×44 + 6×2(行间距) = **320px**。
+        319 **差 1px**。所以再把顶栏两个图标按钮 48→44 补上这 4px，
+        树高 323 ⇒ 完整可见 **6 → 7 行**。
+        ⇒ 判准用「**完整可见行**」，不是「树盒高」：
+           树 319 和 323 在属性上只差 4px，但 319 仍是 6 行。
+
+     ── 选择器：`nav ~ div:not(:has([role="tree"]))` ──
+        目标：块4。踩了三个坑才选中：
+        ① `div:has(> [role="tree"]) ~ div` —— 合法但**命中 0**。
+           树的直接父是块3 的**唯一**子元素，没有兄弟可取。
+        ② `div:has(> div:has(> [role="tree"])) ~ div` ——
+           **整条非法**（`:has()` 嵌套 + 兄弟组合），
+           `<style>` 会**静默丢弃**整条规则，A/B 看起来像「没效果」。
+           ⚠️ 我一度把它误读成「`~` 要求同父」——两个都沾边，
+              真因是**语法非法**，两者结论不同，别混记。
+        ③ `nav ~ div:not(:has(> div > [role="tree"]))` —— 合法但**命中 2**
+           （没排掉块3：块的子元素的**子元素**才是树）。
+           **这种「恰好没炸」不上线**，收紧为
+        ④ `nav ~ div:not(:has([role="tree"]))` —— **命中 1** ✅
+           排除条件最短也最直观：**凡含树的都不是块4**。
+        ⚠️ 块4 的子元素是 `<DIV>`（**不是 button**），所以用 `> *`。
+
+     ── 配套纪律 ──
+        ⭐ **打开侧栏后必须等布局稳定再量**。本轮开局量到树高
+          **1070px**（自然高），5 秒后再量是 303px（被 flex 压住）。
+          与「换主题必须等稳定」同源，**布局动画没结束就量 = 量到中间态**。
+
+     ── 实测（359×691dp，dpr 3.5）──
+        树高     303 → 323      界 579 → 595
+        完整可见  6/21 → **7/21**      overflow-y 仍是 auto（能滚）
+        块4      112 → 96       块1 48 → 44
+  */
+  nav ~ div:not(:has([role="tree"])) > * {
+    min-height: 48px !important;
+    height: 48px !important;
+  }
+  button[aria-label^="Collapse sidebar"],
+  button[aria-label^="New session"] {
+    min-height: 44px !important;
+    height: 44px !important;
+  }
+
+  /* B17 · 侧栏换皮成「桌面级 / VSCode 质感」（第 20 轮）
+     -------------------------------------------------------
+     用户诉求不是「再挤一点」，是**视觉语言**：
+     不要「传统移动页」，要像 **VSCode 那样精致、美观、桌面级质感**。
+
+     ── 先量清楚「现在长什么样」（359×691dp 实测）──
+       树内**唯一**的填充块：
+         <DIV> «New Session» y504  318×44
+         底 rgba(255,255,255,0.08)  圆角 12px  内距 0 8px
+       它夹在一堆线性条目中间 —— 截图上一眼就是「移动网页」。
+       ⚠️ **VSCode 的 explorer 里没有这种大填充块**。
+     全部树项：44px 高、**圆角 12px**、内距 0 8px、字号 14px、图标 16px
+     时间戳：12px、色 rgb(173,178,184)、数字变体 **normal**（非等宽）
+
+     ── VSCode Explorer 的视觉语言 → 本项目的落地 ──
+       桌面行高 22px；**触屏折中 34px**（见下「取舍」）
+       圆角 12px 药丸 → **4px**（桌面端没有大圆角列表项）
+       选中态 = 左侧 2px 强调条 + 极淡底，不是整块高亮
+       时间戳 = `tabular-nums`（等宽数字）+ 更小更弱
+       导航区 = **没有填充药丸**
+
+     ── ④ 为什么「New Session」药丸必须用 JS 标记 ──
+       它就是普通的 `[role="treeitem"]`，圆角/内距/子元素
+       （SPAN 16×20 + SPAN 文本）与文件夹行、会话行**完全同构**。
+       唯一区别是**文字内容是 "New Session"** —— **CSS 无法匹配文本**。
+       按项目既有约定（`data-qx-wsroot` / `data-qx-rowtitle`）
+       由 custom.js 打 `data-qx-nspill`，CSS 只认这个标记。
+       ⚠️ 别再试图用结构猜（有 svg = 文件夹 / 有 0×0 div = 会话）——
+          第 20 轮试过，New Session 行两者都不满足，而别的行会落进空集。
+
+     ── 取舍：34px 行高 vs 44dp 触摸下限 ──
+       这是**真取舍**，不是「忘了规范」：
+         · iOS HIG 44pt / Material 48dp —— 面向**手指**的舒适下限
+         · VSCode 22px —— 面向**鼠标**的桌面密度
+       本项目是**触屏**，但用户明确要「桌面级质感」。
+       取 **34px**（9.0mm）：
+         · 仍高于 WCAG 2.2 「目标尺寸(最小)」24×24 CSS px
+         · 仍高于 9mm 的最小可点直径
+         · 但**低于** iOS/Material 的舒适下限
+       ⇒ 一级导航（Plugins / Automation / Mobile access / Settings）
+         仍保 **48px**（入口少、点击频率高、必须好按）；
+         只把**树里的次级列表项**收到 34px。
+         实测完整可见行 **7 → 9**。
+
+     ── 实测（359×691dp，dpr 3.5）──
+       树项行高  44 → 34      圆角 12 → 4
+       完整可见  7/20 → **9/20**      overflow-y 仍 auto
+       一级导航  **保持 48px**（未降）
+  */
+  /* 树项：桌面密度 + 细圆角 */
+  [role="treeitem"] {
+    min-height: 34px !important;
+    height: 34px !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    border-radius: 4px !important;
+  }
+  [role="tree"] > div {
+    margin-top: 0 !important;
+  }
+  [role="treeitem"] svg {
+    width: 14px !important;
+    height: 14px !important;
+  }
+  /* 时间戳：等宽数字 + 更小更弱（桌面级的「精致」多半在这里） */
+  [role="treeitem"] span {
+    font-variant-numeric: tabular-nums !important;
+  }
+  /* ⭐ 去药丸：New Session 由 custom.js 打 data-qx-nspill */
+  [data-qx-nspill] {
+    background: transparent !important;
+    border-radius: 4px !important;
+    font-weight: 400 !important;
+    opacity: 0.72 !important;
+  }
+  [data-qx-nspill]:hover,
+  [data-qx-nspill]:focus-visible {
+    opacity: 1 !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+  }
+
+  /* B18 · 导航区与树**统一节奏**（第 20 轮收口）
+     -------------------------------------------------------
+     B17 只把树收紧了，结果树一密集，**导航区反而成了新的「移动页」信号**：
+     上面 44~48px / 22px 大字 / 16px 大图标 / 大留白，下面 34px 细行，
+     上下像**两个产品拼在一起**。桌面级质感的另一半是**全局统一**。
+
+     ⚠️ ④ 这批选择器全部**实测命中数 = 1**，不再靠猜：
+         · 侧栏根 `data-slot`        → 命中 0（**根根本没有 data-slot**）
+         · `div[aria-label="New session"]` → 命中 0（药丸其实是 **button**）
+         · `button[aria-label="New session"]` → **命中 2**（274×44 的 logo 区
+           和 326×44 的大药丸共用同一个 aria-label，分不开）
+       ⇒ 改为 custom.js 打 `data-qx-sb-{logo,primary,panels,tree,footer}`。
+
+     ⚠️ ⑤ 为什么下面几条选择器**写成两遍属性**（`[x][x]`）：
+         本文件里 B16 已有两条 !important 规则会压住它们，实测确认：
+           · `button[aria-label^="New session"]`   特异性 **0,1,1**
+           · `nav ~ div:not(:has([role="tree"])) > *` 特异性 **0,1,2**
+         而 `[data-qx-sb-primary]` 只有 **0,1,0** —— 写了等于没写
+         （症状：`height:36px` 实得 44，且**看不出任何报错**）。
+         重复属性选择器把特异性抬到 **0,2,0**，稳压上面两条，
+         又**不用**写 DSH 的哈希类名。已实测生效。
+
+     ── 桌面节奏收口（实测 359×691dp）──
+       块0 logo 头   60 → 48      块1 大药丸 44 → 40（圆角 12 → 4）
+       块2 Plugins/Automation 48 → 36     块4 底栏 **保持 48**
+       树项 34px     时间戳 tabular-nums
+
+     ── 无障碍取舍（查过 UI 库后定，**不是忘了规范**）──
+       库原文：「iOS 44pt / Android 48dp; **for web use the separate WCAG
+       Target Size rule**」「**Don't treat one unit or minimum as universal**」
+       本项目是 **WebView 里的 web 内容** ⇒ 适用 **WCAG 2.2 AA 24×24 CSS px**，
+       树行 34px（9.0mm）达标；**一级导航仍保 44~48px**（入口少、点击频率高）。
+       另外补上库里的三条（零成本）：
+         · `touch-action: manipulation` —— 去掉 300ms 点击延迟
+         · `:focus-visible` 可见焦点环 —— 键盘可达
+         · `prefers-reduced-motion` —— 关掉过渡
+       hover 过渡统一 180ms（库要求 150~300ms）。
+  */
+  /* 块0 logo 头 60 → 48 */
+  [data-qx-sb-logo][data-qx-sb-logo] {
+    min-height: 48px !important;
+    height: 48px !important;
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+  }
+  [data-qx-sb-logo] > * {
+    min-height: 44px !important;
+    height: 44px !important;
+  }
+  /* 块1 顶部大药丸 44 → 40，圆角 12 → 4 */
+  [data-qx-sb-primary][data-qx-sb-primary] {
+    min-height: 40px !important;
+    height: 40px !important;
+    margin-bottom: 4px !important;
+    border-radius: 4px !important;
+  }
+  [data-qx-sb-primary] span {
+    font-size: 13px !important;
+    font-weight: 500 !important;
+  }
+  /* 块2 Plugins / Automation tasks 48 → 36 */
+  [data-qx-sb-panels] {
+    gap: 2px !important;
+  }
+  [data-qx-sb-panels][data-qx-sb-panels] > * {
+    min-height: 36px !important;
+    height: 36px !important;
+    border-radius: 4px !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+  [data-qx-sb-panels] svg {
+    width: 15px !important;
+    height: 15px !important;
+  }
+  /* 块3 内的 Workspaces 分组标题弱化（桌面端的 section header） */
+  [data-qx-sb-tree] > *:not([role="tree"]) {
+    min-height: 30px !important;
+    height: 30px !important;
+    margin-bottom: 2px !important;
+  }
+  /* 块4 底栏 **保持 48**（拇指区主入口，不降）——只统一圆角与去药丸感 */
+  [data-qx-sb-footer] > * {
+    border-radius: 4px !important;
+  }
+
+  /* ── 无障碍三项（UI 库 Pre-Delivery Checklist）── */
+  [role="treeitem"],
+  [data-qx-sb-panels] > *,
+  [data-qx-sb-footer] > *,
+  [data-qx-sb-primary] {
+    touch-action: manipulation !important;
+    transition: background-color 180ms ease, opacity 180ms ease !important;
+  }
+  /* 焦点环必须可见（库：Focus states visible for keyboard nav） */
+  [role="treeitem"]:focus-visible,
+  [data-qx-sb-panels] > *:focus-visible,
+  [data-qx-sb-footer] > *:focus-visible,
+  [data-qx-sb-primary]:focus-visible {
+    outline: 2px solid currentColor !important;
+    outline-offset: -2px !important;
+    border-radius: 4px !important;
+  }
+  /* 库：prefers-reduced-motion respected */
+  @media (prefers-reduced-motion: reduce) {
+    [role="treeitem"],
+    [data-qx-sb-panels] > *,
+    [data-qx-sb-footer] > *,
+    [data-qx-sb-primary] {
+      transition: none !important;
+    }
+  }
 }

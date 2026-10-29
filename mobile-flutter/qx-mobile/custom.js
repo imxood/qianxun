@@ -418,13 +418,18 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
         }))
       }
 
-      // 2. 上下文占用（>50% 才显示；>65% 转琥珀）
-      if (summary.contextPct !== null && summary.contextPct > 50) {
-        appendHint(row, el('div', {
-          class: 'qx-hint-ctx' + (summary.contextPct > 65 ? ' qx-hint-ctx--hi' : ''),
-          text: '上下文 ' + Math.round(summary.contextPct) + '%',
-        }))
-      }
+      // 2. 上下文占用：**不再插进列表**（用户明确要求）。
+      //    它现在由 composer 工具栏里的「N%」标签承担 ——
+      //    那个标签就在输入框旁边，看上下文是「准备发消息」时的动作；
+      //    而列表是「找会话」时的浏览场景，两边都放是**重复信息**，
+      //    而且列表行只有 48px，塞进去会把标题挤到只剩几十像素。
+      //
+      //    ⚠️ 原来那个标签还写在 `.qx-hint-ctx`，定位是 `position:absolute`
+      //    压在标题右端 —— 实测它与标题**重叠 52px**，
+      //    在 A22 把行宽收回视口内之后糊成一团。
+      //    去掉它同时解决了「重复」和「重叠」两件事。
+      //    保留：`.qx-hint-sparse`（解释「这一行为什么是空的」，别处没有）、
+      //    `.qx-row--pending`（待答是跨会话的状态，列表里需要一眼看到）。
 
       // 3. 待答：只在真的有待答时加（不可知的不加标签 ——
       //    那是「不可知」，不是「待答」；不可知的统计放在侧栏底部）
@@ -432,6 +437,13 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
         row.classList.add('qx-row--pending')
       }
     }
+
+    // 清掉**上一轮**插进去的上下文标签。
+    // ⚠️ 必须每轮清而不是只在插入时清：`state.painted` 让同一行只加工一次，
+    //    热替换之后新 mount 的 painted 是空的，会重插 —— 但老节点还在，
+    //    不清就会出现两个（这是幂等测试当初抓的那一类）。
+    const staleCtx = doc.querySelectorAll('.qx-hint-ctx')
+    for (let s = 0; s < staleCtx.length; s += 1) staleCtx[s].remove()
   }
 
   /**
@@ -683,6 +695,110 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
   }
 
   /**
+   * 给 composer 底部那一行「统计药丸」打标记，交给 A17 重新分配宽度。
+   *
+   * 🔴 为什么需要单独一条：markClippedRows 只标记了**药丸自己**，
+   *    它解决的是药丸**内部**的截断（「缓存命中 98%」被砍成「98」）。
+   *    但药丸**之间**的宽度分配是父行决定的 —— A13 完全没碰过它，
+   *    于是换行后的文字从药丸里溢出去，压到了下一个药丸上
+   *    （实测重叠 36px，截图上「103」与「89.2M tok」糊成一团）。
+   *
+   * ⚠️⚠️ **第一版写错了，而且错得很隐蔽**：只用「横排容器 + 多个被截断
+   *    的药丸」这个启发式，一次标上了 **45 个元素** ——
+   *    转录里每一行 Think / Pwsh / Grep 都满足「横排 + 内部有截断」，
+   *    于是 A17 的 `[data-qx-status] [data-qx-clipped] > *`
+   *    规则会把**整个转录**的排版一起改掉。
+   *
+   *    这类规则一旦错标，症状是「页面整体变得很怪」而不是「某处不对」，
+   *    极难往回找。**教训：标记类启发式必须有一个「只可能在这里出现」的锚。**
+   *
+   * 现在的锚：`[data-slot="conversation.composer.dock"]` —— composer 的底部停靠区，
+   * 语义化、带版本，且只有那一行统计药丸在里面。
+   * 实测祖先链：药丸 → 行 → [slot=conversation.composer.dock]（display:contents）。
+   */
+  /**
+   * 找出 DSH 自己的统计按钮（轮数/步数/tok/缓存/上下文占用）。
+   *
+   * ⚠️⚠️ **这一版不再依赖 `[data-qx-clipped]` 标记**，前两版都在这里栽了：
+   *   v1「药丸的 parentElement 就是行」→ 标到了**药丸按钮**上，
+   *      A17 的「行铺满 / 药丸均分」全打进了药丸内部；
+   *   v2「数直接子级里带 clipped 的」→ 一个都数不到，
+   *      因为带标记的是**孙级 BUTTON**，标记整个消失。
+   *
+   * 根因：markClippedRows 标记的是「**被文字撑破**的元素」，
+   * 而统计行的层级是 DIV[行] → SPAN[药丸壳] → BUTTON[带标记] → SPAN[文字]，
+   * 层级比想的多一层。**依赖另一条启发式的产物，就等于继承它的所有误判。**
+   *
+   * 现在改成**独立判据**：文本里带统计关键词的按钮。
+   * 它不依赖任何别处的标记，也不会随那些标记的实现变化而失效。
+   */
+  const STAT_RE = /turn|step|tok|cache|%|轮|步|命中|用量/i
+
+  function findStatButtons() {
+    const bar = doc.querySelector('[data-slot="conversation.composer.bar"]')
+    if (!bar) return []
+    const out = []
+    for (const b of bar.querySelectorAll('button, [role="button"]')) {
+      // ⚠️⚠️ **必须先排掉我们自己的按钮。**
+      //   它的文字是 `79%`，同样命中 STAT_RE；
+      //   于是它被当成 DSH 的统计按钮，一路把 findStatRow 带到了
+      //   composer 的根 —— B12 就会把**整个输入框**收起来。
+      //   症状是「按钮和输入框一起消失」，看着像页面崩了。
+      //
+      //   **规律：自己造的元素绝不能进入「找 DSH 元素」的判据。**
+      if (b.closest('.qx-status-btn')) continue
+      const r = b.getBoundingClientRect()
+      // ⚠️ **只查宽度，不查高度。**
+      //   状态区是被 `height:0 + visibility:hidden` 收起来的
+      //   （见 custom.css B12：不能用 display:none，否则读不到数），
+      //   它的按钮高度仍然是真实的，但万一 DSH 哪天把行压扁了，
+      //   也不该让我们丢掉唯一的数据源。
+      if (r.width < 1) continue
+      const t = (b.textContent || '').trim()
+      if (!t || !STAT_RE.test(t)) continue
+      out.push(b)
+    }
+    return out
+  }
+
+  /**
+   * 统计区 = composer 根底下、**与输入卡片并列的那个兄弟节点**。
+   *
+   * ⚠️ 前三版都栽在「数统计按钮」上：
+   *   v1 依赖 [data-qx-clipped] 标记 → 标到了药丸按钮上
+   *   v2 数直接子级里带标记的 → 一个都数不到（标记在孙级）
+   *   v3 数「直辖 ≥2 个统计按钮的祖先」→ 一旦 B12 把药丸藏起来，
+   *      它们 `getBoundingClientRect()` 变成 0×0 被过滤掉，
+   *      计数随之变化，标记**跟着漂移** —— 实测药丸藏了、79% 圆环留在屏幕底部。
+   *
+   * 根因：**判据依赖了自己隐藏掉的那个元素**。隐藏是单向不可逆的，
+   * 任何「数一数还剩几个」的判据在隐藏之后都会自己失效。
+   *
+   * 现在改成**位置判据**：从统计按钮往上走，走到「它的父节点里已经有输入区、
+   * 而它自己没有」为止 —— 那就是统计区。
+   * 这个判据只看结构、不看数量，隐藏前后都成立。
+   */
+  function findStatRow() {
+    for (const b of findStatButtons()) {
+      let n = b
+      for (let i = 0; i < 6 && n && n.parentElement; i += 1, n = n.parentElement) {
+        const p = n.parentElement
+        if (!p.querySelector('[data-slot="conversation.input.left"]')) continue
+        if (n.querySelector('[data-slot="conversation.input.left"]')) return null  // 它自己就是输入区
+        return n
+      }
+    }
+    return null
+  }
+
+  function markStatusRow() {
+    const row = findStatRow()
+    if (!row) return 0
+    row.setAttribute('data-qx-status', '1')
+    return 1
+  }
+
+  /**
    * 标记「太矮的块级可点元素」，交给 CSS 补到 40px 高。
    *
    * 实测（359dp）：转录里的审批/提问选项只有 23px 高、283px 宽 ——
@@ -696,6 +812,63 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
    *      2. 宽度 > 视口的 55%（行内链接不会占这么宽）
    *      3. 高度在 12–32px 之间（低于 12 的是图标碎片，高于 32 的本来就够）
    */
+  // ── 第 10 轮：Trajectory 页左侧的「请求标记」是 16×16 ────────────
+  //
+  // 实测（359dp 视口）：
+  //   BUTTON  16×16   透明背景、无子元素、无边框
+  //     ::before   5×5 灰点  ← 唯一可见的东西
+  //     ::after   "Request #1" 54×12  白底  ← 悬停标签
+  //   一共 14 个，纵向相邻间距 60–106px（最小 60）。
+  //
+  // 16px 在手机上**永远点不准**，而它是「跳转到某次请求」的唯一入口。
+  //
+  // 为什么按钮本身放大是安全的：**圆点是 ::before 伪元素，不是子元素** ——
+  // 按钮自身完全透明，放大只会让热区变大，那个 5px 的点不动。
+  //
+  // 用**对称负边距**把布局盒子拉回原尺寸，所以：
+  //   · 行高不变（TR 仍 30px），滚动条长度不变
+  //   · 圆点仍在原来的位置
+  //   · 热区 16 → 44，且 44 < 60 的最小间距，装得下不重叠
+  //
+  // ⚠️ 判据写成「尺寸 + 无子元素 + 透明背景」，**不碰 DSH 的类名**：
+  //    它是 `Y0dWHa_requestBoundaryControl`，哈希前缀每次构建都变。
+  function widenDotTaps(session) {
+    for (const el of session.querySelectorAll('button, [role="button"]')) {
+      const r = el.getBoundingClientRect()
+      // 只管「两个方向都 ≤20 的小方块」，且**没有子元素**（有子元素的
+      // 是真按钮，缩小它会丢内容，不属于这一类）
+      if (r.width > 20 || r.height > 20) continue
+      if (el.children.length) continue
+      const cs = win.getComputedStyle(el)
+      // 透明背景才认 —— 有背景色的小块可能是色块本身（不该拉大）。
+      // `transparent` 关键字和 rgba(...,0) 都算透明：
+      // 规范上浏览器会归一化成 rgba(0,0,0,0)，但个别引擎会原样返回关键字，
+      // 一行判断就能兜住，不值得为它冒「一个标记全都不动」的风险。
+      const bg = cs.backgroundColor
+      if (bg && bg !== 'transparent') {
+        const m = /rgba?\(([^)]+)\)/.exec(bg)
+        if (m) {
+          const parts = m[1].split(',')
+          const alpha = parseFloat((parts[3] !== undefined ? parts[3] : '1').trim())
+          if (alpha > 0.02) continue
+        } else {
+          continue                                   // 认不出的颜色一律不动
+        }
+      }
+
+      el.setAttribute('data-qx-dot-tap', '1')
+      el.style.setProperty('min-width', '44px', 'important')
+      el.style.setProperty('min-height', '44px', 'important')
+      // 对称负边距：44 - w，两侧各退一半 → 布局盒子回到 w
+      const dx = (44 - r.width) / 2
+      const dy = (44 - r.height) / 2
+      el.style.setProperty('margin-left', (-dx) + 'px', 'important')
+      el.style.setProperty('margin-right', (-dx) + 'px', 'important')
+      el.style.setProperty('margin-top', (-dy) + 'px', 'important')
+      el.style.setProperty('margin-bottom', (-dy) + 'px', 'important')
+    }
+  }
+
   function markShortTapRows() {
     const vw = win.innerWidth
     for (const el of doc.querySelectorAll('button, [role="button"], [role="option"], a')) {
@@ -729,6 +902,27 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
         const p = el.parentElement
         const ph = p ? p.getBoundingClientRect().height : 0
         if (ph && Math.abs(ph - r.height) <= 3) wideEnough = true
+        // ── 第 10 轮新增：工具条里的矮按钮 ──────────────────────────
+        // Trajectory 页顶栏实测：
+        //   DIV  容器 185×44（本来就 44 高）
+        //   └ BUTTON "Collapse turns"  55×20   ← 只有 20 高，一半都不够
+        //   └ BUTTON "Collapse calls" 51×20
+        //
+        // 原来的两条判据都匹配不上：宽度 55 < 0.45×359=162；
+        // 父容器 44 与自身 20 相差 24 > 3。
+        //
+        // 补的判据：**父容器是 flex 行，且高度在 [自身高度, 60] 之间** ——
+        // 即「父行就是一条工具条，它为别的按钮已经留够了 44 的空间」。
+        // 上限 60 是必须的：正文段落、整块卡片父容器都远大于 60，
+        // 不设上限就会把它们整段撑成 44 一行。
+        //
+        // ⚠️ 这一条**完全不用 DSH 的类名**：轨迹页的根节点没有 data-slot，
+        //    而 CSS-module 的类名带构建期哈希前缀，靠它定位迟早失效。
+        //    结构判据跨版本稳定，类名不。
+        else if (ph && ph >= r.height && ph <= 60) {
+          const pcs = win.getComputedStyle(p)
+          if (pcs.display === 'flex' || pcs.display === 'inline-flex') wideEnough = true
+        }
       }
       if (!wideEnough) continue
       if (r.height >= 44) continue
@@ -736,22 +930,513 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
       el.style.setProperty('min-height', '44px', 'important')
     }
 
-    // 消息下方那排图标按钮（复制/重试/…）实测只有 24–27px 宽，
-    // 但它们**间距只有 40px** —— 补到 44 会互相重叠，
-    // 那是把「点不准」换成「点错地方」。所以取不重叠的 32×40。
+    // ⚠️ 下面这段注释描述的是**一个已经被推翻的结论**，留着当反面教材：
     //
-    // ⚠️ 宽度 < 8 的要跳过：实测有个 `R_Yw7q_frame` 是 1×44 的按钮，
-    //    那是 DSH 的分隔/占位元素，不是可点的控件。
+    //   「消息下方那排图标按钮（复制/重试/…）实测只有 24–27px 宽，
+    //    但它们**间距只有 40px** —— 补到 44 会互相重叠，
+    //    那是把「点不准」换成「点错地方」。所以取不重叠的 32×40。」
+    //
+    // 错在**把行内间距当成了可用宽度**。行距 8px、视口 359、
+    // 一行只占 200 —— 补到 44 之后仍然只占 252，空得很。
+    // 而「32×40 会不会重叠」这件事，**本来量一下就知道，不该推断**。
+    //
+    // ⚠️ 宽度 < 8 的要分两种（第一版把这里写反过，
+    //    `if (r.width >= 8) continue` 会连 8…32 那一档一起跳过，
+    //    结果触控过小从 6 个涨到 39 个 —— 分支顺序必须是「从小到大」）：
+    //    (a) 里面装着 <img> 的 —— 那不是占位，是**塌掉的缩略图**，要救
+    //    (b) 纯分隔/占位元素 —— 跳过
     const session = doc.querySelector('[data-slot="conversation.session"]')
     if (!session) return
+    widenDotTaps(session)
     for (const el of session.querySelectorAll('button')) {
       const r = el.getBoundingClientRect()
-      if (r.width < 8 || r.width >= 32) continue
       if (r.height < 20) continue
+      if (r.width < 8) {
+        // 🔴 实测（359dp）：转录里两张图片缩略图的按钮是 **1×44**，
+        //   里面的 <img> 是 **0×43** —— 但它 `cursor:zoom-in`、
+        //   有 onclick、tabIndex=0，是**真的能点的控件**。
+        //   起因是那些 PNG 本身就是 1×1，DSH 按自然尺寸渲染就成了 1px。
+        //   内容是 1×1 是事实，但**按钮只有 1px 宽就是缺陷**：
+        //   手机上根本点不中，「点开看原图」这条路等于不存在。
+        //   给一个最小可点尺寸，图片用 object-fit:contain 保持比例。
+        if (el.querySelector('img')) {
+          el.setAttribute('data-qx-thin-media', '1')
+          el.style.setProperty('min-width', '44px', 'important')
+          el.style.setProperty('min-height', '44px', 'important')
+        }
+        continue                                  // (b) 纯占位，跳过
+      }
+      // 🔴 上一轮我在这里写的是「间距只有 40px，补到 44 会互相重叠」，
+      //   于是压到 32×40。**那个理由从一开始就是错的** ——
+      //   我拿「行内间距」当成了「可用宽度」，而真正该问的是「这一行占了视口多少」。
+      //
+      //   实测（359dp 视口，第 9 轮重新量）：
+      //     行 y=520  5 个按钮，x 26→226，**行宽只有 200**，右边空着 133px
+      //     补到 44 是 5×44 + 4×8 = 252，落在 26→278 —— **装得下**
+      //     另一行（Wrap lines / Copy）右对齐在 234→302，加宽后 222→314 —— 也装得下
+      //
+      // ⚠️ 走 setProperty 而非 CSS 规则的原因（实测踩到）：
+      //   这些按钮的 `min-width` 本身就是**行内 style 上的 !important**
+      //   （上一轮我自己写进去的），而行内 !important 在层叠里
+      //   **高于任何样式表规则** —— 哪怕选择器特异性再高、哪怕也带 !important。
+      //   实测：把规则插进真表里，盒子纹丝不动；只有再写一次行内才动。
+      //   所以 custom.css 的 A24 只是兜底，真正让它生效的是这里。
+      // ⚠️ 这里的门槛**必须是目标值 44，不能是旧值 32**。
+      //   写成 `>= 32` 时有个隐蔽的死角：按钮一旦被设成 32，
+      //   下一轮扫描量到 32 就不再匹配 → 永远升不上去，
+      //   **卡死在 32**。实测就是这样：明明目标已经是 44，
+      //   页面上的按钮却一直停在 32，而且每次扫描都「跑过了」。
+      //   按目标值判定天然幂等、且能把旧版留下的 32 一起救回来。
+      if (r.width >= 44) continue
       el.setAttribute('data-qx-narrow-tap', '1')
-      el.style.setProperty('min-width', '32px', 'important')
-      el.style.setProperty('min-height', '40px', 'important')
+      el.style.setProperty('min-width', '44px', 'important')
+      el.style.setProperty('min-height', '44px', 'important')
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 状态条 → 工具栏里的一个按钮 + 点击弹层
+  // ══════════════════════════════════════════════════════════════════
+
+  /**
+   * 找出 composer 工具栏那一层横排容器 —— **按行为找，不写死层级**。
+   *
+   * 实测（359dp）工具栏里所有 `[data-slot="conversation.input.*"]`
+   * 都是 `display:contents`，真正参与排版的是它们的父包装盒：
+   *     DIV[16,531,320,108]  ← 工具栏行（我们按宽度 + 含左右两组来认它）
+   *       ├ DIV[24,561,92,44]   [slot=input.left]   「+」+ 权限
+   *       ├ DIV[186,561,46,44]  [slot=input.model]  模型
+   *       ├ DIV[240,561,40,44]  [slot=input.activity] 麦克风
+   *       └ 发送
+   *   中间 116…186 有 **70px 空档** —— 状态按钮正好放这儿。
+   *
+   * 为什么必须「找」而不是直接 `document.querySelector` 某个 data-slot：
+   *   工具栏行**没有自己的 slot**，而 left/right 都是 contents（盒模型为 0×0），
+   *   直接拿它们的 parentElement 拿到的是「左组」不是「行」。
+   */
+  function findToolbarRow() {
+    const left = doc.querySelector('[data-slot="conversation.input.left"]')
+    if (!left) return null
+    let node = left.parentElement
+    for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) {
+      const cs = win.getComputedStyle(node)
+      if (cs.display !== 'flex' || cs.flexDirection.indexOf('row') !== 0) continue
+      const r = node.getBoundingClientRect()
+      if (r.width < win.innerWidth * 0.7) continue
+      if (!node.querySelector('[data-slot="conversation.input.right"]')) continue
+      // 打标记，让 CSS 据此微调间距 ——
+      // ⚠️ 不要试图用 CSS 选择器找这一层：`input.left` 在里面是**孙级**
+      //    （行 → tools → left），写 `div:has(> [slot=input.left])` 一条都不命中。
+      //    层级会变，标记不会。
+      node.setAttribute('data-qx-toolbar', '1')
+      return node
+    }
+    return null
+  }
+
+  /**
+   * 从 DSH 自己的状态行里读出全部统计字段。
+   *
+   * ⚠️ **只读不删**：状态行里每一个字段（轮数 / 步数 / tok/s / 总 tok /
+   *    缓存命中率 / 上下文占用）都要原样带进弹层。
+   *    把它们收进按钮只改变**呈现位置**，不删任何信息 ——
+   *    这是 P1「不改 DSH 的内容」在本轮的具体落法。
+   *
+   * 读不到就返回空数组，弹层会显示「暂无统计」而不是空白。
+   */
+  function readStats() {
+    const seen = {}
+    const out = []
+    for (const node of findStatButtons()) {
+      const parts = [...node.childNodes]
+        .map((c) => (c.textContent || '').trim())
+        .filter(Boolean)
+      const text = (node.getAttribute('aria-label') || parts.join(' ') || node.textContent || '')
+        .trim()
+      if (!text) continue
+      const key = text.replace(/\s+/g, ' ')
+      if (seen[key]) continue
+      seen[key] = 1
+      out.push(key)
+    }
+    return out
+  }
+
+  /** 弹层：把全部统计字段列出来。 */
+  function openStatusSheet() {
+    for (const old of doc.querySelectorAll('[data-qx-statussheet]')) old.remove()
+    const stats = readStats()
+    const rows = stats.length
+      ? stats.map((text) => el('div', { class: 'qx-stat-row' }, [
+        el('span', { class: 'qx-stat-text', text }),
+      ]))
+      : [el('div', { class: 'qx-stat-row qx-stat-row--empty', text: '本会话暂无统计' })]
+
+    const sheet = el('div', { class: 'qx-sheet qx-stat-sheet', 'data-qx-sheet': '', 'data-qx-statussheet': '' }, [
+      el('div', { class: 'qx-sheet-grab' }),
+      el('div', { class: 'qx-sheet-head' }, [
+        el('span', { class: 'qx-sheet-title', text: '会话统计' }),
+        el('button', {
+          class: 'qx-sheet-x', type: 'button', text: '✕', 'aria-label': '关闭',
+          onclick: () => sheet.remove(),
+        }),
+      ]),
+      el('div', { class: 'qx-stat-list' }, rows),
+    ])
+    doc.body.appendChild(sheet)
+    // 点背景关闭：手机上比找那个 ✕ 顺手
+    sheet.addEventListener('click', (event) => {
+      if (event.target === sheet) sheet.remove()
+    })
+  }
+
+  /**
+   * 在工具栏中间装一个状态按钮。
+   *
+   * 为什么按钮上只放一个数：**上下文占用**。
+   * 实测它是那一堆里唯一「会随时间逼近上限」的量（79%），
+   * 也是用户真正会盯着看的；轮数/步数/tok 是「跑完了才知道」的历史值，
+   * 放在弹层里不影响使用。
+   */
+  function installStatusButton() {
+    const row = findToolbarRow()
+    if (!row) return false
+    if (row.querySelector('.qx-status-btn')) return true
+
+    const rightSlot = row.querySelector('[data-slot="conversation.input.right"]')
+    const rightGroup = rightSlot && rightSlot.parentElement
+
+    const btn = el('button', {
+      class: 'qx-status-btn', type: 'button',
+      'aria-label': '查看会话统计', title: '会话统计',
+    })
+    btn.appendChild(el('b', { class: 'qx-status-val', text: '—' }))
+    btn.addEventListener('click', openStatusSheet)
+
+    // ⚠️⚠️ **插在「发送」之前，不要当行的最后一个子元素。**
+    //   实测：appendChild 会让它落在发送键**右边**（实测 x=287，而发送在
+    //   233…281）——「发消息」旁边挂一个「上下文 79%」的读数，
+    //   语义上是干扰；而放在发送键**左边**才是「辅助信息、主操作在右」
+    //   （iOS / Material 的通用排法）。
+    //
+    //   另外 ⚠️ 这一行的 flex 分配是按「恰好两个子元素」调的：
+    //   trailing 带 flex-grow，**多出第三个子元素**时它会把剩余空间全吃掉
+    //   （实测 142 → 233），而 tools 可收缩（92 → **5px**，「+」被压没）。
+    //   所以药丸必须待在 tools 与 trailing **之间**：
+    //   实测 92 + 41 + 142 + 2×6 = 287 ≤ 304，整排稳在一行。
+    const anchor = [...row.children].find((k) => k !== rightGroup
+      && k.querySelector('[data-slot="conversation.input.model"]'))
+    if (anchor) row.insertBefore(btn, anchor)
+    else if (rightGroup && rightGroup.parentElement === row) row.insertBefore(btn, rightGroup)
+    else row.appendChild(btn)
+
+    syncStatusButton()
+    return true
+  }
+
+  /**
+   * 「计划编辑器」在场时给工具栏打 `data-qx-plan`，CSS 据此放开行高。
+   *
+   * 为什么需要它：custom.css B13 把工具栏行**写死 52px**
+   * （这一行内容就是 44px + 8px padding，写死能白拿回 92px 正文高度），
+   * 但计划编辑器展开时需要更多高度，否则会被切掉。
+   *
+   * 判据用「有尺寸」而不是「有子节点」：该槽位是 `display:contents`，
+   * 即使空着也会在 DOM 里存在 —— 按子节点判会永远命中。
+   */
+  function syncPlanSlot() {
+    const row = findToolbarRow()
+    if (!row) return
+    const plan = doc.querySelector('[data-slot="conversation.input.plan"]')
+    let on = false
+    if (plan) {
+      const r = plan.getBoundingClientRect()
+      const cs = win.getComputedStyle(plan)
+      on = cs.display !== 'none' && cs.visibility !== 'hidden'
+        && (r.height > 1 || r.width > 1)
+      if (!on) {
+        // contents 槽自己没盒子，就看它里面有没有可见内容
+        on = [...plan.children].some((c) => {
+          const cr = c.getBoundingClientRect()
+          return cr.height > 1 && cr.width > 1
+        })
+      }
+    }
+    if (on) row.setAttribute('data-qx-plan', '1')
+    else row.removeAttribute('data-qx-plan')
+  }
+
+  /**
+   * 把上下文占用从 DSH 自己的状态行里抠出来，显示到按钮上。
+   *
+   * 实测那一行里有一个 `79%` 的圆环按钮，aria-label 是空的，
+   * 只能靠「文本形如 n%」这个**行为**认 —— 这正是 §4.3 说的
+   * 「class 不可用但结构不稳时，按行为找元素」。
+   */
+  function syncStatusButton() {
+    const btn = doc.querySelector('.qx-status-btn')
+    if (!btn) return
+    let pct = null
+    for (const node of findStatButtons()) {
+      const t = (node.textContent || '').trim()
+      // ⚠️ 只要**整段文字就是一个百分数**的那个按钮。
+      //    实测踩过：宽泛地找 `/(\d+)%/` 会先撞上
+      //    「89.2M tok · Cache hit **98%**」——那是**缓存命中率**，
+      //    拿它当「上下文占用」显示，数字大得吓人，而且含义完全错。
+      //    上下文占用那个按钮的文字**只有** `79%`（旁边是个圆环），
+      //    所以「整段就是一个百分数」才是能区分二者的判据。
+      const m = /^(\d{1,3})\s*%$/.exec(t)
+      if (m) { pct = parseInt(m[1], 10); break }
+    }
+    const val = btn.querySelector('.qx-status-val')
+    if (!val) return
+    if (pct === null) {
+      btn.setAttribute('data-qx-empty', '1')
+      val.textContent = '—'
+      btn.setAttribute('aria-label', '会话统计')
+      return
+    }
+    btn.removeAttribute('data-qx-empty')
+    val.textContent = pct + '%'
+    btn.setAttribute('aria-label', '会话统计，上下文已用 ' + pct + '%')
+    // 圆环的进度用 CSS 变量传过去（conic-gradient 读它）
+    btn.style.setProperty('--qx-p', String(pct))
+    // 越满越要显眼：60% 起变色，85% 起用警示色
+    btn.setAttribute('data-qx-level', pct >= 85 ? 'high' : (pct >= 60 ? 'mid' : 'low'))
+  }
+
+  /**
+   * 给侧栏里「工作区 / 会话」分区根打标记，交给 CSS 强制单列堆叠。
+   *
+   * 🔴 真机实测（359×691 与 359×789 都复现）：
+   *     root        [12,238,347,335]  display:flex  **column**  wrap:wrap
+   *       ├ sectionHeader [12,240,213,36]   「Workspaces」+ 搜索/筛选/添加
+   *       └ listArea      [217,238,245,622]  会话列表
+   *
+   *   列表被推到 **x=217**（右边缘 462，视口只有 359）——
+   *   屏幕上就是 `egui_hikvision_ap` / `补充命令输入文件` 这样被切掉。
+   *
+   * 成因：`column + wrap` 的 flex，**换行是往右边换一列**。
+   * 两个子元素高度 36 + 622 = 658 > 容器 335，于是 listArea 被放到了第二列。
+   * DSH 在宽侧栏上这么写没问题，在 359dp 上就把主内容推出屏幕了。
+   *
+   * ⚠️ 为什么用 `grid` 而不是把 `flex-direction` 改成 `row`：
+   *   `row + wrap` 实测也能摆对（maxRight 241），但它是**靠内容超高触发换行**
+   *   才换到下一行的 —— 视口一高（真机 789dp）就可能不换行、重新并排。
+   *   「单列 grid」是**无条件**堆叠，不依赖任何测量值。
+   *
+   * 判据按**行为**找，不写 class：侧栏里「至少两个孩子、且至少一个孩子里装着
+   * 会话行、且自己横跨大部分视口」的最内层容器。
+   * 从会话行往上走，取**第一个**合格的 —— 天然就是最内层那个。
+   */
+  function markWorkspaceRoot() {
+    const side = doc.querySelector('[data-slot="sidebar"]')
+    if (!side) return 0
+    let marked = 0
+    for (const row of side.querySelectorAll('[data-row-key]')) {
+      // ⚠️⚠️ **必须取「最外层」合格祖先，而不是第一个。**
+      //   实测链条（从行往上）：
+      //     i0 _root_38jqx_3       [221,…]  行
+      //     i1 bhn1Oq_groupSection [221,…]  ← 第一个合格的，**改它没用**
+      //     i2 bhn1Oq_list        [217,…]  第二个合格的
+      //     i3 bhn1Oq_treeBody    [221,…]  ← 偏移从这里开始
+      //     i4 bhn1Oq_listArea    [217,…]  ← **真正的病根**
+      //   取第一个 → 标记落在 groupSection 上，偏移一点没动；
+      //   截图上「看着好了」是因为那次结构层级不同，属于**碰巧**。
+      //
+      //   正确做法：把整条链上**所有**合格的都标上
+      //   （grid 单列对中间层无害，对根层才是修复）。
+      let n = row.parentElement
+      for (let i = 0; i < 6 && n && side.contains(n); i += 1, n = n.parentElement) {
+        let direct = 0
+        for (const c of n.children) if (c.querySelector('[data-row-key]')) direct += 1
+        if (direct < 1 || n.children.length < 2) continue
+        const r = n.getBoundingClientRect()
+        if (r.width < win.innerWidth * 0.7) continue
+        if (!n.hasAttribute('data-qx-wsroot')) {
+          n.setAttribute('data-qx-wsroot', '1')
+          marked += 1
+        }
+      }
+    }
+    return marked
+  }
+
+  /**
+   * 标记侧栏行里「那一段标题文字」。
+   *
+   * 🔴 A22 把行宽从 376 压到 323（回到视口内）之后暴露出来的后果：
+   *     行  [12,434,323,48]  display:flex  row
+   *       ├ slot [20,434, 16,20]
+   *       ├ title[24,454,320,20]   ← 320 宽，**换行到了第二排**
+   *       ├ time [20,474, 16,20]   ← 被挤到第三排
+   *       └ ctx  [256,449, 72,17]  ← 与标题**重叠成一团**
+   *     16 + 320 + 14 = 350 > 323 → 整行折成三行，48px 的行装不下。
+   *     截图上表现为：长标题冲出卡片圆角、时间掉到下一行、
+   *     标题和「上下文 51%」糊在一起。
+   *
+   * 修法是**给标题收缩能力**（`min-width:0` + 省略号）并锁死行不换行。
+   *
+   * ⚠️ 为什么用行为找而不是「第几个子元素」：
+   *   实测子元素顺序是 slot / title / time / rowActions / 我们插的提示条，
+   *   顺序会随 DSH 版本变；而「文字最多的那个非我们元素」是稳定的语义。
+   *   §5.3 早就说过：写死「第几个子级是什么」会散架。
+   */
+  function markRowTitle() {
+    const side = doc.querySelector('[data-slot="sidebar"]')
+    if (!side) return 0
+    let marked = 0
+    for (const row of side.querySelectorAll('[data-row-key]')) {
+      let best = null
+      let bestLen = 0
+      for (const k of row.children) {
+        if (k.classList && (k.classList.contains('qx-hint-sparse')
+          || k.classList.contains('qx-hint-ctx'))) continue
+        const t = (k.textContent || '').trim()
+        if (t.length <= bestLen) continue
+        best = k
+        bestLen = t.length
+      }
+      if (!best || bestLen < 2) continue
+      if (!best.hasAttribute('data-qx-rowtitle')) marked += 1
+      best.setAttribute('data-qx-rowtitle', '1')
+    }
+    return marked
+  }
+
+  /**
+   * 标记侧栏树里的「New Session」填充药丸 → `data-qx-nspill`
+   *
+   * 🔴 第 20 轮：这是整个侧栏**最像移动网页**的一个元素。
+   *     实测 `[role="tree"]` 内**唯一**的填充块：
+   *       <DIV> «New Session»  y504  318×44
+   *       底 rgba(255, 255, 255, 0.08)   圆角 12px   内距 0 8px
+   *     它夹在一堆线性条目中间，截图上一眼就是「传统移动页」。
+   *     VSCode 的 explorer 里**没有**这种大填充块。
+   *
+   * ⚠️ 为什么 CSS 选不出来（这轮踩过）：
+   *     它就是一个普通的 `[role="treeitem"]`，圆角/内距/子元素
+   *     和文件夹行、会话行**完全同构**（SPAN 16×20 + SPAN 文本）。
+   *     唯一的区别是**文字是「New Session」**——CSS 无法匹配文本。
+   *     试过按结构猜（有 svg = 文件夹 / 有 0×0 div = 会话），
+   *     结果 New Session 行**两者都不满足**，但还有别的行也落入空集。
+   *     ⇒ 按项目既有约定，**用 JS 打标记**（同 `data-qx-wsroot` /
+   *       `data-qx-rowtitle`），CSS 只认 `[data-qx-nspill]`。
+   *
+   * 只**标记**，不移动、不删除、不改结构（AGENTS 契约：定制层不做 DOM 增删移动）。
+   */
+  function markNewSessionPill() {
+    let marked = 0
+    const trees = doc.querySelectorAll('[role="tree"]')
+    for (const tree of trees) {
+      for (const item of tree.querySelectorAll('[role="treeitem"]')) {
+        const t = (item.textContent || '').replace(/\s+/g, ' ').trim()
+        // 精确匹配，避免把标题里含 "new session" 的真实会话误伤
+        if (t !== 'New Session' && t !== '新建会话') continue
+        if (!item.hasAttribute('data-qx-nspill')) {
+          item.setAttribute('data-qx-nspill', '1')
+          marked += 1
+        }
+      }
+    }
+    return marked
+  }
+
+  /**
+   * 标记侧栏根的 5 个直接子块（第 20 轮 B18 换皮用）。
+   *
+   * 🔴 为什么不能再用 CSS 选择器考古（这轮已经栽了三次）：
+   *     ① `[data-slot="sidebar"]`   → 命中 0，**侧栏根根本没有 data-slot**
+   *     ② `div[aria-label="New session"]` → 命中 0
+   *        顶部那个大药丸其实是 **`<button>`** 不是 div
+   *     ③ `button[aria-label="New session"]` → **命中 2**
+   *        274×44（logo 区的「新会话」入口）**和** 326×44（顶部大药丸）
+   *        —— 同一个 aria-label 两个元素，靠选择器分不开
+   *
+   * ⇒ 一次把 5 块全标好，CSS 只认 `data-qx-sb-*`，不再猜。
+   *
+   * 块位（自上而下，实测 359×691dp）：
+   *   sb-logo     60   含 Collapse sidebar 图标按钮
+   *   sb-primary  44   顶部大药丸「New Session」326×44 圆角12
+   *   sb-panels  100   Plugins / Automation tasks 两个 48 按钮
+   *   sb-tree    367   Workspaces + 树（flex:1 1 0%）
+   *   sb-footer   96   Mobile access / Settings
+   */
+  function markSidebarBlocks() {
+    let marked = 0
+    const 树 = doc.querySelector('[role="tree"]')
+    if (!树 || !树.getBoundingClientRect().width) return 0
+    // 往上走到侧栏根：从树起第 4 层是根（实测 L0..L6）
+    let 根 = 树
+    for (let i = 0; i < 6 && 根.parentElement; i += 1) 根 = 根.parentElement
+    for (const 块 of 根.children) {
+      if (块.getBoundingClientRect().width <= 0) continue
+      // ⚠️ 必须 **自身或后代** 都查 —— 顶部那个大药丸**本身就是**
+        //    `<button aria-label="New session">`，不是「装着 button 的容器」。
+        //    只用 querySelector（只搜后代）会把块1 整块漏掉，
+        //    症状是 `data-qx-sb-primary` MISSING，而其它 4 块都正常。
+      const 有 = sel => 块.matches(sel) || !!块.querySelector(sel)
+      let 名 = ''
+      if (有('[role="tree"]')) 名 = 'tree'
+      else if (有('[data-slot="sidebar.settings"]')) 名 = 'footer'
+      else if (有('button[aria-label="Collapse sidebar"]')) 名 = 'logo'
+      else if (有('button[aria-label="Plugins"], button[aria-label="Automation tasks"]')) 名 = 'panels'
+      else if (有('button[aria-label="New session"]')) 名 = 'primary'
+      if (!名) continue
+      for (const 旧 of ['logo', 'primary', 'panels', 'tree', 'footer']) {
+        块.removeAttribute('data-qx-sb-' + 旧)
+      }
+      if (!块.hasAttribute('data-qx-sb-' + 名)) marked += 1
+      块.setAttribute('data-qx-sb-' + 名, '1')
+    }
+    return marked
+  }
+
+  /**
+   * 摘掉侧栏上 DSH 自己写的内联 `min-height: 44px !important`（B18 换皮的必要前提）。
+   *
+   * 🔴🔴 本项目最贵的一条 CSS 教训（第 20 轮实测踩穿）：
+   *
+   *   `hHd-Xa_newSession`（顶部大药丸）与 `hHd-Xa_panelRow`（Plugins /
+   *   Automation tasks）上带着**内联** `min-height: 44px !important`。
+   *   它**不是 custom.js 写的**（全项目 4 处 `min-height` 内联都在
+   *   会话区 / 点触点修复 / 细图按钮里，够不到侧栏），**是 DSH 运行时自己写的**。
+   *
+   *   ⇒ CSS **永远压不过它**。实测阶梯：
+   *       `[data-qx-sb-primary]{min-height:33px!important}`            → 44
+   *       `[data-qx-sb-primary][data-qx-sb-primary]{…!important}`      → 44
+   *       再叠 `button[...]` / 三重属性 / 放到最后                        → **还是 44**
+   *       只有 `el.style.setProperty('min-height','40px','important')`  → 40 ✅
+   *
+   *   原因：**内联 `!important` 排在作者样式表 `!important` 之上**，
+   *   且这一层**与选择器特异性无关** —— 叠多少遍 `[x][x]` 都一样。
+   *
+   *   ⚠️ 反过来也解释了第 19 轮的一个**假成功**：
+   *   B16「把侧栏底栏压到 48」当时真的生效了 —— 但那是因为 **48
+   *   恰好等于内联值**，不是 B16 压过了谁。现在改成 40 立刻打回原形。
+   *   ⇒ **别把「值恰好相同」当成「规则生效了」。**
+   *
+   * 做法：标记时把这条内联摘掉，尺寸改由 CSS 的 `data-qx-sb-*` 规则接管。
+   * 清理函数里 `marks` 已包含 sb-*，会再 `removeProperty` 一次，幂等。
+   */
+  function relaxSidebarInlineHeights() {
+    let n = 0
+    const 目标 = []
+    const p = doc.querySelector('[data-qx-sb-primary]')
+    if (p) 目标.push(p, ...p.querySelectorAll('*'))
+    for (const k of ['panels', 'footer', 'logo']) {
+      const b = doc.querySelector('[data-qx-sb-' + k + ']')
+      if (b) 目标.push(b, ...b.querySelectorAll('*'))
+    }
+    for (const el of 目标) {
+      const v = el.style && el.style.getPropertyPriority
+        && el.style.getPropertyValue('min-height')
+      if (!v) continue
+      if (el.style.getPropertyPriority('min-height') !== 'important') continue
+      el.style.removeProperty('min-height')
+      n += 1
+    }
+    return n
   }
 
   /**
@@ -807,9 +1492,20 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     slot.appendChild(btn)
 
     // 视口从窄变宽（比如折叠屏展开 / 横屏）时把按钮撤掉，交还给 rail
+    //
+    // ⚠️ **重新查一次 slot，不能用闭包里那个 `slot`**：
+    //   DSH 换会话 / 重渲染顶栏时会整块替换掉 leading 槽，
+    //   闭包里存的是**已经被换掉的旧节点**。往它上面 append 等于
+    //   把按钮挂在一个游离的树上 —— 界面上看不到，但 `querySelector`
+    //   还查得到，于是看起来「按钮还在，就是不出现」。
     const watch = () => {
-      if (win.innerWidth > NARROW && btn.parentNode) btn.remove()
-      else if (win.innerWidth <= NARROW && !btn.parentNode) slot.appendChild(btn)
+      if (win.innerWidth > NARROW) {
+        if (btn.parentNode) btn.remove()
+        return
+      }
+      if (btn.parentNode) return
+      const live = doc.querySelector('[data-slot="conversation.header.leading"]')
+      if (live && live.children.length === 0) live.appendChild(btn)
     }
     win.addEventListener('resize', watch)
     state.onResize = watch
@@ -846,6 +1542,22 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     state.lastError = String(error)
   }
 
+  // ── 第 11 轮：先扫掉上一轮遗留的层，再插自己的 ────────────────────
+  //
+  // 实测在热重载多次后页面上**同时存在 2 个 .qx-layer**。
+  // dispose 明明有 `layer.remove()`（第 1500 行），所以只能是
+  // **两个 mount 同时活着** —— 旧实例还没被 dispose，新实例已经建好了层。
+  //
+  // 眼下它们 `pointer-events:none`、没有子元素，谁也挡不住，
+  // 所以肉眼看不出问题 —— 但这是一个**只会累积、不会自愈**的泄漏，
+  // 而且闸门原来只断言「已插入、zIndex 正确」，**没断言只有一个**。
+  //
+  // 「断言了存在」≠「断言了存在且唯一」—— 这是本轮补的第二条同类教训。
+  //
+  // 只清自己的层（按 class），不碰任何 DSH 节点：
+  // 按项目约定，定制层不插入/移动 DSH 的结构，这里清理的是自己的产物。
+  for (const stale of doc.querySelectorAll('.qx-layer')) stale.remove()
+
   layer = el('div', { class: 'qx-layer', 'data-qx-layer': '' })
   layer.style.zIndex = '2147483644'
   doc.body.appendChild(layer)
@@ -859,9 +1571,26 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     paintToolCards()
     paintSidebarRows()
     markClippedRows()
+    // ⚠️ 必须紧跟在 markClippedRows 之后 —— 它认的是药丸身上
+    //    markClippedRows 刚打上的 [data-qx-clipped]，顺序反了就一个都标不上。
+    markStatusRow()
     markTinyText()
     markShortTapRows()
     syncMenuButton()
+    // ⚠️ 必须每轮重试：installMenuButton 只在启动时调一次，而顶栏是**异步**渲染的
+    //    —— 实测整页重载后 `[data-slot="conversation.header.leading"]` 还没出现，
+    //    那一行就返回 false 并**永远不再重试**，☰ 于是彻底消失。
+    //    症状是「导航入口没了」，但界面看不出任何报错。
+    installMenuButton()
+    // 同理：工具栏也是异步渲染的，状态按钮必须每轮重试 + 同步数值
+    installStatusButton()
+    syncStatusButton()
+    syncPlanSlot()
+    markWorkspaceRoot()
+    markRowTitle()
+    markNewSessionPill()
+    markSidebarBlocks()
+    relaxSidebarInlineHeights()
   }
   // 头 6 秒每 300ms 扫一次 —— 覆盖 DSH 插件异步加载那段窗口，
   // 否则用户会在弹窗消失前先摸到屏幕。
@@ -894,19 +1623,34 @@ window.qxMobile.register(async function qxMount({ document: doc, window: win }) 
     if (state.onResize) win.removeEventListener('resize', state.onResize)
     const menuBtn = doc.querySelector('.qx-menu-btn')
     if (menuBtn) menuBtn.remove()
+    // 状态按钮插在 DSH 自己的工具栏行里（不在 layer 里），必须单独清
+    const statusBtn = doc.querySelector('.qx-status-btn')
+    if (statusBtn) statusBtn.remove()
+    const toolbars = doc.querySelectorAll('[data-qx-toolbar]')
+    for (let i = 0; i < toolbars.length; i += 1) toolbars[i].removeAttribute('data-qx-toolbar')
     // 提示条插在 DSH 自己的行里，不在 layer 里 —— 必须单独清，
     // 否则热替换之后旧的还留着，新 mount 会再插一遍（出现过两个「上下文 79%」）
     const leftovers = doc.querySelectorAll('.qx-hint-sparse, .qx-hint-ctx, .qx-full-btn')
     for (let i = 0; i < leftovers.length; i += 1) leftovers[i].remove()
     const pendingRows = doc.querySelectorAll('.qx-row--pending')
     for (let i = 0; i < pendingRows.length; i += 1) pendingRows[i].classList.remove('qx-row--pending')
-    const marks = doc.querySelectorAll('[data-qx-clipped], [data-qx-tiny], [data-qx-short-tap], [data-qx-inline-tap], [data-qx-narrow-tap]')
+    const marks = doc.querySelectorAll('[data-qx-clipped], [data-qx-tiny], [data-qx-short-tap], [data-qx-inline-tap], [data-qx-narrow-tap], [data-qx-status], [data-qx-thin-media], [data-qx-plan], [data-qx-toolbar], [data-qx-wsroot], [data-qx-rowtitle], [data-qx-nspill], [data-qx-sb-logo], [data-qx-sb-primary], [data-qx-sb-panels], [data-qx-sb-tree], [data-qx-sb-footer]')
     for (let i = 0; i < marks.length; i += 1) {
       marks[i].removeAttribute('data-qx-clipped')
       marks[i].removeAttribute('data-qx-tiny')
       marks[i].removeAttribute('data-qx-short-tap')
       marks[i].removeAttribute('data-qx-inline-tap')
       marks[i].removeAttribute('data-qx-narrow-tap')
+      marks[i].removeAttribute('data-qx-status')
+      marks[i].removeAttribute('data-qx-thin-media')
+      marks[i].removeAttribute('data-qx-wsroot')
+      marks[i].removeAttribute('data-qx-rowtitle')
+      marks[i].removeAttribute('data-qx-nspill')
+      marks[i].removeAttribute('data-qx-sb-logo')
+      marks[i].removeAttribute('data-qx-sb-primary')
+      marks[i].removeAttribute('data-qx-sb-panels')
+      marks[i].removeAttribute('data-qx-sb-tree')
+      marks[i].removeAttribute('data-qx-sb-footer')
       marks[i].style.removeProperty('padding-top')
       marks[i].style.removeProperty('padding-bottom')
       marks[i].style.removeProperty('font-size')

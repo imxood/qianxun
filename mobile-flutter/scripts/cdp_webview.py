@@ -42,6 +42,21 @@ PKG = "com.qianxun.qianxun_mobile"
 _DEFAULT_SERIAL = "emulator-5554"
 SERIAL = os.environ.get("QX_SERIAL", _DEFAULT_SERIAL)
 
+# ── 真机护栏 ────────────────────────────────────────────────────────
+# ⚠️ 用户要求：**本阶段不使用真机**（他在手机上做特殊的事）。
+#    这个脚本是整套工具里 adb 调用最频繁的一个，
+#    所以护栏放在**解析 --serial 之后、真正发 adb 之前**，
+#    任何路径（命令行 / 环境变量 / 默认值）都绕不过去。
+_FORBIDDEN = ("AEQC8P55MFCYBUFA",)
+
+
+def _guard_phone(allow: bool) -> None:
+    if SERIAL in _FORBIDDEN and not allow:
+        raise SystemExit(
+            "⛔ 拒绝操作真机 " + SERIAL + "\n"
+            "   用户要求本阶段只使用模拟器（" + _DEFAULT_SERIAL + "）。\n"
+            "   确实需要时加 --allow-phone 临时放行。")
+
 
 def _apply_serial_argv(argv: list[str]) -> list[str]:
     """把 --serial/--emulator 从 argv 里摘出来并写进 SERIAL。"""
@@ -55,6 +70,9 @@ def _apply_serial_argv(argv: list[str]) -> list[str]:
             continue
         if argv[i] == "--emulator":
             SERIAL = _DEFAULT_SERIAL
+            i += 1
+            continue
+        if argv[i] == "--allow-phone":
             i += 1
             continue
         out.append(argv[i])
@@ -148,7 +166,10 @@ def ws_url(port: int, page: dict) -> str:
 
 
 def main() -> int:
-    sys.argv = _apply_serial_argv(sys.argv[1:])
+    argv0 = sys.argv[1:]
+    _guard_phone("--allow-phone" in argv0)
+    sys.argv = _apply_serial_argv(argv0)
+    _guard_phone(False)          # 环境变量也可能把 SERIAL 指向真机
     print(f"设备 {SERIAL}")
     if len(sys.argv) < 1:
         print(__doc__)
