@@ -99,6 +99,14 @@ pub fn workspace_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// 情报域数据目录（docs/17）：state.json + days/{date}/{topic}.json +
+/// favorites.json / read-state.json。
+pub fn intel_dir(app: &AppHandle) -> Result<PathBuf> {
+    let dir = data_dir(app)?.join("intel");
+    std::fs::create_dir_all(&dir).map_err(|cause| Error::DataDir(cause.to_string()))?;
+    Ok(dir)
+}
+
 /// pnpm 工具目录：npm 把 pnpm 装在这里，安装器幂等复用（架构 §4.4）。
 pub fn pnpm_tool_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("pnpm-tool"))

@@ -66,6 +66,9 @@ pub enum Error {
     #[error("备份失败：{0}")]
     Backup(String),
 
+    #[error("情报失败：{0}")]
+    Intel(String),
+
     #[error("DSH 正在启动中，请等待")]
     AlreadyStarting,
 
