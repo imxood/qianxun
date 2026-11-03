@@ -575,28 +575,28 @@ npm 装完保留了该字段，pnpm 走 pnpm 11.7.0 正常落位。
 - [ ] DSH `0.2.1-rc.3` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装→重启→卸载
 - [ ] **mobile-access 回归**（`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
 
-## V0.9.0 · DSH 0.2.1-rc.3 → 0.2.2-alpha.2（锚点切换，2026-10-29）
+## V0.9.0 · DSH 0.2.1-rc.3 -> 0.2.2-alpha.2（锚点切换，2026-10-29）
 
-**目标**：锚点从 DSH `0.2.1` 切到 `0.2.2`，千寻版本号 `0.8.2` → `0.9.0`。按
+**目标**：锚点从 DSH `0.2.1` 切到 `0.2.2`，千寻版本号 `0.8.2` -> `0.9.0`。按
 ADR-015 属**锚点切换**：改钉版 + 跑千寻自身回归；全套 DSH 真机验收另行安排，
 勾完才算锚点切换闭环。
 
 ### 依赖树实测（npm registry diff，2026-10-29）
 
-顶层依赖 86 → 91：
+顶层依赖 86 -> 91：
 
 - **移除 0 个**；
 - **新增 5 个**：`dsh-cua-bundle`、`dsh-experimental-forge-bundle`、
   `dsh-experimental-liveshare`、`dsh-official-bundles`、
   `dsh-personalized-recommendations`；
-- 其余全部 `@deepseek-ai/*` 子包 `0.2.1-rc.3` → `0.2.2-alpha.2`；上游基座出
-  alpha：`cordis ~4.0.5` → `~4.0.6-alpha.1`、`schemastery ~3.18.5` →
+- 其余全部 `@deepseek-ai/*` 子包 `0.2.1-rc.3` -> `0.2.2-alpha.2`；上游基座出
+  alpha：`cordis ~4.0.5` -> `~4.0.6-alpha.1`、`schemastery ~3.18.5` ->
   `~3.18.6-alpha.1`、`cordis-plugin-{include,loader,timer}` minor alpha。
 
 ### 落地项
 
 - [x] `install::PINNED_VERSION` 由 `0.2.1-rc.3` 升到 `0.2.2-alpha.2` ✅（代码侧）
-- [x] 千寻版本号 `0.8.2` → `0.9.0` ✅（包元数据：root / tauri / Cargo.toml；
+- [x] 千寻版本号 `0.8.2` -> `0.9.0` ✅（包元数据：root / tauri / Cargo.toml；
       Cargo.lock 随构建；mobile 系元数据未动，发版时同步）
 - [x] 双源可解析 ✅（npmmirror 与 npmjs 均已同步 `0.2.2-alpha.2`，2026-10-29 实测）
 - [x] 独立 DSH web 运行时已先行升级并冷启动自检 ✅（`~/.qianxun/dsh-runtime`
@@ -613,6 +613,39 @@ ADR-015 属**锚点切换**：改钉版 + 跑千寻自身回归；全套 DSH 真
 
 注意：上游基座本轮带 alpha（cordis / schemastery 均为 `*-alpha.1`），与 V0.8.2
 「alpha 出清」方向相反——`0.2.2` 转 rc 时需复查这几个基座是否转正。
+
+## V0.9.1 · DSH 0.2.2-alpha.2 -> 0.2.2-alpha.3（同锚点修订，2026-11-03）
+
+**目标**：锚点仍是 DSH `0.2.2`，钉版从 `0.2.2-alpha.2` 递到 `0.2.2-alpha.3`，
+千寻版本号 `0.9.0` -> `0.9.1`。按 ADR-015 属**千寻修订号**：同锚点 DSH 升级，
+跑千寻自身回归 + 依赖树 diff，不做全套 DSH 真机重验。
+
+### 依赖树实测（npm registry diff，2026-11-03）
+
+顶层依赖 91 -> 90：
+
+- **移除 1 个**：`dsh-cua-bundle`（CUA 能力包被上游撤下，千寻未引用）；
+- **新增 0 个**；
+- 82 个 `@deepseek-ai/dsh-*` 子包 `0.2.2-alpha.2` -> `0.2.2-alpha.3`；
+- 上游基座 alpha 递进：`cordis ~4.0.6-alpha.1` -> `~4.0.6-alpha.2`、
+  `schemastery ~3.18.6-alpha.1` -> `~3.18.6-alpha.2`、
+  `cordis-plugin-{include,loader,timer}` 同步 alpha.1 -> alpha.2。
+
+### 落地项
+
+- [x] `install::PINNED_VERSION` 由 `0.2.2-alpha.2` 升到 `0.2.2-alpha.3` ✅（代码侧）
+- [x] 千寻版本号 `0.9.0` -> `0.9.1` ✅（包元数据：root / tauri / Cargo.toml；
+      Cargo.lock 随构建；mobile 系元数据未动，发版时同步）
+- [x] 双源可解析 ✅（npmjs 与 npmmirror 均已同步 `0.2.2-alpha.3`，2026-11-03 实测）
+- [x] 桌面端无已装 runtime 冲突 ✅（各 data dir 下均未安装 dsh-runtime，
+      不存在 `DshVersionMismatch` 门禁拒启风险）
+- [x] Rust `fmt --check` + `clippy --all-targets -D warnings` + `test --workspace` ✅
+      （2026-11-03 三项 rc=0 全绿；fmt 用 --check 非侵入模式，避免连带重排
+      工作区在制的 remote/* 代码；上一版记录的 `intel::fetch::rss解析完整条目
+      并过滤过期` 本轮亦转绿——在制的 intel/fetch.rs 已把写死日历日期的 fixture
+      改为按当前时钟动态生成，修复归属在制工作，未计入本次提交）
+- [ ] DSH `0.2.2-alpha.3` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装->重启->卸载
+- [ ] **mobile-access 回归**（`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
 
 ## 里程碑间的纪律
 
