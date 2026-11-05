@@ -647,6 +647,40 @@ ADR-015 属**锚点切换**：改钉版 + 跑千寻自身回归；全套 DSH 真
 - [ ] DSH `0.2.2-alpha.3` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装->重启->卸载
 - [ ] **mobile-access 回归**（`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
 
+## V0.9.2 · DSH 0.2.2-alpha.3 -> 0.2.2-rc.1（同锚点修订，2026-11-05）
+
+**目标**：锚点仍是 DSH `0.2.2`，钉版从 `0.2.2-alpha.3` 递到 `0.2.2-rc.1`，千寻
+版本号 `0.9.1` -> `0.9.2`。按 ADR-015 属**千寻修订号**：同锚点 DSH 升级，跑
+千寻自身回归 + 依赖树 diff，不做全套 DSH 真机重验。
+
+### 依赖树实测（npm registry diff，2026-11-05）
+
+顶层依赖 90 -> 90：
+
+- **移除 0 个、新增 0 个**；
+- 82 个 `@deepseek-ai/dsh-*` 子包 `0.2.2-alpha.3` -> `0.2.2-rc.1`；
+- **上游基座全部转正**（兑现 V0.9.1 段落的复查项）：`cordis ~4.0.6-alpha.2` ->
+  `~4.1.0`、`schemastery ~3.18.6-alpha.2` -> `~3.19.0`、
+  `cordis-plugin-include ~1.0.11-alpha.2` -> `~1.1.0`、
+  `cordis-plugin-loader ~1.0.7-alpha.2` -> `~1.1.0`、
+  `cordis-plugin-timer ~1.1.8-alpha.2` -> `~1.2.0`。
+
+### 落地项
+
+- [x] `install::PINNED_VERSION` 由 `0.2.2-alpha.3` 升到 `0.2.2-rc.1` ✅（代码侧）
+- [x] 千寻版本号 `0.9.1` -> `0.9.2` ✅（包元数据：root / tauri / Cargo.toml；
+      Cargo.lock 随构建；mobile 系元数据未动，发版时同步）
+- [x] 双源可解析 ✅（npmjs 与 npmmirror 均已同步 `0.2.2-rc.1`，2026-11-05 实测）
+- [x] Rust `fmt --check` + `clippy --all-targets -D warnings` + `test --workspace` ✅
+      （2026-11-05 三项 rc=0 全绿；fmt 首轮抓到两处我方反代修复引入的格式
+       问题——gateway.rs 分支花括号、proxy.rs 超宽行——已修，未触碰在制代码）
+- [ ] DSH `0.2.2-rc.1` 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装->重启->卸载
+- [ ] **mobile-access 回归**（`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
+
+注意：基座从 alpha 跳到 minor 转正（cordis 4.0.6 -> 4.1.0 等），不是单纯
+rc 递版——千寻侧与 cordis 插件协议相关的面（插件加载器、定时器）在真机验收
+时多看一眼。
+
 ## 里程碑间的纪律
 
 1. 任何里程碑开工前，先读 `03-编码规范`，门禁脚本必须已在跑；
