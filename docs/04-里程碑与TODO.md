@@ -681,6 +681,75 @@ ADR-015 属**锚点切换**：改钉版 + 跑千寻自身回归；全套 DSH 真
 rc 递版——千寻侧与 cordis 插件协议相关的面（插件加载器、定时器）在真机验收
 时多看一眼。
 
+## 挂账 · DSH 0.2.2-rc.2 上架等待（2026-11-11 核实，未开里程碑）
+
+**结论**：`0.2.2-rc.2` **在 GitHub 已发布、但在 npm 未上架**，故本轮不动钉版，
+等 npm 上的正式版上架后再走升级流程。
+
+### 实测依据
+
+- GitHub release `dsh-v0.2.2-rc.2` 确实存在（commit `ddac967`，imccyu 发布
+  2026-11-11 11:33，Pre-release）；tag 上本体包在 `apps/cli/package.json`
+  （name `@deepseek-ai/dsh`，version `0.2.2-rc.2`）。
+- npm 双源未上架：`registry.npmjs.org` 与 `registry.npmmirror.com` 的
+  `@deepseek-ai/dsh` 均 404 该版本，dist-tags 仍为
+  `{latest: 0.2.2-rc.1, alpha: 0.2.2-alpha.3, next: 0.2.2-rc.1}`；
+  `0.2.2` 系只有 alpha.2 / alpha.3 / rc.1。
+- **GitHub 源不能当安装通道**（用户问过「可否用 github 的版本」，实测否决）：
+  - rc.2 tag tarball（codeload，40.7 MB / 23924 条目）内 `apps/cli/lib/*.js`
+    数量为 **0**——只有 `src/`，**没有构建产物**；npm tarball 才是已构建产物。
+  - `apps/cli` 的 144 个依赖里 **135 个是 `workspace:` 协议**
+    （如 `@deepseek-ai/cordis workspace:~`），从 tarball 安装等于要求用户机跑
+    完整 monorepo 的 pnpm workspace 构建 + 原生编译。
+  - rc.2 release 无任何预构建资产（`expanded_assets` 为空）。
+  - npm 才是首发渠道：rc.1 的 npm 发布时间 2026-11-04T09:20:32Z **早于**其
+    GitHub release 的 2026-11-04T13:07:14Z 约 4 小时。
+- 桌面端独立 runtime 已对齐 `0.2.2-rc.1`（`~/.qianxun/dsh-runtime`，冷启动自检
+  通过），与当前钉版一致，不存在 `DshVersionMismatch` 拒启风险。
+
+### 决定（用户 2026-11-11）
+
+1. **放弃 GitHub 源**，继续走 npm，等新版本在 npm 上架；
+2. **不预置「registry 预检 + 空窗期回退」兜底**——保持 ADR-015 的严格钉版
+   语义（千寻不装未经自己验证过的 DSH 版本）；
+3. **不做后台轮询**，由用户在上架后通知再执行升级流程。
+
+### 正式版上架后的执行清单（沿用三轮升级的既定流程）
+
+- [ ] 双源可解析性复核（npmjs + npmmirror 的 dist-tags 与 tarball 直连）
+- [ ] 依赖树 diff（`npm view @deepseek-ai/dsh@<新版本> dependencies --json`；
+      **404 时该命令返回的是错误对象，不是依赖表**——见到「移除 90 个包」这类
+      假 diff 必须先确认包本身可解析）
+- [ ] 改 4 个版本落点：`src-tauri/src/harness/install.rs` 的 `PINNED_VERSION`、
+      root `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`
+- [ ] 千寻版本号递增（`0.9.2` -> `0.9.3`；若届时锚点仍为 DSH `0.2.2` 则属
+      ADR-015 的千寻修订号，只跑千寻自身回归；若上游改锚点则按锚点切换做全套）
+- [ ] 门禁：`cargo fmt --check` -> `cargo clippy --all-targets -- -D warnings`
+      -> `cargo test --workspace`
+- [ ] `pnpm tauri build` 出安装包，用户自行安装验证
+- [ ] **websearch 回归**（rc.2 变更点，见下）
+- [ ] DSH 真机验收：启动 / 搜索 / 抓取 / 网关代持 / 插件市场安装->重启->卸载
+- [ ] **mobile-access 回归**（`custom.js` 靠 DOM 注入，DSH web UI 一改就碎）
+
+### rc.2 变更对千寻的影响面（提前勘察，真机验收时重点看）
+
+- **网页搜索默认提供方改用 DeepSeek Search API**（「旧提供方和自定义配置需按
+  升级指南调整」）：千寻在 `src-tauri/src/websearch/commands.rs:212-216` 往 DSH
+  的 `web` 插件 config 写 `searchProvider: qx-websearch` + `fetchProvider:
+  qx-websearch`（PATCH_MARK / FETCH_MARK 见 `commands.rs:23-26`），插件侧在
+  `packages/websearch/dsh/index.js:134-198` 通过
+  `ctx.web.registerSearchProvider` / `ctx.web.registerFetchProvider` 注册提供方。
+  查 rc.2 源码 `docs/subsystems/web.zh.md:130,179,188`：**四个接口与配置键
+  全部仍在**，且提供方选择规则是「显式 id 优先，否则唯一可用者自动选，多个未
+  配置则抛 `WEB_PROVIDER_AMBIGUOUS`」——千寻显式写 id 的做法仍然成立，但要真机
+  回归确认。
+  （注：`docs/22-DSH运行时工具拦截能力探查报告.md` 相关的 rc.2 源码抽取在
+  `.tmp/rc2-src/subset`，该 subset 未包含 web 插件源码目录，故此结论来自
+  rc.2 tag 的 `docs/subsystems/web.zh.md` 全文，需要时重新抽源码复核。）
+- AgentTeam 改用统一具名子代理、中断工具默认关闭；工具失败给出更明确的错误
+  类型与代码；Session 支持批量追加事件——影响自定义插件/SDK 集成，千寻目前无
+  相关自定义，暂无影响面。
+
 ## 里程碑间的纪律
 
 1. 任何里程碑开工前，先读 `03-编码规范`，门禁脚本必须已在跑；
