@@ -1,0 +1,120 @@
+/* 千寻移动端 · 最小可用定制层（custom.css）
+ * ─────────────────────────────────────────────────────────────
+ * 部署到：<DSH_HOME>/mobile-access/custom.css
+ * 千寻网关在每个 DSH 页面 </head> 前注入 qx-mobile-bootstrap.js，
+ * 它会轮询 /qx-mobile/version，内容 hash 变了就换本文件的 <link href>。
+ * 保存后**最多 5 秒自动生效**（bootstrap.js VISIBLE_MS = 5000）。
+ *
+ * ============================== 范围纪律 ==============================
+ * 本文件**只做一件事**：让「输入框 + 软键盘」在手机上可用。
+ * ⛔ **不做任何视觉美化**——重排、配色、圆角、字号一律不加。
+ *    （历史版本 §A 的窄屏重排与 §B 的自绘覆盖层已按用户要求整体下线。）
+ *
+ * 唯一保留的是下面 §1 的视口高度修正：它不是美化，是**功能性修复**
+ * ——没有它，Android 软键盘弹起时输入框被完全遮住，无法输入。
+ *
+ * ⚠️ 选择器纪律：**不要写 class 名选择器去改 DSH 的东西**。
+ *    它的 class 是构建期哈希（实测 hHd-Xa_ / bhn1Oq_ / pI_x6G_），
+ *    每次 DSH 构建都变。这里只用元素选择器与属性选择器。
+ */
+
+/* ── §1 视口高度：键盘弹起时 vh 不变 -> 输入框被盖住 ──────────────
+ * 100dvh = 动态视口高度：软键盘弹起时浏览器会把 dvh 收缩到「可见区」，
+ * 而 vh 保持不变。这是移动端「键盘遮挡」的标准解法。
+ * 只改高度，不改任何配色/间距/字号。
+ *
+ * ⚠️ 现状（2026-11-05 起的新机制，见 custom.js §1.5 与
+ *    mobile-flutter/docs/design/24-移动端问题修复记录.md §9.6）：
+ *   Flutter 壳在 Android 上 `resizeToAvoidBottomInset: false`
+ *   （WebView 表面尺寸全程不变 -> 键盘动画零掉帧），并逐帧把 IME 高度
+ *   推给页面 `window.__qxKb(h)`；跟手由 custom.js 用 compositor-only 的
+ *   transform 完成，键盘稳定后再给滚动容器补一次 padding-bottom。
+ *   dvh 在这条链路里退居第二道保险（无壳通道的环境仍靠它）。 */
+html,
+body {
+  height: 100dvh;
+  min-height: 100dvh;
+}
+
+/* ── §2 安全区：底部输入框别被 Home 指示条压住 ────────────────────
+ * 只加内边距，不改布局。 */
+body {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ── §3 聚焦滚动留白：万一需要滚动，别把目标推到太远 ──────────────
+ * custom.js 用 block:'nearest' + 非平滑滚动做「按需补偿」，
+ * 这里的 scroll-margin 只是给那一点点余量。
+ * ⚠️ 旧值是 50vh —— 那会把目标推到视口中部，滚动量放大数倍，
+ * 与键盘动画叠加时观感发滞（2026-11-05 真机时间线定位）。 */
+input,
+textarea,
+select,
+[contenteditable='true'] {
+  scroll-margin-bottom: 12px;
+}
+
+/* ── §4 窄屏：DSH 头部多出一行「工作区 / 更多 / 侧边栏」──────────────
+ *
+ * 现象（2026-11-05 真机实测，OnePlus PKB110 / Android 16 / 视口 359×692
+ * CSS px / dpr 3.5）：
+ *
+ *   DSH 的会话头部 titleRow 是 `display:flex; flex-wrap:wrap`，宽 311px：
+ *     ├ titleCluster   flex-grow:1  -> 撑满 307px
+ *     │   ├ crumbs(85px，标题「移除千寻软件UI样式处理」)
+ *     │   └ headerActions(187px)「智能体团队」+「2 个后台任务运行中」
+ *     ├ headerUtilities(77px) 「工作区」按钮
+ *     └ headerCorner(28px)    「更多」/「侧边栏」按钮
+ *
+ *   算术：标题 86 + 状态区 187 + 按钮 105 = **378px > 311px 可用**
+ *   -> flex-wrap 把 headerUtilities + headerCorner 挤到**第二行**，
+ *     于是在「对话 | 轨迹」那一行**上方多出一整行**。
+ *
+ *   对照：会话标题为空时，187 + 105 = 292 <= 311，排得下 -> 只有一行。
+ *   所以触发条件是**会话标题**，不是端差异（RN 端同样会这样）。
+ *
+ * 修法（只动布局，不做视觉美化）：
+ *   1) titleRow 不换行；
+ *   2) 标题簇与状态区允许收缩（标题本身已带 text-overflow:ellipsis，
+ *      收缩后显示省略号，不会被裁成乱码）；
+ *   3) 「工作区/更多/侧边栏」三个按钮浮到标题行右上角（它们本来就
+ *      贴在右边，浮起来后位置观感不变），并给标题簇留出等宽的让位。
+ *
+ * ⚠️ 选择器纪律见文件头：只用属性选择器，**不写 DSH 的哈希 class**。
+ */
+@media (max-width: 560px) {
+  /* titleRow 不换行：三个子项（标题簇 / 工作区 / 更多侧边栏）挤在一行。
+   * ⚠️ 用「让标题簇收缩」而不是「绝对定位 + padding-right」：
+   *   后者会因 content-box 把 307 + padding 撑爆 311 的行宽，
+   *   标题簇内部被迫折行，反而从 56px 涨到 104px（实测踩过）。 */
+  [data-slot='conversation.session.header'] > div {
+    flex-wrap: nowrap !important;
+  }
+
+  /* 标题簇：可收缩 + 内部不换行 */
+  [data-slot='conversation.session.header'] > div > div:first-child {
+    flex-wrap: nowrap !important;
+    min-width: 0 !important;
+    flex-shrink: 1 !important;
+  }
+
+  /* 标题簇的两个直接子元素（标题 crumbs / 状态区）都可收缩。
+   * crumbs 内部自带 text-overflow:ellipsis，收缩后显示省略号。 */
+  [data-slot='conversation.session.header'] > div > div:first-child > * {
+    min-width: 0 !important;
+    flex-shrink: 1 !important;
+    overflow: hidden !important;
+    /* ⛔ 必须 nowrap：被压窄后中文会**逐字竖排**（「2 个后台任务运行中」
+       变成一列单字），加了 nowrap 才会在同一行被裁切/省略。 */
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+  }
+
+  /* 状态区内部的文本容器同样禁止换行（否则逐字竖排） */
+  [data-slot='conversation.session.header'] > div > div:first-child > * > * {
+    min-width: 0 !important;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+  }
+}

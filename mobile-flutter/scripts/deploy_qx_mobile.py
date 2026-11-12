@@ -36,7 +36,16 @@ from pathlib import Path
 QIANXUN = Path(r"C:\Users\maxu\.qianxun")
 # paths.rs:91 —— 隔离模式下 dsh_home = <data_dir>/dsh-home
 # settings.json 的 dsh.home = "isolated"，所以是 .qianxun/dsh-home
-SOURCE = Path(r"E:\develop\dsh-workspace\qianxun\mobile-flutter\qx-mobile")
+#
+# ⚠️ 2026-11-05：源目录从 `qx-mobile/` 改为 `mobile/examples/minimal-input/`。
+# 旧 `qx-mobile/` 是 L3 定制层（68KB CSS 的窄屏重排 + 自绘覆盖层），
+# 已按用户要求整体下线——「UI 美化一律不要」。现在只保留**功能性**的
+# 「输入框 + 软键盘」适配（视口高度 100dvh + 聚焦滚动留白）。
+#
+# 两个目录都在同一个 git 仓库里，底稿与部署副本可 diff、可回滚。
+SOURCE = Path(
+    r"E:\develop\dsh-workspace\qianxun\mobile\examples\minimal-input"
+)
 
 # mobile_ui.rs:31 的上限 —— 超出网关会返 413
 CSS_LIMIT = 512 * 1024
