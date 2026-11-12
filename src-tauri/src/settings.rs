@@ -95,6 +95,16 @@ fn default_dsh_home() -> String {
     DSH_HOME_ISOLATED.to_owned()
 }
 
+/// DSH 来源策略：
+/// - `bundled`（默认）：用千寻私有 npm prefix 托管安装的 DSH；
+/// - `external`：不内置 DSH，直接调用用户全局安装的 `dsh` 可执行文件。
+pub const DSH_SOURCE_BUNDLED: &str = "bundled";
+pub const DSH_SOURCE_EXTERNAL: &str = "external";
+
+fn default_dsh_source() -> String {
+    DSH_SOURCE_BUNDLED.to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DshSettings {
@@ -104,6 +114,8 @@ pub struct DshSettings {
     pub autostart: bool,
     /// ADR-009：见 `DSH_HOME_ISOLATED` 常量说明。
     pub home: String,
+    /// DSH 来源：`bundled`（默认，托管安装）或 `external`（全局 dsh）。
+    pub source: String,
 }
 
 impl Default for DshSettings {
@@ -114,6 +126,7 @@ impl Default for DshSettings {
             version_strategy: DshVersionStrategy::default(),
             autostart: true,
             home: default_dsh_home(),
+            source: default_dsh_source(),
         }
     }
 }
@@ -550,6 +563,12 @@ fn validate(settings: &Settings) -> Result<()> {
         return Err(Error::SettingsInvalid(format!(
             "dsh.home 只能是 isolated 或 system，当前为 {}",
             settings.dsh.home
+        )));
+    }
+    if settings.dsh.source != DSH_SOURCE_BUNDLED && settings.dsh.source != DSH_SOURCE_EXTERNAL {
+        return Err(Error::SettingsInvalid(format!(
+            "dsh.source 只能是 bundled 或 external，当前为 {}",
+            settings.dsh.source
         )));
     }
     let node_sources = [

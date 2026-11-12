@@ -5,6 +5,7 @@
 //! 状态机与进程ownership在 supervisor，安装执行在 install，IPC 在 commands。
 
 pub mod commands;
+pub mod external;
 pub mod health;
 pub mod install;
 pub mod node_install;
@@ -20,7 +21,7 @@ use tauri::Emitter;
 
 use crate::error::{Error, Result};
 use crate::paths;
-use crate::settings::{Settings, DSH_HOME_SYSTEM};
+use crate::settings::{Settings, DSH_HOME_SYSTEM, DSH_SOURCE_EXTERNAL};
 use install::InstallPlan;
 use supervisor::LaunchPlan;
 
@@ -150,6 +151,11 @@ pub struct Environment {
     pub dsh_home: PathBuf,
     /// 千寻一键安装会下载的 Node 版本（UI 按钮文案用它，避免前端硬编码漂移）。
     pub bundled_node_version: String,
+    /// DSH 来源：`bundled`（千寻私有 prefix 自装）或 `external`（用户全局
+    /// 安装的 `dsh`）。外部模式下千寻不装、不管、不升级 DSH。
+    pub dsh_source: String,
+    /// 外部模式下命中的全局 dsh 可执行文件路径（内置模式恒为 None）。
+    pub dsh_external_path: Option<PathBuf>,
 }
 
 /// 探测环境。探测本身可能 spawn 若干 `node --version`，命令层把它
@@ -173,13 +179,42 @@ pub fn environment(app: &tauri::AppHandle, settings: &Settings) -> Environment {
         .find(|install| install.version >= node_runtime::MINIMUM_SUPPORTED)
         .cloned();
 
+    // 外部模式：千寻不碰私有 prefix，DSH 的事实全部来自用户自己装的
+    // 可执行文件（路径 + 版本）。
+    let external = if settings.dsh.source == DSH_SOURCE_EXTERNAL {
+        external::resolve()
+    } else {
+        None
+    };
+
     let harness_dir = paths::harness_dir(app).unwrap_or_else(|_| PathBuf::from("."));
-    let dsh_entry = paths::harness_entry(app).unwrap_or_else(|_| PathBuf::from("."));
-    let dsh_version = install::runtime_version(&harness_dir);
-    let dsh_installed = dsh_version.is_some() && dsh_entry.is_file();
-    // ADR-015：千寻主版本号 ↔ DSH 适配锚点。已装但版本不匹配时不允许启动——
-    // 必须用户主动点重装装入验证过的版本。
-    let dsh_version_matches = install::runtime_matches_pinned(&harness_dir);
+    let (dsh_entry, dsh_installed, dsh_version, dsh_version_matches) = match &external {
+        Some(resolved) => {
+            let version = resolved.version.clone();
+            // 外部模式的版本判定用「兼容」语义（见 external_version_compatible）：
+            // 落在同一发行线上（major.minor.patch 相同，预发布后缀不计）即可。
+            let matches = version
+                .as_deref()
+                .is_some_and(|value| external_version_compatible(value, install::PINNED_VERSION));
+            (resolved.path.clone(), true, version, matches)
+        }
+        None => {
+            let dsh_entry = paths::harness_entry(app).unwrap_or_else(|_| PathBuf::from("."));
+            let dsh_version = install::runtime_version(&harness_dir);
+            let dsh_installed = dsh_version.is_some() && dsh_entry.is_file();
+            // ADR-015：千寻主版本号 ↔ DSH 适配锚点。已装但版本不匹配时不允许启动——
+            // 必须用户主动点重装装入验证过的版本。
+            let dsh_version_matches = install::runtime_matches_pinned(&harness_dir);
+            (dsh_entry, dsh_installed, dsh_version, dsh_version_matches)
+        }
+    };
+    // 来源是「设置」而不是「探测结果」：外部模式即使一个 dsh 都没找到，
+    // 来源仍然如实是 external（前端据此显示「未找到全局 DSH」）。
+    let dsh_source = if settings.dsh.source == DSH_SOURCE_EXTERNAL {
+        DSH_SOURCE_EXTERNAL.to_owned()
+    } else {
+        crate::settings::DSH_SOURCE_BUNDLED.to_owned()
+    };
 
     Environment {
         node,
@@ -193,24 +228,61 @@ pub fn environment(app: &tauri::AppHandle, settings: &Settings) -> Environment {
         workspace: paths::workspace_dir(),
         dsh_home: dsh_home(app, settings),
         bundled_node_version: node_install::NODE_VERSION.to_owned(),
+        dsh_source,
+        dsh_external_path: external.map(|resolved| resolved.path),
     }
+}
+
+/// 外部 DSH 的版本兼容性判定。
+///
+/// 外部模式的 DSH 由用户自己安装（mise / npm 全局），千寻不能也不该
+/// 把它按精确版本钉死——但「完全不管版本」等于把运行时的正确性交给
+/// 运气。判定口径：**major/minor/patch 三段数字全等即兼容**，预发布
+/// 后缀（`-rc.1` / `-rc.2`）不参与比较——同一发行线的 rc 迭代之间视为
+/// 兼容（预编译 0.2.2-rc.2 ↔ 已装 0.2.2-rc.1 通过）。任一侧解析不出
+/// 三段数字 → 不兼容（宁可不启动，也不跑一个认不出的版本）。
+pub fn external_version_compatible(installed: &str, pinned: &str) -> bool {
+    match (release_triple(installed), release_triple(pinned)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// 版本号的三段数字（`0.2.2-rc.1` → (0, 2, 2)；解析不出 → None）。
+fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.trim().trim_start_matches('v');
+    let numeric = core.split(['-', '+']).next()?;
+    let mut parts = numeric.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
 }
 
 /// ADR-009：isolated → 应用数据目录下的独立 HOME；system → 系统默认
 /// （不注入 DSH_HOME，DSH 自己落到 ~/.dsh）。
+///
+/// 外部模式（`dsh.source == external`）**一律**取系统 HOME：外部 dsh 本来
+/// 就带着用户自己的 profile 资产（插件、会话、配置），把它们搬进千寻的
+/// 隔离目录等于让用户「装了两份 DSH 却只看见一份」。
 pub fn dsh_home(app: &tauri::AppHandle, settings: &Settings) -> PathBuf {
-    if settings.dsh.home == DSH_HOME_SYSTEM {
-        PathBuf::from(
-            std::env::var_os("DSH_HOME").unwrap_or(
-                dirs::home_dir()
-                    .map(|home| home.join(".dsh"))
-                    .map(|p| p.into_os_string())
-                    .unwrap_or_default(),
-            ),
-        )
+    if settings.dsh.source == DSH_SOURCE_EXTERNAL || settings.dsh.home == DSH_HOME_SYSTEM {
+        system_dsh_home()
     } else {
         paths::dsh_home(app).unwrap_or_else(|_| PathBuf::from("."))
     }
+}
+
+/// 系统 DSH_HOME（`DSH_HOME` 环境变量优先，否则 ~/.dsh）。
+fn system_dsh_home() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("DSH_HOME").unwrap_or(
+            dirs::home_dir()
+                .map(|home| home.join(".dsh"))
+                .map(|p| p.into_os_string())
+                .unwrap_or_default(),
+        ),
+    )
 }
 
 /// 把当前环境变成可运行的启动计划（指定 profile），或说清缺什么。
@@ -222,6 +294,12 @@ pub fn launch_plan_for(
     profile: &str,
 ) -> Result<LaunchPlan> {
     let environment = environment(app, settings);
+
+    // 外部模式：不要求私有 prefix 已安装、不要求本机 Node、不做精确版本
+    // 判定——直接跑用户全局装好的 dsh。
+    if settings.dsh.source == DSH_SOURCE_EXTERNAL {
+        return external_launch_plan(&environment, profile);
+    }
 
     let node = environment.node.clone().ok_or(Error::NoNodeRuntime {
         minimum: node_runtime::MINIMUM_SUPPORTED,
@@ -262,8 +340,8 @@ pub fn launch_plan_for(
     }
 
     Ok(LaunchPlan {
-        node: node.path,
-        entry: environment.dsh_entry,
+        program: node.path,
+        entry: Some(environment.dsh_entry),
         profile: profile.to_owned(),
         workspace: environment.workspace,
         host: BIND_HOST.to_owned(),
@@ -278,8 +356,60 @@ pub fn launch_plan_for(
     })
 }
 
+/// 外部模式的启动计划：直接跑用户全局的 dsh。
+///
+/// 与内置模式的差别只有一处实质：程序就是那个 dsh 可执行文件，没有
+/// `bin.js` 入口，也不需要本机 Node。其余参数、环境变量、端口策略完全
+/// 一致——两种模式对用户是同一种「启动 DSH」。
+fn external_launch_plan(environment: &Environment, profile: &str) -> Result<LaunchPlan> {
+    let Some(program) = environment.dsh_external_path.clone() else {
+        crate::logging::log(
+            "warn",
+            &format!(
+                "外部 DSH 模式：未找到全局 dsh 可执行文件（可用 {} 指定）",
+                external::DSH_BIN_ENV
+            ),
+        );
+        return Err(Error::DshExternalNotFound);
+    };
+    // 外部模式不比精确版本，但也不能跑一个认不出的版本：版本探测失败或
+    // 与锚点不同线 → 拒绝启动。
+    if !environment.dsh_version_matches {
+        crate::logging::log(
+            "warn",
+            &format!(
+                "外部 DSH 版本不兼容：installed={:?} required={}",
+                environment.dsh_version,
+                install::PINNED_VERSION
+            ),
+        );
+        return Err(Error::DshVersionMismatch {
+            required: install::PINNED_VERSION.to_owned(),
+            installed: environment
+                .dsh_version
+                .clone()
+                .unwrap_or_else(|| "未知版本".to_owned()),
+        });
+    }
+    Ok(LaunchPlan {
+        program,
+        entry: None,
+        profile: profile.to_owned(),
+        workspace: environment.workspace.clone(),
+        host: BIND_HOST.to_owned(),
+        port: 0,
+        // 外部模式一律不注入 DSH_HOME：让 dsh 用系统 ~/.dsh 的既有资产。
+        dsh_home: None,
+    })
+}
+
 /// 生成安装计划（用哪个 Node 的 npm、装到哪、装什么、走哪个源）。
 pub fn install_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<InstallPlan> {
+    // 外部模式：千寻不托管 DSH 的安装——装什么版本由用户自己的包管理器
+    // （mise / npm 全局）决定，千寻无权改动它。
+    if settings.dsh.source == DSH_SOURCE_EXTERNAL {
+        return Err(Error::DshExternalManagedInstallUnsupported);
+    }
     let environment = environment(app, settings);
     let supported = environment
         .all_node_runtimes
@@ -320,9 +450,34 @@ pub fn install_plan(app: &tauri::AppHandle, settings: &Settings) -> Result<Insta
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_dsh_progress, InstallProgress};
+    use super::{external_version_compatible, parse_dsh_progress, InstallProgress};
 
     const REGISTRY: &str = "https://registry.npmmirror.com/";
+
+    #[test]
+    fn 外部版本同一发行线判为兼容() {
+        // 预发布后缀不参与比较：0.2.2-rc.1 ↔ 0.2.2-rc.2 兼容。
+        assert!(external_version_compatible("0.2.2-rc.1", "0.2.2-rc.2"));
+        assert!(external_version_compatible("0.2.2", "0.2.2"));
+    }
+
+    #[test]
+    fn 外部版本不同发行线判为不兼容() {
+        // 不同 minor、不同 patch 都不通过。
+        assert!(!external_version_compatible("0.2.2", "0.3.0"));
+        assert!(!external_version_compatible("0.2.2", "0.2.1"));
+        // 不同 major 也不通过。
+        assert!(!external_version_compatible("1.2.2", "0.2.2"));
+    }
+
+    #[test]
+    fn 外部版本无法解析判为不兼容() {
+        assert!(!external_version_compatible("", "0.2.2-rc.2"));
+        assert!(!external_version_compatible("未知", "0.2.2-rc.2"));
+        assert!(!external_version_compatible("0.2.2-rc.2", "不是版本号"));
+        // 少一段的版本号也不认。
+        assert!(!external_version_compatible("0.2", "0.2.2-rc.2"));
+    }
 
     #[test]
     fn packages行给出总包数提示() {

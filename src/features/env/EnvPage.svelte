@@ -94,6 +94,31 @@
       harness.status.phase === 'restarting',
   );
 
+  // 外部 DSH 模式：千寻不内置、不托管 DSH，直接用用户全局安装的 dsh。
+  // 这种模式下本机有没有 Node 与能不能启动无关（dsh 自带运行时）。
+  const dshExternal = $derived(harness.environment?.dshSource === 'external');
+
+  /** DSH 来源中文映射（bundled = 千寻托管；external = 用户全局安装）。 */
+  const DSH_SOURCE_LABEL: Record<string, string> = {
+    bundled: '内置托管',
+    external: '全局安装',
+  };
+
+  /** 当前 DSH 来源文案（环境未探到时按内置托管展示）。 */
+  const dshSourceLabel = $derived(
+    DSH_SOURCE_LABEL[harness.environment?.dshSource ?? 'bundled'] ?? '内置托管',
+  );
+
+  /** 启动前提：DSH 就位且版本匹配；内置模式还要求本机有合格的 Node。 */
+  const canStartDsh = $derived(
+    Boolean(
+      harness.environment &&
+      harness.environment.dshInstalled &&
+      harness.environment.dshVersionMatches &&
+      (dshExternal || harness.environment.node),
+    ),
+  );
+
   /** failed 变体的收窄（union 上直接取 reason 过不了类型检查）。 */
   const failReason = $derived(harness.status.phase === 'failed' ? harness.status.reason : '');
 
@@ -330,10 +355,7 @@
             {:else}
               <button
                 class="qx-btn qx-btn-sm qx-btn-primary"
-                disabled={harness.starting ||
-                  !harness.environment?.node ||
-                  !harness.environment?.dshInstalled ||
-                  !harness.environment?.dshVersionMatches}
+                disabled={harness.starting || !canStartDsh}
                 data-testid="harness-start"
                 onclick={() => void start()}
               >
@@ -347,6 +369,9 @@
           {#if harness.environment?.dshVersion}
             · v{harness.environment.dshVersion}
           {/if}
+        </p>
+        <p class="mt-1 text-xs text-muted" data-testid="dsh-source-line">
+          来源：{dshSourceLabel}
         </p>
         {#if harness.status.phase === 'failed'}
           <p class="mt-1.5 text-xs text-danger">{failReason}</p>
@@ -391,7 +416,7 @@
             安全模式中：插件变更冻结，重启 DSH 退出。
           </p>
         {/if}
-        {#if harness.environment && !harness.environment.node}
+        {#if harness.environment && !harness.environment.node && !dshExternal}
           <div class="mt-2 flex items-center justify-between gap-2">
             <p class="text-xs text-muted">未检测到 Node</p>
             <button
@@ -406,7 +431,30 @@
             <p class="mt-1 text-xs text-danger">{nodeError}</p>
           {/if}
         {/if}
-        {#if harness.environment && !harness.environment.dshInstalled}
+        {#if harness.environment && dshExternal}
+          <p class="mt-2 text-xs text-muted">当前使用全局 DSH（千寻不托管安装与升级）</p>
+          {#if harness.environment.dshExternalPath}
+            <p
+              class="truncate font-mono text-xs text-muted"
+              title={harness.environment.dshExternalPath}
+            >
+              {harness.environment.dshExternalPath}
+              {#if harness.environment.dshVersion}
+                · v{harness.environment.dshVersion}
+              {/if}
+            </p>
+          {:else}
+            <p class="mt-1 text-xs text-warning">
+              未找到全局安装的 DSH：请确认 dsh 已在 PATH 中，或用 QIANXUN_DSH_BIN 指向它。
+            </p>
+          {/if}
+          {#if harness.environment.dshExternalPath && !harness.environment.dshVersionMatches}
+            <p class="mt-1 text-xs text-warning">
+              版本不兼容：要求 {pinnedDshVersion(harness.environment.installSpec)}，当前 {harness
+                .environment.dshVersion ?? '未知'}
+            </p>
+          {/if}
+        {:else if harness.environment && !harness.environment.dshInstalled}
           <div class="mt-2 flex items-center justify-between gap-2">
             <p class="text-xs text-muted">DSH 未安装</p>
             <button

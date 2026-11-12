@@ -119,6 +119,12 @@ pub async fn harness_restart(app: AppHandle) -> Result<String> {
 /// 包数推进另发进度事件（前端 store 留存备用，UI 展示走日志）。
 #[tauri::command]
 pub async fn harness_install(app: AppHandle) -> Result<()> {
+    // 外部 DSH 模式：千寻不托管 DSH 的安装/升级——全局 dsh 归用户的
+    // 包管理器管，千寻插手只会改坏用户自己的环境。
+    let settings = crate::settings_snapshot(&app)?;
+    if settings.dsh.source == crate::settings::DSH_SOURCE_EXTERNAL {
+        return Err(Error::DshExternalManagedInstallUnsupported);
+    }
     let state = app.state::<crate::AppState>();
     if state.harness.installing.swap(true, Ordering::SeqCst) {
         return Err(Error::AlreadyInstalling);

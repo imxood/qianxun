@@ -94,10 +94,12 @@ pub enum Event {
 /// 启动一次 DSH 所需的全部输入。
 #[derive(Clone, Debug)]
 pub struct LaunchPlan {
-    /// 运行 DSH 的 Node 可执行文件。
-    pub node: PathBuf,
-    /// DSH CLI 入口（私有 prefix 里的 bin.js）。
-    pub entry: PathBuf,
+    /// 被拉起来的程序：内置模式 = 运行 DSH 的 Node 可执行文件；外部模式
+    /// = 用户全局安装的 `dsh` 可执行文件。
+    pub program: PathBuf,
+    /// DSH CLI 入口（内置模式 = 私有 prefix 里的 bin.js；外部模式 = None，
+    /// 因为外部 dsh 自己就是入口）。
+    pub entry: Option<PathBuf>,
     /// 启动的 profile（决定插件栈）。
     pub profile: String,
     /// DSH 工作目录（agent 会话继承）。
@@ -113,9 +115,11 @@ pub struct LaunchPlan {
 
 impl LaunchPlan {
     fn to_command(&self) -> Command {
-        let mut command = Command::new(&self.node);
+        let mut command = Command::new(&self.program);
+        if let Some(entry) = &self.entry {
+            command.arg(entry);
+        }
         command
-            .arg(&self.entry)
             // 用命名子命令而不是 `web` 别名，且放在 profile 自身参数之前：
             // launcher 在第一个不认识的 token 处停止读取自己的旗标。
             .arg("--profile")
@@ -616,8 +620,8 @@ mod tests {
     fn 端口错位被固定端口校验拒绝() {
         let supervisor = Supervisor::new().expect("process guard");
         let plan = LaunchPlan {
-            node: PathBuf::from("node"),
-            entry: PathBuf::from("bin.js"),
+            program: PathBuf::from("node"),
+            entry: Some(PathBuf::from("bin.js")),
             profile: "web".into(),
             workspace: PathBuf::from("."),
             host: "127.0.0.1".into(),
@@ -641,8 +645,8 @@ mod tests {
     fn 启动命令注入环境与参数次序() {
         let dsh_home = PathBuf::from("data").join("dsh-home");
         let plan = LaunchPlan {
-            node: PathBuf::from("node"),
-            entry: PathBuf::from("dsh/bin.js"),
+            program: PathBuf::from("node"),
+            entry: Some(PathBuf::from("dsh/bin.js")),
             profile: "web".into(),
             workspace: PathBuf::from("workspace"),
             host: "127.0.0.1".into(),
@@ -692,6 +696,64 @@ mod tests {
         assert_eq!(
             environment.get("QIANXUN_VERSION").map(String::as_str),
             Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn 外部模式的启动命令没有入口前缀() {
+        // 外部模式：程序就是全局 dsh 本身，没有 bin.js 入口，参数序列
+        // 与内置模式完全一致。
+        let plan = LaunchPlan {
+            program: PathBuf::from("/home/maxu/.local/share/mise/shims/dsh"),
+            entry: None,
+            profile: "web".into(),
+            workspace: PathBuf::from("workspace"),
+            host: "127.0.0.1".into(),
+            port: 17300,
+            dsh_home: None,
+        };
+        let command = plan.to_command();
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "--profile",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "17300",
+            ]
+        );
+        let program = command
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(program, "/home/maxu/.local/share/mise/shims/dsh");
+
+        // 外部模式不注入 DSH_HOME：dsh 用系统 ~/.dsh 的既有资产。
+        let environment = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(name, value)| {
+                value.map(|value| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(!environment.contains_key("DSH_HOME"));
+        assert_eq!(
+            environment.get("DSH_DESKTOP").map(String::as_str),
+            Some("1")
         );
     }
 }

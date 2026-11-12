@@ -8,6 +8,8 @@
     BackupExportResult,
     BackupManifest,
     BackupRestoreReport,
+    DshSource,
+    HarnessEnvironment,
     HarnessStatus,
     SyncItemResult,
     SyncStatus,
@@ -26,6 +28,53 @@
   let registryInput: string = $state('');
   /** 千寻锁定的 DSH 安装说明符（Rust 侧单一事实源）。 */
   let installSpec: string | null = $state(null);
+  /**
+   * 全局模式下探测到的 dsh 可执行文件路径；
+   * null = 探测过但没找到；undefined = 还没探测到（环境信息拿不到）。
+   */
+  let dshExternalPath: string | null | undefined = $state(undefined);
+
+  /** DSH 来源候选项（取值与 Rust 侧 DshSource 一致）。 */
+  const DSH_SOURCE_OPTIONS: Array<{ value: DshSource; label: string }> = [
+    { value: 'bundled', label: '托管安装（千寻自管）' },
+    { value: 'external', label: '全局安装（自备 dsh）' },
+  ];
+
+  /** 当前来源；设置未加载时按 bundled 展示（Rust 侧默认值同为 bundled）。 */
+  const dshSource = $derived<DshSource>(settings.current?.dsh.source ?? 'bundled');
+
+  /** 来源说明：external 要讲清「千寻不负责安装与升级」。 */
+  const dshSourceHint = $derived(
+    dshSource === 'external'
+      ? '使用系统里已安装的 dsh（PATH 或 QIANXUN_DSH_BIN），千寻不负责安装与升级'
+      : '由千寻安装并升级 DSH（推荐）',
+  );
+
+  /** 全局模式却没探测到 dsh：提示用环境变量或 PATH 指定。 */
+  const dshSourceWarn = $derived(
+    dshSource === 'external' && dshExternalPath === null
+      ? '未检测到全局 dsh：请确认 dsh 已在 PATH 中，或设置环境变量 QIANXUN_DSH_BIN 指向它'
+      : '',
+  );
+
+  /** 刷新 DSH 环境事实（安装说明符 + 全局 dsh 路径）。 */
+  async function refreshDshEnvironment(): Promise<void> {
+    try {
+      const env = await call<HarnessEnvironment>('harness_environment');
+      installSpec = env.installSpec;
+      // 字段不存在（旧二进制）时按「未知」处理，不误报「未检测到 dsh」。
+      dshExternalPath = 'dshExternalPath' in env ? (env.dshExternalPath ?? null) : undefined;
+    } catch {
+      installSpec = null;
+      dshExternalPath = undefined;
+    }
+  }
+
+  /** 切换 DSH 来源：落设置后重探环境（全局模式要重新探测 dsh 路径）。 */
+  async function onDshSource(value: DshSource): Promise<void> {
+    await save({ dsh: { source: value } });
+    await refreshDshEnvironment();
+  }
 
   const themeOptions: Array<{ value: ThemePreference; label: string }> = [
     { value: 'system', label: '跟随系统' },
@@ -208,9 +257,9 @@
         meta = null;
       }
       try {
-        installSpec = (await call<{ installSpec: string }>('harness_environment')).installSpec;
+        await refreshDshEnvironment();
       } catch {
-        installSpec = null;
+        // 环境信息拿不到不影响设置编辑：锁定版本显示为「…」。
       }
       await refreshSync();
     })();
@@ -697,6 +746,22 @@
         <section id="dsh" bind:this={sectionEls.dsh} class="qx-card scroll-mt-6 px-5 pt-4 pb-3.5">
           <h2 class="qx-h pb-2">DSH 环境</h2>
           <div class="divide-y divide-line/60">
+            <SettingRow label="DSH 来源" hint={dshSourceHint} warn={dshSourceWarn}>
+              <select
+                class="qx-select w-52"
+                aria-label="DSH 来源"
+                data-testid="dsh-source-select"
+                value={dshSource}
+                onchange={(event) => {
+                  const value = event.currentTarget.value as DshSource;
+                  void onDshSource(value);
+                }}
+              >
+                {#each DSH_SOURCE_OPTIONS as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+            </SettingRow>
             <SettingRow label="随千寻启动">
               <Switch
                 label="随千寻启动 DSH"

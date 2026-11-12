@@ -89,6 +89,14 @@ pub enum Error {
     /// （重启 DSH 不是选项：DSH 进程在跑也意味着它在用未验证的版本。）
     #[error("DSH 版本不匹配：千寻要求 {required}，当前 {installed}。请到「环境」页点重装")]
     DshVersionMismatch { required: String, installed: String },
+
+    /// 外部 DSH 模式：没找到用户全局安装的 `dsh` 可执行文件。
+    #[error("未找到全局安装的 DSH：请用 QIANXUN_DSH_BIN 指定 dsh 可执行文件的路径，或在终端里装好 dsh 后重试")]
+    DshExternalNotFound,
+
+    /// 外部 DSH 模式：千寻不托管 DSH 的安装与升级（那是用户自己包管理器的活）。
+    #[error("外部 DSH 模式下不支持托管安装或升级：请用 mise / npm 等工具自行更新 DSH")]
+    DshExternalManagedInstallUnsupported,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

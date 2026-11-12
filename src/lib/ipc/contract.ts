@@ -166,12 +166,21 @@ export type DshVersionStrategy = 'pinned' | 'existing';
 
 export type DshHomePolicy = 'isolated' | 'system';
 
+/**
+ * DSH 来源：
+ * - `bundled`：千寻私有 npm prefix 自装并托管（默认，行为不变）；
+ * - `external`：不内置 DSH，直接用用户全局安装的 `dsh` 可执行文件。
+ */
+export type DshSource = 'bundled' | 'external';
+
 export interface DshSettings {
   port: number;
   allowRandomFallback: boolean;
   versionStrategy: DshVersionStrategy;
   autostart: boolean;
   home: DshHomePolicy;
+  /** DSH 来源（bundled = 千寻托管安装；external = 用户全局安装）。 */
+  source: DshSource;
 }
 
 export interface MirrorsSettings {
@@ -545,6 +554,15 @@ export interface HarnessEnvironment {
   dshHome: string;
   /** 一键安装将下载的 Node 版本（Rust 侧单一事实源，避免前端硬编码）。 */
   bundledNodeVersion: string;
+  /**
+   * DSH 来源：`bundled`（千寻私有 prefix 托管）或 `external`（用户全局
+   * 安装的 `dsh`）。外部模式下 `dshInstalled` / `dshVersion` /
+   * `dshVersionMatches` 都按外部 dsh 的事实计算（版本判定用「兼容」
+   * 语义：同一发行线即通过）。
+   */
+  dshSource: DshSource;
+  /** 外部模式下命中的全局 dsh 可执行文件路径（内置模式为 null）。 */
+  dshExternalPath?: string | null;
 }
 
 /** supervisor 状态机（serde tag = "phase"）。 */
