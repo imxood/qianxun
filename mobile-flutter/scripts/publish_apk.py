@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.server
+import os
 import re
 import shutil
 import socketserver
@@ -50,9 +51,86 @@ RENAMES = {
     "app-debug.apk": "qianxun-{v}-debug.apk",
 }
 
+# 发布出去的包，其 Android versionCode 必须 >= 这个值，否则**装不上**。
+#
+# Android 覆盖安装要求 versionCode 不低于已装版本（降级会被拦，提示
+# 「已安装更高版本"千寻(0.3.0)"」——2026-11-05 实测）。
+#
+# versionCode 的算法（Flutter gradle 插件 FlutterPlugin.kt）：
+#   split-per-abi：ABI偏移×1000 + buildNumber（armv7 +1000 / arm64 +2000 /
+#                  x86_64 +4000）；不 split 时就是 buildNumber。
+#
+# 历史的 0.3.0 是 buildNumber=1 -> arm64 versionCode=2001，手机上那个包的
+# versionCode 更高，所以 buildNumber=2 的新包（2002）仍被当作降级拦下。
+#
+# 现在 pubspec 用 buildNumber=30000 -> 各 ABI 包 30000~34000，远高于历史值。
+# 以后出包若 buildNumber 被改小，这里会拦住发布。
+MIN_VERSION_CODE = 30000
+
+
+def apk_version_code(apk: Path) -> int | None:
+    """读 APK 的 Android versionCode。读不到返回 None。"""
+    aapt2 = None
+    for candidate in sorted(
+        Path(r"D:\programs\android-sdk").glob("build-tools/*/aapt2.exe")
+    ):
+        aapt2 = candidate
+    if aapt2 is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [str(aapt2), "dump", "badging", str(apk)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    for line in proc.stdout.splitlines():
+        if line.startswith("package:"):
+            for token in line.split():
+                if token.startswith("versionCode="):
+                    try:
+                        return int(token.split("=", 1)[1].strip("'"))
+                    except ValueError:
+                        return None
+    return None
+
 # 旧版本号的包一并清掉：手机上从同一个 URL 下载时，最容易出的错就是
 # 浏览器拿了一个旧文件（缓存、或上次下到一半），装上去却以为是最新的。
 STALE_SUFFIXES = (".apk",)
+
+
+def newest_source_mtime() -> float:
+    """源码树里最新的修改时间（只看参与构建的目录）。
+
+    用途：判断 APK 是不是「旧包」。见 sync() 里的新鲜度闸门。
+    """
+    roots = [
+        ROOT / "lib",
+        ROOT / "android" / "app",
+        ROOT / "android" / "settings.gradle.kts",
+        ROOT / "android" / "gradle.properties",
+        ROOT / "pubspec.yaml",
+    ]
+    newest = 0.0
+    for root in roots:
+        if root.is_file():
+            newest = max(newest, root.stat().st_mtime)
+            continue
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in ("build", ".gradle", ".cxx")]
+            for name in filenames:
+                path = Path(dirpath) / name
+                try:
+                    newest = max(newest, path.stat().st_mtime)
+                except OSError:
+                    pass
+    return newest
 
 
 def sync() -> list[Path]:
@@ -63,14 +141,58 @@ def sync() -> list[Path]:
     version = app_version()
     SERVE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ── 新鲜度闸门（2026-11-05 加）────────────────────────────────────
+    # 踩过的坑：`build/app/outputs/flutter-apk/` 里**同时躺着旧的 release 包
+    # 和新的 debug 包**（本脚本只按文件名拷贝，不看新旧）。于是手机上下载
+    # `qianxun-<v>-arm64.apk` 装上去，代码却是改动之前的——「怎么没生效」。
+    #
+    # 判据：产物比源码旧 -> 它一定是陈旧的（源码改了没重新构建）。
+    # 此时**不发布那个产物**，并说清楚该跑什么构建命令。
+    source_mtime = newest_source_mtime()
+    stale: list[str] = []
+    for src_name in RENAMES:
+        src = APK_DIR / src_name
+        if not src.is_file():
+            continue
+        if src.stat().st_mtime < source_mtime:
+            stale.append(src_name)
+    if stale:
+        print("⚠️ 以下产物比源码旧，**不发布**（装了会看不到改动）：", file=sys.stderr)
+        for name in stale:
+            src = APK_DIR / name
+            age = source_mtime - src.stat().st_mtime
+            print(
+                f"   {name}  比源码旧 {age / 60:.0f} 分钟",
+                file=sys.stderr,
+            )
+        print(
+            "   请重新构建：flutter build apk --release --split-per-abi"
+            "（或 flutter build apk --debug）",
+            file=sys.stderr,
+        )
+
     for old in SERVE_DIR.glob("*.apk"):
         old.unlink()
         print(f"  清掉旧包 {old.name}")
 
     out: list[Path] = []
     for src_name, dst_tpl in RENAMES.items():
+        if src_name in stale:
+            continue
         src = APK_DIR / src_name
         if not src.is_file():
+            continue
+        # ── versionCode 门槛（2026-11-05 加）─────────────────────────
+        # 装不上是最容易被误判成「改动没生效」的一种故障：手机上装的是
+        # 旧包，新包 versionCode 更低 -> Android 直接拒绝安装。
+        # 与其让人下载完才发现装不上，不如不发布。
+        code = apk_version_code(src)
+        if code is not None and code < MIN_VERSION_CODE:
+            print(
+                f"⚠️ {src_name} 的 versionCode={code} < {MIN_VERSION_CODE}，"
+                f"**不发布**（手机上会报「已安装更高版本」而装不上）",
+                file=sys.stderr,
+            )
             continue
         dst = SERVE_DIR / dst_tpl.format(v=version)
         shutil.copy2(src, dst)

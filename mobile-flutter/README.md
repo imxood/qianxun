@@ -100,12 +100,12 @@ POST /api/<namespace>/<method>
 实测于 qianxun 0.7.0 内置的 harness（用 `scripts/probe_rpc.py` 打的），
 真实形状是：
 
-| 方法 | 正确载荷 | 写错会得到 |
-|---|---|---|
-| `session/list` | `{"args":{"_request":{}}}` | `args fields do not match the descriptor: missing "request"; unexpected "_request"` |
-| `session/page` / `prompt` / `cancel` / `search` / `create` / `$events/result` | `{"args":{"request":{…}}}` | 同上 |
-| `agentPresets/list` / `session/modelCatalog` | `{"args":{}}` | `args fields do not match the descriptor: unexpected …` |
-| **任何**方法，payload 摊平 | `{"payload":{}}` | `Remote payload must contain exactly one plain-object args field` |
+| 方法                                                                          | 正确载荷                   | 写错会得到                                                                          |
+| ----------------------------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
+| `session/list`                                                                | `{"args":{"_request":{}}}` | `args fields do not match the descriptor: missing "request"; unexpected "_request"` |
+| `session/page` / `prompt` / `cancel` / `search` / `create` / `$events/result` | `{"args":{"request":{…}}}` | 同上                                                                                |
+| `agentPresets/list` / `session/modelCatalog`                                  | `{"args":{}}`              | `args fields do not match the descriptor: unexpected …`                             |
+| **任何**方法，payload 摊平                                                    | `{"payload":{}}`           | `Remote payload must contain exactly one plain-object args field`                   |
 
 要点：
 
@@ -126,8 +126,13 @@ Content-Type: application/octet-stream
 ```
 
 ```json
-{"ok":true,"value":{"receiptId":"<uuid>",
-  "file":{"attachmentId":"sha256:<hex>","name":"probe.png","bytes":70}}}
+{
+  "ok": true,
+  "value": {
+    "receiptId": "<uuid>",
+    "file": { "attachmentId": "sha256:<hex>", "name": "probe.png", "bytes": 70 }
+  }
+}
 ```
 
 四个必须记住的点：
@@ -148,11 +153,11 @@ Content-Type: application/octet-stream
 
 ### 2.4 编码规则（对齐 `WireJson`）
 
-| 标志 | 含义 | Dart 侧要求 |
-|---|---|---|
-| `explicitNulls = false` | null 字段**被省略** | 绝不发 `"cursor": null` |
+| 标志                    | 含义                       | Dart 侧要求              |
+| ----------------------- | -------------------------- | ------------------------ |
+| `explicitNulls = false` | null 字段**被省略**        | 绝不发 `"cursor": null`  |
 | `encodeDefaults = true` | 有默认值的字段**总是**写出 | 别写「等于默认值就省掉」 |
-| `ignoreUnknownKeys` | 未知键忽略 | 解码宽松 |
+| `ignoreUnknownKeys`     | 未知键忽略                 | 解码宽松                 |
 
 ### 2.3 流多路复用
 
@@ -176,23 +181,23 @@ Content-Type: application/octet-stream
 
 逻辑流端点：
 
-| 端点 | 用途 |
-|---|---|
-| `$events` | 连接存活 + 通知 + 主机请求。**无条件打开**——健康度不依赖界面是否在监听 |
-| `$events/result` | 一元端点，回应 waterfall |
-| `session/follow` | 会话实时流 |
-| `session/control` | 队列 / 后台 job / 投影 |
-| `workspace/follow` | 工作区注册表 |
+| 端点               | 用途                                                                   |
+| ------------------ | ---------------------------------------------------------------------- |
+| `$events`          | 连接存活 + 通知 + 主机请求。**无条件打开**——健康度不依赖界面是否在监听 |
+| `$events/result`   | 一元端点，回应 waterfall                                               |
+| `session/follow`   | 会话实时流                                                             |
+| `session/control`  | 队列 / 后台 job / 投影                                                 |
+| `workspace/follow` | 工作区注册表                                                           |
 
 ### 2.4 `$events` 帧
 
-| `type` | 字段 | 含义 |
-|---|---|---|
-| `ready` | `clientId`, `host.home` | 开帧，**必须第一个**。`clientId` 绑定本代所有回复 |
-| `emit` | `event`, `args[]` | 通知，**断线不重放** |
-| `waterfall` | `event`, `eventId`, `agentId`, `request` | 等待本客户端回答 |
-| `cancel` | `eventId` | 撤回，**不回答**地撤掉提示 |
-| 其它 | — | 原样保留 |
+| `type`      | 字段                                     | 含义                                              |
+| ----------- | ---------------------------------------- | ------------------------------------------------- |
+| `ready`     | `clientId`, `host.home`                  | 开帧，**必须第一个**。`clientId` 绑定本代所有回复 |
+| `emit`      | `event`, `args[]`                        | 通知，**断线不重放**                              |
+| `waterfall` | `event`, `eventId`, `agentId`, `request` | 等待本客户端回答                                  |
+| `cancel`    | `eventId`                                | 撤回，**不回答**地撤掉提示                        |
+| 其它        | —                                        | 原样保留                                          |
 
 本客户端只认领两种 waterfall：
 
@@ -331,13 +336,13 @@ scripts/
 
 本机已就绪（装在 D 盘，没写进系统 PATH）：
 
-| 组件 | 路径 | 说明 |
-|---|---|---|
-| Flutter SDK | `E:\develop\tools\flutter` | 3.47.6 stable |
-| JDK | `D:\programs\jdk-17.0.20.1+1` | Temurin 17.0.20.1（AGP 9.1 要求 17）——**原本就有** |
-| Android SDK | `D:\programs\android-sdk` | 本次新装：platform-36 / build-tools 36.0.0 / platform-tools / emulator |
-| AVD | `D:\programs\android-avd\qx36.avd` | pixel_6 规格，API 36 google_apis x86_64 |
-| pub 缓存 | `E:\develop\.pub-cache` | **必须与项目同盘**，见下方 |
+| 组件        | 路径                               | 说明                                                                   |
+| ----------- | ---------------------------------- | ---------------------------------------------------------------------- |
+| Flutter SDK | `E:\develop\tools\flutter`         | 3.47.6 stable                                                          |
+| JDK         | `D:\programs\jdk-17.0.20.1+1`      | Temurin 17.0.20.1（AGP 9.1 要求 17）——**原本就有**                     |
+| Android SDK | `D:\programs\android-sdk`          | 本次新装：platform-36 / build-tools 36.0.0 / platform-tools / emulator |
+| AVD         | `D:\programs\android-avd\qx36.avd` | pixel_6 规格，API 36 google_apis x86_64                                |
+| pub 缓存    | `E:\develop\.pub-cache`            | **必须与项目同盘**，见下方                                             |
 
 **先加载环境**，再跑 flutter：
 
@@ -435,13 +440,20 @@ flutter build apk → √ Built build\app\outputs\flutter-apk\app-*-release.apk
 
 APK 实测（`aapt2 dump badging`）：
 
-| 项 | 值 |
-|---|---|
-| package | `com.qianxun.qianxun_mobile` |
-| versionName | `0.3.0` |
-| minSdk / targetSdk / compileSdk | 24 / 36 / 36 |
-| application-label | 千寻 |
-| 大小 | 见下（分 ABI release，arm64 约 18 MB） |
+| 项                              | 值                                                         |
+| ------------------------------- | ---------------------------------------------------------- |
+| package                         | `com.qianxun.qianxun_mobile`                               |
+| versionName                     | `0.3.1`                                                    |
+| versionCode                     | arm64 **32000** / armv7 31000 / x86_64 34000 / debug 30000 |
+| minSdk / targetSdk / compileSdk | 26 / 36 / 36                                               |
+| application-label               | 千寻                                                       |
+| 大小                            | 见下（分 ABI release，arm64 约 18 MB）                     |
+
+> **versionCode 规则**（2026-11-05 定，见 `pubspec.yaml` 注释）：
+> `versionCode = ABI偏移×1000 + buildNumber`（armv7 +1000 / arm64 +2000 /
+> x86_64 +4000；不 split 时就是 buildNumber）。Android 覆盖安装要求
+> versionCode **不低于**已装版本，降级会被拦（提示「已安装更高版本」）。
+> 所以 pubspec 的 buildNumber 必须**远大于**任何历史值，当前取 `+30000`。
 
 测试分五类（145 项）：
 
