@@ -41,6 +41,10 @@ pub struct RemoteStatus {
     pub active_count: usize,
     /// DSH 是否在跑（网关可用性的前提）。
     pub dsh_running: bool,
+    /// 本地服务反代（docs/20）：设置态 + 监听态 + 端口（网关端口 + 2）。
+    pub proxy_enabled: bool,
+    pub proxy_port: u16,
+    pub proxy_listening: Option<String>,
 }
 
 /// 本机全部网卡地址（含 EasyTier 识别），供绑定选择。
@@ -74,6 +78,13 @@ pub fn remote_status(app: AppHandle) -> RemoteStatus {
         .unwrap()
         .as_ref()
         .and_then(|handle| handle.lan_addr.borrow().map(|a| a.to_string()));
+    let proxy_listening = state
+        .remote
+        .running
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|handle| handle.proxy_addr.borrow().map(|a| a.to_string()));
     let dsh_running = matches!(
         state.harness.supervisor.status(),
         crate::harness::supervisor::Status::Starting
@@ -88,6 +99,9 @@ pub fn remote_status(app: AppHandle) -> RemoteStatus {
         device_count: remote.devices.len(),
         active_count: remote.devices.iter().filter(|d| !d.revoked).count(),
         dsh_running,
+        proxy_enabled: remote.proxy_enabled,
+        proxy_port: remote::proxy::ProxyLaunch::port_for(remote.port).unwrap_or_default(),
+        proxy_listening,
     }
 }
 
@@ -236,14 +250,16 @@ pub async fn remote_self_check(app: AppHandle) -> SelfCheck {
     }
 }
 
-/// 启动配置指纹：enabled/bind/port/devices/upstream/dsh_url 任一变化都
-/// 会改变它。sync 用它决定「保留运行中的网关」还是「停旧起新」——设备表
-/// 是网关启动快照，不重启就进不去新配对的 token、也断不掉已吊销的（R1 修复）；
-/// upstream 必须参与：启动早于 DSH 就绪时上游是占位 0 端口，就绪事件
-/// 再 sync 时指纹必须变化才会重建（否则网关永远指向上游 0——实测复现）。
-/// dsh_url（DSH 启动 token）参与：DSH revive 后 token 变化时也重建网关，
-/// 保证 `Upstream` 始终持有最新的换 cookie 入口（cookie 本身因签名密钥
-/// 持久化多半仍有效，但重兑路径必须用新 token）。
+/// 启动配置指纹：enabled/bind/port/devices/upstream/dsh_url/反代开关/
+/// 内网目标开关 任一变化都会改变它。sync 用它决定「保留运行中的网关」
+/// 还是「停旧起新」——设备表是网关启动快照，不重启就进不去新配对的
+/// token、也断不掉已吊销的（R1 修复）；upstream 必须参与：启动早于 DSH
+/// 就绪时上游是占位 0 端口，就绪事件再 sync 时指纹必须变化才会重建
+/// （否则网关永远指向上游 0——实测复现）。dsh_url（DSH 启动 token）参与：
+/// DSH revive 后 token 变化时也重建网关，保证 `Upstream` 始终持有最新的
+/// 换 cookie 入口（cookie 本身因签名密钥持久化多半仍有效，但重兑路径
+/// 必须用新 token）。参数即全部指纹维度，哈希函数天然多参，允许超参。
+#[allow(clippy::too_many_arguments)]
 fn fingerprint(
     enabled: bool,
     bind_ip: &str,
@@ -251,6 +267,8 @@ fn fingerprint(
     devices: &[RemoteDevice],
     upstream: Option<&str>,
     dsh_url: Option<&str>,
+    proxy_enabled: bool,
+    proxy_allow_lan: bool,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -261,6 +279,8 @@ fn fingerprint(
     devices.hash(&mut hasher);
     upstream.hash(&mut hasher);
     dsh_url.hash(&mut hasher);
+    proxy_enabled.hash(&mut hasher);
+    proxy_allow_lan.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -275,7 +295,7 @@ pub async fn sync(app: AppHandle) {
     let state = app.state::<crate::AppState>();
     let _serial = state.remote.sync_lock.lock().await;
 
-    let (should_bind_lan, bind_ip, port, devices, upstream, dsh_url) = {
+    let (should_bind_lan, bind_ip, port, devices, upstream, dsh_url, proxy_launch) = {
         let settings = state
             .settings
             .lock()
@@ -289,6 +309,10 @@ pub async fn sync(app: AppHandle) {
             _ => (None, None),
         };
         let should_bind_lan = settings.remote.enabled && !settings.remote.bind_ip.is_empty();
+        let proxy_launch = remote::proxy::ProxyLaunch {
+            enabled: settings.remote.proxy_enabled,
+            allow_lan_targets: settings.remote.proxy_allow_lan,
+        };
         (
             should_bind_lan,
             settings.remote.bind_ip.clone(),
@@ -296,6 +320,7 @@ pub async fn sync(app: AppHandle) {
             settings.remote.devices.clone(),
             upstream,
             dsh_url,
+            proxy_launch,
         )
     };
     // 回环永远要起；LAN 只在启用时绑——start() 内部据此分支。
@@ -312,6 +337,8 @@ pub async fn sync(app: AppHandle) {
         &devices,
         upstream.as_deref(),
         dsh_url.as_deref(),
+        proxy_launch.enabled,
+        proxy_launch.allow_lan_targets,
     );
 
     // 指纹没变且任务健在才保留；否则（含吊销/配对/换网卡换端口/远程开关）重建。
@@ -358,9 +385,11 @@ pub async fn sync(app: AppHandle) {
     crate::logging::log(
         "info",
         &format!(
-            "网关重建：lan={should_bind_lan} bind={effective_bind_ip}:{port} 设备={} 上游={upstream} dsh_url={}",
+            "网关重建：lan={should_bind_lan} bind={effective_bind_ip}:{port} 设备={} 上游={upstream} dsh_url={} 反代=开({})/内网目标({})",
             devices.len(),
             dsh_url.is_some(),
+            proxy_launch.enabled,
+            proxy_launch.allow_lan_targets,
         ),
     );
     match remote::gateway::start(
@@ -371,16 +400,21 @@ pub async fn sync(app: AppHandle) {
         devices,
         desired,
         mobile_access_dir,
+        proxy_launch,
     )
     .await
     {
         Ok(handle) => {
-            let log = match *handle.lan_addr.borrow() {
-                Some(lan) => format!(
+            let log = match (*handle.lan_addr.borrow(), *handle.proxy_addr.borrow()) {
+                (Some(lan), Some(proxy)) => format!(
+                    "回环 {} + 局域网 {lan} + 反代 {proxy}（上游 {upstream}）",
+                    handle.loopback_addr
+                ),
+                (Some(lan), None) => format!(
                     "回环 {} + 局域网 {lan}（上游 {upstream}）",
                     handle.loopback_addr
                 ),
-                None => format!("仅回环 {}（上游 {upstream}）", handle.loopback_addr),
+                (None, _) => format!("仅回环 {}（上游 {upstream}）", handle.loopback_addr),
             };
             *state
                 .remote
@@ -492,119 +526,176 @@ mod tests {
             created_at: 0,
             revoked: false,
         };
-        let base = fingerprint(
+        let fp = |enabled: bool,
+                  bind: &str,
+                  port: u16,
+                  devices: &[RemoteDevice],
+                  upstream: Option<&str>,
+                  dsh_url: Option<&str>,
+                  proxy: bool,
+                  proxy_lan: bool| {
+            fingerprint(
+                enabled, bind, port, devices, upstream, dsh_url, proxy, proxy_lan,
+            )
+        };
+        let base = fp(
             true,
             "10.0.0.1",
             17400,
             std::slice::from_ref(&device),
             None,
             None,
+            true,
+            false,
         );
-        // 配置没变 → 指纹稳定（keep 的前提）。
+        // 配置没变 -> 指纹稳定（keep 的前提）。
         assert_eq!(
             base,
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
                 None,
                 None,
+                true,
+                false,
             )
         );
-        // 新配对（设备表变化）→ 指纹变化。
+        // 新配对（设备表变化）-> 指纹变化。
         let paired = RemoteDevice {
             created_at: 1,
             ..device.clone()
         };
         assert_ne!(
             base,
-            fingerprint(true, "10.0.0.1", 17400, &[paired], None, None)
+            fp(true, "10.0.0.1", 17400, &[paired], None, None, true, false)
         );
-        // 吊销 → 指纹变化。
+        // 吊销 -> 指纹变化。
         let revoked = RemoteDevice {
             revoked: true,
             ..device.clone()
         };
         assert_ne!(
             base,
-            fingerprint(true, "10.0.0.1", 17400, &[revoked], None, None)
+            fp(true, "10.0.0.1", 17400, &[revoked], None, None, true, false)
         );
-        // 换网卡 / 换端口 / 开关 / 上游就绪 → 指纹变化。
+        // 换网卡 / 换端口 / 开关 / 上游就绪 -> 指纹变化。
         assert_ne!(
             base,
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.2",
                 17400,
                 std::slice::from_ref(&device),
                 None,
-                None
+                None,
+                true,
+                false,
             )
         );
         assert_ne!(
             base,
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.1",
                 17401,
                 std::slice::from_ref(&device),
                 None,
-                None
+                None,
+                true,
+                false,
             )
         );
         assert_ne!(
             base,
-            fingerprint(
+            fp(
                 false,
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
                 None,
                 None,
+                true,
+                false,
             )
         );
-        // 上游从占位（None）变为真实端口 → 指纹变化（DSH 就绪重建的依据）。
+        // 上游从占位（None）变为真实端口 -> 指纹变化（DSH 就绪重建的依据）。
         assert_ne!(
             base,
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
                 Some("127.0.0.1:17300"),
                 None,
+                true,
+                false,
             )
         );
-        // DSH 启动 token（dsh_url）变化 → 指纹变化（revive 重建的依据）。
+        // DSH 启动 token（dsh_url）变化 -> 指纹变化（revive 重建的依据）。
         assert_ne!(
             base,
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
                 Some("127.0.0.1:17300"),
                 Some("http://127.0.0.1:17300/?token=AAA"),
+                true,
+                false,
             )
         );
-        // DSH token 变而 origin 不变 → 指纹仍变。
+        // DSH token 变而 origin 不变 -> 指纹仍变。
         assert_ne!(
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
                 Some("127.0.0.1:17300"),
                 Some("http://127.0.0.1:17300/?token=AAA"),
+                true,
+                false,
             ),
-            fingerprint(
+            fp(
                 true,
                 "10.0.0.1",
                 17400,
                 std::slice::from_ref(&device),
                 Some("127.0.0.1:17300"),
                 Some("http://127.0.0.1:17300/?token=BBB"),
+                true,
+                false,
+            )
+        );
+        // 反代开关 / 内网目标开关 -> 指纹变化（docs/20）。
+        assert_ne!(
+            base,
+            fp(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                None,
+                None,
+                false,
+                false,
+            )
+        );
+        assert_ne!(
+            base,
+            fp(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                None,
+                None,
+                true,
+                true,
             )
         );
     }
@@ -640,6 +731,7 @@ mod tests {
             vec![device.clone()],
             1,
             std::env::temp_dir().join("qianxun-gw-test-mobile-access"),
+            remote::proxy::ProxyLaunch::default(),
         )
         .await
         .expect("网关启动");
@@ -711,6 +803,7 @@ mod tests {
             vec![revoked],
             2,
             std::env::temp_dir().join("qianxun-gw-test-mobile-access"),
+            remote::proxy::ProxyLaunch::default(),
         )
         .await
         .expect("网关二启动");
@@ -830,6 +923,7 @@ mod tests {
             vec![device],
             7,
             std::env::temp_dir().join("qianxun-gw-test-mobile-access"),
+            remote::proxy::ProxyLaunch::default(),
         )
         .await
         .expect("网关启动");

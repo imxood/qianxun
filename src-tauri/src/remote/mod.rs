@@ -7,7 +7,10 @@
 //! - 其余全部路径要求 cookie/query 命中未吊销 token，否则 401；
 //! - `/api/*`（含 SSE 流响应）与静态页流式转发到 DSH 回环 origin；
 //! - `/api/remote.mux` 一条 WS 下行做双向桥（带 10 分钟空闲超时，
-//!   防手机息屏导致的半开连接泄漏）。
+//!   防手机息屏导致的半开连接泄漏）；
+//! - `proxy`（docs/20）：可选的本地服务反代面——LAN 网卡上另绑一个端口
+//!   （网关端口 + 2），整源代理给 cookie 指定的**回环**目标（默认），
+//!   手机浏览器直达本机 dev server；鉴权与网关同源，目标白名单收敛。
 //!
 //! `remote.enabled=false`（默认）时**不绑 LAN**：网关任务照常启动，但只听
 //! 回环 `127.0.0.1:port`（DSH 页 iframe 与回环 fetch 依赖它），并按周期
@@ -19,6 +22,7 @@ pub mod commands;
 pub mod gateway;
 pub mod mobile_ui;
 pub mod online;
+pub mod proxy;
 
 pub use mobile_ui::MobileUi;
 
@@ -89,6 +93,11 @@ pub struct RemoteSettings {
     pub bind_ip: String,
     pub port: u16,
     pub devices: Vec<RemoteDevice>,
+    /// 本地服务反代（docs/20）：LAN 上另绑 `port + 2`，手机直达本机
+    /// 回环服务。默认开——远程访问本身就是运营者主动启用的能力面。
+    pub proxy_enabled: bool,
+    /// 反代目标放宽到内网（RFC1918/链路本地/ULA）。默认只允许回环。
+    pub proxy_allow_lan: bool,
 }
 
 impl Default for RemoteSettings {
@@ -98,6 +107,8 @@ impl Default for RemoteSettings {
             bind_ip: String::new(),
             port: default_gateway_port(),
             devices: Vec::new(),
+            proxy_enabled: true,
+            proxy_allow_lan: false,
         }
     }
 }

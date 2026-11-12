@@ -994,6 +994,10 @@ export interface RemoteSettings {
   bindIp: string;
   port: number;
   devices: RemoteDevice[];
+  /** 本地服务反代（docs/20）：LAN 上另绑 port+2，手机直达本机回环服务。 */
+  proxyEnabled: boolean;
+  /** 反代目标放宽到内网（RFC1918/链路本地/ULA）；默认仅回环。 */
+  proxyAllowLan: boolean;
 }
 
 /** 服务端域设置（docs/19）：单地址 + 实例凭据（token 不入备份）。 */
@@ -1033,6 +1037,10 @@ export interface RemoteStatus {
   deviceCount: number;
   activeCount: number;
   dshRunning: boolean;
+  /** 本地服务反代（docs/20）：设置态 + 端口（网关端口 + 2）+ 监听态。 */
+  proxyEnabled: boolean;
+  proxyPort: number;
+  proxyListening: string | null;
 }
 
 /** remote_self_check 返回：网关健康自检（带真实 token 走 /qx-gate）。 */

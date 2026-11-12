@@ -125,6 +125,8 @@
     enabled?: boolean;
     bindIp?: string;
     port?: number;
+    proxyEnabled?: boolean;
+    proxyAllowLan?: boolean;
   }): Promise<void> {
     error = '';
     try {
@@ -146,6 +148,14 @@
 
   function toggleEnabled(value: boolean): void {
     void apply({ enabled: value });
+  }
+
+  function toggleProxy(value: boolean): void {
+    void apply({ proxyEnabled: value });
+  }
+
+  function toggleProxyAllowLan(value: boolean): void {
+    void apply({ proxyAllowLan: value });
   }
 
   /** 配对：设备记录 + 二维码 URL。Rust 侧 pair 自带 sync（新 token 即时生效）。 */
@@ -379,6 +389,52 @@
         <span class="text-muted">状态加载中…</span>
       {/if}
     </div>
+  </section>
+
+  <section class="qx-card space-y-3 p-4">
+    <h2 class="qx-h">本地服务反代</h2>
+    <p class="text-xs leading-5 text-muted">
+      在 LAN 上另开一个端口（网关端口 + 2），把整个源代理给本机的一个服务——手机浏览器打开
+      <span class="font-mono">http://&lt;电脑IP&gt;:&lt;反代端口&gt;/?_qx_to=127.0.0.1:5173</span>
+      即可访问本机 dev server（子资源与 WebSocket 一并代理，vite 热更新可用）。
+    </p>
+    <label class="flex items-center justify-between text-sm">
+      <span>启用本地服务反代</span>
+      <Switch
+        label="启用本地服务反代"
+        checked={settings.current?.remote.proxyEnabled ?? false}
+        onchange={toggleProxy}
+      />
+    </label>
+    <label class="flex items-center justify-between gap-4 text-sm">
+      <span class="min-w-0">
+        允许内网目标
+        <span class="block text-xs text-muted"
+          >默认仅本机（127.0.0.1 / localhost）；打开后可代理内网 IP 服务</span
+        >
+      </span>
+      <Switch
+        label="允许内网目标"
+        checked={settings.current?.remote.proxyAllowLan ?? false}
+        onchange={toggleProxyAllowLan}
+      />
+    </label>
+    {#if status}
+      <div class="flex h-5 items-center gap-2 text-xs">
+        {#if status.proxyListening}
+          <span class="qx-badge bg-accent-soft text-accent tabular-nums">
+            反代 {status.proxyListening}
+          </span>
+          <span class="text-muted tabular-nums">端口 {status.proxyPort}</span>
+        {:else if status.proxyEnabled && status.listening}
+          <span class="text-muted">反代随网关绑定后自动监听（端口 {status.proxyPort}）</span>
+        {:else if status.proxyEnabled}
+          <span class="text-muted">未监听：先启用远程访问并选择网卡</span>
+        {:else}
+          <span class="text-muted">反代已关闭</span>
+        {/if}
+      </div>
+    {/if}
   </section>
 
   <section class="qx-card space-y-3 p-4">

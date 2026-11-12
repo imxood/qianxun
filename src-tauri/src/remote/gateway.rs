@@ -48,6 +48,8 @@ pub struct GatewayHandle {
     pub lan_addr: watch::Receiver<Option<SocketAddr>>,
     /// 回环监听地址（永远存在）。DSH 页 iframe URL 即 `http://{loopback_addr}`。
     pub loopback_addr: SocketAddr,
+    /// 本地服务反代监听地址（docs/20；未启用/未绑定时恒 None）。
+    pub proxy_addr: watch::Receiver<Option<SocketAddr>>,
     pub fingerprint: u64,
 }
 
@@ -101,6 +103,11 @@ impl GatewayState {
 /// `upstream` 是 DSH origin（host:port）；`dsh_url` 是 DSH 就绪时打印的
 /// 完整 URL（已含 `?token=`）—— 兑换 cookie 时整段打过去；None = DSH 未就绪。
 /// `mobile_access_dir` 是移动定制层目录（`<DSH_HOME>/mobile-access`）。
+/// `proxy` 是本地服务反代面配置（docs/20）：启用时在 LAN 网卡上另绑
+/// `port + 2`，整源代理给回环目标。
+/// 参数全部是「启动快照」字段，sync 指纹比对后一次性传入——结构体化
+/// 只是把同一组字段换个名字，故允许超参。
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     bind_ip: &str,
     port: u16,
@@ -109,6 +116,7 @@ pub async fn start(
     devices: Vec<RemoteDevice>,
     fingerprint: u64,
     mobile_access_dir: std::path::PathBuf,
+    proxy: super::proxy::ProxyLaunch,
 ) -> Result<GatewayHandle, String> {
     let loopback_bind: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
@@ -195,10 +203,51 @@ pub async fn start(
     // 首绑成功 = 无失败计数；首绑失败 = start() 已记一次 warn，计数从 1 起。
     let lan_failures = u32::from(lan_addr.is_none());
 
+    // 本地服务反代面（docs/20）：仅 LAN 入口需要；绑失败不拖累网关
+    // （warn 降级 + 与 LAN 相同的周期重试自愈）。端口 = 网关端口 + 2。
+    let (proxy_listener, proxy_bind) = match (lan_bind, proxy.enabled) {
+        (Some(lan), true) => match super::proxy::ProxyLaunch::addr_for(lan) {
+            Some(proxy_sock) => match tokio::net::TcpListener::bind(proxy_sock).await {
+                Ok(listener) => (Some(listener), Some(proxy_sock)),
+                Err(cause) => {
+                    crate::logging::log(
+                            "warn",
+                            &format!(
+                                "本地服务反代 {proxy_sock} 暂不可用（{cause}）；已降级，每 30s 自动重试"
+                            ),
+                        );
+                    (None, Some(proxy_sock))
+                }
+            },
+            None => (None, None),
+        },
+        _ => (None, None),
+    };
+    let proxy_listen_addr = proxy_listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok());
+    let (proxy_status_tx, proxy_status_rx) = watch::channel(proxy_listen_addr);
+    let proxy_failures = u32::from(proxy_listen_addr.is_none());
+    // 停止信号先建：LAN 与反代两条重试循环都要 clone 它。
+    let (shutdown, mut signal) = watch::channel(false);
+    let proxy_router = super::proxy::router(state.clone(), port.saturating_add(2), proxy);
+    let proxy_retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        match proxy_bind {
+            Some(bind) => Box::pin(lan_serve_loop(
+                proxy_listener,
+                bind,
+                proxy_router,
+                proxy_status_tx,
+                signal.clone(),
+                proxy_failures,
+                "本地服务反代",
+            )),
+            None => Box::pin(std::future::pending()),
+        };
+
     // 单个监督任务托起所有 server，共享同一停止信号——任一 server 退出就
     // 结束整组（restart 由 sync 层重新建）。LAN 侧不是一次性 serve 而是
     // 「重试 + 服务」循环：绑定失败回到定时重试，网卡恢复即自动上线。
-    let (shutdown, mut signal) = watch::channel(false);
     let lan_retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = match lan_bind
     {
         Some(bind) => Box::pin(lan_serve_loop(
@@ -208,6 +257,7 @@ pub async fn start(
             lan_status_tx,
             signal.clone(),
             lan_failures,
+            "局域网网关",
         )),
         None => Box::pin(std::future::pending()),
     };
@@ -231,6 +281,7 @@ pub async fn start(
                 }
             }
             _ = lan_retry => {}
+            _ = proxy_retry => {}
         }
     });
     Ok(GatewayHandle {
@@ -238,6 +289,7 @@ pub async fn start(
         task,
         lan_addr: lan_status_rx,
         loopback_addr,
+        proxy_addr: proxy_status_rx,
         fingerprint,
     })
 }
@@ -254,6 +306,7 @@ async fn lan_serve_loop(
     lan_status: watch::Sender<Option<SocketAddr>>,
     mut signal: watch::Receiver<bool>,
     mut failures: u32,
+    label: &'static str,
 ) {
     loop {
         if *signal.borrow_and_update() {
@@ -270,7 +323,7 @@ async fn lan_serve_loop(
                         crate::logging::log(
                             "warn",
                             &format!(
-                                "局域网网关仍不可用（{bind}）：{cause}（已连续 {failures} 次，节流提醒）"
+                                "{label}仍不可用（{bind}）：{cause}（已连续 {failures} 次，节流提醒）"
                             ),
                         );
                     }
@@ -284,12 +337,12 @@ async fn lan_serve_loop(
         };
         failures = 0;
         let _ = lan_status.send(Some(bind));
-        crate::logging::log("info", &format!("局域网网关已监听 {bind}（网卡已恢复）"));
+        crate::logging::log("info", &format!("{label}已监听 {bind}（网卡已恢复）"));
         if let Err(cause) = axum::serve(bound, app.clone()).await {
-            crate::logging::log("warn", &format!("局域网网关退出：{cause}"));
+            crate::logging::log("warn", &format!("{label}退出：{cause}"));
         }
         let _ = lan_status.send(None);
-        crate::logging::log("warn", "局域网网关退出，将按周期重试绑定");
+        crate::logging::log("warn", &format!("{label}退出，将按周期重试绑定"));
         tokio::select! {
             _ = signal.changed() => return,
             _ = tokio::time::sleep(LAN_RETRY_INTERVAL) => {}
@@ -828,10 +881,15 @@ mod tests {
             Vec::new(),
             0,
             std::env::temp_dir().join("qianxun-gateway-degrade-test"),
+            crate::remote::proxy::ProxyLaunch::default(),
         )
         .await
         .expect("LAN 绑定失败不应拖垮网关启动");
         assert!(handle.lan_addr.borrow().is_none(), "LAN 应处于降级重试态");
+        assert!(
+            handle.proxy_addr.borrow().is_none(),
+            "LAN 降级时反代面也不应监听"
+        );
         // 回环照常可达。
         tokio::net::TcpStream::connect(handle.loopback_addr)
             .await
@@ -991,6 +1049,7 @@ mod tests {
             Vec::new(),
             0,
             std::env::temp_dir().join("qianxun-gateway-desktop-layer-test"),
+            crate::remote::proxy::ProxyLaunch::default(),
         )
         .await
         .expect("网关应启动");
