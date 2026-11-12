@@ -692,15 +692,30 @@ mod tests {
         assert!(ctrl_slot.lock().unwrap().is_some(), "控制通道应在位");
 
         // 设备完整链请求：cookie 鉴权 → 治理 → 开流 → Host 重写 → 千寻 Router。
+        // router_handle 是**进程级全局**（生产：一进程一网关；测试：并行的
+        // 网关测试 start() 会覆写它，本测试的流在请求时 load_full 就可能拿
+        // 到别人的 Router，表现为 502「上游不可达」）。所以每次尝试前重新
+        // 发布本测试的最小 Router，命中别人的 Router 就重试——生产路径
+        // （每流 load_full）不动，只把测试对这个全局的依赖稳住。
         let client = reqwest::Client::new();
-        let response = client
-            .get(format!("http://{addr}/"))
-            .header("cookie", format!("qx_token={device_token}; qx_iid=dev-i1"))
-            .send()
-            .await
-            .expect("反代请求");
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(response.text().await.expect("响应体"), "ok-from-qianxun");
+        let mut body = String::new();
+        for _ in 0..5 {
+            remote::router_handle().store(std::sync::Arc::new(
+                axum::Router::new().fallback(|| async { "ok-from-qianxun" }),
+            ));
+            let response = client
+                .get(format!("http://{addr}/"))
+                .header("cookie", format!("qx_token={device_token}; qx_iid=dev-i1"))
+                .send()
+                .await
+                .expect("反代请求");
+            let status = response.status();
+            body = response.text().await.expect("响应体");
+            if status.is_success() && body == "ok-from-qianxun" {
+                break;
+            }
+        }
+        assert_eq!(body, "ok-from-qianxun");
 
         session.abort();
     }
