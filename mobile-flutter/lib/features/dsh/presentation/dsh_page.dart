@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ⚠️ `Cookie` / `CookieManager` / `UriRequest` 都来自这个包，
@@ -8,24 +9,43 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 // 混用会得到「The method 'Cookie' isn't defined for the type」这种
 // 指不到根因的报错。
 import 'package:webview_flutter/webview_flutter.dart';
+// ⚠️ Android 专有扩展：`AndroidWebViewController` 与 `FileSelectorMode`
+// 只存在于 `webview_flutter_android`，不在 `webview_flutter` 主包里。
+// iOS 编译时这个 import 仍可用（该包对所有平台都有 stub），
+// 但 `setOnShowFileSelector` 只在 Android 实现里有意义 —— 调用前
+// 必须按 `defaultTargetPlatform.isAndroid` 判断。
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../../../core/qx_log.dart';
 import '../../../data/store/connection_store.dart';
 import 'dsh_credential.dart';
+import 'webview_file_chooser.dart';
+// 返回键三级递进的判定（`decideBackAction` / `DshBackAction`）在
+// `webview_host_state.dart` 里——那是纯函数，测试直接钉它。
 import 'webview_host_state.dart';
 
 /// DSH 页面宿主。
 ///
 /// 方案 B 的核心：**壳只负责「能不能打开」，页面负责「打开后长什么样」**。
-/// 界面、导航、工具卡、审批、diff 全部由 `<dsh_home>/mobile-access/custom.js`
-/// 在页面内重建（千寻网关注入 `window.qxMobile`）。
 ///
 /// 所以这个 widget **刻意不重画任何 DSH 界面** —— 那是重写不是移植。
-/// 它只做四件壳该做的事：
+/// 它只做五件壳该做的事：
 ///   1. 加载前注入 `qx_token` cookie（否则网关 401，页面白屏）
-///   2. 处理返回键（WebView 历史 → 设备列表 → 退出）
+///   2. 处理返回键（WebView 历史 -> 设备列表 -> 退出）
 ///   3. 外部链接交系统浏览器（同源留在 WebView）
-///   4. 把加载状态与错误显式呈现（不假装「正在加载」）
+///   4. **接上原生文件选择器**（页面里的 `<input type="file">`）
+///   5. 把加载状态与错误显式呈现（不假装「正在加载」）
+///
+/// ## 关于「定制层」
+///
+/// 历史上的移动定制层（L3：`custom.css` + `custom.js`，在页面内重建
+/// 导航/工具卡/审批）已于 2026-10-31 按用户要求整体下线——**UI 美化
+/// 一律不要**，只保留「输入框 + 软键盘」的功能性适配（见
+/// `mobile/examples/minimal-input/`）。
+///
+/// 因此本页**不再探测 `window.qxMobile`**，也不再挂恒显的状态条：
+/// 那条 28px 的「正在检测定制层…」是顶栏下面多出来的第二行，
+/// 手机上尤其刺眼。
 class DshPage extends ConsumerStatefulWidget {
   const DshPage({super.key, required this.connection});
 
@@ -37,14 +57,6 @@ class DshPage extends ConsumerStatefulWidget {
 
 class _DshPageState extends ConsumerState<DshPage> {
   WebViewController? _controller;
-  Timer? _readyTimer;
-
-  /// 页面自己报告的「定制层已就绪」。null = 还没报告。
-  ///
-  /// 用来区分两种白屏：**网关上没东西**（我们的问题）与
-  /// **页面加载了但定制层没生效**（custom.js 的问题）。
-  /// 两者都表现为白屏，但排查方向完全相反。
-  bool? _customLayerReady;
 
   String? _loadError;
 
@@ -56,7 +68,6 @@ class _DshPageState extends ConsumerState<DshPage> {
 
   @override
   void dispose() {
-    _readyTimer?.cancel();
     super.dispose();
   }
 
@@ -115,16 +126,12 @@ class _DshPageState extends ConsumerState<DshPage> {
             // 不是 Uri。直接 `.host` / `.path` 会报
             // 「The getter 'host' isn't defined for the type 'String'」。
             final parsed = Uri.tryParse(uri);
-            qxlog.info('dsh', '页面开始加载 ${parsed?.host ?? '?'}${parsed?.path ?? ''}');
+            qxlog.info(
+                'dsh', '页面开始加载 ${parsed?.host ?? '?'}${parsed?.path ?? ''}');
             if (mounted) setState(() => _loadError = null);
           },
           onPageFinished: (uri) async {
             qxlog.info('dsh', '页面加载完成 ${Uri.tryParse(uri)?.path ?? uri}');
-            // 控制器在 onPageFinished 之前已赋值（loadRequest 之前），
-            // 但闭包里直接引用局部变量会报「referenced_before_declaration」
-            // —— 用 State 的字段。
-            final controller = _controller;
-            if (controller != null) await _probeCustomLayer(controller);
           },
           onWebResourceError: (error) {
             // ⚠️ 只上报**主文档**错误。子资源（字体/图片）失败在移动网络上
@@ -160,20 +167,55 @@ class _DshPageState extends ConsumerState<DshPage> {
 
     _controller = controller;
 
+    // ⚠️ **文件选择器必须在这里接**（不接 = 点了「文件」什么都不发生）。
+    //
+    // DSH 的「+ -> 文件」是页面里的原生 `<input type="file">`
+    // （`dsh-client-ui-conversation` 的 `fileInputRef.current?.click()`）。
+    // Android WebView 上，file input 的弹框**唯一**入口是
+    // `WebChromeClient.onShowFileChooser`：
+    // - webview_flutter 的 Java 侧 `returnValueForOnShowFileChooser` 默认
+    //   **false** -> `onShowFileChooser` 返回 false -> WebView 认为没人处理
+    //   -> **静默不弹框**（不报错，最难查的那种）；
+    // - 只有注册了回调，Java 侧才置 true，并把回调返回的 URI 列表喂给
+    //   页面的 `File` 对象。
+    //
+    // RN 端（`react-native-webview`）内置了这条链路，所以那边一直好用。
+    //
+    // ⚠️ 这是 **Android 专有扩展**（`AndroidWebViewController`），iOS 不存在
+    // —— 所以要按运行平台判断，不能无条件调用。
+    await _attachFileChooser(controller);
+
     // ⚠️ 必须剥掉 query —— 旧数据的 url 里带 `?token=<64hex>`，
     // 直接加载会让它进 WebView 的历史与（万一的）日志。
     // token 已经进 cookie 了，url 不需要再带一遍。
     final target = stripCredential(url).resolve('/');
     qxlog.info('dsh', '加载 $target');
     await controller.loadRequest(target);
+  }
 
-    // 兜底：页面若没报告定制层状态，20 秒后收掉「正在检测」，
-    // 避免一个永远转下去的指示器（那比白屏更让人困惑）。
-    _readyTimer = Timer(const Duration(seconds: 20), () {
-      if (mounted && _customLayerReady == null) {
-        setState(() => _customLayerReady = false);
-      }
+  /// 接上原生文件选择器（Android 专有 API，iOS 走系统默认）。
+  Future<void> _attachFileChooser(WebViewController controller) async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    // ⚠️ 必须用 `as` 强制转换，**不能**靠 `is` 的类型提升：
+    // `AndroidWebViewController` 继承的是 `PlatformWebViewController`，
+    // 与 `WebViewController` **没有继承关系**（两者只是实现同一接口），
+    // Dart 的类型提升规则在这里不适用——写 `is` 检查后仍按基类解析，
+    // 编译报「The method 'setOnShowFileSelector' isn't defined for the
+    // type 'WebViewController'」。
+    if (controller is! AndroidWebViewController) {
+      qxlog.warn('dsh', '当前不是 Android WebView 控制器，跳过文件选择器接线');
+      return;
+    }
+    final androidController = controller as AndroidWebViewController;
+    await androidController.setOnShowFileSelector((params) {
+      qxlog.info('dsh',
+          '页面请求选择文件（多选=${params.mode == FileSelectorMode.openMultiple}）');
+      return WebViewFileChooser.pick(
+        allowMultiple: params.mode == FileSelectorMode.openMultiple,
+        acceptTypes: params.acceptTypes,
+      );
     });
+    qxlog.info('dsh', '文件选择器已接线');
   }
 
   bool isSameOrigin(Uri candidate, Uri base) {
@@ -194,30 +236,10 @@ class _DshPageState extends ConsumerState<DshPage> {
     qxlog.info('dsh', '外部链接交系统浏览器：$url');
   }
 
-  /// 问页面「定制层在不在」。这决定了白屏该往哪查。
-  Future<void> _probeCustomLayer(WebViewController controller) async {
-    try {
-      final result = await controller.runJavaScriptReturningResult(
-        'typeof window.qxMobile === "object" && window.qxMobile !== null',
-      );
-      final present = result == true || result == 'true';
-      if (mounted) setState(() => _customLayerReady = present);
-      qxlog.info('dsh', '定制层 window.qxMobile ${present ? "在" : "不在"}');
-      if (!present) {
-        qxlog.warn('dsh',
-          '页面里没有 window.qxMobile —— custom.js 不会执行。'
-          '检查千寻是否以含 remote 模块的构建在跑，'
-          '以及 <dsh_home>/mobile-access/custom.js 是否存在。');
-      }
-    } catch (error) {
-      qxlog.warn('dsh', '探测定制层失败：$error');
-      if (mounted) setState(() => _customLayerReady = false);
-    }
-  }
-
   void _onShellMessage(String raw) {
-    // 页面 → 壳。目前只有 Surface 切换。
-    qxlog.info('dsh', '页面消息：${raw.length > 200 ? '${raw.substring(0, 200)}…' : raw}');
+    // 页面 -> 壳。目前只有 Surface 切换。
+    qxlog.info(
+        'dsh', '页面消息：${raw.length > 200 ? '${raw.substring(0, 200)}…' : raw}');
   }
 
   /// 返回键：三级递进。顺序**不可调换**。
@@ -248,7 +270,7 @@ class _DshPageState extends ConsumerState<DshPage> {
       routeCanPop: canPop,
       onDeviceListRoot: !canPop,
     );
-    qxlog.info('dsh', '返回键 → $action');
+    qxlog.info('dsh', '返回键 -> $action');
     switch (action) {
       case DshBackAction.webHistory:
         await controller?.goBack();
@@ -261,8 +283,38 @@ class _DshPageState extends ConsumerState<DshPage> {
     }
   }
 
+  /// 上一帧转发给页面的键盘高度（去重，避免每帧多余的 JS 桥调用）
+  double _lastForwardedKb = -1;
+
   @override
   Widget build(BuildContext context) {
+    // Android：壳**不再 resize WebView**（surface 尺寸全程不变 ->
+    // 键盘动画由系统独立绘制，不触发 Chromium 整页光栅化）。
+    // A/B 实测（scripts/probe_keyboard.py，rAF 帧间隔采样，2026-11-05）：
+    //   true（每帧 resize）-> 键盘动画期间 8~9 个 >32ms 长帧（最长 77ms）
+    //   false（不 resize） -> **0 个**长帧（最长 15ms）
+    //
+    // 避让改由页内完成：壳把 Android 11+ 的**逐帧** IME inset 桥接给页面
+    // （window.__qxKb(高度px)），页面用 compositor-only 的 transform 让
+    // composer 跟手（见 mobile/examples/minimal-input/custom.js §1.5）。
+    // 头部与对话区全程静止（比 resize 方案多一层视觉稳定）。
+    // 非 Android（桌面/调试）维持 Scaffold 默认行为。
+    final bool androidShell = defaultTargetPlatform == TargetPlatform.android;
+    final double kbInset = MediaQuery.viewInsetsOf(context).bottom;
+    if (androidShell && _controller != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _controller == null) return;
+        if ((kbInset - _lastForwardedKb).abs() < 0.5) return;
+        _lastForwardedKb = kbInset;
+        unawaited(
+          _controller!
+              .runJavaScript(
+                'window.__qxKb&&window.__qxKb(${kbInset.toStringAsFixed(1)})',
+              )
+              .catchError((Object _) {}),
+        );
+      });
+    }
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
@@ -278,6 +330,9 @@ class _DshPageState extends ConsumerState<DshPage> {
       },
       child: Scaffold(
         backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        // 键盘避让策略见 build() 顶部的注释：Android 关闭（surface 不变 +
+        // 页内 transform 跟手），其余平台维持默认。
+        resizeToAvoidBottomInset: !androidShell,
         appBar: AppBar(
           // 顶栏只留「返回 + 机器名」。**不放任何 DSH 相关控件** ——
           // 那些由页面的 custom.js 负责，壳再画一遍就成了两套 UI。
@@ -297,36 +352,10 @@ class _DshPageState extends ConsumerState<DshPage> {
               if (!handled) navigator.maybePop();
             },
           ),
-          bottom: _statusBar(),
         ),
         body: _body(),
       ),
     );
-  }
-
-  PreferredSizeWidget? _statusBar() {
-    final error = _loadError;
-    if (error != null) {
-      return _StatusStrip(
-        text: '加载失败：$error',
-        color: Theme.of(context).colorScheme.error,
-        onRetry: () {
-          setState(() => _loadError = null);
-          unawaited(_controller?.reload());
-        },
-      );
-    }
-    final ready = _customLayerReady;
-    if (ready == null) {
-      return const _StatusStrip(text: '正在检测定制层…', color: Colors.blueGrey);
-    }
-    if (!ready) {
-      return _StatusStrip(
-        text: '页面已加载，但 custom.js 未生效（window.qxMobile 不存在）',
-        color: Colors.amber.shade700,
-      );
-    }
-    return null;
   }
 
   Widget _body() {
@@ -344,50 +373,6 @@ class _DshPageState extends ConsumerState<DshPage> {
       return const Center(child: CircularProgressIndicator());
     }
     return WebViewWidget(controller: controller);
-  }
-}
-
-class _StatusStrip extends StatelessWidget implements PreferredSizeWidget {
-  const _StatusStrip({required this.text, required this.color, this.onRetry});
-
-  final String text;
-  final Color color;
-  final VoidCallback? onRetry;
-
-  @override
-  Size get preferredSize => const Size.fromHeight(28);
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 28,
-      color: color.withValues(alpha: 0.14),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(fontSize: 12, color: color),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (onRetry != null)
-            GestureDetector(
-              onTap: onRetry,
-              child: Text(
-                '重试',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: color,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
   }
 }
 

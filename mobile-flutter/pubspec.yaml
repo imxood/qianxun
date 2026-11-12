@@ -1,7 +1,28 @@
 name: qianxun_mobile
 description: 千寻 DSH 远程客户端 —— 原生 Flutter 实现的 AI Agent 工作台。
 publish_to: "none"
-version: 0.3.0+1
+# 版本号规则（2026-11-05 定）：
+#   `X.Y.Z+N` —— Z 是功能版本，N 是**构建序号**（决定 Android versionCode）。
+#
+# ⚠️ **N 必须远大于任何历史值**，不能从 1 重新数。
+#
+# 踩过的坑（2026-11-05）：手机上装的是 0.3.0，新包 0.3.1 装不上，Android 报
+# 「已安装更高版本"千寻(0.3.0)"」——因为 **versionCode 降级被拦**
+# （INSTALL_FAILED_VERSION_DOWNGRADE），不是签名问题。
+#
+# versionCode 的真实算法（Flutter gradle 插件，FlutterPlugin.kt）：
+#   split-per-abi 时：versionCode = ABI偏移×1000 + buildNumber
+#     armv7=+1000 / arm64=+2000 / x86_64=+4000
+#   不 split 时：      versionCode = buildNumber
+#   （base 来自 flutter.versionCode，由工具按 buildNumber 写入 local.properties）
+#
+# 历史的 0.3.0 是 buildNumber=1 -> arm64 versionCode=2001，而当时手机上那个
+# 包的 versionCode 更高（历史构建序号曾更大），于是 0.3.1（arm64=2002）
+# 仍被当作「降级」拦下。
+#
+# 现在把 buildNumber 提到 **30000**：arm64 包 versionCode=32000，
+# 远高于任何历史值，不会再撞降级拦截。以后递增只需把 N 往上加。
+version: 0.3.1+30000
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -32,7 +53,22 @@ dependencies:
   # 应用私有目录，用于落盘日志与临时导出文件。
   path_provider: ^2.1.5
   webview_flutter: ^4.14.1
+  # Android 专有扩展：`AndroidWebViewController.setOnShowFileSelector` 是
+  # 「页面里的 <input type=file> 弹系统选择器」的唯一入口，不接就静默失败。
+  # 必须显式声明为依赖——否则类型提升失效（`is AndroidWebViewController`
+  # 之后仍按基类解析，编译报「方法未定义」）。
+  #
+  # ⚠️ 版本约束用 ^4.12.0（不是 ^4.14.1）：本机 Flutter SDK 3.47.9 的
+  # `flutter pub get` 要求它降到 4.12.0，钉 4.14.1 会解析失败。
+  # `setOnShowFileSelector` 在 4.12.0 就有，API 形状相同。
+  webview_flutter_android: ^4.12.0
   cookie_jar: ^4.0.9
+
+  # WebView 里的 <input type="file"> 走原生文件选择器。
+  # DSH 的「+ -> 文件」是页面里的原生 file input（fileInputRef.click()），
+  # WebView 必须接 onShowFileChooser 才会弹框——不接就是静默失败
+  # （插件默认返回空列表）。选中的文件回传给页面时需要 URI 列表。
+  file_picker: ^11.0.3
 
 dev_dependencies:
   flutter_test:

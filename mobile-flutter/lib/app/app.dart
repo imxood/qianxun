@@ -37,18 +37,31 @@ final _router = GoRouter(
           context.push('/dsh/${Uri.encodeComponent(conn.id)}');
         },
       ),
-    ),
-    // deep link 入口：`qianxun://app/dsh` → 打开最近用过那台电脑。
-    // 不是为了好看，是两个真实用途：手机锁屏时 adb 仍能拉起这一页
-    // （远程验证的唯一路径），以及桌面端做「在手机上打开这个会话」的链接。
-    GoRoute(
-      path: '/dsh',
-      builder: (context, state) => const _DshPickRoute(),
-    ),
-    GoRoute(
-      path: '/dsh/:connectionId',
-      builder: (context, state) =>
-          _DshRoute(connectionId: state.pathParameters['connectionId'] ?? ''),
+      // ⚠️ DSH 两条路由**必须嵌套在 `/` 之下**（2026-11-05 返回键修复）。
+      //
+      // 之前它们是顶层路由：深链 `qianxun://app/dsh` 冷启动/恢复时，
+      // GoRouter 的栈只有 [/dsh] 一层（`/` 不在栈底）->
+      // `navigator.canPop()` = false -> decideBackAction 走 exit ->
+      // `maybePop()` 在根上是 no-op -> **顶栏返回与系统返回双双失效**
+      // （实测连点 6 次页面纹丝不动；web 历史已排除——探针实测
+      // history.length=1、零 pushState，WebView 层无辜）。
+      //
+      // 嵌套后，任何方式进入 DSH 页，栈都是 [/ -> /dsh/...]，
+      // 返回自然弹回设备列表。
+      routes: [
+        // deep link 入口：`qianxun://app/dsh` -> 打开最近用过那台电脑。
+        // 不是为了好看，是两个真实用途：手机锁屏时 adb 仍能拉起这一页
+        // （远程验证的唯一路径），以及桌面端做「在手机上打开这个会话」的链接。
+        GoRoute(
+          path: 'dsh',
+          builder: (context, state) => const _DshPickRoute(),
+        ),
+        GoRoute(
+          path: 'dsh/:connectionId',
+          builder: (context, state) => _DshRoute(
+              connectionId: state.pathParameters['connectionId'] ?? ''),
+        ),
+      ],
     ),
     GoRoute(
       path: '/logs',
@@ -56,7 +69,6 @@ final _router = GoRouter(
     ),
   ],
 );
-
 
 /// DSH 路由。
 ///
