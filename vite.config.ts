@@ -21,7 +21,18 @@ export default defineConfig({
       // `.<name>.<pid>.<uuid>.tmpdir` 临时目录（同样会撞锁）。`.tmp` 是
       // Agent 调试时落临时脚本/日志的目录（.gitignored），不监听避免 HMR
       // 抖动；ESLint/Prettier 默认不扫它。
-      ignored: ['**/src-tauri/target/**', '**/.*.tmpdir/**', '**/.tmp/**'],
+      ignored: [
+        '**/src-tauri/target/**',
+        '**/.*.tmpdir/**',
+        '**/.tmp/**',
+        // 文档不在前端模块图里，但 Vite 见到变更会回退整页 reload，打断
+        // 人工验证（实测 2026-11-12：改 docs/04 后 1 秒 page reload）。
+        // Tauri watcher 只监听 src-tauri/，docs 变更本就不触发 Rust 重编。
+        '**/docs/**',
+        '**/AGENTS.md',
+        '**/README.md',
+        '**/TODO.md',
+      ],
     },
   },
   optimizeDeps: {

@@ -681,12 +681,16 @@ ADR-015 属**锚点切换**：改钉版 + 跑千寻自身回归；全套 DSH 真
 rc 递版——千寻侧与 cordis 插件协议相关的面（插件加载器、定时器）在真机验收
 时多看一眼。
 
-## 挂账 · DSH 0.2.2-rc.2 上架等待（2026-11-11 核实，未开里程碑）
+## 挂账 · DSH 0.2.2-rc.2 上架等待 → 已上架，钉版已切换（2026-11-12）
 
-**结论**：`0.2.2-rc.2` **在 GitHub 已发布、但在 npm 未上架**，故本轮不动钉版，
-等 npm 上的正式版上架后再走升级流程。
+**结论**：⛔ 已撤回（2026-11-12）——原结论「在 GitHub 已发布、但在 npm 未上架，
+本轮不动钉版」失效。2026-11-12 实测：`0.2.2-rc.2` 已在 npm 双源上架
+（`npm view @deepseek-ai/dsh@0.2.2-rc.2 version` 在 npmjs 与 npmmirror 均返回
+版本号；dist-tags `next: 0.2.2-rc.2`，`latest` 仍为 `0.2.2-rc.1`）。
+按用户要求（2026-11-12），`install::PINNED_VERSION` 已切换为 `0.2.2-rc.2`；
+升级流程其余项见下方执行清单（多数未闭环）。
 
-### 实测依据
+### 实测依据（2026-11-11 历史快照，上架状态已被 2026-11-12 复核取代）
 
 - GitHub release `dsh-v0.2.2-rc.2` 确实存在（commit `ddac967`，imccyu 发布
   2026-11-11 11:33，Pre-release）；tag 上本体包在 `apps/cli/package.json`
@@ -706,6 +710,10 @@ rc 递版——千寻侧与 cordis 插件协议相关的面（插件加载器、
     GitHub release 的 2026-11-04T13:07:14Z 约 4 小时。
 - 桌面端独立 runtime 已对齐 `0.2.2-rc.1`（`~/.qianxun/dsh-runtime`，冷启动自检
   通过），与当前钉版一致，不存在 `DshVersionMismatch` 拒启风险。
+  （⛔ 已撤回（2026-11-12）：23:42 实测 `~/.qianxun/dsh-runtime` 为
+  `0.2.2-alpha.3`，与安装版二进制自身钉版一致——该 exe 构建于 2026-11-04，
+  早于 rc.1/rc.2 钉版改动，源码改钉版不影响已安装 release。dev 版数据根
+  隔离在 `~/.qianxun_dev`，见 `src-tauri/src/paths.rs:33-37`。）
 
 ### 决定（用户 2026-11-11）
 
@@ -716,11 +724,16 @@ rc 递版——千寻侧与 cordis 插件协议相关的面（插件加载器、
 
 ### 正式版上架后的执行清单（沿用三轮升级的既定流程）
 
-- [ ] 双源可解析性复核（npmjs + npmmirror 的 dist-tags 与 tarball 直连）
+- [x] 双源可解析性复核 ✅（2026-11-12：npmjs 与 npmmirror 的
+      `@deepseek-ai/dsh@0.2.2-rc.2 version` 均返回 `0.2.2-rc.2`；dist-tags
+      `next: 0.2.2-rc.2`、`latest: 0.2.2-rc.1`、`alpha: 0.2.2-alpha.3`）
 - [ ] 依赖树 diff（`npm view @deepseek-ai/dsh@<新版本> dependencies --json`；
       **404 时该命令返回的是错误对象，不是依赖表**——见到「移除 90 个包」这类
       假 diff 必须先确认包本身可解析）
-- [ ] 改 4 个版本落点：`src-tauri/src/harness/install.rs` 的 `PINNED_VERSION`、
+- [x] 改版本落点之 `src-tauri/src/harness/install.rs` 的 `PINNED_VERSION`
+      `0.2.2-rc.1` -> `0.2.2-rc.2` ✅（2026-11-12，用户指示；`install_spec()`
+      及全部引用点随常量自动生效，无需散改）
+- [ ] 其余 3 个版本落点（千寻自身版本号，随发版递增时同步）：
       root `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`
 - [ ] 千寻版本号递增（`0.9.2` -> `0.9.3`；若届时锚点仍为 DSH `0.2.2` 则属
       ADR-015 的千寻修订号，只跑千寻自身回归；若上游改锚点则按锚点切换做全套）
