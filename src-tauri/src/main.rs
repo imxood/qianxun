@@ -3,6 +3,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Linux 路线用 CEF（内嵌 Chromium）：CEF 的渲染/zygote 子进程复用同一个
+// 可执行文件，靠 argv 里的 `--type=` 区分。这个宏把子进程分流到
+// CEF 的 helper 入口，浏览器主进程才继续往下跑。Windows 路线（wry /
+// WebView2）不需要它。
+#[cfg_attr(target_os = "linux", tauri_runtime_cef::cef_entry_point)]
 fn main() {
     // debug 构建的 WebView2 隔离配置，必须早于 WebView2 SDK 初始化（loader
     // 在本进程内读 GetEnvironmentVariable，set_var 时机足够早）。release 构

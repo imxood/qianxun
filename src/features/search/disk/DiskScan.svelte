@@ -40,7 +40,7 @@
   import { onMount } from 'svelte';
   import { Channel } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+  import { openPath, revealItemsInDir } from '@tauri-apps/plugin-opener';
   import { call } from '../../../lib/ipc';
   import { contextMenu } from '../../../lib/menu.svelte';
   import type {
@@ -416,7 +416,7 @@
     if (entry.dir) items.push({ label: '进入', onclick: () => drill(entry) });
     items.push({
       label: '在资源管理器中显示',
-      onclick: () => void revealItemInDir(entry.path).catch(() => {}),
+      onclick: () => void revealItemsInDir(entry.path).catch(() => {}),
     });
     items.push({ label: '移入回收站…', onclick: () => askClean(entry) });
     contextMenu.show(event, items);
@@ -1268,7 +1268,7 @@
           <button
             class="max-w-64 truncate rounded-full border border-line bg-surface px-2 py-0.5 transition-colors hover:border-accent"
             title="{file.path} · 点击在资源管理器中显示"
-            onclick={() => void revealItemInDir(file.path).catch(() => {})}
+            onclick={() => void revealItemsInDir(file.path).catch(() => {})}
           >
             {file.name} · {formatBytes(file.size)}
           </button>

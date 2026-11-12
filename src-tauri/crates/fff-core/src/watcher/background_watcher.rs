@@ -711,9 +711,9 @@ fn watch_dirs_nonrecursive<'a>(
     for dir in dirs {
         if let Err(e) = debouncer.watch(dir, RecursiveMode::NonRecursive) {
             warn!(
-                ?e,
-                dir = %dir.display(),
-                "Failed to init watcher for new directory"
+                "Failed to init watcher for new directory {:?}: {}",
+                dir.display(),
+                e
             );
         }
     }

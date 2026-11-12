@@ -6,6 +6,9 @@
 mod atomic;
 mod backup;
 mod bridge;
+// Linux 路线的 runtime 装配（CEF 内嵌 Chromium）。Windows 走 wry。
+#[cfg(target_os = "linux")]
+mod cef;
 mod child_output;
 mod disk;
 mod dsh_upstream;
@@ -38,6 +41,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use harness::supervisor::{Event, Supervisor};
 use settings::Settings;
+// Linux 路线的 CEF runtime 装配（Windows 走 wry，不需要）。
+#[cfg(target_os = "linux")]
+use crate::cef::linux_cef_runtime;
 
 /// 全局可变状态。设置的唯一持有者（IPC 读写都经过它），
 /// 加上托管域自己的 supervisor/安装状态与搜索域索引。
@@ -116,6 +122,16 @@ pub fn run() {
     }));
     #[cfg(not(windows))]
     let builder = tauri::Builder::default();
+    // Tauri 3：runtime 必须显式选择（v2 的默认 wry feature 已移除），
+    // 不选会报 RuntimeNotConfigured。两条路线按目标平台分家：
+    //   Windows → wry（系统 WebView2，Chromium 内核由 Edge 提供）
+    //   Linux   → tauri-runtime-cef（内嵌 Chromium，CEF 154.x）
+    // 依赖也按 target 拆开了（见 Cargo.toml），避免 Linux 上把 WebKitGTK
+    // 一起拖进来。
+    #[cfg(windows)]
+    let builder = builder.runtime(tauri_runtime_wry::Wry::default());
+    #[cfg(target_os = "linux")]
+    let builder = builder.runtime(linux_cef_runtime());
     builder
         .plugin(tauri_plugin_opener::init())
         // 原生目录选择器（搜索页选根目录，替代手输绝对路径）。

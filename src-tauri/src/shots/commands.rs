@@ -70,6 +70,7 @@ pub fn shots_capture(app: AppHandle) -> Result<Vec<FrozenMonitor>> {
     capture_all(&app)
 }
 
+#[cfg(windows)]
 fn capture_all(app: &AppHandle) -> Result<Vec<FrozenMonitor>> {
     let dir = shots_dir(app);
     std::fs::create_dir_all(&dir)
@@ -106,26 +107,48 @@ fn capture_all(app: &AppHandle) -> Result<Vec<FrozenMonitor>> {
     Ok(frozen)
 }
 
+/// 非 Windows 没有 xcap（Lead 已把它钉成 windows-only 依赖）：明确报错而非
+/// 静默返回空数组，前端据此提示「仅支持 Windows」；热键路径 open_overlays_impl
+/// 同样接到此错误并落日志，不会 panic。
+#[cfg(not(windows))]
+fn capture_all(_app: &AppHandle) -> Result<Vec<FrozenMonitor>> {
+    Err(Error::Screenshot("截屏功能当前仅支持 Windows".into()))
+}
+
 /// 微信式窗口感知：虚拟屏幕物理坐标 (x, y) 处的最顶层可用窗口矩形。
 /// 排除不可见/最小化/UWP 幽灵（cloaked）窗，以及千寻自己的覆盖窗与
 /// 贴图窗（它们盖在一切之上，命中会把感知钉死在遮罩上）；主窗不排除
 /// ——截千寻自己也是合法需求。非 Windows 恒 None（前端静默无感知）。
 #[tauri::command]
 pub fn shots_window_at(app: AppHandle, x: f64, y: f64) -> Option<WindowHit> {
+    let excluded = excluded_window_handles(&app);
+    window_at_impl(x, y, &excluded)
+}
+
+/// 收集要排除的窗口句柄（千寻自己的覆盖窗/贴图窗，它们盖在一切之上，
+/// 命中会把感知钉死在遮罩上）。仅 Windows 需要 HWND；非 Windows 的
+/// window_at_impl 恒 None，排除集无意义，返回空。
+#[cfg(windows)]
+fn excluded_window_handles(app: &AppHandle) -> Vec<isize> {
     // 排除集合：label 前缀 = 覆盖窗 / 贴图窗（含历史遗留 pin-N）。
-    let excluded = app
-        .webview_windows()
+    app.webview_windows()
         .into_iter()
         .filter(|(label, _)| {
             label.starts_with(OVERLAY_LABEL_PREFIX) || label.starts_with(PIN_LABEL_PREFIX)
         })
         .filter_map(|(_, window)| window.hwnd().ok())
         .map(|hwnd| hwnd.0 as isize)
-        .collect::<Vec<_>>();
-    window_at_impl(x, y, &excluded)
+        .collect()
 }
 
-/// 贴图窗 label 前缀（shots_open_pin 的 `pin-`；感知排除用）。
+#[cfg(not(windows))]
+fn excluded_window_handles(_app: &AppHandle) -> Vec<isize> {
+    Vec::new()
+}
+
+/// 贴图窗 label 前缀（shots_open_pin 的 `pin-`）。仅 Windows 感知排除消费，
+/// 随之门控，避免非 Windows 下 dead_code。
+#[cfg(windows)]
 const PIN_LABEL_PREFIX: &str = "pin-";
 
 #[cfg(windows)]
@@ -214,6 +237,8 @@ fn window_at_impl(_x: f64, _y: f64, _excluded: &[isize]) -> Option<WindowHit> {
 }
 
 /// xcap 0.9 的几何访问都返回 Result；统一解包成 (x, y, w, h)。
+/// xcap 是 windows-only 依赖，整函数门控（调用方 capture_all/测试同为 Windows）。
+#[cfg(windows)]
 fn monitor_geometry(monitor: &xcap::Monitor) -> Result<(i32, i32, i32, i32)> {
     let x = monitor
         .x()
@@ -233,6 +258,7 @@ fn monitor_geometry(monitor: &xcap::Monitor) -> Result<(i32, i32, i32, i32)> {
 }
 
 /// DPI 缩放；读取失败按 1.0 兜底（坐标只偏不大）。
+#[cfg(windows)]
 fn monitor_scale(monitor: &xcap::Monitor) -> f64 {
     monitor.scale_factor().unwrap_or(1.0) as f64
 }
@@ -623,6 +649,7 @@ mod tests {
 
     /// 真实显示器捕获链路（本机有屏才能跑）：枚举 → 截图 → PNG 落盘非空。
     #[test]
+    #[cfg(windows)]
     #[ignore = "真实显示器截屏，验收时手跑"]
     fn 真实捕获显示器() {
         let monitors = xcap::Monitor::all().expect("枚举显示器");

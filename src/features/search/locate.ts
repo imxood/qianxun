@@ -1,4 +1,4 @@
-import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+import { openPath, revealItemsInDir } from '@tauri-apps/plugin-opener';
 import { search } from '../../stores/search.svelte';
 import { toast } from '../../stores/toast.svelte';
 
@@ -35,7 +35,7 @@ export function locateInExplorer(relative: string): void {
     toast.show('未选择搜索根目录');
     return;
   }
-  void revealItemInDir(target).catch((error: unknown) => {
+  void revealItemsInDir(target).catch((error: unknown) => {
     toast.show(`定位失败：${relative}`, {
       label: '重试',
       run: () => locateInExplorer(relative),

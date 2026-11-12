@@ -439,6 +439,8 @@ pub fn apply_webview_preferences(window: &WebviewWindow) {
         ICoreWebView2Settings3, COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK,
         COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT,
     };
+    // Tauri 3：with_webview 的 wry 专属形态移到 runtime 扩展 trait。
+    use tauri_runtime_wry::WebviewWryExt;
     use windows_core::Interface;
 
     let os_app_dark = os_app_mode_is_dark();
@@ -447,7 +449,7 @@ pub fn apply_webview_preferences(window: &WebviewWindow) {
     } else {
         COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT
     };
-    if let Err(error) = window.with_webview(move |webview| unsafe {
+    if let Err(error) = window.with_wry_webview(move |webview| unsafe {
         let controller = webview.controller();
         let Ok(core) = controller.CoreWebView2() else {
             return;
@@ -534,11 +536,11 @@ pub async fn window_spawn_view(app: AppHandle, view: String) -> crate::error::Re
         }
     }
 
-    let spawned = builder
+    let _spawned = builder
         .build()
         .map_err(|cause| crate::error::Error::Window(format!("创建独立窗口失败：{cause}")))?;
     #[cfg(windows)]
-    apply_webview_preferences(&spawned);
+    apply_webview_preferences(&_spawned);
     Ok(label)
 }
 
@@ -624,11 +626,11 @@ pub async fn window_open_external(
         }
     });
 
-    let spawned = builder
+    let _spawned = builder
         .build()
         .map_err(|cause| crate::error::Error::Window(format!("创建内置浏览器窗失败：{cause}")))?;
     #[cfg(windows)]
-    apply_webview_preferences(&spawned);
+    apply_webview_preferences(&_spawned);
 
     // 兜底亮窗：万一目标站连 load 事件都不发（极端网络黑洞），8 秒后强制
     // 亮出，宁可白屏也不让窗口「隐身」（同主窗 20s 兜底的思路）。
@@ -669,6 +671,9 @@ pub fn on_theme_changed(app: &AppHandle) {
         }
         let _ = app.emit("system://theme", os_app_mode_is_dark());
     }
+    // 非 Windows：没有 WebView2 偏好可设（CEF 路线不需要），此处保持静默。
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 /// 独立窗口已销毁：广播 closed 事件让主窗恢复侧栏项。

@@ -14,10 +14,13 @@ use crate::window;
 static TRAY: std::sync::OnceLock<TrayIcon> = std::sync::OnceLock::new();
 
 /// 「退出 UI」菜单句柄：轻量模式下置灰（UI 已不在，无可退出）。
-static EXIT_UI: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+// Tauri 3：菜单类型不带默认泛型，显式标注类型擦除的 DynRuntime（不再写死 tauri::Wry）。
+static EXIT_UI: std::sync::OnceLock<tauri::menu::MenuItem<tauri::DynRuntime>> =
+    std::sync::OnceLock::new();
 
 /// 「开机自启」勾选句柄：切换后按注册表回读刷新勾选态。
-static AUTOSTART: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+static AUTOSTART: std::sync::OnceLock<CheckMenuItem<tauri::DynRuntime>> =
+    std::sync::OnceLock::new();
 
 /// 轻量模式切换 → 菜单可用态。失败静默：菜单态不是关键路径。
 pub fn reflect_light_mode(light: bool) {
@@ -54,7 +57,7 @@ pub fn build(app: &AppHandle) -> Result<()> {
     // 「开机自启」勾选项：初始勾选态回读注册表（插件写的 HKCU Run 键），
     // 读失败按未勾选兜底并落日志——菜单态不是关键路径（同 EXIT_UI 风格）。
     let autostart_enabled = app
-        .autolaunch()
+        .autostart()
         .is_enabled()
         .inspect_err(|cause| crate::logging::log("warn", &format!("读取开机自启状态失败：{cause}")))
         .unwrap_or(false);
@@ -155,16 +158,16 @@ pub fn build(app: &AppHandle) -> Result<()> {
             "autostart" => {
                 // 切换后以 is_enabled 回读注册表刷新勾选态：成败都回读，
                 // UI 与注册表永不各说各话；失败只落日志不改其他状态。
-                let autolaunch = app.autolaunch();
-                let outcome = if autolaunch.is_enabled().unwrap_or(false) {
-                    autolaunch.disable()
+                let autostart = app.autostart();
+                let outcome = if autostart.is_enabled().unwrap_or(false) {
+                    autostart.disable()
                 } else {
-                    autolaunch.enable()
+                    autostart.enable()
                 };
                 if let Err(cause) = outcome {
                     crate::logging::log("warn", &format!("切换开机自启失败：{cause}"));
                 }
-                let enabled = autolaunch.is_enabled().unwrap_or(false);
+                let enabled = autostart.is_enabled().unwrap_or(false);
                 if let Some(item) = AUTOSTART.get() {
                     let _ = item.set_checked(enabled);
                 }
