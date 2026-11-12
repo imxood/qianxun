@@ -433,16 +433,26 @@ mod tests {
 
     #[test]
     fn rss解析完整条目并过滤过期() {
+        use chrono::{Duration, Utc};
         let src = SourceDef {
             id: "qbitai",
             endpoint: "https://www.qbitai.com/feed",
             kind: SourceKind::Rss,
         };
-        let body = r#"<?xml version="1.0"?><rss><channel>
+        // 发布时间按当前时钟动态生成（写死日历日期会随时间推移被新鲜度
+        // 窗口自然过滤，测试变成定时炸弹——实测 2026-10-17 起挂）。
+        let fresh_date = (Utc::now() - Duration::days(1))
+            .format("%a, %d %b %Y %H:%M:%S +0000")
+            .to_string();
+        let stale_date = (Utc::now() - Duration::days(RSS_FRESH_DAYS * 2))
+            .format("%a, %d %b %Y %H:%M:%S +0000")
+            .to_string();
+        let body = format!(
+            r#"<?xml version="1.0"?><rss><channel>
             <item>
                 <title>标题一</title>
                 <link>https://www.qbitai.com/a.html</link>
-                <pubDate>Fri, 02 Oct 2026 07:34:15 +0000</pubDate>
+                <pubDate>{fresh_date}</pubDate>
                 <description><![CDATA[摘要一]]></description>
             </item>
             <item>
@@ -452,11 +462,12 @@ mod tests {
             <item>
                 <title>旧文</title>
                 <link>https://www.qbitai.com/old.html</link>
-                <pubDate>Mon, 01 Jan 2024 00:00:00 +0000</pubDate>
+                <pubDate>{stale_date}</pubDate>
             </item>
-        </channel></rss>"#;
-        let items = parse_rss_items(&src, body).unwrap();
-        assert_eq!(items.len(), 2, "2024 年旧文应被新鲜度过滤丢弃");
+        </channel></rss>"#
+        );
+        let items = parse_rss_items(&src, &body).unwrap();
+        assert_eq!(items.len(), 2, "超过新鲜度窗口的旧文应被丢弃");
         assert_eq!(items[0].title, "标题一");
         assert_eq!(items[0].url, "https://www.qbitai.com/a.html");
         assert_eq!(items[0].summary, "摘要一");
