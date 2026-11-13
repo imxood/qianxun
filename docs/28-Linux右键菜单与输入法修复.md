@@ -1,7 +1,8 @@
 # 28 · Linux(CEF) 右键菜单与输入法修复
 
 > 记录 2026-11-13 一轮实机排障：千寻在 omarchy(Hyprland/纯 Wayland) 上「右键菜单与输入法候选框变成巨大的窗口」。
-> 结论：**右键菜单巨大已根治**（前端 `preventDefault` + 自绘菜单）；**输入法候选框巨大仍未闭环**，需要在图形会话里实测开关。
+> 结论：**两项都已闭环**——右键菜单巨大（前端 `preventDefault` + 自绘菜单）；输入法候选框巨大（IM 环境自愈后，fcitx5 收到的光标矩形正常，候选窗回到 477x44 的小窗，见 §5）。
+> ⚠️ `--disable-gtk-ime` **不是**修法：它会连带关掉中文输入（Chromium 没有 XIM 兜底），已在 §5.3 记录结论与实测证据。
 
 ## 1. 现象
 
@@ -97,6 +98,25 @@ runtime style 只有 Alloy/Chrome，**没有 Views**（`webview.rs:842-846`）�
   `command_line_arg`（L583，对所有进程生效）、`command_line_args`（L598，仅 browser 进程）、
   `disable_features`(L919)/`enable_features`(L933)（逗号列表必须合并，`--disable-features` 是替换语义）。
 
+### 3.4 用户可指定的 IM 模块：`QIANXUN_IM_MODULE`（`src-tauri/src/linux_im.rs`）
+
+用户可以用环境变量**强制**指定输入法模块，不必改代码：
+
+| 取值            | 效果                                                                       |
+| --------------- | -------------------------------------------------------------------------- |
+| 未设置 / `auto` | 默认：只在变量缺失或为空时补（保守，不覆盖用户已有的非空值）               |
+| `fcitx`         | 强制 `XMODIFIERS=@im=fcitx` + `GTK_IM_MODULE=fcitx`（覆盖已有非空值）      |
+| `ibus`          | 强制 `XMODIFIERS=@im=ibus` + `GTK_IM_MODULE=ibus`                          |
+| `xim`           | 强制 `XMODIFIERS=@im=xim` + `GTK_IM_MODULE=xim`（走 X11 XIM，绕开 GTK IM） |
+| `none`          | 明确不要输入法：**删除** `XMODIFIERS` 与 `GTK_IM_MODULE`                   |
+| 其它非法值      | 打 warn 并回退 `auto`                                                      |
+
+- 决策逻辑写成纯函数（`resolve_im_override` / `im_override_is_valid` / `plan_im_env` / `ImEnvAction` / `ImEnvPlan`），
+  Windows 侧也能单测；执行层（`platform::ensure_im_env()`）只照计划做，不做判断。
+- ⚠️ GTK4 的 IM 模块目录里**只有** `libim-fcitx5.so`（GTK3 才有 `im-xim.so`/`im-wayland.so` 等）
+  ⇒ `QIANXUN_IM_MODULE=xim` 对 GTK4 **无效**（要等 CEF/Chromium 真正走 XIM 才有意义）。
+- ⚠️ `none` 会清掉图形会话里已有的 IM 设置；若只是想让「候选窗变小」，别用 `none`。
+
 ## 4. 实测结果（远端 192.168.20.3，omarchy/Arch，CEF 154.0.8037.98）
 
 远端构建：`cargo build --features tauri/custom-protocol` **首次编译通过**（cef.rs + linux_im.rs 的 platform 模块都是 Linux-only）。
@@ -111,20 +131,62 @@ runtime style 只有 Alloy/Chrome，**没有 Views**（`webview.rs:842-846`）�
 
 本地门禁全绿：prettier / eslint / svelte-check / vitest / `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（228 passed / 0 failed / 6 ignored）。
 
-## 5. 未闭环：输入法候选框仍然巨大
+## 5. 输入法候选框巨大：已闭环（自主验证）
 
-- 现象：fcitx5 输入窗 `0x400003` = 1100x734（整个 webview）。
-- 归因：Chromium 的 GTK IM **dummy window** 大小＝浏览器窗口 ⇒ fcitx5 按整窗创建候选窗（§2.2）。
-- 为什么远端 SSH 实例验证不了：X input focus 恒为 `0x1 (PointerRoot)`（SSH 起的实例没有 WM 焦点），
-  `XSetInputFocus` 成功后被 XWayland 覆盖成 `0x0`，XTEST 按键进不了渲染进程；
-  `hyprctl dispatch focuswindow address:0x…` 在新版 Hyprland 改用 lua 语法，旧语法报
-  `error: 3 [string "return hl.dispatch(focuswindow address:0x6000..."]:1: ')' expected near 'address'`。
-  ⇒ **真实 IME 交互只能由用户在自己的图形会话里验证**。
-- 候选修法（都可用 §3.3 的环境变量口子试，不用改代码）：
-  - `QIANXUN_CEF_ARGS=--disable-gtk-ime` —— Chromium 不再用 GTK IM（绕过 dummy window），改走 XIM。
-  - `QIANXUN_CEF_ARGS=--enable-wayland-ime` —— 反向验证 IME 路径归属（CEF 目前无 Wayland 支持，见 #2804/#4233）。
-- 远端机器本身：Hyprland **纯 Wayland** + fcitx5，原生 Wayland 应用走 text-input 协议（用户在远端自己那轮 DSH 会话里已确认 fcitx5 拼音可用、词典齐全）；
-  千寻因 CEF 无 Wayland 支持只能走 XWayland，IM 路径天然更「重」。
+### 5.1 复现方法学：把 X 输入焦点打到 CEF 子窗口
+
+之前的结论「远端 SSH 实例验证不了真实 IME」是**不完整**的。关键在 X 输入焦点落在哪个窗口：
+
+- 焦点在 GTK4 顶层（`0x600008`）时，XTEST 按键**进不了渲染进程**（textarea 值不变）——之前一直卡在这里。
+- `XSetInputFocus(0xc00003)`（CEF 的 child X window，`override-redirect`，`1100x734`）后，XTEST 按键**直达渲染进程**：
+  `ime_xtest.py focus:0xc00003 n i h a o` → 输入框拿到 `"ni hao"`（fcitx5 的行内预编辑）。
+- 写法坑：`ime_xtest.py` 的第一个参数必须是 `focus:<hex>`；直接传裸 hex 会被当成 keysym 名字，
+  `XStringToKeysym("0xc00003")` 返回 0 → `XTestFakeKeyEvent` 触发 X 错误 → 进程被 Xlib 默认错误处理器杀掉（stdout 全丢，看起来像"没输出"）。
+- 另一个前置条件：fcitx5 必须在拼音态。`fcitx5-remote -n` 实测默认是 **`keyboard-us`**（英文键盘），
+  要先 `fcitx5-remote -s pinyin`，否则按键直通字母、不组字。
+- 第三个坑：`XTestFakeKeyEvent` 的按键必须**逐个**发（按下/抬起 + flush），一次性 `str` 灌进去不会触发 IM。
+
+### 5.2 三组场景的实测（基线：无 `--disable-gtk-ime`）
+
+窗口捕获器（每 0.5s 扫 X11 树，发现**新映射**且 ≥800x500 的窗口就记 xprop 属性 + `import -window` 抓 PNG）全程**零命中**。
+
+| 场景                                             | 输入框内容（行内预编辑） | fcitx5 输入窗几何    | 新增大窗口 |
+| ------------------------------------------------ | ------------------------ | -------------------- | ---------- |
+| 顶层页 textarea（1100x734）                      | `ni hao`                 | `477x44 @ (450,240)` | 无         |
+| DSH iframe 聊天框（1100x734）                    | `ni hao`                 | `477x44 @ (778,783)` | 无         |
+| DSH iframe 聊天框（**最大化** 1892x1080 @ x=28） | `ni hao ni hao`          | `503x44 @ (672,956)` | 无         |
+
+⇒ 输入法**可用**（行内预编辑 + 候选窗贴着光标），**不再出现整窗大的黑窗**；最大化那组同时复验了
+「最大化避开 WM 保留区」的工作区修复（`outer_size=1892x1080`、`outer_position=(28,0)`）。
+
+### 5.3 `--disable-gtk-ime` 是诊断开关，不是修法
+
+| 观察                             | 带 `--disable-gtk-ime`      | 基线                            |
+| -------------------------------- | --------------------------- | ------------------------------- |
+| 巨大窗口                         | 不出现                      | 不出现                          |
+| fcitx5 的 X11 组 InputContext 数 | **0**（没有任何 IM 客户端） | 1（`frontend:dbus`，`focus:1`） |
+| 中文输入                         | **失效**                    | 正常                            |
+| 源码依据                         | —                           | —                               |
+
+- 源码结论（`.tmp/probe/research_im_focus.md`）：`--disable-gtk-ime` 唯一消费点是 `ui/gtk/gtk_ui.cc:563-570`；
+  关掉后回退 `linux_input_method_context_factory.cc` → ozone 工厂（只有 Wayland 注册，`ui/ozone/platform/x11/` 下没有 ime 文件）
+  → `FakeInputMethodContext`；Chromium 整个 `ui/` 树里 `XOpenIM|XCreateIC|XFilterEvent|XSetLocaleModifiers` **0 命中**
+  ⇒ **没有 XIM 兜底**，结局只能是「中文彻底失效」。
+- 所以：**保留基线**（不传 `QIANXUN_CEF_ARGS`），不要用这个开关"治"巨大窗口。
+
+### 5.4 归因修正
+
+§2.2 里「Chromium 的 IM dummy window ＝ 整窗 ⇒ fcitx5 必然把候选窗做成整窗」这条推断**不完整**：
+dummy window 决定的是**坐标系与缩放换算**，候选窗的尺寸最终由**客户端上报的光标矩形**决定。
+基线（IM 环境自愈后）GTK4 侧能拿到正常的光标矩形 ⇒ fcitx5 把候选窗做成 477x44 的小窗并贴到光标旁。
+本轮真正起作用的是 §3.2 的 **IM 环境自愈**（`XMODIFIERS=@im=fcitx` + `GTK_IM_MODULE=fcitx` + `LANG=en_US.UTF-8`），
+它同时解决了两件事：GTK4 自动加载 `libim-fcitx5.so`（IM 可用）+ 客户端能上报正确光标矩形（候选窗不再整窗大）。
+
+### 5.5 仍需注意
+
+- 千寻是 **XWayland** 客户端（CEF 无 Wayland 支持，CEF #2804 / PR #4233），IM 路径比原生 Wayland 应用更"重"，
+  候选窗由 fcitx5 以 X11 override-redirect 窗口绘制，理论上仍可能与某些 IM 主题/合成器有差异。
+- 若换输入法（ibus / 其它 IM），请用 §3.4 的 `QIANXUN_IM_MODULE` 显式指定后复验，别改代码。
 
 ## 6. 经验沉淀
 

@@ -10,17 +10,24 @@
 //!
 //! 这里在 `run()` 的最开头（`tauri::Builder` 之前，即 GTK/CEF 初始化之前）
 //! 补齐这些变量：
-//! - `XMODIFIERS` / `GTK_IM_MODULE`：缺（或空）才补。探测到 fcitx 系
-//!   （fcitx5/fcitx）→ `@im=fcitx` / `fcitx`；探测到 ibus 系
-//!   （ibus-daemon/ibus）→ `@im=ibus` / `ibus`。
+//! - `XMODIFIERS` / `GTK_IM_MODULE`：分两层。
+//!   - `QIANXUN_IM_MODULE` **显式指定** ⇒ **强制**写入（覆盖已有非空值，
+//!     那是用户的明确意图）。取值：`auto`（默认）/ `fcitx` / `ibus` / `xim` /
+//!     `none`。`xim` 走 X11 的 XIM（绕开 GTK 的 fcitx 模块，用来绕开「候选窗
+//!     被 resize 成整窗」的怪现象）；`none` 表示明确**不要**输入法 ⇒ 移除
+//!     这两个变量。非法值 ⇒ warn 并回退 `auto`。
+//!   - 未指定（`auto`）⇒ **只补缺失或为空**的变量，已有非空值一律不动；
+//!     探测到 fcitx 系（fcitx5/fcitx）→ `@im=fcitx` / `fcitx`；探测到
+//!     ibus 系（ibus-daemon/ibus）→ `@im=ibus` / `ibus`。
 //! - `LANG`：`LANG` 与 `LC_ALL` **都**缺失或为 `POSIX`/`C` 时才补，
 //!   优先 `en_US.UTF-8`（系统确有该 locale 时），否则 `C.UTF-8`。
 //!
 //! **分层约定（重要）**：决策逻辑一律写成不依赖平台与全局状态的纯函数
-//! （`detect_im_from` / `pick_im` / `decide_lang` / `locale_is_usable`），
-//! 因此在 Windows 上也能跑单元测试；真正读写环境变量的代码全部关在
-//! `#[cfg(target_os = "linux")]` 里。Windows 侧 cargo 根本不编译平台那段，
-//! 写错了只有远端 `cargo build` 能暴露——所以别把纯逻辑塞进 cfg 里。
+//! （`detect_im_from` / `pick_im` / `decide_lang` / `locale_is_usable` /
+//! `resolve_im_override` / `plan_im_env`），因此在 Windows 上也能跑单元测试；
+//! 真正读写环境变量的代码全部关在 `#[cfg(target_os = "linux")]` 里。
+//! Windows 侧 cargo 根本不编译平台那段，写错了只有远端 `cargo build` 能
+//! 暴露——所以别把纯逻辑塞进 cfg 里。
 
 use std::path::{Path, PathBuf};
 
@@ -49,6 +56,177 @@ impl ImKind {
         match self {
             Self::Fcitx => "fcitx",
             Self::Ibus => "ibus",
+        }
+    }
+}
+
+/// 用户显式指定的输入法模块（`QIANXUN_IM_MODULE` 的取值语义）。
+///
+/// 与 [`ImKind`] 的区别：`ImKind` 是「**探测**到了什么」，`ImChoice` 是
+/// 「**用户要求**用什么」——显式指定时**强制**写入（覆盖已有非空值），
+/// 因为那是用户的明确意图；未指定时才走探测 + 只补缺失的保守路径。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImChoice {
+    /// 自动探测（默认）：只在缺失或为空时补，已有非空值不覆盖。
+    Auto,
+    /// fcitx / fcitx5：`XMODIFIERS=@im=fcitx` + `GTK_IM_MODULE=fcitx`。
+    Fcitx,
+    /// ibus：`XMODIFIERS=@im=ibus` + `GTK_IM_MODULE=ibus`。
+    Ibus,
+    /// XIM（走 X11 的 XIM，绕开 GTK 的 fcitx 模块）：
+    /// `XMODIFIERS=@im=xim` + `GTK_IM_MODULE=xim`。
+    Xim,
+    /// 明确**不要**输入法：移除 `XMODIFIERS` 与 `GTK_IM_MODULE`。
+    None,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl ImChoice {
+    /// 该选择对应的 IM 模块名（`Auto` 与禁用态没有模块名）。
+    pub fn module(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Fcitx => Some("fcitx"),
+            Self::Ibus => Some("ibus"),
+            Self::Xim => Some("xim"),
+            Self::None => None,
+        }
+    }
+
+    /// 是否是「用户显式指定」（显式 ⇒ 强制覆盖已有非空值）。
+    pub fn is_forced(self) -> bool {
+        !matches!(self, Self::Auto)
+    }
+}
+
+/// 用户指定 IM 模块的环境变量名。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const IM_MODULE_ENV: &str = "QIANXUN_IM_MODULE";
+
+/// 解析 `QIANXUN_IM_MODULE` 的原始值 → 生效的选择（纯函数）。
+///
+/// - 未设置 / 空串 / 只有空白 → [`ImChoice::Auto`]（视为未指定）
+/// - `auto` → [`ImChoice::Auto`]
+/// - `fcitx` / `ibus` / `xim` / `none` → 对应选择
+/// - 其它值 → 回退 [`ImChoice::Auto`]（非法值由调用方打 warn，
+///   判定见 [`im_override_is_valid`]）
+///
+/// 大小写不敏感、前后空白忽略。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn resolve_im_override(raw: Option<&str>) -> ImChoice {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ImChoice::Auto;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "fcitx" => ImChoice::Fcitx,
+        "ibus" => ImChoice::Ibus,
+        "xim" => ImChoice::Xim,
+        "none" => ImChoice::None,
+        // "auto" 与非法值都回退 Auto（非法值的 warn 由调用方负责）。
+        _ => ImChoice::Auto,
+    }
+}
+
+/// `QIANXUN_IM_MODULE` 的原始值是否合法（纯函数）。
+///
+/// 未设置 / 空串视为「未指定」，合法；`auto`/`fcitx`/`ibus`/`xim`/`none`
+/// 合法；其它非空值非法 ⇒ 调用方打 warn 并回退 auto。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn im_override_is_valid(raw: Option<&str>) -> bool {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "auto" | "fcitx" | "ibus" | "xim" | "none"
+    )
+}
+
+/// 对单个环境变量的处置动作。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImEnvAction {
+    /// 不动（保持原值）。
+    Keep,
+    /// 写入该值。
+    Set(String),
+    /// 删除该变量。
+    Remove,
+}
+
+/// IM 环境的处置计划（纯函数产物；执行层只照做，不做判断）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImEnvPlan {
+    /// `XMODIFIERS` 的处置。
+    pub xmodifiers: ImEnvAction,
+    /// `GTK_IM_MODULE` 的处置。
+    pub gtk_im_module: ImEnvAction,
+    /// 决策来源说明（供日志与测试断言）。
+    pub source: String,
+}
+
+/// 算出 `XMODIFIERS` / `GTK_IM_MODULE` 该怎么处置（纯函数）。
+///
+/// 语义分层：
+/// - **显式指定**（`choice` 非 `Auto`）⇒ **强制**：直接写目标值（`none`
+///   则两个都删），覆盖已有的非空值——那是用户的明确意图。
+/// - **`Auto`** ⇒ **保守**：只在缺失或为空时补；已有非空值一律不动。
+/// - `detected` 是探测到的 IM 模块名（`fcitx` / `ibus`）；`None` 或空串
+///   表示没探测到 ⇒ 什么都不动。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn plan_im_env(
+    choice: ImChoice,
+    detected: Option<&str>,
+    current_xmodifiers: Option<&str>,
+    current_gtk_im_module: Option<&str>,
+) -> ImEnvPlan {
+    match choice {
+        // 自动：只补缺失/空值，已有非空值不动。
+        ImChoice::Auto => {
+            let detected = detected.map(str::trim).filter(|value| !value.is_empty());
+            let Some(module) = detected else {
+                return ImEnvPlan {
+                    xmodifiers: ImEnvAction::Keep,
+                    gtk_im_module: ImEnvAction::Keep,
+                    source: "auto（未探测到输入法）".to_string(),
+                };
+            };
+            let has_x = current_xmodifiers
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            let has_g = current_gtk_im_module
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            ImEnvPlan {
+                xmodifiers: if has_x {
+                    ImEnvAction::Keep
+                } else {
+                    ImEnvAction::Set(format!("@im={module}"))
+                },
+                gtk_im_module: if has_g {
+                    ImEnvAction::Keep
+                } else {
+                    ImEnvAction::Set(module.to_string())
+                },
+                source: format!("auto（探测到 {module}）"),
+            }
+        }
+        // 明确不要输入法：两个变量都删掉。
+        ImChoice::None => ImEnvPlan {
+            xmodifiers: ImEnvAction::Remove,
+            gtk_im_module: ImEnvAction::Remove,
+            source: format!("{IM_MODULE_ENV}=none"),
+        },
+        // 显式指定：强制覆盖。
+        forced => {
+            let module = forced.module().unwrap_or_default();
+            ImEnvPlan {
+                xmodifiers: ImEnvAction::Set(format!("@im={module}")),
+                gtk_im_module: ImEnvAction::Set(module.to_string()),
+                source: format!("{IM_MODULE_ENV}={module}"),
+            }
         }
     }
 }
@@ -163,7 +341,9 @@ pub fn ensure_input_method_env() {
 /// Linux 平台实现：读环境、探测、写环境。**只有这一段是平台专属的。**
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{decide_lang, lc_all_shadows_lang, pick_im, ImKind, IM_CANDIDATES};
+    use super::{
+        decide_lang, lc_all_shadows_lang, pick_im, ImChoice, ImEnvAction, ImKind, IM_CANDIDATES,
+    };
     use std::path::{Path, PathBuf};
 
     /// 补齐全部（IM 变量 + locale）。
@@ -215,44 +395,126 @@ mod platform {
         pick_im(&present)
     }
 
-    /// `XMODIFIERS` / `GTK_IM_MODULE`：缺（或空）才补，已有值一律不动。
+    /// `XMODIFIERS` / `GTK_IM_MODULE` 的处置。
+    ///
+    /// 语义分层（决策全在纯函数里，这里只照做）：
+    /// - `QIANXUN_IM_MODULE` 显式指定 ⇒ **强制**写入（覆盖已有非空值）。
+    /// - `auto`（未指定/非法）⇒ **只在缺失或为空时补**，已有非空值不动。
     fn ensure_im_env() {
-        let has_xmodifiers = std::env::var("XMODIFIERS")
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        let has_gtk_module = std::env::var("GTK_IM_MODULE")
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        if has_xmodifiers && has_gtk_module {
-            return;
-        }
-        let Some((kind, path)) = find_im() else {
+        let raw = std::env::var(super::IM_MODULE_ENV).ok();
+        let choice = super::resolve_im_override(raw.as_deref());
+        if !super::im_override_is_valid(raw.as_deref()) {
             crate::logging::log(
                 "warn",
-                "未探测到可用输入法（PATH 里没有 fcitx5/fcitx/ibus-daemon/ibus）；\
-                 XMODIFIERS/GTK_IM_MODULE 保持原样，输入法可能不可用",
-            );
-            return;
-        };
-        if !has_xmodifiers {
-            std::env::set_var("XMODIFIERS", kind.xmodifiers());
-            crate::logging::log(
-                "info",
                 &format!(
-                    "补齐输入法环境：XMODIFIERS={}（探测自 {}）",
-                    kind.xmodifiers(),
-                    path.display()
+                    "{} 取值非法（{}），回退 auto（自动探测 + 只补缺失值）",
+                    super::IM_MODULE_ENV,
+                    raw.as_deref().unwrap_or("<未设置>")
                 ),
             );
         }
-        if !has_gtk_module {
-            std::env::set_var("GTK_IM_MODULE", kind.gtk_module());
+        // 探测只在 auto 时需要（显式指定时目标值已定，探测纯属浪费）。
+        let detected = match choice {
+            ImChoice::Auto => find_im().map(|(kind, path)| (kind.gtk_module().to_string(), path)),
+            _ => None,
+        };
+        let current_xmodifiers = std::env::var("XMODIFIERS").ok();
+        let current_gtk_im_module = std::env::var("GTK_IM_MODULE").ok();
+        let plan = super::plan_im_env(
+            choice,
+            detected.as_ref().map(|(module, _)| module.as_str()),
+            current_xmodifiers.as_deref(),
+            current_gtk_im_module.as_deref(),
+        );
+
+        // 日志口径：显式指定叫「强制」，自动探测叫「补齐」，禁用叫「已移除」。
+        let forced = choice.is_forced();
+        let probe_note = detected
+            .as_ref()
+            .map(|(_, path)| format!("探测自 {}", path.display()))
+            .unwrap_or_else(|| "未探测到输入法".to_string());
+        let note = if forced {
+            format!("来源 {}", plan.source)
+        } else {
+            probe_note.clone()
+        };
+
+        match &plan.xmodifiers {
+            ImEnvAction::Set(value) => {
+                std::env::set_var("XMODIFIERS", value);
+                crate::logging::log(
+                    "info",
+                    &format!(
+                        "输入法环境：{} XMODIFIERS={}（{}）",
+                        if forced { "强制" } else { "补齐" },
+                        value,
+                        note
+                    ),
+                );
+            }
+            ImEnvAction::Remove => {
+                std::env::remove_var("XMODIFIERS");
+            }
+            ImEnvAction::Keep => {
+                let current = current_xmodifiers.as_deref().unwrap_or("");
+                if current.trim().is_empty() {
+                    crate::logging::log(
+                        "warn",
+                        "输入法环境：未探测到可用输入法（PATH 里没有 \
+                         fcitx5/fcitx/ibus-daemon/ibus），XMODIFIERS 保持原样，\
+                         输入法可能不可用",
+                    );
+                } else {
+                    crate::logging::log(
+                        "info",
+                        &format!("输入法环境：XMODIFIERS 已有值 {current}，保持不动"),
+                    );
+                }
+            }
+        }
+
+        match &plan.gtk_im_module {
+            ImEnvAction::Set(value) => {
+                std::env::set_var("GTK_IM_MODULE", value);
+                crate::logging::log(
+                    "info",
+                    &format!(
+                        "输入法模块：{} GTK_IM_MODULE={}（{}）",
+                        if forced { "强制" } else { "补齐" },
+                        value,
+                        note
+                    ),
+                );
+            }
+            ImEnvAction::Remove => {
+                std::env::remove_var("GTK_IM_MODULE");
+            }
+            ImEnvAction::Keep => {
+                let current = current_gtk_im_module.as_deref().unwrap_or("");
+                if current.trim().is_empty() {
+                    crate::logging::log(
+                        "warn",
+                        "输入法环境：未探测到可用输入法（PATH 里没有 \
+                         fcitx5/fcitx/ibus-daemon/ibus），GTK_IM_MODULE 保持原样，\
+                         输入法可能不可用",
+                    );
+                } else {
+                    crate::logging::log(
+                        "info",
+                        &format!("输入法环境：GTK_IM_MODULE 已有值 {current}，保持不动"),
+                    );
+                }
+            }
+        }
+
+        if matches!(plan.xmodifiers, ImEnvAction::Remove)
+            && matches!(plan.gtk_im_module, ImEnvAction::Remove)
+        {
             crate::logging::log(
                 "info",
                 &format!(
-                    "补齐输入法环境：GTK_IM_MODULE={}（探测自 {}）",
-                    kind.gtk_module(),
-                    path.display()
+                    "输入法环境：已移除 XMODIFIERS/GTK_IM_MODULE（{}）",
+                    plan.source
                 ),
             );
         }
@@ -309,8 +571,8 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_lang, detect_im_from, lc_all_shadows_lang, locale_is_usable, pick_im, ImKind,
-        IM_CANDIDATES,
+        decide_lang, detect_im_from, im_override_is_valid, lc_all_shadows_lang, locale_is_usable,
+        pick_im, plan_im_env, resolve_im_override, ImChoice, ImEnvAction, ImKind, IM_CANDIDATES,
     };
     use std::path::PathBuf;
 
@@ -415,5 +677,103 @@ mod tests {
         assert!(!lc_all_shadows_lang(Some("en_US.UTF-8")));
         assert!(!lc_all_shadows_lang(Some("")));
         assert!(!lc_all_shadows_lang(None));
+    }
+
+    #[test]
+    fn 解析输入法模块覆盖值() {
+        // 未设置 / 空串 / 纯空白 ⇒ 视为未指定 → auto。
+        assert_eq!(resolve_im_override(None), ImChoice::Auto);
+        assert_eq!(resolve_im_override(Some("")), ImChoice::Auto);
+        assert_eq!(resolve_im_override(Some("   ")), ImChoice::Auto);
+        // auto 显式写出来也是 auto。
+        assert_eq!(resolve_im_override(Some("auto")), ImChoice::Auto);
+        assert_eq!(resolve_im_override(Some("AUTO")), ImChoice::Auto);
+        // 四个合法取值。
+        assert_eq!(resolve_im_override(Some("fcitx")), ImChoice::Fcitx);
+        assert_eq!(resolve_im_override(Some("ibus")), ImChoice::Ibus);
+        assert_eq!(resolve_im_override(Some("xim")), ImChoice::Xim);
+        assert_eq!(resolve_im_override(Some("none")), ImChoice::None);
+        // 大小写不敏感 + 去空白。
+        assert_eq!(resolve_im_override(Some("FCITX")), ImChoice::Fcitx);
+        assert_eq!(resolve_im_override(Some("  Xim  ")), ImChoice::Xim);
+        assert_eq!(resolve_im_override(Some("None")), ImChoice::None);
+        // 非法值回退 auto（同时由 im_override_is_valid 报非法）。
+        assert_eq!(resolve_im_override(Some("foo")), ImChoice::Auto);
+        assert_eq!(resolve_im_override(Some("@im=fcitx")), ImChoice::Auto);
+    }
+
+    #[test]
+    fn 输入法模块覆盖值合法性() {
+        assert!(im_override_is_valid(None));
+        assert!(im_override_is_valid(Some("")));
+        assert!(im_override_is_valid(Some("auto")));
+        assert!(im_override_is_valid(Some("FCITX")));
+        assert!(im_override_is_valid(Some("ibus")));
+        assert!(im_override_is_valid(Some("xim")));
+        assert!(im_override_is_valid(Some("none")));
+        assert!(!im_override_is_valid(Some("foo")));
+        assert!(!im_override_is_valid(Some("@im=fcitx")));
+    }
+
+    #[test]
+    fn auto模式下只补缺失不覆盖已有() {
+        // 已有非空值 → 两个变量都不动。
+        let plan = plan_im_env(
+            ImChoice::Auto,
+            Some("fcitx"),
+            Some("@im=ibus"),
+            Some("ibus"),
+        );
+        assert_eq!(plan.xmodifiers, ImEnvAction::Keep);
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Keep);
+
+        // 缺失 → 按探测结果补齐。
+        let plan = plan_im_env(ImChoice::Auto, Some("fcitx"), None, None);
+        assert_eq!(plan.xmodifiers, ImEnvAction::Set("@im=fcitx".to_string()));
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Set("fcitx".to_string()));
+
+        // 空串等同缺失 → 补齐。
+        let plan = plan_im_env(ImChoice::Auto, Some("ibus"), Some(""), Some(""));
+        assert_eq!(plan.xmodifiers, ImEnvAction::Set("@im=ibus".to_string()));
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Set("ibus".to_string()));
+
+        // 只缺一个 → 只补那个。
+        let plan = plan_im_env(ImChoice::Auto, Some("fcitx"), Some("@im=fcitx"), None);
+        assert_eq!(plan.xmodifiers, ImEnvAction::Keep);
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Set("fcitx".to_string()));
+
+        // 没探测到 → 什么都不动（不乱设变量）。
+        let plan = plan_im_env(ImChoice::Auto, None, None, None);
+        assert_eq!(plan.xmodifiers, ImEnvAction::Keep);
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Keep);
+        let plan = plan_im_env(ImChoice::Auto, Some(""), None, None);
+        assert_eq!(plan.xmodifiers, ImEnvAction::Keep);
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Keep);
+    }
+
+    #[test]
+    fn 显式指定时强制覆盖() {
+        // 已有 ibus，强制改成 fcitx。
+        let plan = plan_im_env(ImChoice::Fcitx, None, Some("@im=ibus"), Some("ibus"));
+        assert_eq!(plan.xmodifiers, ImEnvAction::Set("@im=fcitx".to_string()));
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Set("fcitx".to_string()));
+
+        // 强制 ibus。
+        let plan = plan_im_env(ImChoice::Ibus, None, Some("@im=fcitx"), Some("fcitx"));
+        assert_eq!(plan.xmodifiers, ImEnvAction::Set("@im=ibus".to_string()));
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Set("ibus".to_string()));
+
+        // 强制 xim（绕开 GTK 的 fcitx 模块）。
+        let plan = plan_im_env(ImChoice::Xim, None, None, None);
+        assert_eq!(plan.xmodifiers, ImEnvAction::Set("@im=xim".to_string()));
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Set("xim".to_string()));
+    }
+
+    #[test]
+    fn 明确禁用输入法时移除两个变量() {
+        let plan = plan_im_env(ImChoice::None, None, Some("@im=fcitx"), Some("fcitx"));
+        assert_eq!(plan.xmodifiers, ImEnvAction::Remove);
+        assert_eq!(plan.gtk_im_module, ImEnvAction::Remove);
+        assert!(plan.source.contains("none"));
     }
 }
