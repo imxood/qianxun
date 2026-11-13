@@ -108,11 +108,17 @@
   </div>
 {:else if ready}
   <div class="relative h-full w-full bg-bg">
+    <!-- 跨源 iframe 默认拿不到 clipboard-write（Permissions-Policy 默认
+         allowlist 是 'self'），整个 Clipboard API 被禁：DSH 右键「复制图片」
+         走 navigator.clipboard.write([ClipboardItem]) 必被拒，异常又被
+         context-menu 吞掉，只剩「无法复制，请检查内容是否可用后重试」。
+         注意 allow 与 sandbox 是两套机制，sandbox 里没有 clipboard 项。 -->
     <iframe
       title="DSH"
       class="h-full w-full border-0"
       src={dshUrl}
       sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups"
+      allow="clipboard-write"
       bind:this={frame}
       onload={() => {
         frameLoaded = true;
