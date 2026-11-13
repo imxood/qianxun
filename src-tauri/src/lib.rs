@@ -15,6 +15,8 @@ mod dsh_upstream;
 mod error;
 mod harness;
 mod intel;
+// Linux 启动期的输入法/locale 环境补齐（其他平台 no-op）。
+mod linux_im;
 mod logging;
 mod mario;
 mod market;
@@ -109,6 +111,11 @@ fn app_restart(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 输入法/locale 环境补齐（Linux）：必须早于任何 GTK/CEF 初始化——
+    // 进程从 tty/SSH 侧启动时不继承图形会话的 XMODIFIERS/GTK_IM_MODULE，
+    // GTK 的 IM 模块与 XIM 连接都在初始化时读这些变量，晚了就接不上。
+    // 其他平台 no-op。
+    linux_im::ensure_input_method_env();
     // 路径级单实例（Windows，为什么不用官方插件见模块文档）。挂链首：
     // 第二实例必须在任何插件副作用（热键注册等）之前退场。
     #[cfg(windows)]

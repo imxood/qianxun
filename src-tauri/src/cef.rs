@@ -36,6 +36,32 @@ fn allowed_origins() -> Vec<String> {
         .collect()
 }
 
+/// 追加 Chromium 命令行开关的环境变量（逗号或空格分隔）。
+///
+/// 用途：CEF/Chromium 在 Linux 上的行为（输入法、弹窗、缩放…）有大量
+/// 开关可调，但 tauri-runtime-cef 尚未提供逐项配置。留这个口子后，遇到
+/// 「改开关才能修」的问题时，用户可以只改环境变量重启验证，不必重新
+/// 编译整个应用。
+///
+/// 例：`QIANXUN_CEF_ARGS=--disable-gtk-ime,--force-device-scale-factor=1`
+///
+/// 只接受以 `--` 开头的项，避免误把普通参数塞进 Chromium 命令行。
+pub const EXTRA_ARGS_ENV: &str = "QIANXUN_CEF_ARGS";
+
+/// 解析追加开关：逗号或空白分隔，忽略非 `--` 开头的项。
+fn extra_args() -> Vec<String> {
+    parse_extra_args(&std::env::var(EXTRA_ARGS_ENV).unwrap_or_default())
+}
+
+/// 纯函数：把环境变量里的原始文本解析成 Chromium 开关列表。
+fn parse_extra_args(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|arg| arg.starts_with("--"))
+        .map(str::to_string)
+        .collect()
+}
+
 /// 解析远程调试端口：环境变量优先，其次 debug 构建用默认端口。
 /// 端口必须在 1024-65535 之间（CEF 对范围外的值会忽略并告警）。
 fn cdp_port() -> Option<u16> {
@@ -67,5 +93,40 @@ pub fn linux_cef_runtime() -> Cef {
             allowed_origins: allowed_origins(),
         });
     }
+    for arg in extra_args() {
+        cef = cef.command_line_arg(arg, None::<String>);
+    }
     cef
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_extra_args;
+
+    #[test]
+    fn 追加开关只认横线开头的项() {
+        assert_eq!(
+            parse_extra_args("--disable-gtk-ime, --force-device-scale-factor=1"),
+            vec![
+                "--disable-gtk-ime".to_string(),
+                "--force-device-scale-factor=1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn 追加开关忽略非开关文本与空串() {
+        assert!(parse_extra_args("").is_empty());
+        assert!(parse_extra_args("   ").is_empty());
+        assert!(parse_extra_args("not-a-switch").is_empty());
+        assert!(parse_extra_args("--keep,drop-me").eq(&vec!["--keep".to_string()]));
+    }
+
+    #[test]
+    fn 追加开关支持空格分隔() {
+        assert_eq!(
+            parse_extra_args("--a --b\t--c"),
+            vec!["--a".to_string(), "--b".to_string(), "--c".to_string()]
+        );
+    }
 }
