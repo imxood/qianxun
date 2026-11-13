@@ -171,8 +171,10 @@ pub async fn start(
         .route("/qx-mobile/custom.css", any(super::mobile_ui::custom_css))
         .route("/qx-mobile/custom.js", any(super::mobile_ui::custom_js))
         .route("/qx-mobile/{*rest}", any(super::mobile_ui::unknown))
-        // 桌面外壳层：注入 DSH 页的外链拦截脚本（仅回环入口可取）。
+        // 桌面外壳层：注入 DSH 页的外链拦截脚本 + 右键菜单屏蔽脚本
+        // （仅回环入口可取）。
         .route("/qx-shell/links.js", any(shell_links))
+        .route("/qx-shell/ctxmenu.js", any(shell_ctxmenu))
         .route("/{*rest}", any(handler))
         .route("/", any(handler))
         .with_state(state.clone());
@@ -528,11 +530,16 @@ const HTML_INJECT_LIMIT: usize = 2 * 1024 * 1024;
 const MOBILE_LAYER_SNIPPET: &str = "<link rel=\"stylesheet\" href=\"/qx-mobile/custom.css\" /><script src=\"/qx-mobile/bootstrap.js\" defer></script>";
 
 /// 注入桌面外壳层的引导标签：外链拦截脚本（千寻外壳 iframe 专用，
-/// 与外壳握手后才接管点击，普通浏览器直开网关页时零行为）。
-const DESKTOP_LAYER_SNIPPET: &str = "<script src=\"/qx-shell/links.js\" defer></script>";
+/// 与外壳握手后才接管点击，普通浏览器直开网关页时零行为）+ 右键菜单屏蔽
+/// 脚本（CEF 原生右键菜单是独立 override-redirect 弹窗，被算成整窗大小 ⇒
+/// 巨大候选框；DSH 聊天页在 iframe 里，顶层页的前端方案管不到）。
+const DESKTOP_LAYER_SNIPPET: &str = "<script src=\"/qx-shell/links.js\" defer></script><script src=\"/qx-shell/ctxmenu.js\" defer></script>";
 
 /// 桌面外壳层拦截脚本（内嵌二进制，随千寻发布，no-cache 下发）。
 const DESKTOP_LINKS_JS: &str = include_str!("assets/qx-shell-links.js");
+
+/// 桌面外壳层右键菜单脚本（内嵌二进制，随千寻发布，no-cache 下发）。
+const DESKTOP_CTXMENU_JS: &str = include_str!("assets/qx-shell-ctxmenu.js");
 
 /// `/qx-shell/links.js`：仅回环入口可取（桌面外壳 iframe 专用；
 /// 局域网设备走移动层，不给内部脚本面）。
@@ -542,6 +549,19 @@ async fn shell_links(State(state): State<GatewayState>, headers: HeaderMap) -> R
     }
     text_response(
         DESKTOP_LINKS_JS,
+        "text/javascript; charset=utf-8",
+        "no-cache",
+    )
+}
+
+/// `/qx-shell/ctxmenu.js`：仅回环入口可取（同 shell_links：局域网设备
+/// 走移动层，不给内部脚本面）。
+async fn shell_ctxmenu(State(state): State<GatewayState>, headers: HeaderMap) -> Response<Body> {
+    if !state.is_loopback(&headers) {
+        return plain(StatusCode::UNAUTHORIZED, "仅本机外壳可获取桌面外壳层");
+    }
+    text_response(
+        DESKTOP_CTXMENU_JS,
         "text/javascript; charset=utf-8",
         "no-cache",
     )
@@ -973,6 +993,36 @@ mod tests {
         assert!(super::inject_desktop_layer(&GET, 200, "text/css", html).is_none());
     }
 
+    /// 桌面外壳层必须同时挂上「外链拦截脚本」与「右键菜单屏蔽脚本」——
+    /// 后者压掉 CEF 原生右键菜单（独立 override-redirect 弹窗，被算成
+    /// 整窗大小 ⇒ 巨大候选框），DSH 聊天页在 iframe 里只能靠注入脚本兜底。
+    #[test]
+    fn 桌面外壳层_同时注入右键菜单屏蔽脚本() {
+        assert!(super::DESKTOP_LAYER_SNIPPET
+            .contains(r#"<script src="/qx-shell/links.js" defer></script>"#));
+        assert!(super::DESKTOP_LAYER_SNIPPET
+            .contains(r#"<script src="/qx-shell/ctxmenu.js" defer></script>"#));
+
+        let html = "<html><head><title>t</title></head><body></body></html>";
+        let injected = super::inject_desktop_layer(&GET, 200, "text/html", html).expect("应注入");
+        assert!(injected.contains("/qx-shell/ctxmenu.js"));
+        assert!(injected.contains("/qx-shell/links.js"));
+        // 两个脚本都在 </head> 之前（defer，不阻塞首屏）。
+        let head_end = injected.to_ascii_lowercase().find("</head>").unwrap();
+        assert!(injected.find("/qx-shell/ctxmenu.js").unwrap() < head_end);
+        assert!(injected.find("/qx-shell/links.js").unwrap() < head_end);
+    }
+
+    /// 右键菜单脚本本体：必须是可执行 JS，且含「先 preventDefault 压掉原生
+    /// 菜单」与「只在 iframe 里接管」这两个关键行为。
+    #[test]
+    fn 右键菜单脚本内容关键行为() {
+        assert!(super::DESKTOP_CTXMENU_JS.contains("preventDefault"));
+        assert!(super::DESKTOP_CTXMENU_JS.contains("__qxShellCtxMenu"));
+        assert!(super::DESKTOP_CTXMENU_JS.contains("window.parent !== window"));
+        assert!(super::DESKTOP_CTXMENU_JS.contains("contextmenu"));
+    }
+
     #[test]
     fn host必须是回环名带端口() {
         assert!(loopback_authority("127.0.0.1:17400"));
@@ -1115,6 +1165,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(plain, "plain-ok");
+
+        // 5) 右键菜单屏蔽脚本：随 HTML 一同注入（DSH 聊天页在 iframe 里，
+        //    顶层页的前端方案管不到，只能靠注入脚本压掉 CEF 原生大菜单）。
+        assert!(html.contains(r#"<script src="/qx-shell/ctxmenu.js" defer></script>"#));
+
+        // 6) 脚本本尊：回环可取、content-type 是 JS、body 含关键标记。
+        let ctxmenu = client
+            .get(format!("{base}/qx-shell/ctxmenu.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ctxmenu.status(), 200);
+        assert!(ctxmenu.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript"));
+        let ctxmenu_body = ctxmenu.text().await.unwrap();
+        assert!(ctxmenu_body.contains("__qxShellCtxMenu"));
+        assert!(ctxmenu_body.contains("preventDefault"));
+
+        // 7) 同一路由换 LAN Host → 未配对设备 401（不漏内部脚本面）。
+        let denied = client
+            .get(format!("{base}/qx-shell/ctxmenu.js"))
+            .header(
+                "host",
+                format!("192.168.1.10:{}", handle.loopback_addr.port()),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 401);
 
         let _ = handle.shutdown.send(true);
         upstream_task.abort();
