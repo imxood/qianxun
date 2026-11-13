@@ -142,10 +142,10 @@ CEF 进程树：主进程 + 4 个 `--type=zygote` 子进程（带 `--no-zygote-s
 - `dsh: all_proxy names a SOCKS proxy, which is not supported`（远端 all_proxy 是 socks5）
 - 情报域 LLM 429（`open.bigmodel.cn` 限流，与 CEF 路线无关）
 
-## 7. Linux 窗口交互：CEF 的两条硬限制与解法（2026-11-13 追加）
+## 7. Linux 窗口交互：CEF 的三条硬限制与解法（2026-11-13 追加）
 
-远程首跑后暴露两个用户可见问题：**窗口拖不动**、**最小化没反应**；DSH 内嵌页在网关重建窗口期还会留下 Chromium
-「127.0.0.1 refused to connect」错误页。三件事都查清了根因并已修。
+远程首跑后暴露三个用户可见问题：**窗口拖不动**、**最小化没反应**、**最大化没反应**；
+DSH 内嵌页在网关重建窗口期还会留下 Chromium「127.0.0.1 refused to connect」错误页。四件事都查清了根因并已修。
 
 ### 7.1 拖拽失效：CEF 的浏览器是 X11 子窗口，GTK toplevel 收不到指针
 
@@ -216,11 +216,46 @@ network events -> [{"loadingFailed":"net::ERR_ABORTED","type":"Document"},
 
 旧文档被中止（ERR_ABORTED）、新文档 200 —— 错误页自愈。
 
+### 7.5 最大化失效：XWayland 忽略「没有 WM frame」的窗口
+
+`plugin:window|toggle_maximize` 的 IPC 返回 ok，`is_maximized` 也翻成 true，但**几何纹丝不动**。
+远程用 Hyprland 的 `hyprctl clients -j` 交叉验证（注意：SSH 会话里必须自己设
+`HYPRLAND_INSTANCE_SIGNATURE`，取值是 `/run/user/1000/hypr/<sig>` 目录名）：
+
+```
+before:  |千寻|xw=true|size=1100,734|at=362,125
+toggle_maximize -> OK
+after:   |千寻|xw=true|size=1100,734|at=362,125   ← WM 侧尺寸完全没变
+```
+
+根因：GTK4 在 X11 下走客户端装饰（CSD），窗口没有 WM frame（`_NET_FRAME_EXTENTS` 不存在，
+对照实验系统 GTK4 应用 `/usr/bin/gliff` 同样没有），**XWayland 对这类窗口直接忽略最大化请求**。
+与 omarchy 的 `o.window(".*", { suppress_event = "maximize" })` 无关——那条规则只抑制「发给客户端的事件」。
+
+因此 **Linux 上的最大化也由前端自己做**（`createLinuxMaximize()`）：
+记住 `outerPosition/outerSize` → 铺满 `screen.availWidth/availHeight`（换算成物理像素）→
+再切一次用记录值还原。**双击标题栏最大化**同样由前端判定：`attachLinuxDrag()` 在 `pointerdown`
+里做双击判定（间隔 < 400ms 且位移 < 6px），命中就调 `toggle()` 而不是拖拽。
+配套 ACL 补 `core:window:allow-set-size` / `allow-outer-size`（`set_size` 不在 `core:window:default` 里）。
+
+实测（CDP 合成 pointer 双击 + 点击最大化按钮，页面几何与 Hyprland 视角一致）：
+
+```
+[before]              page={"sx":431,"sy":152,"ow":1100,"oh":734}  hypr=size=1100,734 at=431,152
+[after double-click]  page={"sx":0,"sy":0,"ow":1920,"oh":1080}     hypr=size=1920,1080 at=0,0
+[after 2nd dbl-click]page={"sx":431,"sy":152,"ow":1100,"oh":734}  hypr=size=1100,734 at=431,152
+[after maximize btn]  page={"sx":0,"sy":0,"ow":1920,"oh":1080}     hypr=size=1920,1080 at=0,0
+[after restore btn]   page={"sx":431,"sy":152,"ow":1100,"oh":734}  hypr=size=1100,734 at=431,152
+```
+
+> 远程 Hyprland 的显示器是 `1920x1080 scale 1`，顶部有 28px 栏位但 XWayland 没有提供
+> `_NET_WORKAREA`，所以「最大化」按整屏铺满（会盖住顶部栏）。
+
 ## 8. 未闭环 / 后续可做
 
 - Linux 上 **托盘菜单**走 GTK3/GTK4 混用的顾虑已通过 dialog 走 xdg-portal 规避，但托盘本体（ksni）与截图功能仍是 Windows 专属（截图在非 Windows 返回明确错误）。
 - Linux 无单实例机制（`single_instance` 模块整体 cfg(windows)），并发启动会起多个实例；本次未实现 flock/DBus 替代。
 - 远程 pacman 默认镜像不可用（`stable-mirror.omarchy.org` TLS error）；`mirrorlist.bak` 的国内镜像版本号与本机 DB 不一致，装包需手工核对文件名再 `pacman -U`。
 - 未做 Linux 打包产物（deb/appimage）实跑，仅配好 `bundle.targets`。
-- Linux 拖拽/最小化已用 CDP 合成事件验证；**真实鼠标拖拽与最小化仍需用户在远程桌面手动确认**。
+- Linux 拖拽/最小化/最大化/双击最大化已用 CDP 合成事件验证，且用户已在远程桌面确认生效（2026-11-13）。
 - 用户红线仍然生效：全程未写入/未重装/未终止任何 release 路径内容（安装目录 `C:\Users\maxu\AppData\Local\qianxun\` 与 `~/.qianxun`）。

@@ -1,4 +1,4 @@
-import { PhysicalPosition } from '@tauri-apps/api/dpi';
+import { PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi';
 import type { Window } from '@tauri-apps/api/window';
 import { call } from '../ipc';
 import type { AppMetaResult } from '../ipc/contract';
@@ -14,6 +14,10 @@ import type { AppMetaResult } from '../ipc/contract';
  *   所以「让 WM 接管标题栏」这条路走不通，标题栏必须自绘。
  * - GTK4 的 `gtk_window_minimize()` 在 XWayland 下不产生 WM_STATE=Iconic，
  *   最小化按钮改为「隐藏到托盘」，语义上等价于收起窗口。
+ * - XWayland 对没有 WM frame 的窗口（CSD 窗口正是如此）会忽略最大化请求：
+ *   `toggle_maximize` 返回成功、`is_maximized` 也变成 true，但 Hyprland 看到的
+ *   窗口尺寸纹丝不动（实测 1100x734 → 1100x734）。因此最大化也由前端自己做：
+ *   记住原位置/尺寸 → 铺满屏幕 → 再切回来时还原。
  */
 
 /** 运行平台是否为 Linux（取不到平台信息时按非 Linux 处理，走 Tauri 内置行为）。 */
@@ -33,7 +37,11 @@ export async function isLinuxRuntime(): Promise<boolean> {
  * 指针捕获（setPointerCapture）保证指针移出窗口后仍能收到 move 事件。
  * 返回解绑函数。
  */
-export function attachLinuxDrag(el: HTMLElement, win: Window): () => void {
+export function attachLinuxDrag(
+  el: HTMLElement,
+  win: Window,
+  options: { onDoubleClick?: () => void } = {},
+): () => void {
   let dragging = false;
   let ready = false;
   let startX = 0;
@@ -43,6 +51,9 @@ export function attachLinuxDrag(el: HTMLElement, win: Window): () => void {
   let scale = 1;
   let lastX = 0;
   let lastY = 0;
+  let lastClickAt = 0;
+  let lastClickX = 0;
+  let lastClickY = 0;
 
   // 直接调 set_position，不用 requestAnimationFrame：
   // 窗口被遮挡/未聚焦时 Chromium 会挂起 rAF，拖拽会整段失效。
@@ -70,6 +81,23 @@ export function attachLinuxDrag(el: HTMLElement, win: Window): () => void {
     startY = event.screenY;
     lastX = startX;
     lastY = startY;
+
+    // 双击判定：两次按下间隔很短且位置接近 → 视为双击（标题栏双击最大化）。
+    const now = event.timeStamp || Date.now();
+    const isDouble =
+      now - lastClickAt < 400 &&
+      Math.abs(event.screenX - lastClickX) < 6 &&
+      Math.abs(event.screenY - lastClickY) < 6;
+    lastClickAt = now;
+    lastClickX = event.screenX;
+    lastClickY = event.screenY;
+    if (isDouble) {
+      dragging = false;
+      ready = false;
+      options.onDoubleClick?.();
+      return;
+    }
+
     void (async () => {
       try {
         const [pos, factor] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
@@ -113,5 +141,53 @@ export function attachLinuxDrag(el: HTMLElement, win: Window): () => void {
     el.removeEventListener('pointermove', onPointerMove);
     el.removeEventListener('pointerup', onPointerUp);
     el.removeEventListener('pointercancel', onPointerUp);
+  };
+}
+
+/** Linux 下的最大化控制器：自己算几何，不依赖窗口管理器。 */
+export interface LinuxMaximize {
+  /** 当前是否处于「自绘最大化」状态。 */
+  isMaximized(): boolean;
+  /** 最大化 / 还原。 */
+  toggle(): Promise<void>;
+}
+
+export function createLinuxMaximize(win: Window): LinuxMaximize {
+  let maximized = false;
+  let saved: { x: number; y: number; width: number; height: number } | null = null;
+
+  const toggle = async () => {
+    if (!maximized) {
+      const [pos, size, factor] = await Promise.all([
+        win.outerPosition(),
+        win.outerSize(),
+        win.scaleFactor(),
+      ]);
+      saved = { x: pos.x, y: pos.y, width: size.width, height: size.height };
+      const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
+      const cssWidth = screen.availWidth || screen.width;
+      const cssHeight = screen.availHeight || screen.height;
+      const cssLeft = screen.availLeft || 0;
+      const cssTop = screen.availTop || 0;
+      await win.setSize(
+        new PhysicalSize(Math.round(cssWidth * factor), Math.round(cssHeight * factor)),
+      );
+      await win.setPosition(
+        new PhysicalPosition(Math.round(cssLeft * factor), Math.round(cssTop * factor)),
+      );
+      maximized = true;
+      return;
+    }
+    if (saved) {
+      await win.setSize(new PhysicalSize(saved.width, saved.height));
+      await win.setPosition(new PhysicalPosition(saved.x, saved.y));
+      saved = null;
+    }
+    maximized = false;
+  };
+
+  return {
+    isMaximized: () => maximized,
+    toggle,
   };
 }

@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { attachLinuxDrag, isLinuxRuntime } from '../lib/window/linuxWindow';
+  import {
+    attachLinuxDrag,
+    createLinuxMaximize,
+    isLinuxRuntime,
+    type LinuxMaximize,
+  } from '../lib/window/linuxWindow';
 
   // 自绘标题栏（窗口 decorations: false）。三个窗口按钮只调用窗口 API，
   // 真正的关闭语义（隐藏到托盘还是退出）由 Rust 侧 CloseRequested 处理器决定。
@@ -14,18 +19,32 @@
   // （按钮等可点元素会被内置脚本自动豁免，不影响点击）。
   //
   // 例外：Linux（CEF 内嵌 Chromium）下内置脚本的 start_dragging 拿不到指针
-  // 状态，拖不动窗口——改由我们自己按位移调 set_position，并把
-  // data-tauri-drag-region 置为 "false" 让内置脚本别插手。
+  // 状态，拖不动窗口；最大化请求也会被 XWayland 忽略（无 WM frame 的 CSD 窗口）。
+  // 于是 Linux 下这三件事全部由前端自己做：拖拽走 set_position，
+  // 最大化走 set_size + set_position，双击由我们自己的 pointer 判定。
   // 详见 src/lib/window/linuxWindow.ts。
   const win = getCurrentWindow();
 
   let linux = $state(false);
   let headerEl: HTMLElement | undefined = $state();
+  let maximize = $state<LinuxMaximize | null>(null);
+  let maximized = $state(false);
 
   onMount(() => {
     void isLinuxRuntime().then((isLinux) => {
       linux = isLinux;
-      if (isLinux && headerEl) attachLinuxDrag(headerEl, win);
+      if (!isLinux) return;
+      const controller = createLinuxMaximize(win);
+      maximize = controller;
+      if (headerEl) {
+        attachLinuxDrag(headerEl, win, {
+          onDoubleClick: () => {
+            void controller.toggle().then(() => {
+              maximized = controller.isMaximized();
+            });
+          },
+        });
+      }
     });
   });
 
@@ -37,6 +56,17 @@
       return;
     }
     void win.minimize();
+  }
+
+  // Linux 下最大化自己做（窗口管理器的 maximize 请求对 CSD 窗口无效）。
+  function toggleMaximize() {
+    if (linux && maximize) {
+      void maximize.toggle().then(() => {
+        maximized = maximize?.isMaximized() ?? false;
+      });
+      return;
+    }
+    void win.toggleMaximize();
   }
 </script>
 
@@ -69,7 +99,7 @@
     <button
       class="flex w-11 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
       aria-label="最大化 / 还原"
-      onclick={() => void win.toggleMaximize()}
+      onclick={() => toggleMaximize()}
     >
       <svg
         viewBox="0 0 24 24"
@@ -78,7 +108,12 @@
         stroke="currentColor"
         stroke-width="1.6"
       >
-        <rect x="6" y="6" width="12" height="12" rx="1" />
+        {#if maximized}
+          <path d="M9 9h6v6H9z" />
+          <path d="M5 15V5h10" />
+        {:else}
+          <rect x="6" y="6" width="12" height="12" rx="1" />
+        {/if}
       </svg>
     </button>
     <button
