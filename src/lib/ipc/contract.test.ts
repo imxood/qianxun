@@ -123,6 +123,8 @@ const RESPONSE_TYPES = [
   // 磁盘扫描域：rename_all_fields 历史事故恰好发生在这个域
   'DiskEntry',
   'DiskHome',
+  // 窗口域：Linux 自绘最大化用的工作区矩形
+  'WorkArea',
 ] as const;
 
 /**

@@ -1,7 +1,7 @@
 import { PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi';
 import type { Window } from '@tauri-apps/api/window';
 import { call } from '../ipc';
-import type { AppMetaResult } from '../ipc/contract';
+import type { AppMetaResult, WorkArea } from '../ipc/contract';
 
 /**
  * Linux（CEF 内嵌 Chromium）下窗口交互的补丁层。
@@ -17,7 +17,11 @@ import type { AppMetaResult } from '../ipc/contract';
  * - XWayland 对没有 WM frame 的窗口（CSD 窗口正是如此）会忽略最大化请求：
  *   `toggle_maximize` 返回成功、`is_maximized` 也变成 true，但 Hyprland 看到的
  *   窗口尺寸纹丝不动（实测 1100x734 → 1100x734）。因此最大化也由前端自己做：
- *   记住原位置/尺寸 → 铺满屏幕 → 再切回来时还原。
+ *   记住原位置/尺寸 → 铺满**工作区** → 再切回来时还原。
+ * - 铺满的目标矩形不能用 `screen.avail*`：Chromium 报的是整块屏幕，
+ *   不知道 WM 的保留区（omarchy 左侧 28px 竖条），铺满会盖住它。
+ *   工作区由 Rust 侧 `window_work_area` 向 WM 问（见
+ *   `src-tauri/src/window/work_area.rs`），问不到才退回整屏。
  */
 
 /** 运行平台是否为 Linux（取不到平台信息时按非 Linux 处理，走 Tauri 内置行为）。 */
@@ -152,29 +156,51 @@ export interface LinuxMaximize {
   toggle(): Promise<void>;
 }
 
+/**
+ * 取当前窗口所在显示器的可用工作区（物理像素）。
+ *
+ * `screen.avail*` 与 Tauri 的 `monitor.work_area()` 都只认整块屏幕——不知道
+ * 窗口管理器的保留区（omarchy 左侧 28px 竖条，Hyprland 的 reserved）。
+ * 铺满整屏会把那根竖条盖住，所以优先问 Rust 侧（它直接问 WM）。
+ * 问不到就退回整屏（旧行为）。
+ */
+async function resolveWorkArea(): Promise<WorkArea | null> {
+  try {
+    const area = await call<WorkArea>('window_work_area');
+    if (!area || area.width <= 0 || area.height <= 0) return null;
+    return area;
+  } catch {
+    return null;
+  }
+}
+
 export function createLinuxMaximize(win: Window): LinuxMaximize {
   let maximized = false;
   let saved: { x: number; y: number; width: number; height: number } | null = null;
 
   const toggle = async () => {
     if (!maximized) {
-      const [pos, size, factor] = await Promise.all([
-        win.outerPosition(),
-        win.outerSize(),
-        win.scaleFactor(),
-      ]);
+      const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
       saved = { x: pos.x, y: pos.y, width: size.width, height: size.height };
-      const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
-      const cssWidth = screen.availWidth || screen.width;
-      const cssHeight = screen.availHeight || screen.height;
-      const cssLeft = screen.availLeft || 0;
-      const cssTop = screen.availTop || 0;
-      await win.setSize(
-        new PhysicalSize(Math.round(cssWidth * factor), Math.round(cssHeight * factor)),
-      );
-      await win.setPosition(
-        new PhysicalPosition(Math.round(cssLeft * factor), Math.round(cssTop * factor)),
-      );
+      const area = await resolveWorkArea();
+      if (area) {
+        // 工作区已是物理像素，直接用。
+        await win.setSize(new PhysicalSize(area.width, area.height));
+        await win.setPosition(new PhysicalPosition(area.x, area.y));
+      } else {
+        const factor = await win.scaleFactor();
+        const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
+        const cssWidth = screen.availWidth || screen.width;
+        const cssHeight = screen.availHeight || screen.height;
+        const cssLeft = screen.availLeft || 0;
+        const cssTop = screen.availTop || 0;
+        await win.setSize(
+          new PhysicalSize(Math.round(cssWidth * factor), Math.round(cssHeight * factor)),
+        );
+        await win.setPosition(
+          new PhysicalPosition(Math.round(cssLeft * factor), Math.round(cssTop * factor)),
+        );
+      }
       maximized = true;
       return;
     }

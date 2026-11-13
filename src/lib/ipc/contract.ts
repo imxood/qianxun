@@ -56,6 +56,7 @@ export const IPC_COMMANDS = [
   'shots_open_pin',
   'window_spawn_view',
   'window_open_external',
+  'window_work_area',
   'notes_list',
   'notes_read',
   'notes_save',
@@ -142,6 +143,24 @@ export interface AppMetaResult {
   identifier: string;
   /** 运行平台：'windows' | 'linux' | 'macos'。前端据此决定是否自绘标题栏。 */
   platform: string;
+}
+
+/**
+ * 工作区（window_work_area）：窗口所在显示器的可用区域，物理像素。
+ *
+ * Chromium 的 `screen.avail*` 与 Tauri 的 `monitor.work_area()` 都只认整块
+ * 屏幕，不知道窗口管理器的保留区（omarchy 左侧 28px 竖条）。Linux 自绘
+ * 最大化时以本矩形为准，才不会盖住那根竖条。
+ */
+export interface WorkArea {
+  /** 左上角 X（物理像素）。 */
+  x: number;
+  /** 左上角 Y（物理像素）。 */
+  y: number;
+  /** 宽度（物理像素）。 */
+  width: number;
+  /** 高度（物理像素）。 */
+  height: number;
 }
 
 // ---------------------------------------------------------------------------

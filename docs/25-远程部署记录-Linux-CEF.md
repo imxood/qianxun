@@ -248,8 +248,54 @@ after:   |千寻|xw=true|size=1100,734|at=362,125   ← WM 侧尺寸完全没变
 [after restore btn]   page={"sx":431,"sy":152,"ow":1100,"oh":734}  hypr=size=1100,734 at=431,152
 ```
 
-> 远程 Hyprland 的显示器是 `1920x1080 scale 1`，顶部有 28px 栏位但 XWayland 没有提供
-> `_NET_WORKAREA`，所以「最大化」按整屏铺满（会盖住顶部栏）。
+> 远程 Hyprland 的显示器是 `1920x1080 scale 1`，**左侧**有 28px 竖向工具栏（保留区），
+> 但 XWayland 没有提供 `_NET_WORKAREA`，所以「最大化」按整屏铺满（会盖住那根竖条）。
+> 这一点在 §7.6 用「向 WM 问工作区」修掉了。
+
+### 7.6 最大化避开窗口管理器的保留区（2026-11-13）
+
+**问题**：千寻最大化后会盖住 omarchy 左侧那根 28px 的竖向工具栏。
+
+**根因（两层都拿不到保留区）**：
+
+- Chromium 报的是整屏：`screen.availWidth=1920 / availLeft=0`（CDP `Runtime.evaluate` 实测）。
+- Tauri 报的也是整屏：`available_monitors()[0].workArea = {position:{0,0}, size:{1920,1080}}`。
+- X11 通用途径也没有：root window 上不存在 `_NET_WORKAREA`（`XGetWindowProperty` 实测 nitems=0）。
+
+真正知道保留区的是窗口管理器本身：`hyprctl monitors -j` 里
+`reserved: [28, 0, 0, 0]`（顺序 left/right/top/bottom），而 `hyprctl layers` 显示
+只有左侧 28px 是 exclusive zone，底部 dock（`omarchy-dock` 28,873 1892x207）与
+通知面板是浮层。
+
+**做法**：新增 Rust 命令 `window_work_area`（`src-tauri/src/window/work_area.rs`）：
+
+1. `window.available_monitors()` + 窗口 `outer_position()` 选出所在显示器（先命中测试，
+   再退化为交叠面积最大）；
+2. 基准矩形取 `monitor.work_area()`（物理像素；Windows/macOS 上它就是真工作区）；
+3. Linux 覆盖：连 Hyprland 的 IPC socket（`$XDG_RUNTIME_DIR/hypr/<instance>/.socket.sock`，
+   发 `j/monitors` 取 JSON），按几何交叠面积匹配显示器，把该屏的 `reserved`
+   （逻辑像素 × scale 转物理）从基准矩形里扣掉；
+4. 取不到 WM（没装 Hyprland / socket 不在 / 800ms 超时）就退回第 2 步，等于旧行为。
+
+前端 `createLinuxMaximize()` 改用这个工作区（物理像素直接 `setSize`/`setPosition`），
+只在命令失败时退回旧的 `screen.avail*` 路径。
+
+**实测（远端 CDP + Hyprland 双向核对）**：
+
+```
+work_area={"x":28,"y":0,"width":1892,"height":1080}     ← 28px 竖条已被排除
+click=clicked                                            ← 点「最大化 / 还原」
+geometry=[{"cmd":"plugin:window|outer_size","v":{"width":1892,"height":1080}},
+          {"cmd":"plugin:window|outer_position","v":{"x":28,"y":0}}]
+click2=clicked-restore
+geometry_restored=[{"cmd":"plugin:window|outer_size","v":{"width":1100,"height":734}},
+                   {"cmd":"plugin:window|outer_position","v":{"x":386,"y":149}}]
+```
+
+**踩坑**：这段代码是 `#[cfg(target_os = "linux")]` 的——Windows 上的 `cargo check/test`
+根本不会编译它，本地门禁全绿也照样在远端编译炸了 5 个错（`i32`/`u32` 混算、
+`?` 用在 `Result` 上、参数名遮蔽同名函数、`unused import`、未使用参数）。
+**Linux-only 代码必须靠远端 `cargo build` 证伪**，这是一条要记住的跨平台盲区。
 
 ## 8. 未闭环 / 后续可做
 
@@ -261,4 +307,6 @@ after:   |千寻|xw=true|size=1100,734|at=362,125   ← WM 侧尺寸完全没变
 - 远程 pacman 默认镜像不可用（`stable-mirror.omarchy.org` TLS error）；`mirrorlist.bak` 的国内镜像版本号与本机 DB 不一致，装包需手工核对文件名再 `pacman -U`。
 - 未做 Linux 打包产物（deb/appimage）实跑，仅配好 `bundle.targets`。
 - Linux 拖拽/最小化/最大化/双击最大化已用 CDP 合成事件验证，且用户已在远程桌面确认生效（2026-11-13）。
+- **工作区只对 Hyprland 生效**（§7.6）：别的 Wayland 合成器与 X11 拿不到保留区，
+  `window_work_area` 会退回 Tauri 的 `monitor.work_area()`（Linux 上等于整屏，即旧行为）。
 - 用户红线仍然生效：全程未写入/未重装/未终止任何 release 路径内容（安装目录 `C:\Users\maxu\AppData\Local\qianxun\` 与 `~/.qianxun`）。

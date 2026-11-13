@@ -20,6 +20,9 @@ use crate::paths;
 use crate::settings::{self, Geometry};
 use crate::{logging, AppState};
 
+/// 工作区（work area）：最大化时窗口应当占住的矩形。
+pub mod work_area;
+
 /// 独立窗口 label 前缀：`standalone-{view}-{n}`。Destroyed 清理与前端
 /// 窗口身份判断都以该前缀为准。
 pub const STANDALONE_PREFIX: &str = "standalone-";
@@ -420,6 +423,19 @@ pub fn app_toggle_devtools(app: AppHandle) -> crate::error::Result<()> {
         let _ = window.set_focus();
     }
     Ok(())
+}
+
+/// 当前窗口所在显示器的可用工作区（物理像素）。
+///
+/// 用途：Linux/CEF 路线下「最大化」由前端自绘（见
+/// `src/lib/window/linuxWindow.ts`），而 Chromium 的 `screen.avail*` 与
+/// Tauri 的 `monitor.work_area()` 都只认整块屏幕，不知道窗口管理器的
+/// 保留区（omarchy 左侧 28px 竖条）——铺满整屏会把它盖住。
+/// Rust 侧直接向 WM 问，拿不到就退回整屏（即旧行为）。
+#[tauri::command]
+pub async fn window_work_area(app: AppHandle) -> Option<work_area::WorkArea> {
+    let window = front(&app)?;
+    work_area::for_window(&window).await
 }
 
 // ---- 独立窗口（DSH 分离窗）----

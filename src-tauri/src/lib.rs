@@ -345,6 +345,7 @@ pub fn run() {
             shots::commands::shots_open_pin,
             window::app_toggle_devtools,
             window::system_theme,
+            window::window_work_area,
             window::window_spawn_view,
             window::window_open_external,
             notes::commands::notes_list,
