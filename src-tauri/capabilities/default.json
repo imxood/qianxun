@@ -11,6 +11,10 @@
     "core:window:allow-start-dragging",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-hide",
+    "core:window:allow-outer-position",
+    "core:window:allow-set-position",
+    "core:window:allow-scale-factor",
     "opener:allow-open-path",
     {
       "identifier": "opener:allow-open-url",

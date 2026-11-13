@@ -7,6 +7,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { standaloneView } from './lib/windowEnv';
+  import { attachLinuxDrag, isLinuxRuntime } from './lib/window/linuxWindow';
   import { settings } from './stores/settings.svelte';
   import { theme } from './stores/theme.svelte';
   import DshPage from './features/dsh/DshPage.svelte';
@@ -31,19 +32,44 @@
     }
   });
 
+  // 运行平台：Linux 走 CEF 内嵌 Chromium 时，窗口拖拽要自己实现
+  // （内置 start_dragging 拿不到指针状态），最小化改为隐藏到托盘。
+  let linux = $state(false);
+  let headerEl: HTMLElement | undefined = $state();
+
   onMount(() => {
     // 窗口以隐藏创建（window_spawn_view visible:false），首帧就绪后亮出。
     void settings.load().finally(() => {
-      void win.show();
-      void win.setFocus();
+      // 亮窗前先定平台：Linux 上要换掉拖拽实现，先亮窗会闪一帧。
+      void isLinuxRuntime()
+        .then((isLinux) => {
+          linux = isLinux;
+          if (isLinux && headerEl) attachLinuxDrag(headerEl, win);
+        })
+        .catch(() => {
+          /* 取不到平台就按默认（自绘标题栏）走 */
+        })
+        .finally(() => {
+          void win.show();
+          void win.setFocus();
+        });
     });
   });
+
+  function minimize() {
+    if (linux) {
+      void win.hide();
+      return;
+    }
+    void win.minimize();
+  }
 </script>
 
 <div class="flex h-full flex-col overflow-hidden bg-bg">
   <header
+    bind:this={headerEl}
     class="flex h-8 shrink-0 select-none items-stretch justify-between border-b border-line bg-surface"
-    data-tauri-drag-region="deep"
+    data-tauri-drag-region={linux ? 'false' : 'deep'}
   >
     <div class="flex items-center gap-2 self-center pl-3">
       <span class="text-xs font-medium">{meta[view ?? '']?.title ?? '千寻'}</span>
@@ -53,7 +79,7 @@
       <button
         class="flex w-11 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
         aria-label="最小化"
-        onclick={() => void win.minimize()}
+        onclick={() => minimize()}
       >
         <svg
           viewBox="0 0 24 24"

@@ -64,7 +64,7 @@
     return () => window.removeEventListener('message', onMessage);
   });
 
-  // 状态就绪即加载 iframe；重启/断线由 reload 钩子自动恢复。
+  // 状态就绪即加载 iframe；重启/断线靠下面的 iframe 文档代号恢复。
   const ready = $derived(harness.status.phase === 'ready' && harness.proxyUrl !== null);
   // DSH 0.1.2 起浏览器认证 cookie 为 SameSite=Strict：跨站 iframe
   // （tauri.localhost 内嵌 127.0.0.1）永远不携带，直连必 401。iframe 一律
@@ -85,6 +85,27 @@
   $effect(() => {
     void dshUrl;
     frameLoaded = false;
+  });
+
+  // iframe 文档代号：DSH 重启时回环网关会整体重建（上游短暂为 0），这期间
+  // iframe 若发起文档导航就会拿到 Chromium 的「连接被拒绝」错误页；而 iframe
+  // 的 src 始终是同一个回环代理地址，Svelte 不会重建它，错误页就一直留着。
+  // DSH 重新就绪（或就绪地址变化）时自增代号，强制新建一份 iframe 文档，
+  // 把错误页顶掉。Linux/CEF 下这个坑尤其明显（网关停机窗口更容易命中）。
+  let frameEpoch = $state(0);
+  let lastPhase = $state('');
+  let lastOrigin = $state('');
+  $effect(() => {
+    const phase = harness.status.phase;
+    const origin = phase === 'ready' ? harness.status.origin : '';
+    const prevPhase = lastPhase;
+    const prevOrigin = lastOrigin;
+    lastPhase = phase;
+    lastOrigin = origin;
+    if (phase === 'ready' && (prevPhase !== 'ready' || origin !== prevOrigin)) {
+      frameEpoch += 1;
+      frameLoaded = false;
+    }
   });
 
   const phase = $derived(harness.status.phase);
@@ -113,21 +134,23 @@
          走 navigator.clipboard.write([ClipboardItem]) 必被拒，异常又被
          context-menu 吞掉，只剩「无法复制，请检查内容是否可用后重试」。
          注意 allow 与 sandbox 是两套机制，sandbox 里没有 clipboard 项。 -->
-    <iframe
-      title="DSH"
-      class="h-full w-full border-0"
-      src={dshUrl}
-      sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups"
-      allow="clipboard-write"
-      bind:this={frame}
-      onload={() => {
-        frameLoaded = true;
-        // 文档每次加载完成都补发 arm（注入脚本随文档重载重建，armed 归零）。
-        // 重置 shellArmed 让新文档的 ready 能重新触发恰好一次握手。
-        shellArmed = false;
-        armShell();
-      }}
-    ></iframe>
+    {#key frameEpoch}
+      <iframe
+        title="DSH"
+        class="h-full w-full border-0"
+        src={dshUrl}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups"
+        allow="clipboard-write"
+        bind:this={frame}
+        onload={() => {
+          frameLoaded = true;
+          // 文档每次加载完成都补发 arm（注入脚本随文档重载重建，armed 归零）。
+          // 重置 shellArmed 让新文档的 ready 能重新触发恰好一次握手。
+          shellArmed = false;
+          armShell();
+        }}
+      ></iframe>
+    {/key}
     {#if !frameLoaded}
       <div class="absolute inset-0 z-10 flex items-center justify-center bg-bg">
         <div class="flex items-center gap-2 text-sm text-muted">

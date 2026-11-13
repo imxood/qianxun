@@ -81,6 +81,12 @@ fn app_meta(app: tauri::AppHandle) -> AppMeta {
         version: package.version.to_string(),
         // PackageInfo 没有 identifier 字段，标识符在运行时配置里。
         identifier: app.config().identifier.clone(),
+        // 运行平台（"windows" / "linux" / "macos"）。Linux 走 CEF 内嵌
+        // Chromium 时，窗口拖拽与最小化要由前端自己实现（CEF 把浏览器
+        // reparent 进 GTK content 区的 X11 子窗口，GTK toplevel 收不到
+        // 指针事件，Tauri 内置拖拽与 GTK4-X11 图标化都失效）。
+        // 详见 src/lib/window/linuxWindow.ts。
+        platform: std::env::consts::OS.to_string(),
     }
 }
 
@@ -90,6 +96,7 @@ struct AppMeta {
     name: String,
     version: String,
     identifier: String,
+    platform: String,
 }
 
 /// 退出并立即重启千寻（数据备份还原后的生效入口：还原出的设置、

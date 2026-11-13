@@ -26,6 +26,9 @@
   import { search } from './stores/search.svelte';
   import { theme } from './stores/theme.svelte';
 
+  // 窗口拖拽/最小化在 Linux(CEF) 下由标题栏组件自己处理，
+  // 见 src/lib/window/linuxWindow.ts。
+
   onMount(() => {
     // 主窗以隐藏创建（tauri.conf visible:false），前端就绪后由这里亮窗：
     // 几何恢复/最大化在隐藏期间已完成，用户看到的第一帧就是最终形态，

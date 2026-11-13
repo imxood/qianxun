@@ -370,6 +370,12 @@ pub async fn rebuild_main(app: &AppHandle) -> crate::error::Result<()> {
 /// 建窗，参数与这里保持一致）。成功后应用 WebView2 偏好、还原几何，
 /// 并自备兜底亮窗——setup 里的 20s 兜底只管启动，前端 boot 若再挂死，
 /// 重建出的窗口至少不会「隐身」。
+///
+/// 窗口一律自绘无边框（decorations=false），标题栏由前端 TitleBar 组件
+/// 负责。Linux(CEF) 下虽然 WM 也不给 GTK4 窗口画边框（实测无
+/// _NET_FRAME_EXTENTS，GTK4 走客户端装饰），且拖拽/最小化要靠前端自己
+/// 实现（见 src/lib/window/linuxWindow.ts），但保持「全部平台统一自绘」
+/// 的一致性更省心。
 fn build_main(app: &AppHandle, geometry: Option<&Geometry>) -> tauri::Result<()> {
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("千寻")

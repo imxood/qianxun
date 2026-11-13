@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { attachLinuxDrag, isLinuxRuntime } from '../lib/window/linuxWindow';
 
   // 自绘标题栏（窗口 decorations: false）。三个窗口按钮只调用窗口 API，
   // 真正的关闭语义（隐藏到托盘还是退出）由 Rust 侧 CloseRequested 处理器决定。
@@ -10,12 +12,38 @@
   // （切过去又切回来），表现为「双击无效果」。
   // data-tauri-drag-region="deep"：子树内任意位置按下都算拖拽起点
   // （按钮等可点元素会被内置脚本自动豁免，不影响点击）。
+  //
+  // 例外：Linux（CEF 内嵌 Chromium）下内置脚本的 start_dragging 拿不到指针
+  // 状态，拖不动窗口——改由我们自己按位移调 set_position，并把
+  // data-tauri-drag-region 置为 "false" 让内置脚本别插手。
+  // 详见 src/lib/window/linuxWindow.ts。
   const win = getCurrentWindow();
+
+  let linux = $state(false);
+  let headerEl: HTMLElement | undefined = $state();
+
+  onMount(() => {
+    void isLinuxRuntime().then((isLinux) => {
+      linux = isLinux;
+      if (isLinux && headerEl) attachLinuxDrag(headerEl, win);
+    });
+  });
+
+  // Linux 下 GTK4 在 XWayland 里图标化无效（WM_STATE 恒 Normal），
+  // 最小化改为隐藏到托盘，与千寻既有的托盘行为一致。
+  function minimize() {
+    if (linux) {
+      void win.hide();
+      return;
+    }
+    void win.minimize();
+  }
 </script>
 
 <header
+  bind:this={headerEl}
   class="flex h-8 shrink-0 select-none items-stretch justify-between border-b border-line bg-surface"
-  data-tauri-drag-region="deep"
+  data-tauri-drag-region={linux ? 'false' : 'deep'}
 >
   <div class="flex items-center self-center pr-3 pl-3">
     <span class="text-sm font-semibold tracking-tight">千寻</span>
@@ -26,7 +54,7 @@
     <button
       class="flex w-11 items-center justify-center text-fg transition-colors hover:bg-accent-soft"
       aria-label="最小化"
-      onclick={() => void win.minimize()}
+      onclick={() => minimize()}
     >
       <svg
         viewBox="0 0 24 24"

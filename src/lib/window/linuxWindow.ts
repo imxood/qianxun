@@ -1,0 +1,117 @@
+import { PhysicalPosition } from '@tauri-apps/api/dpi';
+import type { Window } from '@tauri-apps/api/window';
+import { call } from '../ipc';
+import type { AppMetaResult } from '../ipc/contract';
+
+/**
+ * Linux（CEF 内嵌 Chromium）下窗口交互的补丁层。
+ *
+ * 背景（远程 omarchy 上实测）：
+ * - CEF 把浏览器窗口 reparent 进 GTK content 区的 X11 子窗口，鼠标事件全落在
+ *   子窗口上，GTK toplevel 收不到 pointer press → Tauri 内置的
+ *   `start_dragging` 在 winit-gtk4 里拿不到指针状态，拖拽必然失败。
+ * - GTK4 在 X11 下走客户端装饰（CSD），窗口管理器不会替 GTK4 窗口画边框，
+ *   所以「让 WM 接管标题栏」这条路走不通，标题栏必须自绘。
+ * - GTK4 的 `gtk_window_minimize()` 在 XWayland 下不产生 WM_STATE=Iconic，
+ *   最小化按钮改为「隐藏到托盘」，语义上等价于收起窗口。
+ */
+
+/** 运行平台是否为 Linux（取不到平台信息时按非 Linux 处理，走 Tauri 内置行为）。 */
+export async function isLinuxRuntime(): Promise<boolean> {
+  try {
+    const meta = await call<AppMetaResult>('app_meta');
+    return meta.platform === 'linux';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把一个元素变成 Linux 下的窗口拖拽把手。
+ *
+ * 做法：按下时记下指针与窗口位置，移动时按位移量调用 `set_position`。
+ * 指针捕获（setPointerCapture）保证指针移出窗口后仍能收到 move 事件。
+ * 返回解绑函数。
+ */
+export function attachLinuxDrag(el: HTMLElement, win: Window): () => void {
+  let dragging = false;
+  let ready = false;
+  let startX = 0;
+  let startY = 0;
+  let originX = 0;
+  let originY = 0;
+  let scale = 1;
+  let lastX = 0;
+  let lastY = 0;
+
+  // 直接调 set_position，不用 requestAnimationFrame：
+  // 窗口被遮挡/未聚焦时 Chromium 会挂起 rAF，拖拽会整段失效。
+  const apply = () => {
+    if (!ready) return;
+    const x = originX + (lastX - startX) * scale;
+    const y = originY + (lastY - startY) * scale;
+    void win.setPosition(new PhysicalPosition(x, y)).catch(() => {});
+  };
+
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    // 按钮/链接等可点元素不触发拖拽（与 Tauri 内置脚本的行为一致）。
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('button, a, input, select, textarea, [role="button"]')) return;
+    event.preventDefault();
+    try {
+      el.setPointerCapture(event.pointerId);
+    } catch {
+      /* 某些环境不允许捕获，退化成普通事件流 */
+    }
+    dragging = true;
+    ready = false;
+    startX = event.screenX;
+    startY = event.screenY;
+    lastX = startX;
+    lastY = startY;
+    void (async () => {
+      try {
+        const [pos, factor] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+        originX = pos.x;
+        originY = pos.y;
+        scale = factor;
+        ready = true;
+        // 位置是异步拿到的，这里补一次，保证按下后立刻移动也能生效。
+        apply();
+      } catch {
+        ready = false;
+      }
+    })();
+  };
+
+  const onPointerMove = (event: PointerEvent) => {
+    if (!dragging) return;
+    lastX = event.screenX;
+    lastY = event.screenY;
+    apply();
+  };
+
+  const onPointerUp = (event: PointerEvent) => {
+    if (!dragging) return;
+    dragging = false;
+    ready = false;
+    try {
+      el.releasePointerCapture(event.pointerId);
+    } catch {
+      /* 已释放 */
+    }
+  };
+
+  el.addEventListener('pointerdown', onPointerDown);
+  el.addEventListener('pointermove', onPointerMove);
+  el.addEventListener('pointerup', onPointerUp);
+  el.addEventListener('pointercancel', onPointerUp);
+
+  return () => {
+    el.removeEventListener('pointerdown', onPointerDown);
+    el.removeEventListener('pointermove', onPointerMove);
+    el.removeEventListener('pointerup', onPointerUp);
+    el.removeEventListener('pointercancel', onPointerUp);
+  };
+}

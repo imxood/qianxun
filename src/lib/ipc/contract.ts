@@ -140,6 +140,8 @@ export interface AppMetaResult {
   name: string;
   version: string;
   identifier: string;
+  /** 运行平台：'windows' | 'linux' | 'macos'。前端据此决定是否自绘标题栏。 */
+  platform: string;
 }
 
 // ---------------------------------------------------------------------------
