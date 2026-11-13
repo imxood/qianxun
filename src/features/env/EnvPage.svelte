@@ -122,6 +122,14 @@
   /** failed 变体的收窄（union 上直接取 reason 过不了类型检查）。 */
   const failReason = $derived(harness.status.phase === 'failed' ? harness.status.reason : '');
 
+  /**
+   * 共享实例：千寻复用了本机已经在跑的 DSH（外部模式 + 已有 dsh web）。
+   * 它不是千寻的进程——千寻不接管它的启停。
+   */
+  const sharedInstance = $derived(
+    harness.status.phase === 'ready' && harness.status.shared ? harness.status : null,
+  );
+
   // ---- Laya / QWen / Moli 环境状态 ----
   let layaStatus = $state<LayaStatus | null>(null);
   let qwenStatus = $state<QwenStatus | null>(null);
@@ -373,6 +381,14 @@
         <p class="mt-1 text-xs text-muted" data-testid="dsh-source-line">
           来源：{dshSourceLabel}
         </p>
+        {#if sharedInstance}
+          <p class="mt-1 text-xs text-muted" data-testid="dsh-shared-line">
+            已复用本机正在运行的 DSH（{sharedInstance.origin}
+            {sharedInstance.pid
+              ? `· pid ${sharedInstance.pid}`
+              : ''}）：千寻不接管它的启停——「停止」只是断开连接，不会结束那个进程。
+          </p>
+        {/if}
         {#if harness.status.phase === 'failed'}
           <p class="mt-1.5 text-xs text-danger">{failReason}</p>
           <div class="mt-2 flex flex-wrap gap-1.5">

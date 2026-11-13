@@ -5,6 +5,7 @@
 //! 状态机与进程ownership在 supervisor，安装执行在 install，IPC 在 commands。
 
 pub mod commands;
+pub mod dsh_share;
 pub mod external;
 pub mod health;
 pub mod install;

@@ -253,6 +253,9 @@ after:   |千寻|xw=true|size=1100,734|at=362,125   ← WM 侧尺寸完全没变
 
 ## 8. 未闭环 / 后续可做
 
+- **DSH 实例复用**：远程千寻不再自己拉 DSH，而是复用用户已在跑的 `dsh web`
+  （`harness_start` → `origin=http://127.0.0.1:3080`、`shared=true`、`pid=318480`），
+  根治了「两个 DSH 抢同一把会话锁」的报错。机制与验证见 `docs/27-DSH共享实例方案.md`。
 - Linux 上 **托盘菜单**走 GTK3/GTK4 混用的顾虑已通过 dialog 走 xdg-portal 规避，但托盘本体（ksni）与截图功能仍是 Windows 专属（截图在非 Windows 返回明确错误）。
 - Linux 无单实例机制（`single_instance` 模块整体 cfg(windows)），并发启动会起多个实例；本次未实现 flock/DBus 替代。
 - 远程 pacman 默认镜像不可用（`stable-mirror.omarchy.org` TLS error）；`mirrorlist.bak` 的国内镜像版本号与本机 DB 不一致，装包需手工核对文件名再 `pacman -U`。

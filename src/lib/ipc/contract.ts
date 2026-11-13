@@ -582,6 +582,13 @@ export type HarnessStatus =
        */
       url: string;
       pid: number;
+      /**
+       * 上游 DSH 是**复用**本机已经在跑的实例（外部模式 + 已有 dsh web），
+       * 不是千寻自己拉起的。千寻对它只有使用权：不 kill、不重启它。
+       * 共享实例没有启动 token（拿不到），故 `url` 给的是千寻自己的回环
+       * 网关地址（cookie 由网关在服务端持有）。
+       */
+      shared: boolean;
     }
   | { phase: 'restarting'; attempt: number; delayMs: number }
   | { phase: 'failed'; reason: string };
@@ -607,7 +614,9 @@ export function formatHarnessStatus(status: HarnessStatus): string {
     case 'starting':
       return '启动中…';
     case 'ready':
-      return `运行中 · ${status.origin}`;
+      return status.shared
+        ? `运行中 · ${status.origin}（复用已在运行的实例）`
+        : `运行中 · ${status.origin}`;
     case 'restarting':
       return `重启中（第 ${status.attempt} 次，${status.delayMs}ms 后）`;
     case 'failed':

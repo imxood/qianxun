@@ -73,6 +73,10 @@ pub enum Status {
         origin: String,
         url: String,
         pid: u32,
+        /// 上游 DSH 不是千寻自己拉起的，而是**复用**了本机已在运行的实例
+        /// （外部模式 + 已有 dsh web）。此时 `pid` 是那个别人的进程
+        /// （可能为 0 = 未能反查），千寻对它只有使用权——没有 kill 权。
+        shared: bool,
     },
     Restarting {
         attempt: u32,
@@ -159,6 +163,9 @@ pub struct Supervisor {
     active: AtomicBool,
     /// stop 置位，监督循环据此区分「有意退出」与「崩溃」。
     stopping: AtomicBool,
+    /// 复用别人已经跑着的 DSH 时，自签的浏览器会话 cookie。
+    /// 凭据不外泄到前端（状态事件里只有 origin），只随网关转发用。
+    shared_cookie: Mutex<Option<String>>,
 }
 
 impl Supervisor {
@@ -170,6 +177,7 @@ impl Supervisor {
             log: Mutex::new(VecDeque::with_capacity(LOG_HISTORY)),
             active: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            shared_cookie: Mutex::new(None),
         }))
     }
 
@@ -223,6 +231,7 @@ impl Supervisor {
                     origin: origin.clone(),
                     url,
                     pid,
+                    shared: false,
                 });
                 tokio::spawn(async move { self.supervise(child, plan).await });
                 Ok(origin)
@@ -244,7 +253,77 @@ impl Supervisor {
         // ADR-011：guard 只拥有千寻自己 spawn 的进程树，
         // terminate_all 触及不到也绝不去触及别人的进程。
         let _ = self.guard.terminate_all();
+        *self.shared_cookie_guard() = None;
         self.publish(Status::Stopped);
+    }
+
+    /// 复用**已经在跑**的 DSH 实例：千寻不拉起任何进程，只「挂」上去。
+    ///
+    /// 外部模式下用户常常自己开着 `dsh web`。两个实例共用同一个
+    /// DSH_HOME 会争抢同一把会话锁（实测报 “This session is already in
+    /// use”），所以先找现成的，找不到才自己拉。
+    ///
+    /// `browser_url` 是「在浏览器里打开这个 DSH」的地址：共享实例没有
+    /// 启动 token（拿不到），浏览器直连会被 401，所以给的是千寻自己的
+    /// 回环网关地址——cookie 由网关在服务端持有。
+    pub async fn attach_shared(
+        self: Arc<Self>,
+        instance: super::dsh_share::SharedInstance,
+        browser_url: Option<String>,
+    ) -> String {
+        if let Status::Ready { origin, .. } = self.status() {
+            return origin;
+        }
+        *self.shared_cookie_guard() = Some(instance.cookie.clone());
+        let origin = format!("http://{}", instance.origin);
+        let url = browser_url.unwrap_or_else(|| format!("{origin}/"));
+        self.publish(Status::Ready {
+            origin: origin.clone(),
+            url,
+            pid: instance.pid.unwrap_or_default(),
+            shared: true,
+        });
+        self.note(
+            Stream::Stdout,
+            format!("[DSH] 已连接到正在运行的实例（{}）", instance.origin),
+        );
+        // 共享实例是**用户的**进程：它没了就报失败，绝不替用户重启，
+        // 更不能去 kill 它。
+        tokio::spawn(async move { self.watch_shared(instance.origin).await });
+        origin
+    }
+
+    /// 自签 cookie（复用共享实例时用）：网关转发时带上它。
+    pub fn shared_cookie(&self) -> Option<String> {
+        self.shared_cookie_guard().clone()
+    }
+
+    /// 盯住共享实例：它停止应答就把状态改成失败（不替用户重启）。
+    async fn watch_shared(self: Arc<Self>, origin: String) {
+        let mut misses = 0u32;
+        loop {
+            tokio::time::sleep(HEALTH_INTERVAL).await;
+            if !matches!(self.status(), Status::Ready { shared: true, .. }) {
+                return;
+            }
+            match health::probe(&format!("http://{origin}"), HEALTH_TIMEOUT).await {
+                Ok(()) => misses = 0,
+                Err(reason) => {
+                    misses += 1;
+                    if misses >= HEALTH_MISS_LIMIT {
+                        self.record(
+                            Stream::Stderr,
+                            format!("已在运行的 DSH 实例（{origin}）停止应答：{reason}"),
+                        );
+                        *self.shared_cookie_guard() = None;
+                        self.publish(Status::Failed {
+                            reason: format!("已在运行的 DSH 实例（{origin}）停止应答"),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// 等到监督任务观察到进程终止。安装器替换 runtime 目录前
@@ -489,7 +568,12 @@ impl Supervisor {
             match Arc::clone(&self).launch_once(plan).await {
                 Ok((child, origin, url)) => {
                     let pid = child.id().unwrap_or_default();
-                    self.publish(Status::Ready { origin, url, pid });
+                    self.publish(Status::Ready {
+                        origin,
+                        url,
+                        pid,
+                        shared: false,
+                    });
                     return Some(child);
                 }
                 Err(failure) => self.record(Stream::Stderr, format!("重启失败：{failure}")),
@@ -534,6 +618,13 @@ impl Supervisor {
     /// 内存日志只是一个有界队列，中毒也能恢复。
     fn log_guard(&self) -> MutexGuard<'_, VecDeque<(Stream, String)>> {
         self.log.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 自签 cookie 的持有槽（中毒也能恢复）。
+    fn shared_cookie_guard(&self) -> MutexGuard<'_, Option<String>> {
+        self.shared_cookie
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 

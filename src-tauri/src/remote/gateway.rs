@@ -113,6 +113,7 @@ pub async fn start(
     port: u16,
     upstream: String,
     dsh_url: Option<String>,
+    dsh_cookie: Option<String>,
     devices: Vec<RemoteDevice>,
     fingerprint: u64,
     mobile_access_dir: std::path::PathBuf,
@@ -123,7 +124,12 @@ pub async fn start(
         .map_err(|cause| format!("回环地址不合法：{cause}"))?;
     // 定制目录尽力创建：方便用户/agent 直接往里放 custom.css/js。
     let _ = std::fs::create_dir_all(&mobile_access_dir);
-    let upstream_state = Upstream::new(upstream, dsh_url.clone());
+    // 共享实例（复用用户自己跑着的 dsh web）：cookie 已经自签好，直接用；
+    // 没有 token 可兑换，故不走 exchange 那条路。
+    let upstream_state = match dsh_cookie.clone() {
+        Some(cookie) => Upstream::with_shared_cookie(upstream.clone(), cookie),
+        None => Upstream::new(upstream.clone(), dsh_url.clone()),
+    };
     let loopback_listener = tokio::net::TcpListener::bind(loopback_bind)
         .await
         .map_err(|cause| format!("回环监听失败（{loopback_bind}）：{cause}"))?;
@@ -140,7 +146,10 @@ pub async fn start(
         pair_codes: global_pair_codes().clone(),
     };
     // 顺手把登录兑换做掉：首个请求就不必等一次兑换往返。
-    if dsh_url.is_some() {
+    // 共享实例的 cookie 是自签的，本来就没有 dsh_url 可兑换。
+    if dsh_cookie.is_some() {
+        crate::logging::log("info", "网关使用自签 cookie 连接共享的 DSH 实例");
+    } else if dsh_url.is_some() {
         match upstream_state.ensure_cookie().await {
             Some(_) => crate::logging::log("info", "网关已向 DSH 兑换登录 cookie"),
             None => crate::logging::log(
@@ -878,6 +887,7 @@ mod tests {
             port,
             "127.0.0.1:0".to_owned(),
             None,
+            None,
             Vec::new(),
             0,
             std::env::temp_dir().join("qianxun-gateway-degrade-test"),
@@ -1045,6 +1055,7 @@ mod tests {
             "",
             port,
             upstream_addr.to_string(),
+            None,
             None,
             Vec::new(),
             0,

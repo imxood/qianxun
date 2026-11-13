@@ -89,6 +89,11 @@ struct Inner {
     dsh_url: Option<String>,
     /// 兑换出的 `dsh-auth-*` cookie（Name=Value），跨请求复用。
     cookie: Option<String>,
+    /// cookie 是**自签**的（复用别人已经跑着的 dsh web 时没有启动 token，
+    /// 只能拿 DSH_HOME 里的持久密钥自己签一张）。自签的 cookie 过期或
+    /// 密钥轮换后要**重新签**，而不是拿 `dsh_url` 去兑换——那条路根本
+    /// 没有 token。
+    self_signed: bool,
 }
 
 /// origin 契约归一化：调用方给的是 supervisor 的 `origin`（带 scheme，
@@ -114,6 +119,25 @@ impl Upstream {
                 origin: normalize_origin(origin),
                 dsh_url,
                 cookie: None,
+                self_signed: false,
+            })),
+            client: reqwest::Client::builder()
+                .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        }
+    }
+
+    /// 复用**已经在跑**的 dsh web：没有启动 token，cookie 是用 DSH_HOME
+    /// 里的持久密钥自签的（见 harness::dsh_share）。这条路上没有
+    /// `dsh_url` 可兑换，cookie 只能自签；失效时重新签一张即可。
+    pub fn with_shared_cookie(origin: impl Into<String>, cookie: impl Into<String>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                origin: normalize_origin(origin),
+                dsh_url: None,
+                cookie: Some(cookie.into()),
+                self_signed: true,
             })),
             client: reqwest::Client::builder()
                 .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
@@ -161,7 +185,7 @@ impl Upstream {
         if let Some(cookie) = inner.cookie.as_ref() {
             return Some(cookie.clone());
         }
-        let cookie = exchange_cookie(inner.dsh_url.as_deref()?).await?;
+        let cookie = self.issue_cookie(&inner).await?;
         inner.cookie = Some(cookie.clone());
         Some(cookie)
     }
@@ -170,9 +194,21 @@ impl Upstream {
     pub async fn refresh_cookie(&self) -> Option<String> {
         let mut inner = self.inner.lock().await;
         inner.cookie = None;
-        let cookie = exchange_cookie(inner.dsh_url.as_deref()?).await?;
+        let cookie = self.issue_cookie(&inner).await?;
         inner.cookie = Some(cookie.clone());
         Some(cookie)
+    }
+
+    /// 造一张能用的 cookie：自签的走重新签名，兑换的走启动 token。
+    ///
+    /// 自签这条路没有 token 可兑换，只能拿 DSH_HOME 里的持久密钥重新签；
+    /// 签完**当场验**（哪些密钥属于这个实例只有上游知道），验不过就换
+    /// 下一把密钥。
+    async fn issue_cookie(&self, inner: &Inner) -> Option<String> {
+        if inner.self_signed {
+            return crate::harness::dsh_share::issue_verified_cookie(&inner.origin).await;
+        }
+        exchange_cookie(inner.dsh_url.as_deref()?).await
     }
 
     #[cfg(test)]

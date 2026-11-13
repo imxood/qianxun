@@ -256,12 +256,39 @@ async fn start_locked(app: &AppHandle) -> Result<String> {
     let state = app.state::<crate::AppState>();
     let settings = crate::settings_snapshot(app)?;
     let profile_dir = default_profile_dir(app, &settings);
+    state.harness.safe_mode.store(false, Ordering::SeqCst);
+
+    // 先找本机**已经在跑**的 dsh web，找不到才自己拉。
+    //
+    // 为什么两种来源模式都要找：同一台机器上跑着两个 DSH 会争同一把会话锁
+    // （实测报 “This session is already in use”）。外部模式不注入 DSH_HOME，
+    // 两个实例共用同一个 ~/.dsh，冲突必现；内置模式虽然用隔离 home，
+    // 但会话目录仍指向同一个工作区，一样可能撞。
+    //
+    // 复用的代价：那个实例不是千寻拉起来的，千寻只有使用权——「停止」只是
+    // 断开连接，不会结束那个进程（见 supervisor::watch_shared 的注释）。
+    {
+        // 排除自己的回环网关端口：网关会把请求转发给上游 DSH，没带 cookie
+        // 时回的正是「dsh web authentication required」——不排除就会把
+        // 千寻自己当成可复用的实例接上去（自环）。
+        if let Some(instance) = super::dsh_share::detect(&[settings.remote.port]).await {
+            // 共享实例没有启动 token（拿不到），浏览器直连会 401；
+            // 「在浏览器打开」给千寻自己的回环网关地址，cookie 由网关持有。
+            let browser_url = Some(format!("http://127.0.0.1:{}", settings.remote.port));
+            let origin = Arc::clone(&state.harness.supervisor)
+                .attach_shared(instance, browser_url)
+                .await;
+            // 不走 after_successful_start：known-good 快照与安全 profile 预热
+            // 都会写用户的共享 ~/.dsh，那是别人的资产。
+            return Ok(origin);
+        }
+    }
+
     let plan = super::launch_plan_for(app, &settings, super::DEFAULT_PROFILE)?;
     state
         .harness
         .supervisor
         .note(Stream::Stdout, "[DSH] 启动".to_owned());
-    state.harness.safe_mode.store(false, Ordering::SeqCst);
     match Arc::clone(&state.harness.supervisor).start(plan).await {
         Ok(origin) => {
             after_successful_start(app, &profile_dir);

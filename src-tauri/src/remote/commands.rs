@@ -267,6 +267,7 @@ fn fingerprint(
     devices: &[RemoteDevice],
     upstream: Option<&str>,
     dsh_url: Option<&str>,
+    dsh_cookie: Option<&str>,
     proxy_enabled: bool,
     proxy_allow_lan: bool,
 ) -> u64 {
@@ -279,6 +280,8 @@ fn fingerprint(
     devices.hash(&mut hasher);
     upstream.hash(&mut hasher);
     dsh_url.hash(&mut hasher);
+    // 共享实例的 cookie 是自签的：换实例/重签都要重建网关。
+    dsh_cookie.hash(&mut hasher);
     proxy_enabled.hash(&mut hasher);
     proxy_allow_lan.hash(&mut hasher);
     hasher.finish()
@@ -295,18 +298,30 @@ pub async fn sync(app: AppHandle) {
     let state = app.state::<crate::AppState>();
     let _serial = state.remote.sync_lock.lock().await;
 
-    let (should_bind_lan, bind_ip, port, devices, upstream, dsh_url, proxy_launch) = {
+    let (should_bind_lan, bind_ip, port, devices, upstream, dsh_url, dsh_cookie, proxy_launch) = {
         let settings = state
             .settings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // DSH 就绪后取完整 URL（gateway 替远程设备兑换签名 cookie 时整段打过去，
         // 不再单独抽 token 字段）；upstream 仍只装 host:port，供转发与 WS 桥构造 URL。
-        let (upstream, dsh_url) = match state.harness.supervisor.status() {
-            crate::harness::supervisor::Status::Ready { origin, url, .. } => {
-                (Some(origin), Some(url))
+        //
+        // 共享实例（复用用户自己跑着的 dsh web）没有启动 token 可兑换：cookie
+        // 是自签的，dsh_url 置空，避免网关拿回环地址去「兑换」——那是网关自己。
+        let (upstream, dsh_url, dsh_cookie) = match state.harness.supervisor.status() {
+            crate::harness::supervisor::Status::Ready {
+                origin,
+                url,
+                shared,
+                ..
+            } => {
+                if shared {
+                    (Some(origin), None, state.harness.supervisor.shared_cookie())
+                } else {
+                    (Some(origin), Some(url), None)
+                }
             }
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let should_bind_lan = settings.remote.enabled && !settings.remote.bind_ip.is_empty();
         let proxy_launch = remote::proxy::ProxyLaunch {
@@ -320,6 +335,7 @@ pub async fn sync(app: AppHandle) {
             settings.remote.devices.clone(),
             upstream,
             dsh_url,
+            dsh_cookie,
             proxy_launch,
         )
     };
@@ -337,6 +353,7 @@ pub async fn sync(app: AppHandle) {
         &devices,
         upstream.as_deref(),
         dsh_url.as_deref(),
+        dsh_cookie.as_deref(),
         proxy_launch.enabled,
         proxy_launch.allow_lan_targets,
     );
@@ -397,6 +414,7 @@ pub async fn sync(app: AppHandle) {
         port,
         upstream.clone(),
         dsh_url,
+        dsh_cookie,
         devices,
         desired,
         mobile_access_dir,
@@ -535,7 +553,7 @@ mod tests {
                   proxy: bool,
                   proxy_lan: bool| {
             fingerprint(
-                enabled, bind, port, devices, upstream, dsh_url, proxy, proxy_lan,
+                enabled, bind, port, devices, upstream, dsh_url, None, proxy, proxy_lan,
             )
         };
         let base = fp(
@@ -634,6 +652,31 @@ mod tests {
                 false,
             )
         );
+        // 共享实例的自签 cookie 变化 -> 指纹变化（换实例/重签都要重建网关）。
+        assert_ne!(
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                Some("127.0.0.1:3080"),
+                None,
+                None,
+                true,
+                false,
+            ),
+            fingerprint(
+                true,
+                "10.0.0.1",
+                17400,
+                std::slice::from_ref(&device),
+                Some("127.0.0.1:3080"),
+                None,
+                Some("dsh-auth-x=v1.body.sig"),
+                true,
+                false,
+            )
+        );
         // DSH 启动 token（dsh_url）变化 -> 指纹变化（revive 重建的依据）。
         assert_ne!(
             base,
@@ -728,6 +771,7 @@ mod tests {
             0,
             upstream_addr.to_string(),
             None,
+            None,
             vec![device.clone()],
             1,
             std::env::temp_dir().join("qianxun-gw-test-mobile-access"),
@@ -799,6 +843,7 @@ mod tests {
             "127.0.0.2",
             0,
             upstream_addr.to_string(),
+            None,
             None,
             vec![revoked],
             2,
@@ -920,6 +965,7 @@ mod tests {
             0,
             upstream_addr.to_string(),
             Some(format!("http://{upstream_addr}/?token={LAUNCH_TOKEN}")),
+            None,
             vec![device],
             7,
             std::env::temp_dir().join("qianxun-gw-test-mobile-access"),

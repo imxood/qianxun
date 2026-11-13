@@ -92,6 +92,9 @@ tauri-plugin-global-shortcut = "3.0.0-alpha.3"
 # 读写与回读；只在 Rust 侧用（托盘），无需前端 capability。
 tauri-plugin-autostart = "3.0.0-alpha.3"
 base64 = "0.23.1"
+# HMAC-SHA256：自签 DSH 浏览器会话 cookie（复用已在运行的 dsh web 实例，
+# 见 harness/dsh_share）。密钥取自 ~/.dsh/.credentials.yaml 的持久 secret。
+hmac = "0.12"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # 远程网关（R1，架构 §4.5）：DSH 回环唯一暴露面——axum 终结 HTTP/WS，
 # reqwest 流式转发 /api（含 SSE），tokio-tungstenite 桥两条 WS 下行。
