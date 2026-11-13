@@ -309,4 +309,7 @@ geometry_restored=[{"cmd":"plugin:window|outer_size","v":{"width":1100,"height":
 - Linux 拖拽/最小化/最大化/双击最大化已用 CDP 合成事件验证，且用户已在远程桌面确认生效（2026-11-13）。
 - **工作区只对 Hyprland 生效**（§7.6）：别的 Wayland 合成器与 X11 拿不到保留区，
   `window_work_area` 会退回 Tauri 的 `monitor.work_area()`（Linux 上等于整屏，即旧行为）。
+- **右键菜单与输入法**：CEF 原生右键菜单会弹成「与主窗口等大」的独立 X11 窗口，输入法候选框同样覆盖整窗；
+  已用「前端 `preventDefault` + 自绘菜单 + Linux 启动自愈 IM 环境」根治右键菜单，输入法候选框仍待图形会话实测开关。
+  根因、源码对照与实测数据见 `docs/28-Linux右键菜单与输入法修复.md`。
 - 用户红线仍然生效：全程未写入/未重装/未终止任何 release 路径内容（安装目录 `C:\Users\maxu\AppData\Local\qianxun\` 与 `~/.qianxun`）。
